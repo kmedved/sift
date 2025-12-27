@@ -52,8 +52,6 @@ This package is designed to do *mRMR* selection through different tools, dependi
 Currently, the following tools are supported (others will be added):
 - **Pandas**
 - **Polars**
-- **Spark**
-- **Google BigQuery**
 
 The package has a module for each supported tool. Each module has *at least* these 2 functions:
 - `mrmr_classif`, for feature selection when the target variable is categorical (binary or multiclass).
@@ -97,43 +95,6 @@ df_polars = polars.DataFrame(data=data, schema=columns)
 import mrmr
 selected_features = mrmr.polars.mrmr_regression(df=df_polars, target_column="target", K=2)
 ```
-
-#### 3. Spark example
-
-```python
-# create some spark data
-import pyspark
-session = pyspark.sql.SparkSession(pyspark.context.SparkContext())
-data = [(1.0, 1.0, 1.0, 7.0, 1.5, -2.3), 
-        (2.0, float('NaN'), 2.0, 7.0, 8.5, 6.7), 
-        (2.0, float('NaN'), 3.0, 7.0, -2.3, 4.4),
-        (3.0, 4.0, 3.0, 7.0, 0.0, 0.0),
-        (4.0, 5.0, 4.0, 7.0, 12.1, -5.2)]
-columns = ["target", "some_null", "feature", "constant", "other_feature", "another_feature"]
-df_spark = session.createDataFrame(data=data, schema=columns)
-
-# select top 2 features using mRMR
-import mrmr
-selected_features = mrmr.spark.mrmr_regression(df=df_spark, target_column="target", K=2)
-```
-
-#### 4. Google BigQuery example
-
-```python
-# initialize BigQuery client
-from google.cloud.bigquery import Client
-bq_client = Client(credentials=your_credentials)
-
-# select top 20 features using mRMR
-import mrmr
-selected_features = mrmr.bigquery.mrmr_regression(
-    bq_client=bq_client,
-    table_id='bigquery-public-data.covid19_open_data.covid19_open_data',
-    target_column='new_deceased',
-    K=20
-)
-```
-
 
 ## Reference
 
