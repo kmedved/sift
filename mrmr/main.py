@@ -218,6 +218,7 @@ def mrmr_base(K, relevance_func, redundancy_func,
             redundancy.loc[domain_features, selected] = (
                 col.reindex(domain_features).fillna(0.0).abs().to_numpy()
             )
+        redundancy = redundancy.fillna(0.0)
     else:
         for selected in selected_features:
             col = redundancy_func(

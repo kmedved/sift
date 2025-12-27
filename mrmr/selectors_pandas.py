@@ -19,18 +19,19 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from .main import mrmr_base, jmi_base
 
 
-def _subsample_xy(X, y, subsample, random_state):
+def _subsample_xy(X, y, subsample, random_state, warn_subsample):
     if subsample is None:
         return X, y
     n = len(X)
     if n <= subsample:
         return X, y
-    import warnings
-    warnings.warn(
-        f"Subsampling from {n} to {subsample} rows. Set subsample=None to use all data.",
-        UserWarning,
-        stacklevel=3,
-    )
+    if warn_subsample:
+        import warnings
+        warnings.warn(
+            f"Subsampling from {n} to {subsample} rows. Set subsample=None to use all data.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
     rng = np.random.default_rng(random_state)
     row_idx = rng.choice(n, size=subsample, replace=False)
     X_sub = X.iloc[row_idx] if hasattr(X, "iloc") else X[row_idx]
@@ -248,6 +249,7 @@ def mrmr_classif(
         only_same_domain=False, return_scores=False,
         n_jobs=-1, show_progress=True,
         subsample=50_000, random_state=0,
+        warn_subsample=False,
         parallel_prefer="threads",
 ):
     """MRMR/JMI/JMIM feature selection for a classification task
@@ -301,6 +303,8 @@ def mrmr_classif(
         Maximum number of rows to use for selection. If None, use all rows.
     random_state: int (optional, default=0)
         Random seed for row subsampling.
+    warn_subsample: bool (optional, default=False)
+        If True, warn when subsampling is applied.
     parallel_prefer: str (optional, default="threads")
         Joblib backend preference ("threads" or "processes").
     show_progress: bool (optional, default=True)
@@ -313,7 +317,13 @@ def mrmr_classif(
         List of selected features.
     """
 
-    X, y = _subsample_xy(X, y, subsample=subsample, random_state=random_state)
+    X, y = _subsample_xy(
+        X,
+        y,
+        subsample=subsample,
+        random_state=random_state,
+        warn_subsample=warn_subsample,
+    )
 
     if cat_features is None:
         cat_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -377,6 +387,7 @@ def mrmr_regression(
         n_jobs=-1, show_progress=True,
         mi_method='regression',
         subsample=50_000, random_state=0,
+        warn_subsample=False,
         parallel_prefer="threads",
 ):
     """MRMR/JMI/JMIM feature selection for a regression task
@@ -438,6 +449,8 @@ def mrmr_regression(
         Maximum number of rows to use for selection. If None, use all rows.
     random_state: int (optional, default=0)
         Random seed for row subsampling.
+    warn_subsample: bool (optional, default=False)
+        If True, warn when subsampling is applied.
     parallel_prefer: str (optional, default="threads")
         Joblib backend preference ("threads" or "processes").
         
@@ -446,7 +459,13 @@ def mrmr_regression(
     selected_features: list of str
         List of selected features.
     """
-    X, y = _subsample_xy(X, y, subsample=subsample, random_state=random_state)
+    X, y = _subsample_xy(
+        X,
+        y,
+        subsample=subsample,
+        random_state=random_state,
+        warn_subsample=warn_subsample,
+    )
 
     if cat_features is None:
         cat_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -506,6 +525,7 @@ def mrmr_regression(
             mode=mode,
             method=method,
             subsample=None,
+            # X, y already subsampled above; avoid second subsample inside cefsplus_regression.
             random_state=random_state,
             show_progress=show_progress,
         )

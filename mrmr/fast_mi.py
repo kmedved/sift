@@ -30,10 +30,14 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
     """
     import pandas as pd
 
-    X_arr = X.values if hasattr(X, 'values') else X
+    if not hasattr(X, "columns"):
+        raise TypeError("regression_joint_mi expects X to be a pandas DataFrame with column names.")
+
+    X_arr = X.values
     y_arr = (y.values if hasattr(y, 'values') else y).ravel()
     col_idx = {c: i for i, c in enumerate(X.columns)}
     target_idx = col_idx[target_column]
+    feat_idx = np.fromiter((col_idx[f] for f in features), dtype=np.int64, count=len(features))
 
     n = len(y_arr)
 
@@ -52,11 +56,11 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
     # r_ys: corr(selected, y) -> scalar
     r_ys = np.dot(s_s, y_s) / n
 
-    results = {}
+    mi_vals = np.empty(len(features), dtype=np.float64)
 
     for start in range(0, len(features), block_size):
         block_features = features[start:start + block_size]
-        block_idx = np.array([col_idx[f] for f in block_features])
+        block_idx = feat_idx[start:start + block_size]
         F_s = zscore(X_arr[:, block_idx])    # candidate features (n, block_size)
 
         # r_yf: corr(candidates, y) -> (block_size,)
@@ -74,12 +78,9 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
         r2 = np.clip(num / denom, 0.0, 0.99999)
 
         # Convert R² to MI scale: I(f,s; y) ≈ -0.5 * log(1 - R²)
-        mi_block = -0.5 * np.log(1.0 - r2)
+        mi_vals[start:start + len(block_idx)] = -0.5 * np.log(1.0 - r2)
 
-        for feature, mi in zip(block_features, mi_block):
-            results[feature] = mi
-
-    return pd.Series(results)
+    return pd.Series(mi_vals, index=features)
 
 
 # =============================================================================
@@ -270,7 +271,7 @@ def auto_joint_mi(target_column, features, X, y, method='auto', n_jobs=-1, **kwa
         method = 'regression'
 
     if method == 'regression':
-        return regression_joint_mi(target_column, features, X, y, n_jobs=n_jobs)
+        return regression_joint_mi(target_column, features, X, y, n_jobs=n_jobs, **kwargs)
     if method == 'binned':
         n_bins = kwargs.get('n_bins', 10)
         return binned_joint_mi(target_column, features, X, y, n_bins=n_bins, n_jobs=n_jobs)

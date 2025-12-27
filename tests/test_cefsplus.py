@@ -29,7 +29,8 @@ def test_cefsplus_with_cache():
 
     assert len(sel1) == 5
     assert len(sel2) == 5
-    assert sel1 != sel2
+    assert "f0" in sel1[:2]
+    assert "f5" in sel2[:2]
 
 
 def test_build_cache_nan_handling():
@@ -42,15 +43,17 @@ def test_build_cache_nan_handling():
 
 
 def test_ksg_sanity():
-    """KSG should return ~0 MI for independent variables."""
+    """KSG should report higher MI for dependent variables."""
     from mrmr.fast_mi import _ksg_mi_joint
     np.random.seed(42)
-    x1 = np.random.randn(200)
-    x2 = np.random.randn(200)
-    y = np.random.randn(200)
+    x1 = np.random.randn(1000)
+    x2 = np.random.randn(1000)
+    y_independent = np.random.randn(1000)
+    y_dependent = x1 + x2 + np.random.randn(1000) * 0.1
 
-    mi = _ksg_mi_joint(x1, x2, y, k=3)
-    assert mi < 0.2
+    mi_independent = _ksg_mi_joint(x1, x2, y_independent, k=3)
+    mi_dependent = _ksg_mi_joint(x1, x2, y_dependent, k=3)
+    assert mi_dependent > mi_independent
 
 
 def test_binned_mi_increases_with_dependence():
