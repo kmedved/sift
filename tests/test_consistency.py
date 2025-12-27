@@ -26,7 +26,11 @@ df_bigquery = f"({pd_dataframe2bq_query(df_pandas)})"
 
 
 def test_consistency_f_classif():
-    f_classif_pandas = mrmr.pandas.f_classif(X=df_pandas.loc[:, features], y=df_pandas.loc[:, target_column_classif])
+    f_classif_pandas = mrmr.selectors_pandas.f_classif(
+        X=df_pandas.loc[:, features],
+        y=df_pandas.loc[:, target_column_classif],
+        n_jobs=-1,
+    )
     f_classif_spark = mrmr.spark.f_classif(df=df_spark, target_column=target_column_classif, features=features)
     f_classif_bigquery = mrmr.bigquery.f_classif(bq_client=bq_client, table_id=df_bigquery, target_column=target_column_classif, features=features)
 
@@ -37,7 +41,12 @@ def test_consistency_f_classif():
 
 
 def test_consistency_correlation():
-    correlation_pandas = mrmr.pandas.correlation(target_column=target_column_regression, features=features, X=df_pandas)
+    correlation_pandas = mrmr.selectors_pandas.correlation(
+        target_column=target_column_regression,
+        features=features,
+        X=df_pandas,
+        n_jobs=-1,
+    )
     correlation_spark = mrmr.spark.correlation(target_column=target_column_regression, features=features, df=df_spark)
     correlation_bigquery = mrmr.bigquery.correlation(bq_client=bq_client, table_id=df_bigquery, target_column=target_column_regression, features=features)
 
@@ -48,7 +57,11 @@ def test_consistency_correlation():
 
 
 def test_consistency_f_regression():
-    f_regression_pandas = mrmr.pandas.f_regression(X=df_pandas.loc[:, features], y=df_pandas.loc[:, target_column_regression])
+    f_regression_pandas = mrmr.selectors_pandas.f_regression(
+        X=df_pandas.loc[:, features],
+        y=df_pandas.loc[:, target_column_regression],
+        n_jobs=-1,
+    )
     f_regression_spark = mrmr.spark.f_regression(df=df_spark, target_column=target_column_regression, features=features)
     f_regression_bigquery = mrmr.bigquery.f_regression(bq_client=bq_client, table_id=df_bigquery, target_column=target_column_regression, features=features)
 

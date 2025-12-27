@@ -19,7 +19,20 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from .main import mrmr_base, jmi_base
 
 
-def parallel_df(func, df, series, n_jobs):
+def _subsample_xy(X, y, subsample, random_state):
+    if subsample is None:
+        return X, y
+    n = len(X)
+    if n <= subsample:
+        return X, y
+    rng = np.random.default_rng(random_state)
+    row_idx = rng.choice(n, size=subsample, replace=False)
+    X_sub = X.iloc[row_idx] if hasattr(X, "iloc") else X[row_idx]
+    y_sub = y.iloc[row_idx] if hasattr(y, "iloc") else y[row_idx]
+    return X_sub, y_sub
+
+
+def parallel_df(func, df, series, n_jobs, prefer="threads"):
     # Handle empty DataFrame
     if len(df.columns) == 0:
         return pd.Series(dtype=float)
@@ -27,7 +40,7 @@ def parallel_df(func, df, series, n_jobs):
     n_jobs = min(cpu_count(), len(df.columns)) if n_jobs == -1 else min(cpu_count(), n_jobs)
     n_jobs = max(1, n_jobs)  # Ensure at least 1 job
     col_chunks = np.array_split(range(len(df.columns)), n_jobs)
-    lst = Parallel(n_jobs=n_jobs)(
+    lst = Parallel(n_jobs=n_jobs, prefer=prefer)(
         delayed(func)(df.iloc[:, col_chunk], series)
         for col_chunk in col_chunks
     )
@@ -54,12 +67,12 @@ def _f_regression(X, y):
     return X.apply(lambda col: _f_regression_series(col, y)).fillna(0.0)
 
 
-def f_classif(X, y, n_jobs):
-    return parallel_df(_f_classif, X, y, n_jobs=n_jobs)
+def f_classif(X, y, n_jobs=-1, parallel_prefer="threads"):
+    return parallel_df(_f_classif, X, y, n_jobs=n_jobs, prefer=parallel_prefer)
 
 
-def f_regression(X, y, n_jobs):
-    return parallel_df(_f_regression, X, y, n_jobs=n_jobs)
+def f_regression(X, y, n_jobs=-1, parallel_prefer="threads"):
+    return parallel_df(_f_regression, X, y, n_jobs=n_jobs, prefer=parallel_prefer)
 
 
 def _ks_classif(X, y):
@@ -74,8 +87,8 @@ def _ks_classif(X, y):
     return X.apply(lambda col: _ks_classif_series(col, y)).fillna(0.0)
 
 
-def ks_classif(X, y, n_jobs):
-    return parallel_df(_ks_classif, X, y, n_jobs=n_jobs)
+def ks_classif(X, y, n_jobs=-1, parallel_prefer="threads"):
+    return parallel_df(_ks_classif, X, y, n_jobs=n_jobs, prefer=parallel_prefer)
 
 
 def random_forest_classif(X, y):
@@ -88,11 +101,17 @@ def random_forest_regression(X, y):
     return pd.Series(forest.feature_importances_, index=X.columns)
 
 
-def correlation(target_column, features, X, n_jobs):
+def correlation(target_column, features, X, n_jobs=-1, parallel_prefer="threads"):
     def _correlation(X, y):
         return X.corrwith(y).fillna(0.0)
 
-    return parallel_df(_correlation, X.loc[:, features], X.loc[:, target_column], n_jobs=n_jobs)
+    return parallel_df(
+        _correlation,
+        X.loc[:, features],
+        X.loc[:, target_column],
+        n_jobs=n_jobs,
+        prefer=parallel_prefer,
+    )
 
 
 # NOTE: sklearn's mutual_info_regression/classif returns per-feature MI, not joint MI.
@@ -101,7 +120,15 @@ def correlation(target_column, features, X, n_jobs):
 # For classification, use binned_joint_mi_classif.
 
 
-def binned_joint_mi_classif(target_column, features, X, y, n_bins=10, n_jobs=-1):
+def binned_joint_mi_classif(
+    target_column,
+    features,
+    X,
+    y,
+    n_bins=10,
+    n_jobs=-1,
+    parallel_prefer="threads",
+):
     """Compute I(f, target_column; y) for classification using binning.
     
     This correctly computes joint MI between the pair (f, target_column) and 
@@ -188,7 +215,7 @@ def binned_joint_mi_classif(target_column, features, X, y, n_bins=10, n_jobs=-1)
     if n_jobs == 1 or len(features) <= 2:
         results = {f: _compute_joint_mi(f) for f in features}
     else:
-        results_list = Parallel(n_jobs=n_jobs)(
+        results_list = Parallel(n_jobs=n_jobs, prefer=parallel_prefer)(
             delayed(_compute_joint_mi)(f) for f in features
         )
         results = dict(zip(features, results_list))
@@ -218,7 +245,9 @@ def mrmr_classif(
         relevance='f', redundancy='c', denominator='mean',
         cat_features=None, cat_encoding='leave_one_out',
         only_same_domain=False, return_scores=False,
-        n_jobs=-1, show_progress=True
+        n_jobs=-1, show_progress=True,
+        subsample=50_000, random_state=0,
+        parallel_prefer="threads",
 ):
     """MRMR/JMI/JMIM feature selection for a classification task
     
@@ -267,6 +296,12 @@ def mrmr_classif(
     n_jobs: int (optional, default=-1)
         Maximum number of workers to use.
         If -1, use as many workers as min(cpu count, number of features).
+    subsample: int or None (optional, default=50000)
+        Maximum number of rows to use for selection. If None, use all rows.
+    random_state: int (optional, default=0)
+        Random seed for row subsampling.
+    parallel_prefer: str (optional, default="threads")
+        Joblib backend preference ("threads" or "processes").
     show_progress: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
@@ -277,14 +312,23 @@ def mrmr_classif(
         List of selected features.
     """
 
-    if cat_features:
+    X, y = _subsample_xy(X, y, subsample=subsample, random_state=random_state)
+
+    if cat_features is None:
+        cat_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    if len(cat_features) > 0:
         X = encode_df(X=X, y=y, cat_features=cat_features, cat_encoding=cat_encoding)
 
     # Setup relevance function
     if relevance == "f":
-        relevance_func = functools.partial(f_classif, n_jobs=n_jobs)
+        relevance_func = functools.partial(
+            f_classif, n_jobs=n_jobs, parallel_prefer=parallel_prefer
+        )
     elif relevance == "ks":
-        relevance_func = functools.partial(ks_classif, n_jobs=n_jobs)
+        relevance_func = functools.partial(
+            ks_classif, n_jobs=n_jobs, parallel_prefer=parallel_prefer
+        )
     elif relevance == "rf":
         relevance_func = random_forest_classif
     else:
@@ -294,7 +338,9 @@ def mrmr_classif(
 
     if method == 'mrmr':
         # Original MRMR
-        redundancy_func = functools.partial(correlation, n_jobs=n_jobs) if redundancy == 'c' else redundancy
+        redundancy_func = functools.partial(
+            correlation, n_jobs=n_jobs, parallel_prefer=parallel_prefer
+        ) if redundancy == 'c' else redundancy
         denominator_func = np.mean if denominator == 'mean' else (
             np.max if denominator == 'max' else denominator)
         redundancy_args = {'X': X}
@@ -306,7 +352,11 @@ def mrmr_classif(
     
     elif method in ('jmi', 'jmim'):
         # JMI or JMIM - use binned joint MI for classification
-        joint_mi_func = functools.partial(binned_joint_mi_classif, n_jobs=n_jobs)
+        joint_mi_func = functools.partial(
+            binned_joint_mi_classif,
+            n_jobs=n_jobs,
+            parallel_prefer=parallel_prefer,
+        )
         joint_mi_args = {'X': X, 'y': y}
 
         return jmi_base(K=K, relevance_func=relevance_func, joint_mi_func=joint_mi_func,
@@ -324,7 +374,9 @@ def mrmr_regression(
         cat_features=None, cat_encoding='leave_one_out',
         only_same_domain=False, return_scores=False,
         n_jobs=-1, show_progress=True,
-        mi_method='regression'
+        mi_method='regression',
+        subsample=50_000, random_state=0,
+        parallel_prefer="threads",
 ):
     """MRMR/JMI/JMIM feature selection for a regression task
     
@@ -381,24 +433,39 @@ def mrmr_regression(
         - 'regression': R²-based approximation (fastest, assumes ~linear relationships)
         - 'binned': Discretization-based (fast, nonparametric)
         - 'ksg': KSG k-NN estimator (slower, most accurate)
+    subsample: int or None (optional, default=50000)
+        Maximum number of rows to use for selection. If None, use all rows.
+    random_state: int (optional, default=0)
+        Random seed for row subsampling.
+    parallel_prefer: str (optional, default="threads")
+        Joblib backend preference ("threads" or "processes").
         
     Returns
     -------
     selected_features: list of str
         List of selected features.
     """
-    if cat_features:
+    X, y = _subsample_xy(X, y, subsample=subsample, random_state=random_state)
+
+    if cat_features is None:
+        cat_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    if len(cat_features) > 0:
         X = encode_df(X=X, y=y, cat_features=cat_features, cat_encoding=cat_encoding)
 
     # Setup relevance function
-    relevance_func = functools.partial(f_regression, n_jobs=n_jobs) if relevance == 'f' else (
+    relevance_func = functools.partial(
+        f_regression, n_jobs=n_jobs, parallel_prefer=parallel_prefer
+    ) if relevance == 'f' else (
         random_forest_regression if relevance == 'rf' else relevance)
 
     relevance_args = {'X': X, 'y': y}
 
     if method == 'mrmr':
         # Original MRMR
-        redundancy_func = functools.partial(correlation, n_jobs=n_jobs) if redundancy == 'c' else redundancy
+        redundancy_func = functools.partial(
+            correlation, n_jobs=n_jobs, parallel_prefer=parallel_prefer
+        ) if redundancy == 'c' else redundancy
         denominator_func = np.mean if denominator == 'mean' else (
             np.max if denominator == 'max' else denominator)
         redundancy_args = {'X': X}
@@ -432,10 +499,14 @@ def mrmr_regression(
         from .cefsplus import cefsplus_regression
         mode = 'copula' if mi_method in ('copula', 'regression') else 'zscore'
         return cefsplus_regression(
-            X, y, K=K,
+            X,
+            y,
+            K=K,
             mode=mode,
             method=method,
-            show_progress=show_progress
+            subsample=subsample,
+            random_state=random_state,
+            show_progress=show_progress,
         )
     else:
         raise ValueError(f"Unknown method: {method}. Supported: 'mrmr', 'jmi', 'jmim', 'cefsplus', 'mrmr_fcd', 'mrmr_fcq'.")

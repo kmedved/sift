@@ -18,7 +18,7 @@ df_pandas = pd.DataFrame(data=data, columns=columns)
 
 
 def test_mrmr_classif_without_scores():
-    selected_features = mrmr.pandas.mrmr_classif(
+    selected_features = mrmr.selectors_pandas.mrmr_classif(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_classif],
         K=4,
@@ -36,7 +36,7 @@ def test_mrmr_classif_without_scores():
 
 
 def test_mrmr_classif_ks():
-    selected_features = mrmr.pandas.mrmr_classif(
+    selected_features = mrmr.selectors_pandas.mrmr_classif(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_classif],
         K=4,
@@ -54,7 +54,7 @@ def test_mrmr_classif_ks():
 
 
 def test_mrmr_classif_rf():
-    selected_features = mrmr.pandas.mrmr_classif(
+    selected_features = mrmr.selectors_pandas.mrmr_classif(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_classif],
         K=4,
@@ -72,7 +72,7 @@ def test_mrmr_classif_rf():
 
 
 def test_mrmr_classif_with_scores():
-    selected_features, relevance, redundancy = mrmr.pandas.mrmr_classif(
+    selected_features, relevance, redundancy = mrmr.selectors_pandas.mrmr_classif(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_classif],
         K=4,
@@ -93,7 +93,7 @@ def test_mrmr_classif_with_scores():
 
 
 def test_mrmr_regression_without_scores():
-    selected_features = mrmr.pandas.mrmr_regression(
+    selected_features = mrmr.selectors_pandas.mrmr_regression(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_regression],
         K=4,
@@ -111,7 +111,7 @@ def test_mrmr_regression_without_scores():
 
 
 def test_mrmr_regression_with_scores():
-    selected_features, relevance, redundancy = mrmr.pandas.mrmr_regression(
+    selected_features, relevance, redundancy = mrmr.selectors_pandas.mrmr_regression(
         X=df_pandas.loc[:, features],
         y=df_pandas.loc[:, target_column_regression],
         K=4,

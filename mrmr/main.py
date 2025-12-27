@@ -165,13 +165,13 @@ def mrmr_base(K, relevance_func, redundancy_func,
                     features=update_names,
                     **redundancy_args
                 ).fillna(FLOOR).abs().clip(FLOOR)
-
-                for j, fname in zip(update_indices, update_names):
-                    val = new_red.get(fname, FLOOR)
-                    if denominator_func == np.mean:
-                        redundancy_sum[j] += val
-                    else:
-                        redundancy_max[j] = max(redundancy_max[j], val)
+                new_vals = new_red.reindex(update_names).fillna(FLOOR).to_numpy()
+                if denominator_func == np.mean:
+                    redundancy_sum[update_indices] += new_vals
+                else:
+                    redundancy_max[update_indices] = np.maximum(
+                        redundancy_max[update_indices], new_vals
+                    )
         else:
             # Update all candidates
             new_red = redundancy_func(
@@ -179,13 +179,13 @@ def mrmr_base(K, relevance_func, redundancy_func,
                 features=candidate_names,
                 **redundancy_args
             ).fillna(FLOOR).abs().clip(FLOOR)
-
-            for j, fname in zip(candidate_indices, candidate_names):
-                val = new_red.get(fname, FLOOR)
-                if denominator_func == np.mean:
-                    redundancy_sum[j] += val
-                else:
-                    redundancy_max[j] = max(redundancy_max[j], val)
+            new_vals = new_red.reindex(candidate_names).fillna(FLOOR).to_numpy()
+            if denominator_func == np.mean:
+                redundancy_sum[candidate_indices] += new_vals
+            else:
+                redundancy_max[candidate_indices] = np.maximum(
+                    redundancy_max[candidate_indices], new_vals
+                )
 
     if not return_scores:
         return selected_features

@@ -18,7 +18,7 @@ from multiprocessing import cpu_count
 # For Gaussian variables: I(X; Y) = -0.5 * log(1 - corr²)
 # For joint MI: use analytic R² formula from correlation triplets
 
-def regression_joint_mi(target_column, features, X, y, n_jobs=-1):
+def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256):
     """Fast joint MI using vectorized analytic R² from correlations.
 
     For predicting y from (f, s), the R² can be computed analytically:
@@ -48,29 +48,34 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1):
 
     y_s = zscore(y_arr)
     s_s = zscore(X_arr[:, target_idx])  # selected feature (target_column)
-    F_s = zscore(X_arr[:, feat_idx])    # candidate features (n, n_cand)
 
     # Compute correlations (vectorized)
     # r_ys: corr(selected, y) -> scalar
     r_ys = np.dot(s_s, y_s) / n
 
-    # r_yf: corr(candidates, y) -> (n_cand,)
-    r_yf = (F_s.T @ y_s) / n
+    mi_vals = np.empty(len(features), dtype=np.float64)
 
-    # r_fs: corr(candidates, selected) -> (n_cand,)
-    r_fs = (F_s.T @ s_s) / n
+    for start in range(0, len(feat_idx), block_size):
+        block = feat_idx[start:start + block_size]
+        F_s = zscore(X_arr[:, block])    # candidate features (n, block_size)
 
-    # Analytic R² for y ~ f + s
-    # R² = (r_yf² + r_ys² - 2·r_yf·r_ys·r_fs) / (1 - r_fs²)
-    denom = 1.0 - r_fs**2
-    denom = np.where(denom < 1e-6, 1e-6, denom)  # avoid division by zero (collinearity)
+        # r_yf: corr(candidates, y) -> (block_size,)
+        r_yf = (F_s.T @ y_s) / n
 
-    num = r_yf**2 + r_ys**2 - 2 * r_yf * r_ys * r_fs
-    r2 = num / denom
-    r2 = np.clip(r2, 0.0, 0.99999)
+        # r_fs: corr(candidates, selected) -> (block_size,)
+        r_fs = (F_s.T @ s_s) / n
 
-    # Convert R² to MI scale: I(f,s; y) ≈ -0.5 * log(1 - R²)
-    mi_vals = -0.5 * np.log(1.0 - r2)
+        # Analytic R² for y ~ f + s
+        # R² = (r_yf² + r_ys² - 2·r_yf·r_ys·r_fs) / (1 - r_fs²)
+        denom = 1.0 - r_fs**2
+        denom = np.where(denom < 1e-6, 1e-6, denom)  # avoid division by zero (collinearity)
+
+        num = r_yf**2 + r_ys**2 - 2 * r_yf * r_ys * r_fs
+        r2 = num / denom
+        r2 = np.clip(r2, 0.0, 0.99999)
+
+        # Convert R² to MI scale: I(f,s; y) ≈ -0.5 * log(1 - R²)
+        mi_vals[start:start + len(block)] = -0.5 * np.log(1.0 - r2)
 
     return pd.Series(mi_vals, index=features)
 
@@ -192,27 +197,32 @@ def _ksg_mi_joint(x1, x2, y, k=3):
     # Find k+1 nearest neighbors (includes self) and get k-th distance
     # Using Chebyshev (max) distance for proper KSG algorithm
     dists, _ = tree_full.query(XY_full, k=k+1, p=np.inf)
-    eps = dists[:, -1]  # k-th neighbor distance (excluding self)
+    eps = dists[:, -1] - 1e-15  # k-th neighbor distance (excluding self)
+    eps = np.maximum(eps, 0.0)
 
     # Count neighbors within eps in marginal spaces
     # Subtract 1 because query includes the point itself
-    n_x = np.array([tree_x.query_ball_point(X_joint[i], eps[i], p=np.inf, return_length=True) - 1
-                    for i in range(n)])
-    n_y = np.array([tree_y.query_ball_point(Y_marginal[i], eps[i], p=np.inf, return_length=True) - 1
-                    for i in range(n)])
+    n_x = np.array([
+        tree_x.query_ball_point(X_joint[i], eps[i], p=np.inf, return_length=True) - 1
+        for i in range(n)
+    ])
+    n_y = np.array([
+        tree_y.query_ball_point(Y_marginal[i], eps[i], p=np.inf, return_length=True) - 1
+        for i in range(n)
+    ])
 
     # Handle edge cases
-    n_x = np.maximum(n_x, 1)
-    n_y = np.maximum(n_y, 1)
+    n_x = np.maximum(n_x, 0)
+    n_y = np.maximum(n_y, 0)
 
     # KSG estimator
-    mi = digamma(k) + digamma(n) - np.mean(digamma(n_x) + digamma(n_y))
+    mi = digamma(k) + digamma(n) - np.mean(digamma(n_x + 1) + digamma(n_y + 1))
 
     return max(mi, 0.0)
 
 
 def ksg_joint_mi(target_column, features, X, y, k=3, n_jobs=-1):
-    """Numba-accelerated KSG joint MI estimation."""
+    """KSG joint MI estimation."""
     X_arr = X.values if hasattr(X, 'values') else X
     y_arr = y.values if hasattr(y, 'values') else y
     col_idx = {c: i for i, c in enumerate(X.columns)}

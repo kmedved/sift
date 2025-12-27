@@ -433,6 +433,7 @@ def build_cache(
     mode: Literal["zscore", "copula"] = "copula",
     random_state: int = 0,
     min_std: float = 1e-12,
+    impute: Optional[Literal["mean", "median"]] = "mean",
 ) -> FeatureCache:
     """
     Build feature cache for efficient multi-target selection.
@@ -446,6 +447,10 @@ def build_cache(
         - 'copula': rank-Gaussian transform (robust to monotonic nonlinearity)
     random_state : random seed for subsampling
     min_std : drop features with std < this (near-constants)
+    impute : impute missing values on the subsample
+        - 'mean': column mean (default)
+        - 'median': column median
+        - None: leave NaNs (may propagate)
 
     Returns
     -------
@@ -466,6 +471,17 @@ def build_cache(
         row_idx = np.arange(n)
 
     Xs = np.asarray(X[row_idx], dtype=np.float64)
+
+    if impute is not None:
+        if impute == "mean":
+            col_stat = np.nanmean(Xs, axis=0)
+        elif impute == "median":
+            col_stat = np.nanmedian(Xs, axis=0)
+        else:
+            raise ValueError("impute must be 'mean', 'median', or None")
+        col_stat = np.where(np.isnan(col_stat), 0.0, col_stat)
+        inds = np.where(np.isnan(Xs))
+        Xs[inds] = col_stat[inds[1]]
 
     sd = Xs.std(axis=0)
     valid = sd > min_std
@@ -596,6 +612,8 @@ def cefsplus_regression(
     method: Literal["cefsplus", "mrmr_fcd", "mrmr_fcq"] = "cefsplus",
     random_state: int = 0,
     show_progress: bool = True,
+    cache: Optional[FeatureCache] = None,
+    impute: Optional[Literal["mean", "median"]] = "mean",
 ) -> List[str]:
     """
     CEFS+/mRMR feature selection with Gaussian-copula MI estimation.
@@ -622,6 +640,8 @@ def cefsplus_regression(
         - 'mrmr_fcq': mRMR quotient criterion
     random_state : random seed
     show_progress : ignored (for API compatibility)
+    cache : optional FeatureCache to reuse precomputed X data
+    impute : imputation strategy when building cache (ignored if cache provided)
 
     Returns
     -------
@@ -630,7 +650,14 @@ def cefsplus_regression(
     if top_m is None:
         top_m = max(5 * K, 250)
 
-    cache = build_cache(X, subsample=subsample, mode=mode, random_state=random_state)
+    if cache is None:
+        cache = build_cache(
+            X,
+            subsample=subsample,
+            mode=mode,
+            random_state=random_state,
+            impute=impute,
+        )
 
     return select_features_cached(
         cache,
