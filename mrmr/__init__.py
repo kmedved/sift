@@ -21,9 +21,7 @@ _LAZY_ATTRS = {
     "FeatureCache": ("mrmr.cefsplus", "FeatureCache"),
     "selectors_pandas": ("mrmr.selectors_pandas", None),
     "fast_mi": ("mrmr.fast_mi", None),
-    "bigquery": ("mrmr.bigquery", None),
     "polars": ("mrmr.polars", None),
-    "spark": ("mrmr.spark", None),
 }
 
 __all__ = list(_LAZY_ATTRS.keys()) + ["__version__"]
