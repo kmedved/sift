@@ -26,16 +26,11 @@ setup(
     extras_require={
         'categorical': ['category_encoders'],
         'polars': ['polars>=0.12.5'],
-        'pyspark': ['pyspark>=3.4.1'],
-        'bigquery': ['google-cloud-bigquery', 'jinja2'],
         'numba': ['numba'],
         'all': [
             'category_encoders',
             'polars>=0.12.5',
-            'pyspark>=3.4.1',
-            'google-cloud-bigquery',
             'numba',
-            'jinja2',
         ],
     },
     zip_safe=False
