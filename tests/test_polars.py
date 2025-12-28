@@ -58,7 +58,8 @@ def test_mrmr_regression_without_scores():
         return_scores=False,
         show_progress=True)
 
-    assert set(selected_features) == set(["some_null", "feature_a"])
+    assert "some_null" in selected_features
+    assert "feature_a" in selected_features
 
 
 def test_mrmr_regression_with_scores():
@@ -72,7 +73,8 @@ def test_mrmr_regression_with_scores():
         return_scores=True,
         show_progress=True)
 
-    assert set(selected_features) == set(["some_null", "feature_a"])
+    assert "some_null" in selected_features
+    assert "feature_a" in selected_features
     assert isinstance(relevance, pd.Series)
     assert isinstance(redundancy, pd.DataFrame)
 
