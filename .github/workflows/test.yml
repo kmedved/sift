@@ -18,6 +18,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ".[all]"
-          pip install pytest
+          pip install pytest pyarrow
       - name: Run tests
         run: pytest tests/
