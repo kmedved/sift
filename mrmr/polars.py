@@ -57,15 +57,17 @@ def correlation(target_column, features, df):
     corrs = {}
     for f in features:
         filtered = df.filter(pl.col(f).is_not_null() & pl.col(target_column).is_not_null())
-        if filtered.height > 0:
-            val = filtered.select(pl.corr(f, target_column)).item()
-            corrs[f] = val if val is not None else 0.0
+        if filtered.height >= 2:
+            val = filtered.select(pl.corr(f, target_column))[0, 0]
+            corrs[f] = val if (val is not None and np.isfinite(val)) else 0.0
         else:
             corrs[f] = 0.0
     return pd.Series(corrs, dtype=float)
 
 
 def notna(target_column, features, df):
+    if len(features) == 0:
+        return pd.Series(dtype=float)
     counts = df.select([
         ((pl.col(f).is_not_null()) & (pl.col(target_column).is_not_null())).sum().alias(f)
         for f in features

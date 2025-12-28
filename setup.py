@@ -1,19 +1,33 @@
+import pathlib
+import re
+
 from setuptools import setup
-from mrmr import __version__
+
+
+def read_version():
+    version_path = pathlib.Path(__file__).resolve().parent / "mrmr" / "__init__.py"
+    match = re.search(
+        r"^__version__\s*=\s*[\"']([^\"']+)[\"']",
+        version_path.read_text(encoding="utf8"),
+        re.MULTILINE,
+    )
+    if not match:
+        raise RuntimeError("Unable to find __version__ in mrmr/__init__.py")
+    return match.group(1)
 
 with open("README.md", encoding="utf8") as f:
     long_description = f.read()
 
 setup(
     name='mrmr_selection',
-    version=__version__,
+    version=read_version(),
     description='minimum-Redundancy-Maximum-Relevance algorithm for feature selection',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/smazzanti/mrmr',
     author='Samuele Mazzanti',
     author_email='mazzanti.sam@gmail.com',
-    license='GNU General Public License v3.0',
+    license='MIT',
     packages=['mrmr'],
     install_requires=[
         'tqdm',

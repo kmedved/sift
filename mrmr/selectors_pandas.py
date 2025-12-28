@@ -180,7 +180,7 @@ def binned_joint_mi_classif(
         x2 = X_arr[:, target_idx]
         
         # Handle missing values
-        mask = ~(pd.isna(x1) | pd.isna(x2) | pd.isna(y_arr))
+        mask = np.isfinite(x1) & np.isfinite(x2) & pd.notna(y_arr)
         if mask.sum() < 20:
             return 0.0
         

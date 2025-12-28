@@ -42,6 +42,16 @@ def test_build_cache_nan_handling():
     assert not np.isnan(cache.Z).any()
 
 
+def test_build_cache_inf_handling():
+    np.random.seed(42)
+    X = pd.DataFrame(np.random.randn(200, 10))
+    X.iloc[0, 0] = np.inf
+    X.iloc[1, 1] = -np.inf
+
+    cache = mrmr.build_cache(X, impute="mean", subsample=None)
+    assert np.isfinite(cache.Z).all()
+
+
 def test_ksg_sanity():
     """KSG should report higher MI for dependent variables."""
     from mrmr.fast_mi import _ksg_mi_joint
