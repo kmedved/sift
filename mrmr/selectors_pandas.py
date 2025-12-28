@@ -20,6 +20,8 @@ from .main import mrmr_base, jmi_base
 
 
 def _subsample_xy(X, y, subsample, random_state, warn_subsample):
+    if isinstance(y, list):
+        y = np.array(y)
     if subsample is None:
         return X, y
     n = len(X)
@@ -60,6 +62,8 @@ def _f_classif(X, y):
         x_not_na = ~ x.isna()
         if x_not_na.sum() == 0:
             return 0
+        if pd.Series(y[x_not_na]).nunique(dropna=True) < 2:
+            return 0
         return sklearn_f_classif(x[x_not_na].to_frame(), y[x_not_na])[0][0]
 
     return X.apply(lambda col: _f_classif_series(col, y)).fillna(0.0)
@@ -88,6 +92,8 @@ def _ks_classif(X, y):
         x_not_na = ~ x.isna()
         if x_not_na.sum() == 0:
             return 0
+        if pd.Series(y[x_not_na]).nunique(dropna=True) < 2:
+            return 0
         x = x[x_not_na]
         y = y[x_not_na]
         return x.groupby(y).apply(lambda s: ks_2samp(s, x[y != s.name])[0]).mean()
@@ -100,12 +106,20 @@ def ks_classif(X, y, n_jobs=-1, parallel_prefer="threads"):
 
 
 def random_forest_classif(X, y):
-    forest = RandomForestClassifier(max_depth=5, random_state=0).fit(X.fillna(X.min().min() - 1), y)
+    fill_base = X.min(numeric_only=True).min()
+    if not np.isfinite(fill_base):
+        fill_base = 0.0
+    X_filled = X.fillna(fill_base - 1.0)
+    forest = RandomForestClassifier(max_depth=5, random_state=0).fit(X_filled, y)
     return pd.Series(forest.feature_importances_, index=X.columns)
 
 
 def random_forest_regression(X, y):
-    forest = RandomForestRegressor(max_depth=5, random_state=0).fit(X.fillna(X.min().min() - 1), y)
+    fill_base = X.min(numeric_only=True).min()
+    if not np.isfinite(fill_base):
+        fill_base = 0.0
+    X_filled = X.fillna(fill_base - 1.0)
+    forest = RandomForestRegressor(max_depth=5, random_state=0).fit(X_filled, y)
     return pd.Series(forest.feature_importances_, index=X.columns)
 
 
@@ -213,6 +227,7 @@ def binned_joint_mi_classif(
         return max(mi, 0.0)
     
     n_jobs = min(cpu_count(), len(features)) if n_jobs == -1 else min(cpu_count(), n_jobs)
+    n_jobs = max(1, n_jobs)
     
     if n_jobs == 1 or len(features) <= 2:
         results = {f: _compute_joint_mi(f) for f in features}
@@ -516,6 +531,8 @@ def mrmr_regression(
     
     elif method in ('cefsplus', 'mrmr_fcd', 'mrmr_fcq'):
         # Fast Gaussian-copula methods
+        if return_scores:
+            raise ValueError(f"Method '{method}' does not support return_scores=True.")
         from .cefsplus import cefsplus_regression
         mode = 'copula' if mi_method in ('copula', 'regression') else 'zscore'
         return cefsplus_regression(

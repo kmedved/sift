@@ -20,37 +20,57 @@ def get_numeric_features(df, target_column):
     numeric_features : list of str
         List of numeric column names.
     """
-    numeric_dtypes = [
-        pl.datatypes.Float32,
-        pl.datatypes.Float64,
-        pl.datatypes.Int8,
-        pl.datatypes.Int16,
-        pl.datatypes.Int32,
-        pl.datatypes.Int64,
-        pl.datatypes.UInt8,
-        pl.datatypes.UInt16,
-        pl.datatypes.UInt32,
-        pl.datatypes.UInt64
-    ]
-    numeric_features = [column_name for column_name, column_type in zip(df.columns, df.dtypes) if column_type in numeric_dtypes and column_name != target_column]
+    numeric_features = []
+    numeric_dtypes = {
+        pl.Float32,
+        pl.Float64,
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+    }
+    for col in df.columns:
+        if col == target_column:
+            continue
+        dtype = df.schema[col]
+        is_num = False
+        if hasattr(dtype, 'is_numeric'):
+            attr = dtype.is_numeric
+            is_num = attr() if callable(attr) else attr
+        else:
+            try:
+                is_num = dtype in numeric_dtypes
+            except TypeError:
+                is_num = False
+        if is_num:
+            numeric_features.append(col)
     return numeric_features
 
 
 def correlation(target_column, features, df):
-    out = pd.Series(features, index=features).apply(
-        lambda feature: df \
-            .filter(~(pl.col(feature).is_null()) & ~(pl.col(target_column).is_null())) \
-            .select(pl.corr(feature, target_column, method="pearson"))[0,0]
-    ).astype(float).fillna(0.0)
-    return out
+    if len(features) == 0:
+        return pd.Series(dtype=float)
+    corrs = {}
+    for f in features:
+        filtered = df.filter(pl.col(f).is_not_null() & pl.col(target_column).is_not_null())
+        if filtered.height > 0:
+            val = filtered.select(pl.corr(f, target_column)).item()
+            corrs[f] = val if val is not None else 0.0
+        else:
+            corrs[f] = 0.0
+    return pd.Series(corrs, dtype=float)
 
 
 def notna(target_column, features, df):
-    out = pd.Series(features, index=features).apply(
-        lambda feature: df.filter(
-            ~(pl.col(feature).is_null()) & ~(pl.col(target_column).is_null())).height
-    ).astype(float)
-    return out
+    counts = df.select([
+        ((pl.col(f).is_not_null()) & (pl.col(target_column).is_not_null())).sum().alias(f)
+        for f in features
+    ]).to_pandas().iloc[0]
+    return counts.astype(float)
 
 
 def f_regression(target_column, features, df):
@@ -89,7 +109,10 @@ def f_regression(target_column, features, df):
 
 def f_classif(target_column, features, df):
     groupby_method = getattr(df, "group_by", None) or df.groupby
-    groupby = groupby_method(target_column, maintain_order=True)
+    try:
+        groupby = groupby_method(target_column, maintain_order=True)
+    except TypeError:
+        groupby = groupby_method(target_column)
     
     avg = groupby \
         .agg([pl.col(feature).mean().alias(feature) for feature in features]) \
@@ -97,11 +120,9 @@ def f_classif(target_column, features, df):
         .set_index(target_column)
     
     n = groupby \
-        .apply(lambda dfg:
-            dfg.select([
-                (~pl.col(feature).is_null()).sum().alias(feature) for feature in features])) \
+        .agg([(pl.col(feature).is_not_null().sum()).alias(feature) for feature in features]) \
         .to_pandas() \
-        .set_index(avg.index)
+        .set_index(target_column)
     
     var = groupby \
         .agg([pl.col(feature).var().alias(feature) for feature in features]) \
