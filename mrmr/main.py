@@ -144,10 +144,12 @@ def mrmr_base(K, relevance_func, redundancy_func,
         if i == 0:
             scores = rel_values.copy()
         else:
+            denom = np.ones(n_features, dtype=np.float64)
+            mask = redundancy_cnt > 0
             if denom_mode == "mean":
-                denom = np.where(redundancy_cnt > 0, redundancy_sum / redundancy_cnt, 1.0)
+                denom[mask] = redundancy_sum[mask] / redundancy_cnt[mask]
             else:
-                denom = np.where(redundancy_cnt > 0, redundancy_max, 1.0)
+                denom[mask] = redundancy_max[mask]
             denom = np.maximum(denom, FLOOR)
             scores = rel_values / denom
 
@@ -353,9 +355,9 @@ def jmi_base(K, relevance_func, joint_mi_func,
                     target_column=last_selected,
                     features=update_names,
                     **joint_mi_args
-                ).fillna(FLOOR).clip(FLOOR)
+                ).fillna(0.0).clip(lower=0.0)
 
-                new_vals = new_jmi.reindex(update_names).fillna(FLOOR).to_numpy(dtype=np.float64)
+                new_vals = new_jmi.reindex(update_names).fillna(0.0).to_numpy(dtype=np.float64)
 
                 if method == 'jmi':
                     score_acc[update_indices] += new_vals
@@ -399,7 +401,7 @@ def jmi_base(K, relevance_func, joint_mi_func,
         )
         if domain_features:
             joint_mi_matrix.loc[domain_features, selected] = (
-                col.reindex(domain_features).fillna(FLOOR).clip(FLOOR).to_numpy()
+                col.reindex(domain_features).fillna(0.0).clip(lower=0.0).to_numpy()
             )
         joint_mi_matrix.loc[selected, selected] = 0.0
 

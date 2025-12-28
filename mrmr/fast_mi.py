@@ -98,7 +98,7 @@ def _binned_mi_single(x1, x2, y, n_bins=10):
 
     Faster than k-NN, handles nonlinear relationships.
     """
-    mask = ~(np.isnan(x1) | np.isnan(x2) | np.isnan(y))
+    mask = np.isfinite(x1) & np.isfinite(x2) & np.isfinite(y)
     if mask.sum() < 20:
         return 0.0
 
@@ -155,6 +155,7 @@ def binned_joint_mi(target_column, features, X, y, n_bins=10, n_jobs=-1):
         )
 
     n_jobs = min(cpu_count(), len(features)) if n_jobs == -1 else min(cpu_count(), n_jobs)
+    n_jobs = max(1, n_jobs)
 
     if n_jobs == 1 or len(features) <= 2:
         results = {f: compute(f) for f in features}
@@ -181,7 +182,7 @@ def _ksg_mi_joint(x1, x2, y, k=3):
     """
     from scipy.spatial import cKDTree
 
-    mask = ~(np.isnan(x1) | np.isnan(x2) | np.isnan(y))
+    mask = np.isfinite(x1) & np.isfinite(x2) & np.isfinite(y)
     if mask.sum() < k + 5:
         return 0.0
 
@@ -211,12 +212,18 @@ def _ksg_mi_joint(x1, x2, y, k=3):
 
     # Count neighbors within eps in marginal spaces
     # Subtract 1 because query includes the point itself
+    def _safe_count(tree, point, radius):
+        try:
+            return tree.query_ball_point(point, radius, p=np.inf, return_length=True)
+        except TypeError:
+            return len(tree.query_ball_point(point, radius, p=np.inf))
+
     n_x = np.array([
-        tree_x.query_ball_point(X_joint[i], eps[i], p=np.inf, return_length=True) - 1
+        _safe_count(tree_x, X_joint[i], float(eps[i])) - 1
         for i in range(n)
     ])
     n_y = np.array([
-        tree_y.query_ball_point(Y_marginal[i], eps[i], p=np.inf, return_length=True) - 1
+        _safe_count(tree_y, Y_marginal[i], float(eps[i])) - 1
         for i in range(n)
     ])
 
@@ -246,6 +253,7 @@ def ksg_joint_mi(target_column, features, X, y, k=3, n_jobs=-1):
         )
 
     n_jobs = min(cpu_count(), len(features)) if n_jobs == -1 else min(cpu_count(), n_jobs)
+    n_jobs = max(1, n_jobs)
 
     if n_jobs == 1 or len(features) <= 2:
         results = {f: compute(f) for f in features}

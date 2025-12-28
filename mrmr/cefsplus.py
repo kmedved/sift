@@ -42,20 +42,24 @@ except Exception:
 def _standardize_2d(X: np.ndarray) -> np.ndarray:
     """Z-score standardization for 2D array."""
     X = np.asarray(X, dtype=np.float64)
-    mu = X.mean(axis=0)
-    sd = X.std(axis=0)
+    X = np.where(np.isfinite(X), X, np.nan)
+    mu = np.nanmean(X, axis=0)
+    sd = np.nanstd(X, axis=0)
     sd = np.where(sd > 0, sd, 1.0)
     Z = (X - mu) / sd
+    Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
     return Z.astype(np.float32, copy=False)
 
 
 def _standardize_1d(y: np.ndarray) -> np.ndarray:
     """Z-score standardization for 1D array."""
     y = np.asarray(y, dtype=np.float64).ravel()
-    y = y - y.mean()
-    sd = y.std()
+    y = np.where(np.isfinite(y), y, np.nan)
+    y = y - np.nanmean(y)
+    sd = np.nanstd(y)
     if sd > 0:
         y = y / sd
+    y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
     return y.astype(np.float32, copy=False)
 
 
@@ -69,16 +73,23 @@ def _rank_gauss_1d(x: np.ndarray) -> np.ndarray:
     Uses scipy.stats.rankdata with method='average' for proper tie handling,
     which is important for zero-inflated or highly discretized data.
     """
-    x = np.asarray(x)
-    n = x.shape[0]
-    ranks = rankdata(x, method="average")
-    u = ranks / (n + 1)
+    x = np.asarray(x, dtype=np.float64).ravel()
+    mask = np.isfinite(x)
+    m = int(mask.sum())
+    if m == 0:
+        return np.zeros_like(x, dtype=np.float32)
+
+    ranks = rankdata(x[mask], method="average")
+    u = ranks / (m + 1.0)
     z = ndtri(u)
     z -= z.mean()
     sd = z.std()
     if sd > 0:
         z /= sd
-    return z.astype(np.float32, copy=False)
+
+    out = np.zeros_like(x, dtype=np.float64)
+    out[mask] = z
+    return out.astype(np.float32, copy=False)
 
 
 def _rank_gauss_2d(X: np.ndarray) -> np.ndarray:
@@ -179,6 +190,8 @@ def _mrmr_fcd_core(rel: np.ndarray, red: np.ndarray, k: int) -> np.ndarray:
     score(f) = relevance(f) - mean(redundancy with selected)
     """
     m = rel.shape[0]
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64)
     if k > m:
         k = m
 
@@ -224,6 +237,8 @@ def _mrmr_fcq_core(
     score(f) = relevance(f) / mean(redundancy with selected)
     """
     m = rel.shape[0]
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64)
     if k > m:
         k = m
 
@@ -299,6 +314,8 @@ def _cefsplus_logdet_select(
     R = np.asarray(R, dtype=np.float64)
     r = np.asarray(r, dtype=np.float64).ravel()
     m = R.shape[0]
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64)
     k = min(k, m)
 
     if shrink > 0:
@@ -480,7 +497,7 @@ def build_cache(
         inds = np.where(np.isnan(Xs))
         Xs[inds] = col_stat[inds[1]]
 
-    sd = Xs.std(axis=0)
+    sd = np.nanstd(Xs, axis=0)
     valid = sd > min_std
     valid_cols = np.where(valid)[0]
     Xs = Xs[:, valid]
@@ -547,14 +564,22 @@ def select_features_cached(
     rel = _gaussian_mi_from_corr(r)
 
     p_valid = r.shape[0]
+    if p_valid == 0 or k <= 0:
+        return [] if (return_names and cache.feature_names is not None) else np.array([], dtype=np.int64)
     top_m = int(min(top_m, p_valid))
     k = int(min(k, p_valid))
 
-    cand = np.argpartition(np.abs(r), -top_m)[-top_m:]
+    if top_m <= 0:
+        cand = np.arange(p_valid, dtype=np.int64)
+    else:
+        top_m = min(top_m, p_valid)
+        cand = np.argpartition(np.abs(r), -top_m)[-top_m:]
 
     cand = greedy_corr_prune(
         cand, cache.Rxx, score=np.abs(r), corr_threshold=corr_prune_threshold
     )
+    if cand.size == 0:
+        return [] if (return_names and cache.feature_names is not None) else np.array([], dtype=np.int64)
 
     R_sub = cache.Rxx[np.ix_(cand, cand)]
     r_sub = r[cand]
@@ -611,7 +636,7 @@ def cefsplus_regression(
     show_progress: bool = True,
     cache: Optional[FeatureCache] = None,
     impute: Optional[Literal["mean", "median"]] = "mean",
-) -> List[str]:
+) -> Union[List[str], np.ndarray]:
     """
     CEFS+/mRMR feature selection with Gaussian-copula MI estimation.
 
