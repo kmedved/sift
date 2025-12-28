@@ -282,7 +282,8 @@ def jmi_base(K, relevance_func, joint_mi_func,
     return_scores: bool (optional, default=False)
         If False, only the list of selected features is returned.
         If True, a tuple containing (list of selected features, relevance, joint_mi_matrix) is returned.
-        The joint_mi_matrix is recomputed for selected features only (shape: P x K).
+        The joint_mi_matrix is recomputed for selected features and returned with full feature columns
+        (shape: P x P) for backward compatibility.
 
     show_progress: bool (optional, default=True)
         If True, a TQDM progress bar shows the number of features processed.
@@ -381,8 +382,8 @@ def jmi_base(K, relevance_func, joint_mi_func,
     if not return_scores:
         return selected_features
 
-    # Recompute joint MI matrix for selected features only (for backward compat)
-    joint_mi_matrix = pd.DataFrame(0.0, index=features, columns=selected_features, dtype=float)
+    # Recompute joint MI for selected features while returning a full matrix (for backward compat)
+    joint_mi_matrix = pd.DataFrame(0.0, index=features, columns=features, dtype=float)
     for selected in selected_features:
         if only_same_domain:
             sel_domain = selected.split('_')[0]
