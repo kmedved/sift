@@ -26,6 +26,8 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
 
     Then: I(f, s; y) ≈ -0.5 * log(1 - R²)
 
+    Missing values and infinities are standardized to 0.0 (mean-imputed on z-score).
+
     This is ~10x faster than OLS loop since it's fully vectorized.
     """
     import pandas as pd
@@ -44,10 +46,12 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
     # Standardize (z-score)
     def zscore(v):
         v = np.asarray(v, dtype=np.float64)
+        v = np.where(np.isfinite(v), v, np.nan)
         mu = np.nanmean(v, axis=0)
         sd = np.nanstd(v, axis=0)
         sd = np.where(sd > 1e-12, sd, 1.0)
-        return (v - mu) / sd
+        z = (v - mu) / sd
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
     y_s = zscore(y_arr)
     s_s = zscore(X_arr[:, target_idx])  # selected feature (target_column)
@@ -69,13 +73,15 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
         # r_fs: corr(candidates, selected) -> (block_size,)
         r_fs = (F_s.T @ s_s) / n
 
-        # Analytic R² for y ~ f + s
-        # R² = (r_yf² + r_ys² - 2·r_yf·r_ys·r_fs) / (1 - r_fs²)
+        # Analytic R² for y ~ f + s with stable form near collinearity
+        # R² = r_ys² + (r_yf - r_ys * r_fs)² / (1 - r_fs²)
         denom = 1.0 - r_fs**2
-        denom = np.where(denom < 1e-6, 1e-6, denom)  # avoid division by zero (collinearity)
-
-        num = r_yf**2 + r_ys**2 - 2 * r_yf * r_ys * r_fs
-        r2 = np.clip(num / denom, 0.0, 0.99999)
+        near = denom < 1e-8
+        denom = np.maximum(denom, 1e-8)
+        a = r_yf - r_ys * r_fs
+        r2 = r_ys**2 + (a * a) / denom
+        r2[near] = r_ys**2
+        r2 = np.clip(r2, 0.0, 0.99999)
 
         # Convert R² to MI scale: I(f,s; y) ≈ -0.5 * log(1 - R²)
         mi_vals[start:start + len(block_idx)] = -0.5 * np.log(1.0 - r2)

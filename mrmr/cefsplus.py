@@ -15,7 +15,6 @@ Methods:
 """
 
 from dataclasses import dataclass
-import importlib.util
 from typing import List, Literal, Optional, Union
 
 import numpy as np
@@ -23,12 +22,10 @@ import pandas as pd
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
-_numba_spec = importlib.util.find_spec("numba")
-if _numba_spec is not None:
+try:
     from numba import njit
-
     HAS_NUMBA = True
-else:
+except Exception:
     HAS_NUMBA = False
 
     def njit(*args, **kwargs):

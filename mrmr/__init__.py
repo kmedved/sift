@@ -24,7 +24,7 @@ _LAZY_ATTRS = {
     "polars": ("mrmr.polars", None),
 }
 
-__all__ = list(_LAZY_ATTRS.keys()) + ["__version__"]
+__all__ = [name for name in _LAZY_ATTRS.keys() if name != "polars"] + ["__version__"]
 
 
 def __getattr__(name):

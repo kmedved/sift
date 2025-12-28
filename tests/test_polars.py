@@ -1,5 +1,6 @@
+import pytest
 import pandas as pd
-import polars
+polars = pytest.importorskip("polars")
 import mrmr
 
 columns = ["target_classif", "target_regression", "some_null", "feature_a", "constant", "feature_b"]
