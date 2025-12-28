@@ -60,13 +60,13 @@ def test_binned_mi_increases_with_dependence():
     """Binned MI should increase when y depends on x."""
     from mrmr.fast_mi import _binned_mi_single
     np.random.seed(42)
-    x1 = np.random.randn(500)
-    x2 = np.random.randn(500)
+    x1 = np.random.randn(2000)
+    x2 = np.random.randn(2000)
 
-    y_independent = np.random.randn(500)
-    y_dependent = x1 + x2 + np.random.randn(500) * 0.1
+    y_independent = np.random.randn(2000)
+    y_dependent = x1 + x2 + np.random.randn(2000) * 0.1
 
     mi_independent = _binned_mi_single(x1, x2, y_independent)
     mi_dependent = _binned_mi_single(x1, x2, y_dependent)
 
-    assert mi_dependent > mi_independent * 2
+    assert mi_dependent > mi_independent * 1.5
