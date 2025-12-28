@@ -47,7 +47,7 @@ def _standardize_2d(X: np.ndarray) -> np.ndarray:
     sd = np.nanstd(X, axis=0)
     sd = np.where(sd > 0, sd, 1.0)
     Z = (X - mu) / sd
-    Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(Z, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return Z.astype(np.float32, copy=False)
 
 
@@ -59,7 +59,7 @@ def _standardize_1d(y: np.ndarray) -> np.ndarray:
     sd = np.nanstd(y)
     if sd > 0:
         y = y / sd
-    y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(y, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return y.astype(np.float32, copy=False)
 
 
@@ -485,6 +485,7 @@ def build_cache(
         row_idx = np.arange(n)
 
     Xs = np.asarray(X[row_idx], dtype=np.float64)
+    Xs = np.where(np.isfinite(Xs), Xs, np.nan)
 
     if impute is not None:
         if impute == "mean":
@@ -570,7 +571,9 @@ def select_features_cached(
     k = int(min(k, p_valid))
 
     if top_m <= 0:
-        cand = np.arange(p_valid, dtype=np.int64)
+        raise ValueError(
+            "top_m must be > 0; using all features can allocate O(p^2) memory."
+        )
     else:
         top_m = min(top_m, p_valid)
         cand = np.argpartition(np.abs(r), -top_m)[-top_m:]

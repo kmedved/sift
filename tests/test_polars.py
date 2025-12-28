@@ -75,3 +75,19 @@ def test_mrmr_regression_with_scores():
     assert set(selected_features) == set(["some_null", "feature_a"])
     assert isinstance(relevance, pd.Series)
     assert isinstance(redundancy, pd.DataFrame)
+
+
+def test_mrmr_regression_empty_features():
+    df = polars.DataFrame({"y": [1.0, 2.0, 3.0]})
+    selected = mrmr.polars.mrmr_regression(
+        df=df,
+        K=2,
+        target_column="y",
+        features=[],
+        denominator="mean",
+        only_same_domain=False,
+        return_scores=False,
+        show_progress=False,
+    )
+
+    assert selected == []

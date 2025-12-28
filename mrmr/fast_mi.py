@@ -107,6 +107,8 @@ def _binned_mi_single(x1, x2, y, n_bins=10):
 
     # Discretize each variable into bins
     def discretize(arr):
+        if np.std(arr) < 1e-12:
+            return np.zeros(len(arr), dtype=np.int32)
         # Use quantile-based binning for robustness
         percentiles = np.linspace(0, 100, n_bins + 1)
         bins = np.percentile(arr, percentiles)
@@ -141,6 +143,8 @@ def _binned_mi_single(x1, x2, y, n_bins=10):
 
 def binned_joint_mi(target_column, features, X, y, n_bins=10, n_jobs=-1):
     """Fast joint MI using binned/discretized estimation."""
+    if not hasattr(X, "columns"):
+        raise TypeError("binned_joint_mi expects X to be a pandas DataFrame with column names.")
     X_arr = X.values if hasattr(X, 'values') else X
     y_arr = y.values if hasattr(y, 'values') else y
     col_idx = {c: i for i, c in enumerate(X.columns)}
@@ -239,6 +243,8 @@ def _ksg_mi_joint(x1, x2, y, k=3):
 
 def ksg_joint_mi(target_column, features, X, y, k=3, n_jobs=-1):
     """KSG joint MI estimation."""
+    if not hasattr(X, "columns"):
+        raise TypeError("ksg_joint_mi expects X to be a pandas DataFrame with column names.")
     X_arr = X.values if hasattr(X, 'values') else X
     y_arr = y.values if hasattr(y, 'values') else y
     col_idx = {c: i for i, c in enumerate(X.columns)}
