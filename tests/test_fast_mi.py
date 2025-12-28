@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from mrmr.fast_mi import regression_joint_mi, binned_joint_mi, ksg_joint_mi
+from sift.fast_mi import regression_joint_mi, binned_joint_mi, ksg_joint_mi
 
 
 def test_regression_joint_mi_block_consistency():

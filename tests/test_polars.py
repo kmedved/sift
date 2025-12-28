@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 polars = pytest.importorskip("polars")
-import mrmr
+import sift
 
 columns = ["target_classif", "target_regression", "some_null", "feature_a", "constant", "feature_b"]
 target_column_classif = "target_classif"
@@ -18,7 +18,7 @@ df_polars = df_polars.with_columns(polars.Series([3.0,2.0,1.0,2.0,3.0]).alias("f
 
 
 def test_mrmr_classif_without_scores():
-    selected_features = mrmr.polars.mrmr_classif(
+    selected_features = sift.polars.mrmr_classif(
         df=df_polars,
         K=4,
         target_column=target_column_classif,
@@ -32,7 +32,7 @@ def test_mrmr_classif_without_scores():
 
 
 def test_mrmr_classif_with_scores():
-    selected_features, relevance, redundancy = mrmr.polars.mrmr_classif(
+    selected_features, relevance, redundancy = sift.polars.mrmr_classif(
         df=df_polars,
         K=4,
         target_column=target_column_classif,
@@ -48,7 +48,7 @@ def test_mrmr_classif_with_scores():
 
 
 def test_mrmr_regression_without_scores():
-    selected_features = mrmr.polars.mrmr_regression(
+    selected_features = sift.polars.mrmr_regression(
         df=df_polars,
         K=4,
         target_column=target_column_regression,
@@ -62,7 +62,7 @@ def test_mrmr_regression_without_scores():
 
 
 def test_mrmr_regression_with_scores():
-    selected_features, relevance, redundancy = mrmr.polars.mrmr_regression(
+    selected_features, relevance, redundancy = sift.polars.mrmr_regression(
         df=df_polars,
         K=4,
         target_column=target_column_regression,
@@ -79,7 +79,7 @@ def test_mrmr_regression_with_scores():
 
 def test_mrmr_regression_empty_features():
     df = polars.DataFrame({"y": [1.0, 2.0, 3.0]})
-    selected = mrmr.polars.mrmr_regression(
+    selected = sift.polars.mrmr_regression(
         df=df,
         K=2,
         target_column="y",

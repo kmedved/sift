@@ -1,4 +1,4 @@
-import mrmr
+import sift
 import numpy as np
 import pandas as pd
 
@@ -20,7 +20,7 @@ def redundancy_func(target_column, features):
     return redundancy.loc[features, target_column]
 
 def test_mrmr_base_without_scores():
-    selected_features = mrmr.mrmr_base(
+    selected_features = sift.mrmr_base(
         K=100, relevance_func=relevance_func, redundancy_func=redundancy_func,
         relevance_args={}, redundancy_args={},
         denominator_func=np.mean, only_same_domain=False,
@@ -29,7 +29,7 @@ def test_mrmr_base_without_scores():
     assert selected_features == ['first', 'third', 'second']
 
 def test_mrmr_base_with_scores():
-    selected_features, relevance_out, redundancy_out = mrmr.mrmr_base(
+    selected_features, relevance_out, redundancy_out = sift.mrmr_base(
         K=100, relevance_func=relevance_func, redundancy_func=redundancy_func,
         relevance_args={}, redundancy_args={},
         denominator_func=np.mean, only_same_domain=False,
@@ -50,7 +50,7 @@ def test_jmi_base_only_same_domain_relevance_fallback():
     def joint_mi_func_local(target_column, features):
         return pd.Series(0.1, index=features)
 
-    selected_features = mrmr.jmi_base(
+    selected_features = sift.jmi_base(
         K=3,
         relevance_func=relevance_func_local,
         joint_mi_func=joint_mi_func_local,

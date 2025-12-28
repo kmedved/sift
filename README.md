@@ -36,13 +36,13 @@ For instance, in **2019**, **Uber** engineers published a paper describing how t
 You can install this package in your environment via pip:
 
 ```bash
-pip install mrmr_selection
+pip install sift
 ```
 
 And then import it in Python through:
 
 ```python
-import mrmr
+import sift
 ```
 
 ## How to use this package
@@ -72,7 +72,7 @@ X = pd.DataFrame(X)
 y = pd.Series(y)
 
 # select top 10 features using mRMR
-from mrmr import mrmr_classif
+from sift import mrmr_classif
 selected_features = mrmr_classif(X=X, y=y, K=10)
 ```
 
@@ -92,8 +92,8 @@ columns = ["target", "some_null", "feature", "constant", "other_feature", "anoth
 df_polars = polars.DataFrame(data=data, schema=columns)
 
 # select top 2 features using mRMR
-import mrmr
-selected_features = mrmr.polars.mrmr_regression(df=df_polars, target_column="target", K=2)
+import sift
+selected_features = sift.polars.mrmr_regression(df=df_polars, target_column="target", K=2)
 ```
 
 ## Reference
