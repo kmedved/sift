@@ -1,7 +1,3 @@
-<p align="center">
-<img src="https://raw.githubusercontent.com/smazzanti/mrmr/main/docs/img/mrmr_logo_white_bck.png" alt="sift logo" width="450"/>
-</p>
-
 # sift: feature selection toolbox
 
 `sift` is a feature selection toolbox that brings together minimal-optimal and stability-focused selectors.
@@ -19,8 +15,8 @@ It includes **mRMR**, **JMI/JMIM**, **CEFS+** (and related Gaussian-copula varia
 This project is not published on PyPI. Install it from source:
 
 ```bash
-git clone https://github.com/smazzanti/mrmr.git
-cd mrmr
+git clone https://github.com/kmedved/sift.git
+cd sift
 python -m pip install -e .
 ```
 
