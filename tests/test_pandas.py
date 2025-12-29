@@ -128,3 +128,53 @@ def test_mrmr_regression_with_scores():
     assert set(selected_features) == set(["some_null", "feature_a"])
     assert isinstance(relevance, pd.Series)
     assert isinstance(redundancy, pd.DataFrame)
+
+
+def test_mrmr_regression_with_nan_in_target():
+    """Test that mRMR handles NaN values in target variable."""
+    df = df_pandas.copy()
+    y_with_nan = df[target_column_regression].copy()
+    y_with_nan.iloc[0] = float('NaN')
+
+    selected_features = sift.selectors_pandas.mrmr_regression(
+        X=df.loc[:, features],
+        y=y_with_nan,
+        K=4,
+        relevance="f",
+        redundancy="c",
+        denominator="mean",
+        cat_features=[],
+        cat_encoding="leave_one_out",
+        only_same_domain=False,
+        return_scores=False,
+        n_jobs=1,
+        show_progress=False
+    )
+
+    assert isinstance(selected_features, list)
+    assert set(selected_features).issubset(set(features))
+
+
+def test_mrmr_classif_with_nan_in_target():
+    """Test that mRMR handles NaN values in target variable."""
+    df = df_pandas.copy()
+    y_with_nan = df[target_column_classif].copy().astype(object)
+    y_with_nan.iloc[0] = None
+
+    selected_features = sift.selectors_pandas.mrmr_classif(
+        X=df.loc[:, features],
+        y=y_with_nan,
+        K=4,
+        relevance="f",
+        redundancy="c",
+        denominator="mean",
+        cat_features=[],
+        cat_encoding="leave_one_out",
+        only_same_domain=False,
+        return_scores=False,
+        n_jobs=1,
+        show_progress=False
+    )
+
+    assert isinstance(selected_features, list)
+    assert set(selected_features).issubset(set(features))

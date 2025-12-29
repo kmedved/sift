@@ -58,23 +58,27 @@ def parallel_df(func, df, series, n_jobs, prefer="threads"):
 
 
 def _f_classif(X, y):
+    y_notna = ~pd.isna(y)
+
     def _f_classif_series(x, y):
-        x_not_na = ~ x.isna()
-        if x_not_na.sum() == 0:
+        mask = (~x.isna()) & y_notna
+        if mask.sum() == 0:
             return 0
-        if pd.Series(y[x_not_na]).nunique(dropna=True) < 2:
+        if pd.Series(y[mask]).nunique(dropna=True) < 2:
             return 0
-        return sklearn_f_classif(x[x_not_na].to_frame(), y[x_not_na])[0][0]
+        return sklearn_f_classif(x[mask].to_frame(), y[mask])[0][0]
 
     return X.apply(lambda col: _f_classif_series(col, y)).fillna(0.0)
 
 
 def _f_regression(X, y):
+    y_notna = ~pd.isna(y)
+
     def _f_regression_series(x, y):
-        x_not_na = ~ x.isna()
-        if x_not_na.sum() == 0:
+        mask = (~x.isna()) & y_notna
+        if mask.sum() == 0:
             return 0
-        return sklearn_f_regression(x[x_not_na].to_frame(), y[x_not_na])[0][0]
+        return sklearn_f_regression(x[mask].to_frame(), y[mask])[0][0]
 
     return X.apply(lambda col: _f_regression_series(col, y)).fillna(0.0)
 
@@ -88,14 +92,16 @@ def f_regression(X, y, n_jobs=-1, parallel_prefer="threads"):
 
 
 def _ks_classif(X, y):
+    y_notna = ~pd.isna(y)
+
     def _ks_classif_series(x, y):
-        x_not_na = ~ x.isna()
-        if x_not_na.sum() == 0:
+        mask = (~x.isna()) & y_notna
+        if mask.sum() == 0:
             return 0
-        if pd.Series(y[x_not_na]).nunique(dropna=True) < 2:
+        if pd.Series(y[mask]).nunique(dropna=True) < 2:
             return 0
-        x = x[x_not_na]
-        y = y[x_not_na]
+        x = x[mask]
+        y = y[mask]
         return x.groupby(y).apply(lambda s: ks_2samp(s, x[y != s.name])[0]).mean()
 
     return X.apply(lambda col: _ks_classif_series(col, y)).fillna(0.0)

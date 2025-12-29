@@ -39,11 +39,13 @@ setup(
     ],
     extras_require={
         'categorical': ['category_encoders'],
-        'polars': ['polars>=0.12.5'],
+        'polars': ['polars>=0.12.5', 'pyarrow'],
         'numba': ['numba'],
+        'test': ['pytest'],
         'all': [
             'category_encoders',
             'polars>=0.12.5',
+            'pyarrow',
             'numba',
         ],
     },

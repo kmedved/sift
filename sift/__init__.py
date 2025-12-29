@@ -21,6 +21,8 @@ _LAZY_ATTRS = {
     "FeatureCache": ("sift.cefsplus", "FeatureCache"),
     "StabilitySelector": ("sift.stability_selection", "StabilitySelector"),
     "stability_select": ("sift.stability_selection", "stability_select"),
+    "stability_regression": ("sift.stability_selection", "stability_regression"),
+    "stability_classif": ("sift.stability_selection", "stability_classif"),
     "smart_sample": ("sift.stability_selection", "smart_sample"),
     "SmartSamplerConfig": ("sift.stability_selection", "SmartSamplerConfig"),
     "panel_config": ("sift.stability_selection", "panel_config"),

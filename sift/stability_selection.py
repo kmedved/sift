@@ -8,7 +8,7 @@ leverage-based smart sampling for computational efficiency.
 Domain-agnostic: works for sports analytics, finance, biomedical, etc.
 
 Usage:
-    from stability_selection import StabilitySelector
+    from sift import StabilitySelector
 
     # Basic usage
     selector = StabilitySelector(threshold=0.6)
@@ -111,7 +111,7 @@ def first_per_group(df: pd.DataFrame, group_col: str, time_col: str) -> np.ndarr
         return np.zeros(len(df), dtype=bool)
 
     if time_col and time_col in df.columns:
-        df_sorted = df.sort_values([group_col, time_col])
+        df_sorted = df.sort_values([group_col, time_col], kind="mergesort")
         mask = ~df_sorted.duplicated(subset=[group_col], keep='first')
         return mask.reindex(df.index).values
     else:
@@ -119,13 +119,20 @@ def first_per_group(df: pd.DataFrame, group_col: str, time_col: str) -> np.ndarr
 
 
 def first_and_last_per_group(df: pd.DataFrame, group_col: str, time_col: str) -> np.ndarray:
-    """Anchor first and last observation per group."""
+    """Anchor first and last observation per group (by time if available)."""
     if group_col is None:
         return np.zeros(len(df), dtype=bool)
 
-    first = ~df.duplicated(subset=[group_col], keep='first')
-    last = ~df.duplicated(subset=[group_col], keep='last')
-    return (first | last).values
+    if time_col and time_col in df.columns:
+        df_sorted = df.sort_values([group_col, time_col], kind="mergesort")
+        first = ~df_sorted.duplicated(subset=[group_col], keep='first')
+        last = ~df_sorted.duplicated(subset=[group_col], keep='last')
+        mask = first | last
+        return mask.reindex(df.index).values
+    else:
+        first = ~df.duplicated(subset=[group_col], keep='first')
+        last = ~df.duplicated(subset=[group_col], keep='last')
+        return (first | last).values
 
 
 def periodic_anchors(period_cols: Union[str, List[str]], keep_first: bool = True):
@@ -159,6 +166,12 @@ def periodic_anchors(period_cols: Union[str, List[str]], keep_first: bool = True
             return np.zeros(len(df), dtype=bool)
 
         subset = [group_col] + period_cols
+        if time_col and time_col in df.columns:
+            sort_cols = subset + [time_col]
+            df_sorted = df.sort_values(sort_cols, kind="mergesort")
+            mask = ~df_sorted.duplicated(subset=subset, keep='first' if keep_first else 'last')
+            return mask.reindex(df.index).values
+
         return (~df.duplicated(subset=subset, keep='first' if keep_first else 'last')).values
 
     return anchor_fn
@@ -332,15 +345,28 @@ def smart_sample(
     X = df[feature_cols].to_numpy(dtype=np.float32)
     y = df[y_col].to_numpy(dtype=np.float32)
 
+    # Treat inf as missing before imputation
+    X = np.where(np.isfinite(X), X, np.nan)
+
+    # Check y finiteness (only needed when residual weighting is enabled)
+    if config.residual_weight_cap > 0 and not np.isfinite(y).all():
+        raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
+
     # Mean-impute missing values (replace all-NaN columns with 0)
     col_means = np.nanmean(X, axis=0)
     col_means = np.where(np.isnan(col_means), 0.0, col_means)  # Handle all-NaN columns
-    if np.isnan(X).any():
-        nan_mask = np.isnan(X)
+    nan_mask = np.isnan(X)
+    if nan_mask.any():
         X[nan_mask] = col_means[np.where(nan_mask)[1]]
 
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X).astype(np.float32)
+
+    # Verify finiteness after scaling
+    if not np.isfinite(Xs).all():
+        raise ValueError(
+            "X contains non-finite values after imputation/scaling; check for extreme magnitudes."
+        )
 
     n, d = Xs.shape
     target_total = int(np.floor(config.sample_frac * n))
@@ -420,33 +446,34 @@ def smart_sample(
     beta = 0.0
     res_scores = np.ones(n, dtype=np.float32)
 
-    # Skip pilot if we don't have enough data
-    if len(pilot_train) >= 50 and len(pilot_val) >= 20:
-        try:
-            pilot = HistGradientBoostingRegressor(
-                max_iter=50, max_depth=4, learning_rate=0.1,
-                random_state=config.random_state
-            )
-            pilot.fit(Xs[pilot_train], y[pilot_train])
+    # Skip pilot if residual weighting is disabled or we don't have enough data
+    if config.residual_weight_cap > 0:
+        if len(pilot_train) >= 50 and len(pilot_val) >= 20:
+            try:
+                pilot = HistGradientBoostingRegressor(
+                    max_iter=50, max_depth=4, learning_rate=0.1,
+                    random_state=config.random_state
+                )
+                pilot.fit(Xs[pilot_train], y[pilot_train])
 
-            val_pred = pilot.predict(Xs[pilot_val])
-            val_resid = y[pilot_val] - val_pred
-            val_mse = float(np.mean(val_resid ** 2))
-            var_y = float(np.var(y[pilot_val])) + 1e-12
-            r2 = max(0.0, min(1.0, 1.0 - val_mse / var_y))
+                val_pred = pilot.predict(Xs[pilot_val])
+                val_resid = y[pilot_val] - val_pred
+                val_mse = float(np.mean(val_resid ** 2))
+                var_y = float(np.var(y[pilot_val])) + 1e-12
+                r2 = max(0.0, min(1.0, 1.0 - val_mse / var_y))
 
-            preds = pilot.predict(Xs)
-            resid_all = np.abs(y - preds).astype(np.float32)
-            res_scores = np.maximum(resid_all, 1e-12)
-            res_scores /= res_scores.mean()
+                preds = pilot.predict(Xs)
+                resid_all = np.abs(y - preds).astype(np.float32)
+                res_scores = np.maximum(resid_all, 1e-12)
+                res_scores /= res_scores.mean()
 
-            beta = min(config.residual_weight_cap, r2)
-            if config.verbose:
-                print(f"Pilot R² = {r2:.3f} → residual weight β = {beta:.3f}")
-        except Exception as e:
-            warnings.warn(f"Pilot model failed ({e}); using geometry only.", RuntimeWarning)
-    elif config.verbose:
-        warnings.warn(f"Dataset too small for pilot model (n={n}); using geometry only.", RuntimeWarning)
+                beta = min(config.residual_weight_cap, r2)
+                if config.verbose:
+                    print(f"Pilot R² = {r2:.3f} → residual weight β = {beta:.3f}")
+            except Exception as e:
+                warnings.warn(f"Pilot model failed ({e}); using geometry only.", RuntimeWarning)
+        elif config.verbose:
+            warnings.warn(f"Dataset too small for pilot model (n={n}); using geometry only.", RuntimeWarning)
 
     base_scores = (1.0 - beta) * lev_scores + beta * res_scores
     base_scores = (1 - config.uniform_floor) * (base_scores / (base_scores.mean() + 1e-12)) + config.uniform_floor
@@ -516,10 +543,15 @@ def smart_sample(
 
         # Anchors for this group (cap share)
         g_anchor = g_idx[anchor_mask[g_idx]]
-        max_anchor_keep = int(np.floor(config.anchor_max_share * target_g))
-        if g_anchor.size > max_anchor_keep > 0:
-            top_local = np.argpartition(-base_scores[g_anchor], max_anchor_keep - 1)[:max_anchor_keep]
-            g_anchor = g_anchor[top_local]
+        if g_anchor.size:
+            if config.anchor_max_share <= 0:
+                g_anchor = np.array([], dtype=int)
+            else:
+                max_anchor_keep = max(1, int(np.floor(config.anchor_max_share * target_g)))
+                max_anchor_keep = min(max_anchor_keep, target_g)
+                if g_anchor.size > max_anchor_keep:
+                    top_local = np.argpartition(-base_scores[g_anchor], max_anchor_keep - 1)[:max_anchor_keep]
+                    g_anchor = g_anchor[top_local]
         if g_anchor.size:
             add_rows(g_anchor, np.ones(g_anchor.size, dtype=np.float32))
 
@@ -887,11 +919,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         mask = self.selection_frequencies_ >= self.threshold
 
         if self.max_features is not None and mask.sum() > self.max_features:
-            top_idx = np.argsort(-self.selection_frequencies_)[:self.max_features]
+            top_idx = np.argsort(-self.selection_frequencies_, kind="mergesort")[:self.max_features]
             mask = np.zeros(p, dtype=bool)
             mask[top_idx] = True
 
-        self.selected_features_ = np.where(mask)[0]
+        selected = np.where(mask)[0]
+        order = np.argsort(-self.selection_frequencies_[selected], kind="mergesort")
+        self.selected_features_ = selected[order]
         self.selected_feature_names_ = [feature_names[i] for i in self.selected_features_]
         self.n_features_selected_ = len(self.selected_features_)
 
@@ -909,7 +943,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
         """Convert inputs to arrays, extract feature names."""
         exclude = set()
-        if self.sampler_config:
+        if self.use_smart_sampler and self.sampler_config:
             if self.sampler_config.group_col:
                 exclude.add(self.sampler_config.group_col)
             if self.sampler_config.time_col:
@@ -925,6 +959,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             y = y.values
 
         X = np.asarray(X, dtype=np.float32)
+        X = np.where(np.isfinite(X), X, np.nan)
 
         # Handle labels properly for classification
         if self.task == 'classification':
@@ -1279,11 +1314,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         mask = self.selection_frequencies_ >= threshold
 
         if self.max_features is not None and mask.sum() > self.max_features:
-            top_idx = np.argsort(-self.selection_frequencies_)[:self.max_features]
+            top_idx = np.argsort(-self.selection_frequencies_, kind="mergesort")[:self.max_features]
             mask = np.zeros(self.n_features_in_, dtype=bool)
             mask[top_idx] = True
 
-        self.selected_features_ = np.where(mask)[0]
+        selected = np.where(mask)[0]
+        order = np.argsort(-self.selection_frequencies_[selected], kind="mergesort")
+        self.selected_features_ = selected[order]
         self.selected_feature_names_ = [self.feature_names_in_[i] for i in self.selected_features_]
         self.n_features_selected_ = len(self.selected_features_)
 
@@ -1420,24 +1457,151 @@ def stability_select(
     return selector.selected_features_, selector.selection_frequencies_
 
 
+def stability_regression(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    K: int,
+    threshold: float = 0.6,
+    n_bootstrap: int = 50,
+    alpha: Optional[float] = None,
+    l1_ratio: float = 1.0,
+    sample_frac: float = 0.5,
+    use_smart_sampler: bool = False,
+    sampler_config: Optional[SmartSamplerConfig] = None,
+    random_state: Optional[int] = None,
+    n_jobs: int = -1,
+    verbose: bool = True,
+) -> List[str]:
+    """
+    Stability selection for regression.
+
+    Fits Lasso/ElasticNet on bootstrap subsamples and returns features
+    selected consistently across runs.
+
+    Parameters
+    ----------
+    X : array-like or DataFrame of shape (n_samples, n_features)
+        Feature matrix.
+    y : array-like of shape (n_samples,)
+        Continuous target variable.
+    K : int
+        Maximum number of features to select.
+    threshold : float, default=0.6
+        Minimum selection frequency to keep a feature.
+    n_bootstrap : int, default=50
+        Number of bootstrap iterations.
+    alpha : float, optional
+        Regularization strength. If None, estimated via CV.
+    l1_ratio : float, default=1.0
+        ElasticNet mixing (1.0 = Lasso, <1.0 = ElasticNet).
+    sample_frac : float, default=0.5
+        Fraction of data per bootstrap sample.
+    use_smart_sampler : bool, default=False
+        Whether to apply leverage-based smart sampling.
+    sampler_config : SmartSamplerConfig, optional
+        Configuration for smart sampler.
+    random_state : int, optional
+        Random seed for reproducibility.
+    n_jobs : int, default=-1
+        Number of parallel jobs.
+    verbose : bool, default=True
+        Print progress information.
+
+    Returns
+    -------
+    selected_features : list of str
+        Names of selected features.
+    """
+    selector = StabilitySelector(
+        task='regression',
+        threshold=threshold,
+        n_bootstrap=n_bootstrap,
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+        sample_frac=sample_frac,
+        max_features=K,
+        use_smart_sampler=use_smart_sampler,
+        sampler_config=sampler_config,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        verbose=verbose,
+    )
+    selector.fit(X, y)
+    return selector.selected_feature_names_
+
+
+def stability_classif(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    K: int,
+    threshold: float = 0.6,
+    n_bootstrap: int = 50,
+    alpha: Optional[float] = None,
+    sample_frac: float = 0.5,
+    use_smart_sampler: bool = False,
+    sampler_config: Optional[SmartSamplerConfig] = None,
+    random_state: Optional[int] = None,
+    n_jobs: int = -1,
+    verbose: bool = True,
+) -> List[str]:
+    """
+    Stability selection for classification.
+
+    Fits L1-regularized LogisticRegression on bootstrap subsamples and
+    returns features selected consistently across runs.
+
+    Parameters
+    ----------
+    X : array-like or DataFrame of shape (n_samples, n_features)
+        Feature matrix.
+    y : array-like of shape (n_samples,)
+        Categorical target variable.
+    K : int
+        Maximum number of features to select.
+    threshold : float, default=0.6
+        Minimum selection frequency to keep a feature.
+    n_bootstrap : int, default=50
+        Number of bootstrap iterations.
+    alpha : float, optional
+        Regularization strength. If None, estimated via CV.
+    sample_frac : float, default=0.5
+        Fraction of data per bootstrap sample.
+    use_smart_sampler : bool, default=False
+        Whether to apply leverage-based smart sampling.
+    sampler_config : SmartSamplerConfig, optional
+        Configuration for smart sampler.
+    random_state : int, optional
+        Random seed for reproducibility.
+    n_jobs : int, default=-1
+        Number of parallel jobs.
+    verbose : bool, default=True
+        Print progress information.
+
+    Returns
+    -------
+    selected_features : list of str
+        Names of selected features.
+    """
+    selector = StabilitySelector(
+        task='classification',
+        threshold=threshold,
+        n_bootstrap=n_bootstrap,
+        alpha=alpha,
+        sample_frac=sample_frac,
+        max_features=K,
+        use_smart_sampler=use_smart_sampler,
+        sampler_config=sampler_config,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        verbose=verbose,
+    )
+    selector.fit(X, y)
+    return selector.selected_feature_names_
+
+
 # =============================================================================
 # Domain-Specific Presets
 # =============================================================================
-
-def darko_config(sample_frac: float = 0.15) -> SmartSamplerConfig:
-    """Preset for NBA player projection data (DARKO)."""
-    return SmartSamplerConfig(
-        sample_frac=sample_frac,
-        group_col='nba_id',
-        time_col='date',
-        anchor_fn=combine_anchors(
-            first_per_group,
-            periodic_anchors('month'),
-            quantile_anchors('poss_pct', 0.95),
-            event_window_anchors('future_tm_change_fl', window=3),
-        ),
-        min_per_group=3,
-    )
 
 
 def panel_config(
