@@ -24,7 +24,7 @@ def test_mrmr_base_without_scores():
         K=100, relevance_func=relevance_func, redundancy_func=redundancy_func,
         relevance_args={}, redundancy_args={},
         denominator_func=np.mean, only_same_domain=False,
-        return_scores=False, show_progress=True)
+        return_scores=False, verbose=True)
 
     assert selected_features == ['first', 'third', 'second']
 
@@ -33,7 +33,7 @@ def test_mrmr_base_with_scores():
         K=100, relevance_func=relevance_func, redundancy_func=redundancy_func,
         relevance_args={}, redundancy_args={},
         denominator_func=np.mean, only_same_domain=False,
-        return_scores=True, show_progress=True)
+        return_scores=True, verbose=True)
 
     assert selected_features == ['first', 'third', 'second']
     assert isinstance(relevance_out, pd.Series)
@@ -59,7 +59,7 @@ def test_jmi_base_only_same_domain_relevance_fallback():
         method="jmi",
         only_same_domain=True,
         return_scores=False,
-        show_progress=False,
+        verbose=False,
     )
 
     assert selected_features[:2] == ["a_1", "b_1"]

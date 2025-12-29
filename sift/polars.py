@@ -143,7 +143,7 @@ def f_classif(target_column, features, df):
 
 
 def mrmr_classif(df, K, target_column, features=None, denominator='mean', only_same_domain=False,
-                 return_scores=False, show_progress=True):
+                 return_scores=False, verbose=True):
     """MRMR feature selection for a classification task.
 
     Parameters
@@ -175,7 +175,7 @@ def mrmr_classif(df, K, target_column, features=None, denominator='mean', only_s
         If False, only the list of selected features is returned.
         If True, a tuple containing (list of selected features, relevance, redundancy) is returned.
 
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
 
@@ -203,11 +203,11 @@ def mrmr_classif(df, K, target_column, features=None, denominator='mean', only_s
     return mrmr_base(K=K, relevance_func=f_classif, redundancy_func=correlation,
                      relevance_args=relevance_args, redundancy_args=redundancy_args,
                      denominator_func=denominator_func, only_same_domain=only_same_domain,
-                     return_scores=return_scores, show_progress=show_progress)
+                     return_scores=return_scores, verbose=verbose)
 
 
 def mrmr_regression(df, target_column, K, features=None, denominator='mean', only_same_domain=False,
-                    return_scores=False, show_progress=True):
+                    return_scores=False, verbose=True):
     """MRMR feature selection for a regression task.
 
     Parameters
@@ -239,7 +239,7 @@ def mrmr_regression(df, target_column, K, features=None, denominator='mean', onl
         If False, only the list of selected features is returned.
         If True, a tuple containing (list of selected features, relevance, redundancy) is returned.
 
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
 
@@ -267,4 +267,4 @@ def mrmr_regression(df, target_column, K, features=None, denominator='mean', onl
     return mrmr_base(K=K, relevance_func=f_regression, redundancy_func=correlation,
                      relevance_args=relevance_args, redundancy_args=redundancy_args,
                      denominator_func=denominator_func, only_same_domain=only_same_domain,
-                     return_scores=return_scores, show_progress=show_progress)
+                     return_scores=return_scores, verbose=verbose)

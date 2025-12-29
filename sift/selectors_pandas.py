@@ -268,7 +268,7 @@ def mrmr_classif(
         relevance='f', redundancy='c', denominator='mean',
         cat_features=None, cat_encoding='leave_one_out',
         only_same_domain=False, return_scores=False,
-        n_jobs=-1, show_progress=True,
+        n_jobs=-1, verbose=True,
         subsample=50_000, random_state=0,
         warn_subsample=False,
         parallel_prefer="threads",
@@ -328,7 +328,7 @@ def mrmr_classif(
         If True, warn when subsampling is applied.
     parallel_prefer: str (optional, default="threads")
         Joblib backend preference ("threads" or "processes").
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
         
@@ -380,7 +380,7 @@ def mrmr_classif(
         return mrmr_base(K=K, relevance_func=relevance_func, redundancy_func=redundancy_func,
                          relevance_args=relevance_args, redundancy_args=redundancy_args,
                          denominator_func=denominator_func, only_same_domain=only_same_domain,
-                         return_scores=return_scores, show_progress=show_progress)
+                         return_scores=return_scores, verbose=verbose)
     
     elif method in ('jmi', 'jmim'):
         # JMI or JMIM - use binned joint MI for classification
@@ -394,7 +394,7 @@ def mrmr_classif(
         return jmi_base(K=K, relevance_func=relevance_func, joint_mi_func=joint_mi_func,
                         relevance_args=relevance_args, joint_mi_args=joint_mi_args,
                         method=method, only_same_domain=only_same_domain,
-                        return_scores=return_scores, show_progress=show_progress)
+                        return_scores=return_scores, verbose=verbose)
     else:
         raise ValueError(f"Unknown method: {method}. Supported: 'mrmr', 'jmi', 'jmim'.")
 
@@ -405,7 +405,7 @@ def mrmr_regression(
         relevance='f', redundancy='c', denominator='mean',
         cat_features=None, cat_encoding='leave_one_out',
         only_same_domain=False, return_scores=False,
-        n_jobs=-1, show_progress=True,
+        n_jobs=-1, verbose=True,
         mi_method='regression',
         subsample=50_000, random_state=0,
         warn_subsample=False,
@@ -458,7 +458,7 @@ def mrmr_regression(
     n_jobs: int (optional, default=-1)
         Maximum number of workers to use.
         If -1, use as many workers as min(cpu count, number of features).
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
     mi_method: str (optional, default='regression')
@@ -514,7 +514,7 @@ def mrmr_regression(
         return mrmr_base(K=K, relevance_func=relevance_func, redundancy_func=redundancy_func,
                          relevance_args=relevance_args, redundancy_args=redundancy_args,
                          denominator_func=denominator_func, only_same_domain=only_same_domain,
-                         return_scores=return_scores, show_progress=show_progress)
+                         return_scores=return_scores, verbose=verbose)
     
     elif method in ('jmi', 'jmim'):
         # JMI or JMIM - select MI estimation method
@@ -533,7 +533,7 @@ def mrmr_regression(
         return jmi_base(K=K, relevance_func=relevance_func, joint_mi_func=joint_mi_func,
                         relevance_args=relevance_args, joint_mi_args=joint_mi_args,
                         method=method, only_same_domain=only_same_domain,
-                        return_scores=return_scores, show_progress=show_progress)
+                        return_scores=return_scores, verbose=verbose)
     
     elif method in ('cefsplus', 'mrmr_fcd', 'mrmr_fcq'):
         # Fast Gaussian-copula methods
@@ -550,7 +550,7 @@ def mrmr_regression(
             subsample=None,
             # X, y already subsampled above; avoid second subsample inside cefsplus_regression.
             random_state=random_state,
-            show_progress=show_progress,
+            verbose=verbose,
         )
     else:
         raise ValueError(f"Unknown method: {method}. Supported: 'mrmr', 'jmi', 'jmim', 'cefsplus', 'mrmr_fcd', 'mrmr_fcq'.")
