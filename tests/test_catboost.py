@@ -513,7 +513,7 @@ class TestResultMethods:
         result = CatBoostSelectionResult(
             selected_features=['f0', 'f1', 'f2', 'f3', 'f4'],
             best_k=5,
-            scores_by_k={10: 0.50, 5: 0.48, 3: 0.51},
+            scores_by_k={10: 0.52, 5: 0.48, 3: 0.50},
             scores_std_by_k={10: 0.02, 5: 0.02, 3: 0.02},
             feature_importances=pd.Series({'f0': 1.0, 'f1': 0.8, 'f2': 0.5, 'f3': 0.3, 'f4': 0.1}),
             features_by_k={10: ['f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9'],
@@ -524,7 +524,7 @@ class TestResultMethods:
         )
 
         # Best is 0.48 at k=5. With 5% tolerance, threshold is 0.504
-        # k=3 (0.51) is within tolerance
+        # k=3 (0.50) is within tolerance, k=10 (0.52) is not
         parsimonious = result.features_within_tolerance(tolerance=0.05)
         assert len(parsimonious) == 3
         assert parsimonious == ['f0', 'f1', 'f2']

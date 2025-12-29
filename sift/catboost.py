@@ -1337,8 +1337,13 @@ def catboost_select(
             warnings.warn(
                 f"treat_object_as_categorical=False but {len(orphan_obj)} object column(s) "
                 f"are not in text_features or cat_features: {orphan_obj[:5]}. "
-                "CatBoost may fail or treat them as numeric. Consider adding to cat_features."
+                "Auto-treating them as categorical to avoid CatBoost errors. "
+                "To exclude them, drop from X before calling."
             )
+            cat_features_final = list(cat_features_final)
+            for c in orphan_obj:
+                if c not in cat_features_final:
+                    cat_features_final.append(c)
 
     if verbose and cat_features_final:
         print(f"  Categorical features: {len(cat_features_final)}")
