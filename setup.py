@@ -21,7 +21,7 @@ with open("README.md", encoding="utf8") as f:
 setup(
     name='sift',
     version=read_version(),
-    description='minimum-Redundancy-Maximum-Relevance algorithm for feature selection',
+    description='Feature selection toolbox (mRMR, JMI/JMIM, CEFS+, Stability Selection, ...)',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/smazzanti/mrmr',

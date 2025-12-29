@@ -520,7 +520,7 @@ def mrmr_regression(
         # JMI or JMIM - select MI estimation method
         from .fast_mi import regression_joint_mi, binned_joint_mi, ksg_joint_mi
         if mi_method == 'regression':
-            joint_mi_func = functools.partial(regression_joint_mi, n_jobs=n_jobs)
+            joint_mi_func = regression_joint_mi
         elif mi_method == 'binned':
             joint_mi_func = functools.partial(binned_joint_mi, n_jobs=n_jobs)
         elif mi_method == 'ksg':

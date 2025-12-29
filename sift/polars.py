@@ -110,6 +110,10 @@ def f_regression(target_column, features, df):
 
 
 def f_classif(target_column, features, df):
+    if len(features) == 0:
+        out = pd.Series(dtype=float)
+        out.name = target_column
+        return out
     groupby_method = getattr(df, "group_by", None) or df.groupby
     try:
         groupby = groupby_method(target_column, maintain_order=True)

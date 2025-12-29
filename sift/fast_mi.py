@@ -32,6 +32,8 @@ def regression_joint_mi(target_column, features, X, y, n_jobs=-1, block_size=256
     """
     import pandas as pd
 
+    _ = n_jobs
+
     if not hasattr(X, "columns"):
         raise TypeError("regression_joint_mi expects X to be a pandas DataFrame with column names.")
 
@@ -291,7 +293,7 @@ def auto_joint_mi(target_column, features, X, y, method='auto', n_jobs=-1, **kwa
         method = 'regression'
 
     if method == 'regression':
-        return regression_joint_mi(target_column, features, X, y, n_jobs=n_jobs, **kwargs)
+        return regression_joint_mi(target_column, features, X, y, **kwargs)
     if method == 'binned':
         n_bins = kwargs.get('n_bins', 10)
         return binned_joint_mi(target_column, features, X, y, n_bins=n_bins, n_jobs=n_jobs)

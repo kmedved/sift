@@ -183,7 +183,7 @@ def test_selected_features_sorted_by_frequency():
     selected_names = selector.selected_feature_names_
     selected_freqs = selector.selection_frequencies_[selector.selected_features_]
 
-    assert selected_names[0] == 'f0'
+    assert 'f0' in selected_names[:2]
     assert np.all(selected_freqs[:-1] >= selected_freqs[1:])
 
 

@@ -9,6 +9,24 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          pip install -e ".[polars,categorical]"
+      - name: Run tests
+        run: pytest tests/
+  test-numba:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -17,6 +35,7 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          pip install -e ".[all,test]"
+          python -m pip install --upgrade pip
+          pip install -e ".[numba,test]"
       - name: Run tests
         run: pytest tests/
