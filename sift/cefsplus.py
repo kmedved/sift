@@ -4,23 +4,31 @@ CEFS+ and fast mRMR implementations using Gaussian-copula MI approximation.
 Key innovations:
 - Gaussian-copula transform (rank → normal scores) makes MI estimation O(1) per pair
 - Log-det / Schur complement updates for efficient greedy multivariate selection
-- Rank/dominance-count selection matching the CEFS+ paper's spirit
+- Greedy multivariate MI proxy via log-det updates (stable; avoids rank-noise failures)
 - Subsampling support for million-row datasets
 - X caching for efficient multi-target selection (e.g., CV folds)
 
 Methods:
-- cefsplus: CEFS+-style with rank-count selection on log-det quantities
+- cefsplus: CEFS+-style with log-det MI proxy selection
 - mrmr_fcd: mRMR with difference criterion (relevance - redundancy)
 - mrmr_fcq: mRMR with quotient criterion (relevance / redundancy)
 """
 
-from dataclasses import dataclass
 from typing import List, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
-from scipy.special import ndtri
-from scipy.stats import rankdata
+
+from .gcmi import (
+    FeatureCache,
+    _corr_matrix,
+    _corr_with_vector,
+    _gaussian_mi_from_corr,
+    _rank_gauss_1d,
+    _standardize_1d,
+    build_cache,
+    greedy_corr_prune,
+)
 
 try:
     from numba import njit
@@ -33,150 +41,6 @@ except Exception:
             return fn
 
         return _wrap
-
-
-# =============================================================================
-# Transforms and MI utilities
-# =============================================================================
-
-def _standardize_2d(X: np.ndarray) -> np.ndarray:
-    """Z-score standardization for 2D array."""
-    X = np.asarray(X, dtype=np.float64)
-    X = np.where(np.isfinite(X), X, np.nan)
-    mu = np.nanmean(X, axis=0)
-    sd = np.nanstd(X, axis=0)
-    sd = np.where(sd > 0, sd, 1.0)
-    Z = (X - mu) / sd
-    np.nan_to_num(Z, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-    return Z.astype(np.float32, copy=False)
-
-
-def _standardize_1d(y: np.ndarray) -> np.ndarray:
-    """Z-score standardization for 1D array."""
-    y = np.asarray(y, dtype=np.float64).ravel()
-    y = np.where(np.isfinite(y), y, np.nan)
-    y = y - np.nanmean(y)
-    sd = np.nanstd(y)
-    if sd > 0:
-        y = y / sd
-    np.nan_to_num(y, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-    return y.astype(np.float32, copy=False)
-
-
-def _rank_gauss_1d(x: np.ndarray) -> np.ndarray:
-    """
-    Rank-based Gaussian (normal scores) transform.
-
-    Maps data to N(0,1) via: rank → uniform → inverse normal CDF
-    This is the copula transform that makes correlation ≈ copula dependence.
-
-    Uses scipy.stats.rankdata with method='average' for proper tie handling,
-    which is important for zero-inflated or highly discretized data.
-    """
-    x = np.asarray(x, dtype=np.float64).ravel()
-    mask = np.isfinite(x)
-    m = int(mask.sum())
-    if m == 0:
-        return np.zeros_like(x, dtype=np.float32)
-
-    ranks = rankdata(x[mask], method="average")
-    u = ranks / (m + 1.0)
-    z = ndtri(u)
-    z -= z.mean()
-    sd = z.std()
-    if sd > 0:
-        z /= sd
-
-    out = np.zeros_like(x, dtype=np.float64)
-    out[mask] = z
-    return out.astype(np.float32, copy=False)
-
-
-def _rank_gauss_2d(X: np.ndarray) -> np.ndarray:
-    """Apply rank-Gaussian transform to each column."""
-    X = np.asarray(X)
-    n, p = X.shape
-    Z = np.empty((n, p), dtype=np.float32)
-    for j in range(p):
-        Z[:, j] = _rank_gauss_1d(X[:, j])
-    return Z
-
-
-def _gaussian_mi_from_corr(r: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """
-    Mutual information (nats) for Gaussian variables from correlation.
-
-    For bivariate Gaussian: I(X; Y) = -0.5 * log(1 - ρ²)
-    This is exact for Gaussian, approximate for copula-transformed data.
-    """
-    r = np.asarray(r, dtype=np.float64)
-    r2 = np.clip(r * r, 0.0, 1.0 - eps)
-    return (-0.5 * np.log1p(-r2)).astype(np.float64)
-
-
-def _corr_matrix(Z: np.ndarray) -> np.ndarray:
-    """Compute correlation matrix from standardized data."""
-    Z = np.asarray(Z, dtype=np.float32)
-    n = Z.shape[0]
-    R = (Z.T @ Z) / max(n - 1, 1)
-    R = np.clip(R, -0.999999, 0.999999)
-    np.fill_diagonal(R, 1.0)
-    return R.astype(np.float32, copy=False)
-
-
-def _corr_with_vector(Z: np.ndarray, zy: np.ndarray) -> np.ndarray:
-    """Compute correlation of each column of Z with vector zy."""
-    Z = np.asarray(Z, dtype=np.float32)
-    zy = np.asarray(zy, dtype=np.float32).ravel()
-    n = Z.shape[0]
-    r = (Z.T @ zy) / max(n - 1, 1)
-    return np.clip(r, -0.999999, 0.999999).astype(np.float32, copy=False)
-
-
-# =============================================================================
-# Candidate pruning
-# =============================================================================
-
-def greedy_corr_prune(
-    cand: np.ndarray,
-    Rxx: np.ndarray,
-    score: np.ndarray,
-    corr_threshold: float = 0.95,
-) -> np.ndarray:
-    """
-    Greedy correlation-based pruning.
-
-    Sort candidates by score descending, keep each feature and drop all
-    remaining features with |corr| >= threshold.
-
-    Parameters
-    ----------
-    cand : array of candidate indices
-    Rxx : correlation matrix
-    score : relevance scores for ranking
-    corr_threshold : drop features with |corr| >= this
-
-    Returns
-    -------
-    Pruned candidate indices
-    """
-    cand = np.asarray(cand, dtype=np.int64)
-    if cand.size == 0:
-        return cand
-
-    order = cand[np.argsort(score[cand])[::-1]]
-    keep = []
-    active = np.ones(order.shape[0], dtype=bool)
-
-    for i in range(order.shape[0]):
-        if not active[i]:
-            continue
-        fi = order[i]
-        keep.append(fi)
-        c = np.abs(Rxx[fi, order])
-        active &= c < corr_threshold
-
-    return np.asarray(keep, dtype=np.int64)
 
 
 # =============================================================================
@@ -289,12 +153,13 @@ def _cefsplus_logdet_select(
     eps: float = 1e-12,
 ) -> np.ndarray:
     """
-    CEFS+-style greedy selection using log-det updates and rank-count scoring.
+    CEFS+-style greedy selection using log-det updates and MI proxy scoring.
 
-    This implements the paper's "rank technique" using efficient matrix updates:
+    This implements a log-det MI proxy using efficient matrix updates:
     - Lf = log det(R_S∪{f}) measures feature-only copula entropy
     - Lc = log det(R_{y,S,f}) measures feature+target copula entropy
-    - Score by rank(Lf) - rank(Lc), tie-break with relevance
+    - Score by maximizing (Lf - Lc), which is proportional to the Gaussian MI proxy
+      I(y; S∪{f}) ≈ 0.5 * (Lf - Lc) up to an additive constant.
 
     Uses Schur complement for O(s²) updates instead of O(s³) matrix inversions.
 
@@ -361,17 +226,15 @@ def _cefsplus_logdet_select(
         s2 = np.maximum(1.0 - t2, eps)
         Lc = logdet_yS + np.log(s2)
 
-        # Greedy MI proxy (Gaussian): I(y; S∪{f}) ∝ logdet(R_{S∪{f}}) - logdet(R_{y,S,f})
-        # Maximize (Lf - Lc). This naturally balances redundancy (via det(R_{S∪{f}}))
-        # against relevance (via det(R_{y,S,f})) without rank-noise dominating.
+        # Greedy Gaussian MI proxy: maximize (Lf - Lc)
         score = Lf - Lc
-        best_pos = int(np.argmax(score))
-        best = score[best_pos]
-        ties = np.where(np.isclose(score, best, rtol=1e-10, atol=1e-12))[0]
-        if ties.size == 1:
-            best_pos = int(ties[0])
-        else:
-            best_pos = int(ties[np.argmax(tie_break_rel[rem][ties])])
+        best = score.max()
+        ties = np.where(np.isclose(score, best, rtol=1e-12, atol=1e-12))[0]
+        best_pos = (
+            int(ties[0])
+            if ties.size == 1
+            else int(ties[np.argmax(tie_break_rel[rem][ties])])
+        )
 
         j = int(rem[best_pos])
 
@@ -405,116 +268,6 @@ def _cefsplus_logdet_select(
     return np.asarray(selected, dtype=np.int64)
 
 
-# =============================================================================
-# X Cache for efficient multi-target selection
-# =============================================================================
-
-@dataclass
-class FeatureCache:
-    """
-    Cached feature data for efficient multi-target feature selection.
-
-    Build once per dataset/fold, then call select_features() for each target.
-
-    Attributes
-    ----------
-    Z : transformed and standardized features (n_sub, p_valid)
-    Rxx : feature-feature correlation matrix (p_valid, p_valid)
-    valid_cols : original column indices of kept features
-    row_idx : indices of subsampled rows
-    mode : transform mode ('zscore' or 'copula')
-    feature_names : original feature names (if DataFrame input)
-    """
-
-    Z: np.ndarray
-    Rxx: np.ndarray
-    valid_cols: np.ndarray
-    row_idx: np.ndarray
-    mode: str
-    feature_names: Optional[List[str]] = None
-
-
-def build_cache(
-    X: Union[np.ndarray, pd.DataFrame],
-    subsample: Optional[int] = 50_000,
-    mode: Literal["zscore", "copula"] = "copula",
-    random_state: int = 0,
-    min_std: float = 1e-12,
-    impute: Optional[Literal["mean", "median"]] = "mean",
-) -> FeatureCache:
-    """
-    Build feature cache for efficient multi-target selection.
-
-    Parameters
-    ----------
-    X : feature matrix (n_samples, n_features)
-    subsample : max rows to use (None = all). Use 50k for speed on large data.
-    mode : transform mode
-        - 'zscore': simple standardization (fast, assumes linearity)
-        - 'copula': rank-Gaussian transform (robust to monotonic nonlinearity)
-    random_state : random seed for subsampling
-    min_std : drop features with std < this (near-constants)
-    impute : impute missing values on the subsample
-        - 'mean': column mean (default)
-        - 'median': column median
-        - None: leave NaNs (may propagate)
-
-    Returns
-    -------
-    FeatureCache for use with select_features()
-    """
-    feature_names = None
-    if isinstance(X, pd.DataFrame):
-        feature_names = list(X.columns)
-        X = X.values
-
-    X = np.asarray(X)
-    n, _p = X.shape
-    rng = np.random.default_rng(random_state)
-
-    if subsample is not None and n > subsample:
-        row_idx = rng.choice(n, size=subsample, replace=False)
-    else:
-        row_idx = np.arange(n)
-
-    Xs = np.asarray(X[row_idx], dtype=np.float64)
-    Xs = np.where(np.isfinite(Xs), Xs, np.nan)
-
-    if impute is not None:
-        if impute == "mean":
-            col_stat = np.nanmean(Xs, axis=0)
-        elif impute == "median":
-            col_stat = np.nanmedian(Xs, axis=0)
-        else:
-            raise ValueError("impute must be 'mean', 'median', or None")
-        col_stat = np.where(np.isnan(col_stat), 0.0, col_stat)
-        inds = np.where(np.isnan(Xs))
-        Xs[inds] = col_stat[inds[1]]
-
-    sd = np.nanstd(Xs, axis=0)
-    valid = sd > min_std
-    valid_cols = np.where(valid)[0]
-    Xs = Xs[:, valid]
-
-    if mode == "zscore":
-        Z = _standardize_2d(Xs)
-    elif mode == "copula":
-        Z = _rank_gauss_2d(Xs)
-    else:
-        raise ValueError("mode must be 'zscore' or 'copula'")
-
-    Rxx = _corr_matrix(Z)
-
-    return FeatureCache(
-        Z=Z,
-        Rxx=Rxx,
-        valid_cols=valid_cols,
-        row_idx=row_idx,
-        mode=mode,
-        feature_names=feature_names,
-    )
-
-
 def select_features_cached(
     cache: FeatureCache,
     y: Union[np.ndarray, pd.Series],
@@ -535,7 +288,7 @@ def select_features_cached(
     top_m : pre-filter to top_m by relevance before selection (speed vs accuracy)
     corr_prune_threshold : drop features with |corr| >= this after relevance filter
     method : selection algorithm
-        - 'cefsplus': CEFS+-style with rank-count on log-det (handles interactions)
+        - 'cefsplus': CEFS+-style with log-det MI proxy (handles interactions)
         - 'mrmr_fcd': mRMR difference criterion (fast, stable)
         - 'mrmr_fcq': mRMR quotient criterion
     return_names : if True and cache has feature_names, return names instead of indices
@@ -571,13 +324,27 @@ def select_features_cached(
         top_m = min(top_m, p_valid)
         cand = np.argpartition(np.abs(r), -top_m)[-top_m:]
 
-    cand = greedy_corr_prune(
-        cand, cache.Rxx, score=np.abs(r), corr_threshold=corr_prune_threshold
-    )
-    if cand.size == 0:
-        return [] if (return_names and cache.feature_names is not None) else np.array([], dtype=np.int64)
-
-    R_sub = cache.Rxx[np.ix_(cand, cand)]
+    if cache.Rxx is None:
+        # Avoid O(p^2) full matrix: compute correlations only on candidate subset
+        Z_cand = cache.Z[:, cand]
+        R_cand = _corr_matrix(Z_cand)
+        keep_idx = greedy_corr_prune(
+            np.arange(cand.size),
+            R_cand,
+            score=np.abs(r[cand]),
+            corr_threshold=corr_prune_threshold,
+        )
+        if keep_idx.size == 0:
+            return [] if (return_names and cache.feature_names is not None) else np.array([], dtype=np.int64)
+        cand = cand[keep_idx]
+        R_sub = R_cand[np.ix_(keep_idx, keep_idx)]
+    else:
+        cand = greedy_corr_prune(
+            cand, cache.Rxx, score=np.abs(r), corr_threshold=corr_prune_threshold
+        )
+        if cand.size == 0:
+            return [] if (return_names and cache.feature_names is not None) else np.array([], dtype=np.int64)
+        R_sub = cache.Rxx[np.ix_(cand, cand)]
     r_sub = r[cand]
     rel_sub = rel[cand]
 
@@ -632,6 +399,7 @@ def cefsplus_regression(
     verbose: bool = True,
     cache: Optional[FeatureCache] = None,
     impute: Optional[Literal["mean", "median"]] = "mean",
+    compute_Rxx: bool = False,
 ) -> Union[List[str], np.ndarray]:
     """
     CEFS+/mRMR feature selection with Gaussian-copula MI estimation.
@@ -653,7 +421,7 @@ def cefsplus_regression(
     corr_prune_threshold : drop features correlated > this (default: 0.95)
     subsample : max rows to use (default: 50000, None = all)
     method : selection algorithm
-        - 'cefsplus': CEFS+-style with rank-count (default)
+        - 'cefsplus': CEFS+-style with log-det MI proxy (default)
         - 'mrmr_fcd': mRMR difference criterion
         - 'mrmr_fcq': mRMR quotient criterion
     random_state : random seed
@@ -675,6 +443,7 @@ def cefsplus_regression(
             mode=mode,
             random_state=random_state,
             impute=impute,
+            compute_Rxx=compute_Rxx,
         )
 
     return select_features_cached(
