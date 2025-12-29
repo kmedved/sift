@@ -636,7 +636,7 @@ def cefsplus_regression(
     subsample: Optional[int] = 50_000,
     method: Literal["cefsplus", "mrmr_fcd", "mrmr_fcq"] = "cefsplus",
     random_state: int = 0,
-    show_progress: bool = True,
+    verbose: bool = True,
     cache: Optional[FeatureCache] = None,
     impute: Optional[Literal["mean", "median"]] = "mean",
 ) -> Union[List[str], np.ndarray]:
@@ -664,7 +664,7 @@ def cefsplus_regression(
         - 'mrmr_fcd': mRMR difference criterion
         - 'mrmr_fcq': mRMR quotient criterion
     random_state : random seed
-    show_progress : ignored (for API compatibility)
+    verbose : ignored
     cache : optional FeatureCache to reuse precomputed X data
     impute : imputation strategy when building cache (ignored if cache provided)
 

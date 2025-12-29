@@ -26,7 +26,7 @@ def test_mrmr_classif_without_scores():
         denominator="mean",
         only_same_domain=False,
         return_scores=False,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
 
@@ -40,7 +40,7 @@ def test_mrmr_classif_with_scores():
         denominator="mean",
         only_same_domain=False,
         return_scores=True,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
     assert isinstance(relevance, pd.Series)
@@ -56,7 +56,7 @@ def test_mrmr_regression_without_scores():
         denominator="mean",
         only_same_domain=False,
         return_scores=False,
-        show_progress=True)
+        verbose=True)
 
     assert "some_null" in selected_features
     assert "feature_a" in selected_features
@@ -71,7 +71,7 @@ def test_mrmr_regression_with_scores():
         denominator="mean",
         only_same_domain=False,
         return_scores=True,
-        show_progress=True)
+        verbose=True)
 
     assert "some_null" in selected_features
     assert "feature_a" in selected_features
@@ -89,7 +89,7 @@ def test_mrmr_regression_empty_features():
         denominator="mean",
         only_same_domain=False,
         return_scores=False,
-        show_progress=False,
+        verbose=False,
     )
 
     assert selected == []

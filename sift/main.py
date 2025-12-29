@@ -44,7 +44,7 @@ def groupstats2fstat(avg, var, n):
 def mrmr_base(K, relevance_func, redundancy_func,
               relevance_args=None, redundancy_args=None,
               denominator_func=np.mean, only_same_domain=False,
-              return_scores=False, show_progress=True):
+              return_scores=False, verbose=True):
     """General function for mRMR algorithm.
 
     Uses O(P) memory via incremental redundancy accumulation instead of O(P²) matrix.
@@ -87,7 +87,7 @@ def mrmr_base(K, relevance_func, redundancy_func,
         If False, only the list of selected features is returned.
         If True, a tuple containing (list of selected features, relevance, redundancy) is returned.
 
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If False, no progress bar is displayed.
         If True, a TQDM progress bar shows the number of features processed.
 
@@ -139,7 +139,7 @@ def mrmr_base(K, relevance_func, redundancy_func,
     if only_same_domain:
         domains = np.array([f.split('_')[0] for f in features])
 
-    for i in tqdm(range(K), disable=not show_progress):
+    for i in tqdm(range(K), disable=not verbose):
 
         # Compute scores
         if i == 0:
@@ -240,7 +240,7 @@ def mrmr_base(K, relevance_func, redundancy_func,
 def jmi_base(K, relevance_func, joint_mi_func,
              relevance_args=None, joint_mi_args=None,
              method='jmi', only_same_domain=False,
-             return_scores=False, show_progress=True):
+             return_scores=False, verbose=True):
     """General function for JMI and JMIM algorithms.
 
     Uses O(P) memory via incremental score accumulation.
@@ -288,7 +288,7 @@ def jmi_base(K, relevance_func, joint_mi_func,
         The joint_mi_matrix is recomputed for selected features and returned with full feature columns
         (shape: P x P) for backward compatibility.
 
-    show_progress: bool (optional, default=True)
+    verbose: bool (optional, default=True)
         If True, a TQDM progress bar shows the number of features processed.
 
     Returns
@@ -327,7 +327,7 @@ def jmi_base(K, relevance_func, joint_mi_func,
     if only_same_domain:
         domains = np.array([f.split('_')[0] for f in features])
 
-    for i in tqdm(range(K), disable=not show_progress):
+    for i in tqdm(range(K), disable=not verbose):
 
         if i == 0:
             # First feature: select by relevance alone

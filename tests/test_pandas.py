@@ -30,7 +30,7 @@ def test_mrmr_classif_without_scores():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1000,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
 
@@ -48,7 +48,7 @@ def test_mrmr_classif_ks():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1000,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
 
@@ -66,7 +66,7 @@ def test_mrmr_classif_rf():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1000,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
 
@@ -84,7 +84,7 @@ def test_mrmr_classif_with_scores():
         only_same_domain=False,
         return_scores=True,
         n_jobs=1000,
-        show_progress=True
+        verbose=True
     )
 
     assert set(selected_features) == set(["some_null", "feature_a", "feature_b"])
@@ -105,7 +105,7 @@ def test_mrmr_regression_without_scores():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1000,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a"])
 
@@ -123,7 +123,7 @@ def test_mrmr_regression_with_scores():
         only_same_domain=False,
         return_scores=True,
         n_jobs=1000,
-        show_progress=True)
+        verbose=True)
 
     assert set(selected_features) == set(["some_null", "feature_a"])
     assert isinstance(relevance, pd.Series)
@@ -148,7 +148,7 @@ def test_mrmr_regression_with_nan_in_target():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1,
-        show_progress=False
+        verbose=False
     )
 
     assert isinstance(selected_features, list)
@@ -173,7 +173,7 @@ def test_mrmr_classif_with_nan_in_target():
         only_same_domain=False,
         return_scores=False,
         n_jobs=1,
-        show_progress=False
+        verbose=False
     )
 
     assert isinstance(selected_features, list)

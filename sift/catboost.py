@@ -338,25 +338,25 @@ def _prefilter_features(
             from .selectors_pandas import mrmr_classif
             selected = mrmr_classif(
                 X_train[numeric_cols], y_train, K=k_numeric,
-                show_progress=False, subsample=30_000, random_state=random_state
+                verbose=False, subsample=30_000, random_state=random_state
             )
         else:
             selected = cefsplus_regression(
                 X_train[numeric_cols], y_train, K=k_numeric,
-                show_progress=False, subsample=30_000, random_state=random_state
+                verbose=False, subsample=30_000, random_state=random_state
             )
     elif method == 'mrmr':
         if task == 'classification':
             from .selectors_pandas import mrmr_classif
             selected = mrmr_classif(
                 X_train[numeric_cols], y_train, K=k_numeric,
-                show_progress=False, subsample=30_000, random_state=random_state
+                verbose=False, subsample=30_000, random_state=random_state
             )
         else:
             from .selectors_pandas import mrmr_regression
             selected = mrmr_regression(
                 X_train[numeric_cols], y_train, K=k_numeric,
-                show_progress=False, subsample=30_000, random_state=random_state
+                verbose=False, subsample=30_000, random_state=random_state
             )
     else:
         raise ValueError(f"Unknown prefilter method: {method}")
