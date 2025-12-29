@@ -26,7 +26,8 @@ def test_jmi_methods_return_series():
     features = [f'f{i}' for i in range(1, p)]
 
     for func in [regression_joint_mi, binned_joint_mi, ksg_joint_mi]:
-        result = func('f0', features, X, y, n_jobs=1)
+        kwargs = {} if func is regression_joint_mi else {"n_jobs": 1}
+        result = func('f0', features, X, y, **kwargs)
         assert isinstance(result, pd.Series)
         assert len(result) == len(features)
         assert set(result.index) == set(features)

@@ -958,17 +958,23 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if isinstance(y, pd.Series):
             y = y.values
 
+        y_raw = np.asarray(y)
+
         X = np.asarray(X, dtype=np.float32)
         X = np.where(np.isfinite(X), X, np.nan)
 
         # Handle labels properly for classification
         if self.task == 'classification':
+            if pd.isna(y_raw).any():
+                raise ValueError("Missing labels are not allowed for classification.")
             # Use LabelEncoder to handle string/categorical labels
             self._label_encoder = LabelEncoder()
-            y = self._label_encoder.fit_transform(y).astype(np.int32)
+            y = self._label_encoder.fit_transform(y_raw).astype(np.int32)
             self.classes_ = self._label_encoder.classes_
         else:
-            y = np.asarray(y, dtype=np.float32)
+            if not np.isfinite(y_raw).all():
+                raise ValueError("Target values must be finite for regression.")
+            y = y_raw.astype(np.float32)
 
         if sample_weight is None:
             sample_weight = np.ones(len(y), dtype=np.float32)
@@ -1022,6 +1028,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             y_raw = np.asarray(y)
 
         if self.task == 'classification':
+            if pd.isna(y_raw).any():
+                raise ValueError("Missing labels are not allowed for classification.")
             # Encode labels BEFORE sampling so string labels work
             self._label_encoder = LabelEncoder()
             y_enc = self._label_encoder.fit_transform(y_raw).astype(np.int32)
@@ -1029,6 +1037,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             y_col = '_y_enc'
             df[y_col] = y_enc
         else:
+            if not np.isfinite(y_raw).all():
+                raise ValueError("Target values must be finite for regression.")
             y_col = '_y'
             df[y_col] = y_raw.astype(np.float32)
 
@@ -1471,7 +1481,8 @@ def stability_regression(
     random_state: Optional[int] = None,
     n_jobs: int = -1,
     verbose: bool = True,
-) -> List[str]:
+    return_indices: Optional[bool] = None,
+) -> Union[List[str], List[int]]:
     """
     Stability selection for regression.
 
@@ -1506,11 +1517,14 @@ def stability_regression(
         Number of parallel jobs.
     verbose : bool, default=True
         Print progress information.
+    return_indices : bool, optional
+        If True, return feature indices. If False, return feature names.
+        If None, returns names for DataFrame inputs and indices for ndarray inputs.
 
     Returns
     -------
-    selected_features : list of str
-        Names of selected features.
+    selected_features : list of str or list of int
+        Names or indices of selected features, depending on return_indices.
     """
     selector = StabilitySelector(
         task='regression',
@@ -1527,6 +1541,10 @@ def stability_regression(
         verbose=verbose,
     )
     selector.fit(X, y)
+    if return_indices is None:
+        return_indices = not isinstance(X, pd.DataFrame)
+    if return_indices:
+        return selector.selected_features_.tolist()
     return selector.selected_feature_names_
 
 
@@ -1543,7 +1561,8 @@ def stability_classif(
     random_state: Optional[int] = None,
     n_jobs: int = -1,
     verbose: bool = True,
-) -> List[str]:
+    return_indices: Optional[bool] = None,
+) -> Union[List[str], List[int]]:
     """
     Stability selection for classification.
 
@@ -1576,11 +1595,14 @@ def stability_classif(
         Number of parallel jobs.
     verbose : bool, default=True
         Print progress information.
+    return_indices : bool, optional
+        If True, return feature indices. If False, return feature names.
+        If None, returns names for DataFrame inputs and indices for ndarray inputs.
 
     Returns
     -------
-    selected_features : list of str
-        Names of selected features.
+    selected_features : list of str or list of int
+        Names or indices of selected features, depending on return_indices.
     """
     selector = StabilitySelector(
         task='classification',
@@ -1596,6 +1618,10 @@ def stability_classif(
         verbose=verbose,
     )
     selector.fit(X, y)
+    if return_indices is None:
+        return_indices = not isinstance(X, pd.DataFrame)
+    if return_indices:
+        return selector.selected_features_.tolist()
     return selector.selected_feature_names_
 
 
