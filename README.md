@@ -12,6 +12,7 @@ It includes **mRMR**, **JMI/JMIM**, **CEFS+** (and related Gaussian-copula varia
 - **mRMR / JMI / JMIM** (classification & regression; pandas, with a polars mRMR path)
 - **CEFS+** (plus `mrmr_fcd` / `mrmr_fcq` variants)
 - **Stability Selection** (regression & classification)
+- **CatBoost-based selection** (SHAP/permutation/forward, optional dependency)
 
 ## Installation
 
@@ -30,6 +31,7 @@ python -m pip install -e ".[all]"
 python -m pip install -e ".[polars]"
 python -m pip install -e ".[categorical]"
 python -m pip install -e ".[numba]"
+python -m pip install -e ".[catboost]"
 python -m pip install -e ".[test]"
 ```
 
@@ -92,6 +94,168 @@ selected_stable = stability_regression(
     random_state=42,
     verbose=False,
 )
+```
+
+### CatBoost feature selection (optional)
+
+```python
+import pandas as pd
+from sklearn.datasets import make_regression
+import sift
+
+X, y = make_regression(n_samples=300, n_features=25, n_informative=6, noise=0.2)
+X = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+selected = sift.catboost_regression(X, y, K=10, algorithm="forward", prefilter_k=200)
+```
+
+#### Usage Examples
+
+**Time Series Data (Your NBA Use Case)**
+
+```python
+from sklearn.model_selection import TimeSeriesSplit
+import sift
+
+# Time series split - respects temporal ordering
+result = sift.catboost_select(
+    X, y, K=20,
+    cv=TimeSeriesSplit(n_splits=5),
+    algorithm='forward',  # Fast forward selection
+)
+```
+
+**Grouped Data (NBA Players Across Seasons)**
+
+```python
+from sklearn.model_selection import GroupKFold
+import sift
+
+# Group-aware split - no player appears in both train and val
+result = sift.catboost_select(
+    X, y, K=20,
+    cv=GroupKFold(n_splits=5),
+    group_col='player_id',
+)
+```
+
+**Group-Aware Bootstrap Stability**
+
+```python
+import sift
+
+# Bootstrap samples GROUPS, not rows - prevents leakage
+result = sift.catboost_select(
+    X, y, K=20,
+    group_col='player_id',
+    use_stability=True,
+    n_bootstrap=20,
+    stability_threshold=0.6,
+)
+print(result.stability_scores)  # Selection frequencies
+```
+
+**Fast Forward Selection**
+
+```python
+import sift
+
+# O(K) model fits - much faster than RFE
+selected = sift.catboost_regression(
+    X, y, K=20,
+    algorithm='forward',
+    prefilter_k=200,
+)
+```
+
+**True Greedy Forward Selection**
+
+```python
+import sift
+
+# O(K * n_features) fits - most principled but slowest
+selected = sift.catboost_regression(
+    X, y, K=10,  # Use for small K
+    algorithm='forward_greedy',
+    prefilter_k=50,  # Prefilter first to make feasible
+)
+```
+
+**Full Control with K Search**
+
+```python
+import sift
+
+result = sift.catboost_select(
+    X, y,
+    task='regression',
+    K=None,                    # Search for optimal K
+    min_features=5,
+    n_splits=5,
+    eval_metric='RMSE',
+    prefilter_k=200,
+    verbose=True,
+)
+
+print(result.selected_features)
+print(result.scores_by_k)
+print(result.feature_importances.head(10))
+
+# Get minimal feature set within 1% of best score
+parsimonious = result.features_within_tolerance(tolerance=0.01)
+```
+
+**Algorithm Comparison**
+
+| Algorithm | Speed | Accuracy | Use When | Complexity |
+| --- | --- | --- | --- | --- |
+| forward | ⚡⚡⚡⚡ | ★★ | Fast exploration, time series | O(K) fits |
+| prediction | ⚡⚡⚡ | ★ | Quick RFE, large datasets | O(splits×steps) |
+| permutation | ⚡⚡ | ★★ | Production RFE | O(splits×steps) |
+| shap | ⚡ | ★★★ | Final feature set, interpretability | O(splits×steps) |
+| forward_greedy | 🐢 | ★★★ | Small K, final refinement | O(K×n_features) |
+
+**Key Features**
+
+- Custom CV splitter: pass any sklearn splitter via `cv=` parameter.
+- Forward selection: fast importance-based selection (O(K) fits).
+- Group-aware bootstrap: stability selection samples groups when `group_col` provided.
+- One-shot RFE: runs `select_features` once per split at `min_k`.
+- Prefilter inside CV: avoids data leakage.
+- Always explicit metrics: `eval_metric` and `loss_function` always set.
+- Feature aggregation: combines across splits by frequency + mean-rank.
+- Final model on full data: importance computed from model trained on all data.
+- Multi-class SHAP: properly handles multi-dimensional SHAP output.
+
+**Custom Splitter Examples**
+
+```python
+# Time series (no shuffle, temporal order)
+from sklearn.model_selection import TimeSeriesSplit
+import numpy as np
+cv = TimeSeriesSplit(n_splits=5)
+
+# Group K-fold (each group in exactly one fold)
+from sklearn.model_selection import GroupKFold
+cv = GroupKFold(n_splits=5)
+
+# Leave-one-group-out
+from sklearn.model_selection import LeaveOneGroupOut
+cv = LeaveOneGroupOut()
+
+# Blocked time series (custom)
+class BlockedTimeSeriesSplit:
+    def __init__(self, n_splits=5, gap=0):
+        self.n_splits = n_splits
+        self.gap = gap
+
+    def split(self, X, y=None, groups=None):
+        n = len(X)
+        fold_size = n // (self.n_splits + 1)
+        for i in range(self.n_splits):
+            train_end = fold_size * (i + 1)
+            val_start = train_end + self.gap
+            val_end = val_start + fold_size
+            yield np.arange(train_end), np.arange(val_start, min(val_end, n))
 ```
 
 ### Smart sampling (for stability selection)
@@ -324,4 +488,3 @@ tune according to your downstream model’s tolerance for false positives.
 python -m pip install -e ".[test]"
 pytest
 ```
-

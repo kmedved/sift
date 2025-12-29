@@ -31,6 +31,10 @@ _LAZY_ATTRS = {
     "selectors_pandas": ("sift.selectors_pandas", None),
     "fast_mi": ("sift.fast_mi", None),
     "polars": ("sift.polars", None),
+    "catboost_select": ("sift.catboost", "catboost_select"),
+    "catboost_regression": ("sift.catboost", "catboost_regression"),
+    "catboost_classif": ("sift.catboost", "catboost_classif"),
+    "CatBoostSelectionResult": ("sift.catboost", "CatBoostSelectionResult"),
 }
 
 __all__ = [name for name in _LAZY_ATTRS.keys() if name != "polars"] + ["__version__"]

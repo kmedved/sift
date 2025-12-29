@@ -41,12 +41,14 @@ setup(
         'categorical': ['category_encoders'],
         'polars': ['polars>=0.12.5', 'pyarrow'],
         'numba': ['numba'],
+        'catboost': ['catboost'],
         'test': ['pytest'],
         'all': [
             'category_encoders',
             'polars>=0.12.5',
             'pyarrow',
             'numba',
+            'catboost',
         ],
     },
     zip_safe=False
