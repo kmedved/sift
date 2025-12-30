@@ -19,6 +19,8 @@ _LAZY_ATTRS = {
     "build_cache": ("sift.gcmi", "build_cache"),
     "select_features_cached": ("sift.cefsplus", "select_features_cached"),
     "FeatureCache": ("sift.gcmi", "FeatureCache"),
+    "jmi_fast": ("sift.gcmi_selectors", "jmi_fast"),
+    "jmim_fast": ("sift.gcmi_selectors", "jmim_fast"),
     "StabilitySelector": ("sift.stability_selection", "StabilitySelector"),
     "stability_select": ("sift.stability_selection", "stability_select"),
     "stability_regression": ("sift.stability_selection", "stability_regression"),
