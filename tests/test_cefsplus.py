@@ -54,7 +54,7 @@ def test_build_cache_inf_handling():
 
 def test_ksg_sanity():
     """KSG should report higher MI for dependent variables."""
-    from sift.fast_mi import _ksg_mi_joint
+    from sift.mi.estimators import _ksg_mi_joint
     np.random.seed(42)
     x1 = np.random.randn(1000)
     x2 = np.random.randn(1000)
@@ -68,7 +68,7 @@ def test_ksg_sanity():
 
 def test_binned_mi_increases_with_dependence():
     """Binned MI should increase when y depends on x."""
-    from sift.fast_mi import _binned_mi_single
+    from sift.mi.estimators import _binned_mi_single
     np.random.seed(42)
     x1 = np.random.randn(2000)
     x2 = np.random.randn(2000)

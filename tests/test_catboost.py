@@ -6,7 +6,7 @@ import pandas as pd
 
 catboost = pytest.importorskip("catboost")
 
-from sift.catboost import (
+from sift.selectors.catboost import (
     catboost_select,
     catboost_regression,
     catboost_classif,
@@ -14,11 +14,11 @@ from sift.catboost import (
     _resolve_higher_is_better,
     _resolve_metric_and_direction,
     _resolve_loss_function,
-    _best_score_from_dict,
     _generate_feature_counts,
     _get_feature_types,
     _aggregate_feature_lists,
 )
+from sift.core.metrics import best_score_from_dict as _best_score_from_dict
 
 
 class TestScoreDirection:

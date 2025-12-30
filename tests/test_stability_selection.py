@@ -75,7 +75,7 @@ def test_stability_classif_wrapper():
 
 def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
     """Test that group/time columns are only excluded when use_smart_sampler=True."""
-    from sift.stability_selection import SmartSamplerConfig
+    from sift.sampling.smart import SmartSamplerConfig
 
     np.random.seed(42)
     n, p = 100, 10
@@ -102,7 +102,7 @@ def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
 
 def test_first_and_last_per_group_respects_time_order():
     """Test that first_and_last_per_group uses time_col for ordering."""
-    from sift.stability_selection import first_and_last_per_group
+    from sift.sampling.anchors import first_and_last_per_group
 
     # Create data where row order != time order
     df = pd.DataFrame({
@@ -121,7 +121,7 @@ def test_first_and_last_per_group_respects_time_order():
 
 def test_periodic_anchors_respects_time_order():
     """Test that periodic_anchors uses time_col for ordering within periods."""
-    from sift.stability_selection import periodic_anchors
+    from sift.sampling.anchors import periodic_anchors
 
     df = pd.DataFrame({
         'group': ['A', 'A', 'A', 'A'],
@@ -141,7 +141,8 @@ def test_periodic_anchors_respects_time_order():
 
 def test_anchor_max_share_zero_excludes_all_anchors():
     """Test that anchor_max_share=0 excludes all anchors."""
-    from sift.stability_selection import smart_sample, SmartSamplerConfig, first_per_group
+    from sift.sampling.smart import SmartSamplerConfig, smart_sample
+    from sift.sampling.anchors import first_per_group
 
     np.random.seed(42)
     n = 100
