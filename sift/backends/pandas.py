@@ -4,7 +4,7 @@ from multiprocessing import cpu_count
 import numpy as np
 import pandas as pd
 
-from sift._optional import ce, HAS_CATEGORY_ENCODERS
+from sift._optional import HAS_CATEGORY_ENCODERS
 
 from sklearn.feature_selection import f_classif as sklearn_f_classif
 from sklearn.feature_selection import f_regression as sklearn_f_regression
@@ -224,6 +224,7 @@ def encode_df(X, y, cat_features, cat_encoding):
             "Install it with: pip install category_encoders\n"
             "Or set cat_features=None to disable categorical encoding."
         )
+    import category_encoders as ce
     ENCODERS = {
         'leave_one_out': ce.LeaveOneOutEncoder(cols=cat_features, handle_missing='return_nan'),
         'james_stein': ce.JamesSteinEncoder(cols=cat_features, handle_missing='return_nan'),

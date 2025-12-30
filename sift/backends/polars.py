@@ -1,11 +1,13 @@
 import numpy as np
 import pandas as pd
 
-from sift._optional import polars as pl, HAS_POLARS
+from sift._optional import HAS_POLARS
 from sift.core.algorithms import groupstats2fstat, mrmr_base
 
 if not HAS_POLARS:
     raise ImportError("polars required: pip install polars")
+
+import polars as pl
 
 
 def get_numeric_features(df, target_column):

@@ -35,7 +35,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from sift._optional import HAS_CATBOOST, catboost
+from sift._optional import HAS_CATBOOST
 from sift.core.metrics import infer_higher_is_better, best_score_from_dict
 
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
@@ -46,11 +46,8 @@ from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedS
 # =============================================================================
 
 if HAS_CATBOOST:
-    CatBoostRegressor = catboost.CatBoostRegressor
-    CatBoostClassifier = catboost.CatBoostClassifier
-    Pool = catboost.Pool
-    EFeaturesSelectionAlgorithm = catboost.EFeaturesSelectionAlgorithm
-    EShapCalcType = catboost.EShapCalcType
+    from catboost import CatBoostRegressor, CatBoostClassifier, Pool  # type: ignore[import-not-found]
+    from catboost import EFeaturesSelectionAlgorithm, EShapCalcType  # type: ignore[import-not-found]
 else:
     CatBoostRegressor = None
     CatBoostClassifier = None
