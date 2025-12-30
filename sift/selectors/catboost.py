@@ -35,12 +35,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
-try:
-    from catboost import CatBoostRegressor, CatBoostClassifier, Pool  # type: ignore[import-not-found]
-    from catboost import EFeaturesSelectionAlgorithm, EShapCalcType  # type: ignore[import-not-found]
-    HAS_CATBOOST = True
-except ImportError:
-    HAS_CATBOOST = False
+from sift._optional import HAS_CATBOOST, catboost
+from sift.core.metrics import infer_higher_is_better, best_score_from_dict
 
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
@@ -49,32 +45,18 @@ from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedS
 # Score direction handling
 # =============================================================================
 
-HIGHER_IS_BETTER_METRICS = frozenset({
-    'AUC', 'ACCURACY', 'R2', 'NDCG', 'PFOUND', 'MAP', 'PRAUC',
-    'RECALLAT', 'PRECISIONAT', 'F1', 'TOTALF1', 'MCC',
-    'BALANCEDACCURACY', 'KAPPA', 'WKAPPA', 'AVERAGEGAIN',
-})
-
-LOWER_IS_BETTER_METRICS = frozenset({
-    'RMSE', 'MAE', 'MAPE', 'SMAPE', 'MEDIANABSOLUTEERROR',
-    'LOGLOSS', 'CROSSENTROPY', 'MULTICLASS', 'MULTICLASSONEVSALL',
-    'QUANTILE', 'EXPECTILE', 'POISSON', 'TWEEDIE', 'HUBER',
-    'LOGLINQUANTILE', 'MSLE', 'QUERYRMSE', 'QUERYSOFTMAX',
-})
-
-
-def _infer_higher_is_better(metric: Optional[str]) -> bool:
-    """Infer score direction from metric name."""
-    if metric is None:
-        return False  # Default: lower is better (RMSE-like)
-    metric_upper = metric.upper()
-    for m in HIGHER_IS_BETTER_METRICS:
-        if m in metric_upper:
-            return True
-    for m in LOWER_IS_BETTER_METRICS:
-        if m in metric_upper:
-            return False
-    return False
+if HAS_CATBOOST:
+    CatBoostRegressor = catboost.CatBoostRegressor
+    CatBoostClassifier = catboost.CatBoostClassifier
+    Pool = catboost.Pool
+    EFeaturesSelectionAlgorithm = catboost.EFeaturesSelectionAlgorithm
+    EShapCalcType = catboost.EShapCalcType
+else:
+    CatBoostRegressor = None
+    CatBoostClassifier = None
+    Pool = None
+    EFeaturesSelectionAlgorithm = None
+    EShapCalcType = None
 
 
 def _resolve_metric_and_direction(
@@ -99,7 +81,7 @@ def _resolve_metric_and_direction(
             eval_metric = 'MultiClass' if n_classes > 2 else 'Logloss'
 
     if higher_is_better is None:
-        higher_is_better = _infer_higher_is_better(eval_metric)
+        higher_is_better = infer_higher_is_better(eval_metric)
 
     return eval_metric, higher_is_better
 
@@ -128,26 +110,8 @@ def _resolve_higher_is_better(
     if metric is None:
         metric = 'RMSE' if task == 'regression' else 'Logloss'
     if higher_is_better is None:
-        higher_is_better = _infer_higher_is_better(metric)
+        higher_is_better = infer_higher_is_better(metric)
     return metric, higher_is_better
-
-
-def _best_score_from_dict(
-    scores: Dict[int, float],
-    higher_is_better: bool,
-) -> Tuple[int, float]:
-    """Return (best_k, best_score) from scores dict, filtering invalid values."""
-    if not scores:
-        return 0, float('nan')
-    # Filter out nan/inf
-    valid = {k: v for k, v in scores.items() if np.isfinite(v)}
-    if not valid:
-        return 0, float('nan')
-    if higher_is_better:
-        best_k = max(valid, key=valid.get)
-    else:
-        best_k = min(valid, key=valid.get)
-    return best_k, valid[best_k]
 
 
 # =============================================================================
@@ -333,9 +297,9 @@ def _prefilter_features(
         print(f"  Pre-filter: {len(numeric_cols)} numeric → {k_numeric} using {method}")
 
     if method == 'cefsplus':
-        from .cefsplus import cefsplus_regression
+        from sift.mi.fast_selectors import cefsplus_regression
         if task == 'classification':
-            from .selectors_pandas import mrmr_classif
+            from sift.selectors.mrmr import mrmr_classif
             selected = mrmr_classif(
                 X_train[numeric_cols], y_train, K=k_numeric,
                 verbose=False, subsample=30_000, random_state=random_state
@@ -347,13 +311,13 @@ def _prefilter_features(
             )
     elif method == 'mrmr':
         if task == 'classification':
-            from .selectors_pandas import mrmr_classif
+            from sift.selectors.mrmr import mrmr_classif
             selected = mrmr_classif(
                 X_train[numeric_cols], y_train, K=k_numeric,
                 verbose=False, subsample=30_000, random_state=random_state
             )
         else:
-            from .selectors_pandas import mrmr_regression
+            from sift.selectors.mrmr import mrmr_regression
             selected = mrmr_regression(
                 X_train[numeric_cols], y_train, K=k_numeric,
                 verbose=False, subsample=30_000, random_state=random_state
@@ -1537,7 +1501,7 @@ def catboost_select(
 
         if verbose:
             if scores:
-                best_k_fold, best_score_fold = _best_score_from_dict(scores, resolved_hib)
+                best_k_fold, best_score_fold = best_score_from_dict(scores, resolved_hib)
                 print(f"best K={best_k_fold}, score={best_score_fold:.4f}")
             else:
                 print("no valid scores")

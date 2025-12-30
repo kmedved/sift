@@ -1,9 +1,7 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
-# Floor for numerical stability in correlation-based redundancy
-# Using 1e-6 instead of 0.001 to avoid inflating scores
 FLOOR = 1e-6
 
 

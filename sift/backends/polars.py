@@ -1,7 +1,11 @@
 import numpy as np
 import pandas as pd
-import polars as pl
-from .main import groupstats2fstat, mrmr_base
+
+from sift._optional import polars as pl, HAS_POLARS
+from sift.core.algorithms import groupstats2fstat, mrmr_base
+
+if not HAS_POLARS:
+    raise ImportError("polars required: pip install polars")
 
 
 def get_numeric_features(df, target_column):
@@ -119,17 +123,17 @@ def f_classif(target_column, features, df):
         groupby = groupby_method(target_column, maintain_order=True)
     except TypeError:
         groupby = groupby_method(target_column)
-    
+
     avg = groupby \
         .agg([pl.col(feature).mean().alias(feature) for feature in features]) \
         .to_pandas() \
         .set_index(target_column)
-    
+
     n = groupby \
         .agg([(pl.col(feature).is_not_null().sum()).alias(feature) for feature in features]) \
         .to_pandas() \
         .set_index(target_column)
-    
+
     var = groupby \
         .agg([pl.col(feature).var().alias(feature) for feature in features]) \
         .to_pandas() \

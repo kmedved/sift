@@ -1,10 +1,3 @@
-"""
-Gaussian-copula MI utilities, transforms, and feature cache helpers.
-
-This module is the shared "engine" for copula-Gaussian correlation + MI
-approximations used by CEFS+/mRMR variants and any future cache-based selectors.
-"""
-
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Union
 

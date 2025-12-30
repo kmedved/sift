@@ -1,7 +1,7 @@
 import pathlib
 import re
 
-from setuptools import setup
+from setuptools import setup, find_packages
 
 
 def read_version():
@@ -28,7 +28,7 @@ setup(
     author='Samuele Mazzanti',
     author_email='mazzanti.sam@gmail.com',
     license='MIT',
-    packages=['sift'],
+    packages=find_packages(exclude=("tests*", "docs*", "examples*")),
     install_requires=[
         'tqdm',
         'joblib',
