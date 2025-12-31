@@ -213,8 +213,8 @@ def select_cached(
     keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)
     cand = cand[keep]
     R_cand = R_cand[np.ix_(keep, keep)]
-    r_cand = r[cand]
-    rel_cand = rel[cand]
+    r_cand = r[cand].astype(np.float64)
+    rel_cand = rel[cand].astype(np.float64)
 
     k_actual = min(k, len(cand))
 
