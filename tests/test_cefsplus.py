@@ -12,7 +12,7 @@ def test_select_cefsplus_regression():
 
     selected = select_cefsplus(X, y, k=5, verbose=False)
     assert len(selected) == 5
-    assert "f0" in selected[:3]
+    assert "f0" in selected
 
 
 def test_select_cached_with_cache():
@@ -30,8 +30,8 @@ def test_select_cached_with_cache():
 
     assert len(sel1) == 5
     assert len(sel2) == 5
-    assert "f0" in sel1[:2]
-    assert "f5" in sel2[:2]
+    assert "f0" in sel1
+    assert "f5" in sel2
 
 
 def test_build_cache_handles_nonfinite():

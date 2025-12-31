@@ -41,14 +41,18 @@ def test_cefsplus_returns_k(regression_data):
 
 def test_jmi_fast_deterministic(regression_data):
     X, y = regression_data
-    r1 = select_jmi(X, y, k=5, task="regression", estimator="gaussian", random_state=0)
-    r2 = select_jmi(X, y, k=5, task="regression", estimator="gaussian", random_state=0)
+    r1 = select_jmi(
+        X, y, k=5, task="regression", estimator="gaussian", random_state=0, verbose=False
+    )
+    r2 = select_jmi(
+        X, y, k=5, task="regression", estimator="gaussian", random_state=0, verbose=False
+    )
     assert r1 == r2
 
 
 def test_jmim_returns_k(regression_data):
     X, y = regression_data
-    result = select_jmim(X, y, k=5, task="regression")
+    result = select_jmim(X, y, k=5, task="regression", verbose=False)
     assert len(result) == 5
 
 

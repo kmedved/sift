@@ -894,7 +894,7 @@ def stability_select(
 def stability_regression(
     X: Union[np.ndarray, pd.DataFrame],
     y: Union[np.ndarray, pd.Series],
-    K: int,
+    k: int,
     threshold: float = 0.6,
     n_bootstrap: int = 50,
     alpha: Optional[float] = None,
@@ -919,7 +919,7 @@ def stability_regression(
         Feature matrix.
     y : array-like of shape (n_samples,)
         Continuous target variable.
-    K : int
+    k : int
         Maximum number of features to select.
     threshold : float, default=0.6
         Minimum selection frequency to keep a feature.
@@ -957,7 +957,7 @@ def stability_regression(
         alpha=alpha,
         l1_ratio=l1_ratio,
         sample_frac=sample_frac,
-        max_features=K,
+        max_features=k,
         use_smart_sampler=use_smart_sampler,
         sampler_config=sampler_config,
         random_state=random_state,
@@ -975,7 +975,7 @@ def stability_regression(
 def stability_classif(
     X: Union[np.ndarray, pd.DataFrame],
     y: Union[np.ndarray, pd.Series],
-    K: int,
+    k: int,
     threshold: float = 0.6,
     n_bootstrap: int = 50,
     alpha: Optional[float] = None,
@@ -999,7 +999,7 @@ def stability_classif(
         Feature matrix.
     y : array-like of shape (n_samples,)
         Categorical target variable.
-    K : int
+    k : int
         Maximum number of features to select.
     threshold : float, default=0.6
         Minimum selection frequency to keep a feature.
@@ -1034,7 +1034,7 @@ def stability_classif(
         n_bootstrap=n_bootstrap,
         alpha=alpha,
         sample_frac=sample_frac,
-        max_features=K,
+        max_features=k,
         use_smart_sampler=use_smart_sampler,
         sampler_config=sampler_config,
         random_state=random_state,

@@ -535,7 +535,7 @@ class TestResultMethods:
             best_k=5,
             scores_by_k={5: 0.48, 10: 0.50},
             scores_std_by_k={5: 0.02, 10: 0.03},
-            feature_importances=pd.Series(),
+            feature_importances=pd.Series(dtype=float),
             metric='RMSE',
             higher_is_better=False,
         )

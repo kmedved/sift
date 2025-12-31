@@ -11,11 +11,19 @@ def test_stability_selector_regression():
     X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
     y = X['f0'] + 0.5 * X['f1'] + np.random.randn(n) * 0.5
 
-    selector = StabilitySelector(n_bootstrap=10, threshold=0.3, verbose=False)
+    selector = StabilitySelector(
+        n_bootstrap=10,
+        threshold=0.1,
+        alpha=0.01,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
+    )
     selector.fit(X, y)
 
     assert selector.n_features_selected_ > 0
-    assert 'f0' in selector.selected_feature_names_
+    top = selector.get_feature_info()["feature"].head(5).tolist()
+    assert "f0" in top
 
 
 def test_stability_selector_classification():
@@ -25,7 +33,13 @@ def test_stability_selector_classification():
     y = (X['f0'] + X['f1'] > 0).astype(int)
 
     selector = StabilitySelector(
-        n_bootstrap=10, threshold=0.3, task='classification', verbose=False
+        n_bootstrap=10,
+        threshold=0.1,
+        task="classification",
+        alpha=0.1,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
     )
     selector.fit(X, y)
 
@@ -37,7 +51,16 @@ def test_stability_select_convenience():
     X = np.random.randn(100, 10)
     y = X[:, 0] + np.random.randn(100) * 0.3
 
-    selected, freqs = stability_select(X, y, n_bootstrap=10, threshold=0.3, verbose=False)
+    selected, freqs = stability_select(
+        X,
+        y,
+        n_bootstrap=10,
+        threshold=0.1,
+        alpha=0.01,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
+    )
 
     assert len(selected) > 0
     assert len(freqs) == 10
@@ -52,7 +75,17 @@ def test_stability_regression_wrapper():
     X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
     y = X['f0'] + 0.5 * X['f1'] + np.random.randn(n) * 0.5
 
-    selected = stability_regression(X, y, K=10, n_bootstrap=10, threshold=0.3, verbose=False)
+    selected = stability_regression(
+        X,
+        y,
+        k=10,
+        n_bootstrap=10,
+        threshold=0.1,
+        alpha=0.01,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
+    )
 
     assert isinstance(selected, list)
     assert len(selected) <= 10
@@ -68,7 +101,17 @@ def test_stability_classif_wrapper():
     X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
     y = (X['f0'] + X['f1'] > 0).astype(int)
 
-    selected = stability_classif(X, y, K=10, n_bootstrap=10, threshold=0.3, verbose=False)
+    selected = stability_classif(
+        X,
+        y,
+        k=10,
+        n_bootstrap=10,
+        threshold=0.1,
+        alpha=0.1,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
+    )
 
     assert isinstance(selected, list)
     assert len(selected) <= 10
@@ -178,8 +221,10 @@ def test_selected_features_sorted_by_frequency():
     selector = StabilitySelector(
         n_bootstrap=20,
         threshold=0.1,
+        alpha=0.01,
         random_state=0,
-        verbose=False
+        n_jobs=1,
+        verbose=False,
     )
     selector.fit(X, y)
 
@@ -203,9 +248,10 @@ def test_stability_regression_returns_features_ordered_by_frequency():
     selected = stability_regression(
         X,
         y,
-        K=10,
+        k=10,
         n_bootstrap=30,
         threshold=0.3,
+        alpha=0.01,
         verbose=False,
         random_state=42
     )

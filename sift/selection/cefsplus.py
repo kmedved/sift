@@ -207,7 +207,7 @@ def select_cached(
     else:
         cand = np.arange(p_valid)
 
-    Z_cand = cache.Z[:, cand]
+    Z_cand = np.ascontiguousarray(cache.Z[:, cand])
     R_cand = correlation_matrix_fast(Z_cand.astype(np.float64))
 
     keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)

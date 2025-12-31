@@ -37,4 +37,7 @@ __all__ = [
     "StabilitySelector",
     "stability_regression",
     "stability_classif",
+    "catboost_select",
+    "catboost_regression",
+    "catboost_classif",
 ]

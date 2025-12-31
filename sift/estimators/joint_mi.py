@@ -181,12 +181,14 @@ def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, 
             [
                 tree.query_ball_point(points[i], radii[i], p=np.inf, return_length=True) - 1
                 for i in range(n)
-            ]
+            ],
+            dtype=np.int64,
         )
     except TypeError:
         return np.array(
             [
                 len(tree.query_ball_point(points[i], radii[i], p=np.inf)) - 1
                 for i in range(n)
-            ]
+            ],
+            dtype=np.int64,
         )
