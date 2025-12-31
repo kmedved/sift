@@ -1,33 +1,32 @@
 import numpy as np
-import pandas as pd
-from sift.mi.estimators import regression_joint_mi, binned_joint_mi, ksg_joint_mi
+
+from sift.estimators import joint_mi
 
 
-def test_regression_joint_mi_block_consistency():
-    """Results should be same regardless of block_size."""
-    np.random.seed(42)
-    n, p = 200, 50
-    X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
-    y = pd.Series(np.random.randn(n))
+def test_r2_joint_mi_shape():
+    rng = np.random.default_rng(42)
+    n, p = 200, 10
+    X = rng.normal(size=(n, p))
+    y = rng.normal(size=n)
 
-    features = [f'f{i}' for i in range(1, p)]
+    selected = X[:, 0]
+    candidates = X[:, 1:]
 
-    result_small_block = regression_joint_mi('f0', features, X, y, block_size=10)
-    result_large_block = regression_joint_mi('f0', features, X, y, block_size=256)
+    scores = joint_mi.r2_joint_mi(selected, candidates, y)
 
-    pd.testing.assert_series_equal(result_small_block, result_large_block, rtol=1e-10)
+    assert scores.shape == (p - 1,)
 
 
-def test_jmi_methods_return_series():
-    np.random.seed(42)
-    n, p = 100, 10
-    X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
-    y = pd.Series(np.random.randn(n))
-    features = [f'f{i}' for i in range(1, p)]
+def test_binned_joint_mi_returns_nonnegative():
+    rng = np.random.default_rng(123)
+    n, p = 100, 6
+    X = rng.normal(size=(n, p))
+    y = (X[:, 0] > 0).astype(int)
 
-    for func in [regression_joint_mi, binned_joint_mi, ksg_joint_mi]:
-        kwargs = {} if func is regression_joint_mi else {"n_jobs": 1}
-        result = func('f0', features, X, y, **kwargs)
-        assert isinstance(result, pd.Series)
-        assert len(result) == len(features)
-        assert set(result.index) == set(features)
+    selected = X[:, 0]
+    candidates = X[:, 1:]
+
+    scores = joint_mi.binned_joint_mi(selected, candidates, y, y_kind="discrete")
+
+    assert scores.shape == (p - 1,)
+    assert (scores >= 0).all()

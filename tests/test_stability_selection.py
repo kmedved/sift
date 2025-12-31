@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
-from sift import StabilitySelector, stability_select
+
+from sift import StabilitySelector
+from sift.stability import stability_select
 
 
 def test_stability_selector_regression():

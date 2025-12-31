@@ -35,8 +35,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from sift._optional import HAS_CATBOOST
-from sift.core.metrics import infer_higher_is_better, best_score_from_dict
+from sift._preprocess import best_score_from_dict, infer_higher_is_better
 
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
@@ -45,10 +44,15 @@ from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedS
 # Score direction handling
 # =============================================================================
 
-if HAS_CATBOOST:
-    from catboost import CatBoostRegressor, CatBoostClassifier, Pool  # type: ignore[import-not-found]
-    from catboost import EFeaturesSelectionAlgorithm, EShapCalcType  # type: ignore[import-not-found]
-else:
+try:
+    from catboost import (  # type: ignore[import-not-found]
+        CatBoostClassifier,
+        CatBoostRegressor,
+        EFeaturesSelectionAlgorithm,
+        EShapCalcType,
+        Pool,
+    )
+except ImportError:  # pragma: no cover - optional dependency
     CatBoostRegressor = None
     CatBoostClassifier = None
     Pool = None
@@ -294,31 +298,41 @@ def _prefilter_features(
         print(f"  Pre-filter: {len(numeric_cols)} numeric → {k_numeric} using {method}")
 
     if method == 'cefsplus':
-        from sift.mi.fast_selectors import cefsplus_regression
         if task == 'classification':
-            from sift.selectors.mrmr import mrmr_classif
-            selected = mrmr_classif(
-                X_train[numeric_cols], y_train, K=k_numeric,
-                verbose=False, subsample=30_000, random_state=random_state
+            from sift.api import select_mrmr
+
+            selected = select_mrmr(
+                X_train[numeric_cols],
+                y_train,
+                k=k_numeric,
+                task="classification",
+                verbose=False,
+                subsample=30_000,
+                random_state=random_state,
             )
         else:
-            selected = cefsplus_regression(
-                X_train[numeric_cols], y_train, K=k_numeric,
-                verbose=False, subsample=30_000, random_state=random_state
+            from sift.api import select_cefsplus
+
+            selected = select_cefsplus(
+                X_train[numeric_cols],
+                y_train,
+                k=k_numeric,
+                verbose=False,
+                subsample=30_000,
+                random_state=random_state,
             )
     elif method == 'mrmr':
-        if task == 'classification':
-            from sift.selectors.mrmr import mrmr_classif
-            selected = mrmr_classif(
-                X_train[numeric_cols], y_train, K=k_numeric,
-                verbose=False, subsample=30_000, random_state=random_state
-            )
-        else:
-            from sift.selectors.mrmr import mrmr_regression
-            selected = mrmr_regression(
-                X_train[numeric_cols], y_train, K=k_numeric,
-                verbose=False, subsample=30_000, random_state=random_state
-            )
+        from sift.api import select_mrmr
+
+        selected = select_mrmr(
+            X_train[numeric_cols],
+            y_train,
+            k=k_numeric,
+            task=task,
+            verbose=False,
+            subsample=30_000,
+            random_state=random_state,
+        )
     else:
         raise ValueError(f"Unknown prefilter method: {method}")
 
@@ -1226,7 +1240,7 @@ def catboost_select(
         algorithm='forward',
     )
     """
-    if not HAS_CATBOOST:
+    if CatBoostRegressor is None:
         raise ImportError(
             "CatBoost is required for this function. "
             "Install with: pip install catboost"
@@ -1322,7 +1336,7 @@ def catboost_select(
     }
 
     if max_depth is not None:
-        model_params['max_depth'] = max_depth
+        model_params['depth'] = max_depth
     if learning_rate is not None:
         model_params['learning_rate'] = learning_rate
 
@@ -1339,7 +1353,7 @@ def catboost_select(
         if 'eval_metric' in catboost_params:
             resolved_metric = str(catboost_params['eval_metric'])
             if higher_is_better is None:
-                resolved_hib = _infer_higher_is_better(resolved_metric)
+                resolved_hib = infer_higher_is_better(resolved_metric)
 
     # Generate feature counts to try
     if K is not None:

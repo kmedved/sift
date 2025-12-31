@@ -30,6 +30,7 @@ setup(
     license='MIT',
     packages=find_packages(exclude=("tests*", "docs*", "examples*")),
     install_requires=[
+        'numba',
         'tqdm',
         'joblib',
         'pandas>=1.0.3',
@@ -39,15 +40,10 @@ setup(
     ],
     extras_require={
         'categorical': ['category_encoders'],
-        'polars': ['polars>=0.12.5', 'pyarrow'],
-        'numba': ['numba'],
         'catboost': ['catboost'],
         'test': ['pytest'],
         'all': [
             'category_encoders',
-            'polars>=0.12.5',
-            'pyarrow',
-            'numba',
             'catboost',
         ],
     },

@@ -1,0 +1,254 @@
+"""CEFS+ selection using log-det Schur complement updates."""
+
+from __future__ import annotations
+
+from typing import List, Literal, Optional
+
+import numpy as np
+from numba import njit
+
+from sift.estimators.copula import (
+    FeatureCache,
+    build_cache,
+    corr_with_vector,
+    correlation_matrix_fast,
+    gaussian_mi_from_corr,
+    greedy_corr_prune,
+    rank_gauss_1d,
+)
+
+
+@njit(cache=True)
+def cefsplus_loop(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    CEFS+ greedy selection via log-det updates.
+
+    Maximizes Gaussian MI proxy using efficient Schur complement updates.
+    """
+    m = len(r)
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64)
+    k = min(k, m)
+
+    R_shrunk = (1.0 - shrink) * R.copy()
+    for i in range(m):
+        R_shrunk[i, i] = 1.0
+    r_shrunk = (1.0 - shrink) * r.copy()
+
+    selected = np.empty(k, dtype=np.int64)
+    remaining = np.ones(m, dtype=np.bool_)
+
+    j0 = 0
+    best_rel = tie_break_rel[0]
+    for j in range(1, m):
+        if tie_break_rel[j] > best_rel:
+            best_rel = tie_break_rel[j]
+            j0 = j
+
+    selected[0] = j0
+    remaining[j0] = False
+    count = 1
+
+    inv_S = np.array([[1.0]], dtype=np.float64)
+    logdet_S = 0.0
+
+    r0 = r_shrunk[j0]
+    det_yS = max(1.0 - r0 * r0, eps)
+    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
+    logdet_yS = np.log(det_yS)
+
+    while count < k:
+        n_rem = 0
+        for j in range(m):
+            if remaining[j]:
+                n_rem += 1
+        if n_rem == 0:
+            break
+
+        rem = np.empty(n_rem, dtype=np.int64)
+        idx = 0
+        for j in range(m):
+            if remaining[j]:
+                rem[idx] = j
+                idx += 1
+
+        s = count
+
+        B = np.empty((s, n_rem), dtype=np.float64)
+        for si in range(s):
+            for ri in range(n_rem):
+                B[si, ri] = R_shrunk[selected[si], rem[ri]]
+
+        tmp = inv_S @ B
+        t1 = np.zeros(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            for si in range(s):
+                t1[ri] += B[si, ri] * tmp[si, ri]
+
+        s1 = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            s1[ri] = max(1.0 - t1[ri], eps)
+
+        lf = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            lf[ri] = logdet_S + np.log(s1[ri])
+
+        B2 = np.empty((s + 1, n_rem), dtype=np.float64)
+        for ri in range(n_rem):
+            B2[0, ri] = r_shrunk[rem[ri]]
+        for si in range(s):
+            for ri in range(n_rem):
+                B2[si + 1, ri] = B[si, ri]
+
+        tmp2 = inv_yS @ B2
+        t2 = np.zeros(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            for si in range(s + 1):
+                t2[ri] += B2[si, ri] * tmp2[si, ri]
+
+        s2 = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            s2[ri] = max(1.0 - t2[ri], eps)
+
+        lc = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            lc[ri] = logdet_yS + np.log(s2[ri])
+
+        score = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            score[ri] = lf[ri] - lc[ri]
+
+        best_pos = 0
+        best_score = score[0]
+        for ri in range(1, n_rem):
+            if score[ri] > best_score:
+                best_score = score[ri]
+                best_pos = ri
+
+        best_rel = tie_break_rel[rem[best_pos]]
+        for ri in range(n_rem):
+            if np.abs(score[ri] - best_score) < 1e-12:
+                if tie_break_rel[rem[ri]] > best_rel:
+                    best_rel = tie_break_rel[rem[ri]]
+                    best_pos = ri
+
+        j = rem[best_pos]
+
+        b = B[:, best_pos].reshape(-1, 1)
+        v = inv_S @ b
+        s1_best = s1[best_pos]
+
+        inv_S_new = np.empty((s + 1, s + 1), dtype=np.float64)
+        for i in range(s):
+            for jj in range(s):
+                inv_S_new[i, jj] = inv_S[i, jj] + v[i, 0] * v[jj, 0] / s1_best
+        for i in range(s):
+            inv_S_new[i, s] = -v[i, 0] / s1_best
+            inv_S_new[s, i] = -v[i, 0] / s1_best
+        inv_S_new[s, s] = 1.0 / s1_best
+        inv_S = inv_S_new
+        logdet_S += np.log(s1_best)
+
+        b2 = B2[:, best_pos].reshape(-1, 1)
+        v2 = inv_yS @ b2
+        s2_best = s2[best_pos]
+
+        inv_yS_new = np.empty((s + 2, s + 2), dtype=np.float64)
+        for i in range(s + 1):
+            for jj in range(s + 1):
+                inv_yS_new[i, jj] = inv_yS[i, jj] + v2[i, 0] * v2[jj, 0] / s2_best
+        for i in range(s + 1):
+            inv_yS_new[i, s + 1] = -v2[i, 0] / s2_best
+            inv_yS_new[s + 1, i] = -v2[i, 0] / s2_best
+        inv_yS_new[s + 1, s + 1] = 1.0 / s2_best
+        inv_yS = inv_yS_new
+        logdet_yS += np.log(s2_best)
+
+        selected[count] = j
+        remaining[j] = False
+        count += 1
+
+    return selected[:count]
+
+
+def select_cached(
+    cache: FeatureCache,
+    y,
+    k: int,
+    method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"] = "cefsplus",
+    top_m: Optional[int] = None,
+    corr_prune: float = 0.95,
+) -> List[str]:
+    """Select features using pre-built cache."""
+    from sift._preprocess import to_numpy
+    from sift.selection.greedy import jmi_loop, mrmr_loop
+
+    y_arr = to_numpy(y, dtype=np.float32).ravel()
+    ys = y_arr[cache.row_idx]
+    zy = rank_gauss_1d(ys)
+
+    r = corr_with_vector(cache.Z, zy)
+    rel = gaussian_mi_from_corr(r)
+
+    p_valid = len(r)
+    if top_m is None:
+        top_m = max(5 * k, 250)
+    top_m = min(top_m, p_valid)
+
+    if top_m < p_valid:
+        cand = np.argpartition(np.abs(r), -top_m)[-top_m:]
+    else:
+        cand = np.arange(p_valid)
+
+    Z_cand = cache.Z[:, cand]
+    R_cand = correlation_matrix_fast(Z_cand.astype(np.float64))
+
+    keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)
+    cand = cand[keep]
+    R_cand = R_cand[np.ix_(keep, keep)]
+    r_cand = r[cand]
+    rel_cand = rel[cand]
+
+    k_actual = min(k, len(cand))
+
+    if method == "cefsplus":
+        sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
+    elif method in ("mrmr_quot", "mrmr_diff"):
+        red_mi = gaussian_mi_from_corr(R_cand)
+        np.fill_diagonal(red_mi, 0.0)
+        use_quot = method == "mrmr_quot"
+        sel_local = mrmr_loop(rel_cand, np.abs(red_mi), k_actual, use_quotient=use_quot)
+    elif method in ("jmi", "jmim"):
+        joint_mi = np.empty_like(R_cand)
+        for i in range(len(cand)):
+            for j in range(len(cand)):
+                r_fi_y = r_cand[i]
+                r_fj_y = r_cand[j]
+                r_fi_fj = R_cand[i, j]
+                denom = 1.0 - r_fi_fj**2
+                if denom < 1e-8:
+                    r2 = r_fj_y**2
+                else:
+                    a = r_fi_y - r_fj_y * r_fi_fj
+                    r2 = r_fj_y**2 + a**2 / denom
+                r2 = min(max(r2, 0.0), 0.99999)
+                joint_mi[i, j] = -0.5 * np.log(1.0 - r2)
+
+        use_min = method == "jmim"
+        sel_local = jmi_loop(rel_cand, joint_mi, k_actual, use_min=use_min)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    selected_valid = cand[sel_local]
+    selected_original = cache.valid_cols[selected_valid]
+
+    if cache.feature_names is not None:
+        return [cache.feature_names[i] for i in selected_original]
+    return selected_original.tolist()
