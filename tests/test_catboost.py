@@ -181,7 +181,7 @@ class TestCatBoostRegression:
         y = X['f0'] + 0.5 * X['f1'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -199,7 +199,7 @@ class TestCatBoostRegression:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             n_splits=2,
             prefilter_k=15,
             prefilter_method='catboost',
@@ -218,7 +218,7 @@ class TestCatBoostRegression:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -237,7 +237,7 @@ class TestCatBoostRegression:
         y = X['f0'] + 0.5 * X['f1'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -265,7 +265,7 @@ class TestCustomSplitters:
         y = X['f0'] + 0.3 * X['f1'] + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=5,
+            X, y, k=5,
             task='regression',
             cv=TimeSeriesSplit(n_splits=3),
             prefilter_k=None,
@@ -293,7 +293,7 @@ class TestCustomSplitters:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=5,
+            X, y, k=5,
             task='regression',
             cv=GroupKFold(n_splits=3),
             group_col='player_id',
@@ -317,7 +317,7 @@ class TestCatBoostClassification:
         y = pd.Series((X['f0'] + X['f1'] > 0).astype(int))
 
         selected = catboost_classif(
-            X, y, K=5,
+            X, y, k=5,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -336,7 +336,7 @@ class TestCatBoostClassification:
         y = pd.Series(np.random.choice([0, 1, 2], n))
 
         result = catboost_select(
-            X, y, K=5,
+            X, y, k=5,
             task='classification',
             n_splits=2,
             prefilter_k=None,
@@ -361,7 +361,7 @@ class TestKGuarantee:
 
         for k in [3, 5, 10, 15]:
             result = catboost_select(
-                X, y, K=k,
+                X, y, k=k,
                 task='regression',
                 n_splits=2,
                 prefilter_k=None,
@@ -379,7 +379,7 @@ class TestKGuarantee:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=7,
+            X, y, k=7,
             task='regression',
             use_stability=True,
             n_bootstrap=10,
@@ -404,7 +404,7 @@ class TestCatBoostSelect:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=None,
+            X, y, k=None,
             task='regression',
             min_features=3,
             n_splits=2,
@@ -434,7 +434,7 @@ class TestCatBoostSelect:
         y = X['num1'] + (X['cat1'] == 'A').astype(float) + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=3,
+            X, y, k=3,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -452,7 +452,7 @@ class TestCatBoostSelect:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             group_col='group',
             n_splits=2,
             prefilter_k=None,
@@ -472,7 +472,7 @@ class TestCatBoostSelect:
         y = X['f0'] + np.random.randn(n) * 0.3
 
         selected = catboost_regression(
-            X, y, K=5,
+            X, y, k=5,
             sample_weight_col='weight',
             n_splits=2,
             prefilter_k=None,
@@ -491,7 +491,7 @@ class TestCatBoostSelect:
         y = X['f0'] + 0.5 * X['f1'] + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=5,
+            X, y, k=5,
             task='regression',
             use_stability=True,
             n_bootstrap=5,
@@ -563,7 +563,7 @@ class TestCatFeaturesParameter:
         y = X['num1'] + (X['int_cat'] == 1).astype(float) * 2 + np.random.randn(n) * 0.3
 
         result = catboost_select(
-            X, y, K=3,
+            X, y, k=3,
             task='regression',
             cat_features=['int_cat'],  # Explicit
             n_splits=2,
@@ -588,7 +588,7 @@ class TestCatFeaturesParameter:
 
         # str_cat should be auto-detected, int_cat is explicit
         result = catboost_select(
-            X, y, K=3,
+            X, y, k=3,
             task='regression',
             cat_features=['int_cat'],
             n_splits=2,
@@ -614,7 +614,7 @@ class TestCatFeaturesParameter:
         with w.catch_warnings(record=True) as caught:
             w.simplefilter("always")
             result = catboost_select(
-                X, y, K=2,
+                X, y, k=2,
                 task='regression',
                 treat_object_as_categorical=False,
                 n_splits=2,
@@ -645,7 +645,7 @@ class TestKPrefilterInteraction:
         with w.catch_warnings(record=True) as caught:
             w.simplefilter("always")
             result = catboost_select(
-                X, y, K=30,  # Request 30 features
+                X, y, k=30,  # Request 30 features
                 prefilter_k=15,  # But only prefilter to 15
                 task='regression',
                 n_splits=2,
@@ -679,7 +679,7 @@ class TestForwardGreedyGuard:
         import pytest
         with pytest.raises(ValueError, match="forward_greedy is O"):
             catboost_select(
-                X, y, K=10,
+                X, y, k=10,
                 algorithm='forward_greedy',
                 prefilter_k=None,  # Don't prefilter
                 n_splits=2,
@@ -698,7 +698,7 @@ class TestForwardGreedyGuard:
         import pytest
         with pytest.raises(ValueError, match="forward_greedy is O"):
             catboost_select(
-                X, y, K=35,  # Exceeds MAX_FORWARD_GREEDY_K=30
+                X, y, k=35,  # Exceeds MAX_FORWARD_GREEDY_K=30
                 algorithm='forward_greedy',
                 n_splits=2,
                 verbose=False,

@@ -121,6 +121,9 @@ def _mrmr_classic(
     """Classic mRMR implementation."""
     feature_names = extract_feature_names(X)
 
+    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
+        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
+
     if isinstance(X, pd.DataFrame) and cat_features is None:
         cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
 
@@ -138,6 +141,12 @@ def _mrmr_classic(
             "ks": rel_est.ks_classif,
             "rf": rel_est.rf_classif,
         }
+
+    if relevance_method not in rel_funcs:
+        raise ValueError(
+            f"relevance='{relevance_method}' not valid for task='{task}'. "
+            f"Valid options: {sorted(rel_funcs.keys())}"
+        )
 
     rel = rel_funcs[relevance_method](X_arr, y_arr)
 
@@ -301,6 +310,9 @@ def _jmi_classic(
     """Classic JMI/JMIM implementation."""
     feature_names = extract_feature_names(X)
 
+    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
+        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
+
     if isinstance(X, pd.DataFrame) and cat_features is None:
         cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
 
@@ -318,6 +330,12 @@ def _jmi_classic(
             "ks": rel_est.ks_classif,
             "rf": rel_est.rf_classif,
         }
+
+    if relevance_method not in rel_funcs:
+        raise ValueError(
+            f"relevance='{relevance_method}' not valid for task='{task}'. "
+            f"Valid options: {sorted(rel_funcs.keys())}"
+        )
 
     rel = rel_funcs[relevance_method](X_arr, y_arr)
 
@@ -352,6 +370,8 @@ def select_cefsplus(
     *,
     top_m: Optional[int] = None,
     corr_prune: float = 0.95,
+    cat_features: Optional[List[str]] = None,
+    cat_encoding: CatEncoding = "loo",
     subsample: Optional[int] = 50_000,
     random_state: int = 0,
     verbose: bool = True,
@@ -361,13 +381,13 @@ def select_cefsplus(
 
     REGRESSION ONLY.
     """
-    _, y_arr, _ = validate_inputs(X, y, task="regression")
-    unique_y = np.unique(y_arr)
-    if len(unique_y) < 20 and np.allclose(unique_y, unique_y.astype(int)):
-        raise ValueError(
-            "select_cefsplus is for regression only. "
-            "For classification, use select_mrmr or select_jmi with estimator='binned'."
-        )
+    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
+        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
+    if isinstance(X, pd.DataFrame) and cat_features is None:
+        cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    if cat_features and cat_encoding != "none":
+        X = encode_categoricals(X, y, cat_features, cat_encoding)
+    validate_inputs(X, y, task="regression")
     cache = build_cache(X, subsample=subsample, random_state=random_state)
     return select_cached(
         cache,

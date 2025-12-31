@@ -375,6 +375,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         X = np.asarray(X, dtype=np.float32)
         X = np.where(np.isfinite(X), X, np.nan)
+        if np.isnan(X).any():
+            X = X.copy()
 
         # Handle labels properly for classification
         if self.task == 'classification':
@@ -430,7 +432,16 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             exclude.add(config.group_col)
         if config.time_col:
             exclude.add(config.time_col)
-        feature_names = [c for c in X.columns if c not in exclude]
+        candidate_cols = [c for c in X.columns if c not in exclude]
+        feature_names = X[candidate_cols].select_dtypes(include=[np.number]).columns.tolist()
+        dropped = [c for c in candidate_cols if c not in feature_names]
+        if dropped:
+            warnings.warn(
+                f"Smart sampler uses numeric features only; dropping {len(dropped)} non-numeric column(s): "
+                f"{dropped[:5]}{'...' if len(dropped) > 5 else ''}"
+            )
+        if not feature_names:
+            raise ValueError("No numeric feature columns available for smart sampling.")
 
         # Build df with encoded y BEFORE sampling
         df = X.copy()

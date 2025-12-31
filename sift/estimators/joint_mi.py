@@ -6,6 +6,8 @@ from typing import Literal
 
 import numpy as np
 from numba import njit
+from scipy.spatial import cKDTree
+from scipy.special import digamma
 
 
 @njit(cache=True)
@@ -116,9 +118,6 @@ def ksg_joint_mi(
     k: int = 3,
 ) -> np.ndarray:
     """KSG k-NN estimator for joint MI."""
-    from scipy.spatial import cKDTree
-    from scipy.special import digamma
-
     n, p = candidates.shape
     scores = np.empty(p, dtype=np.float64)
 
@@ -140,12 +139,8 @@ def ksg_joint_mi(
         dists, _ = tree_full.query(XY_full, k=k + 1, p=np.inf)
         eps = np.maximum(dists[:, -1] - 1e-15, 0.0)
 
-        n_x = np.array(
-            [tree_x.query_ball_point(X_joint[i], eps[i], p=np.inf, return_length=True) - 1 for i in range(n)]
-        )
-        n_y = np.array(
-            [tree_y.query_ball_point(Y_marginal[i], eps[i], p=np.inf, return_length=True) - 1 for i in range(n)]
-        )
+        n_x = _safe_count_neighbors(tree_x, X_joint, eps, n)
+        n_y = _safe_count_neighbors(tree_y, Y_marginal, eps, n)
 
         n_x = np.maximum(n_x, 0)
         n_y = np.maximum(n_y, 0)
@@ -158,6 +153,8 @@ def ksg_joint_mi(
 
 def _quantile_bin(x: np.ndarray, n_bins: int) -> np.ndarray:
     """Quantile-based binning."""
+    if x.size == 0 or np.std(x) < 1e-12:
+        return np.zeros(len(x), dtype=np.int32)
     percentiles = np.linspace(0, 100, n_bins + 1)
     bins = np.percentile(x, percentiles)
     bins[0] -= 1e-10
@@ -175,3 +172,21 @@ def _entropy_from_array(x: np.ndarray) -> float:
     """Entropy from discrete array."""
     _, counts = np.unique(x, return_counts=True)
     return _entropy_from_counts(counts)
+
+
+def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, n: int) -> np.ndarray:
+    """Count neighbors with fallback for older SciPy."""
+    try:
+        return np.array(
+            [
+                tree.query_ball_point(points[i], radii[i], p=np.inf, return_length=True) - 1
+                for i in range(n)
+            ]
+        )
+    except TypeError:
+        return np.array(
+            [
+                len(tree.query_ball_point(points[i], radii[i], p=np.inf)) - 1
+                for i in range(n)
+            ]
+        )

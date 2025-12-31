@@ -9,6 +9,43 @@ from sklearn.utils.extmath import randomized_svd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
 
+def leverage_scores_multi_alpha(
+    Xs: np.ndarray,
+    V: Optional[np.ndarray],
+    S: Optional[np.ndarray],
+    s2: Optional[np.ndarray],
+    leverage_batch_size: int,
+) -> np.ndarray:
+    """Compute leverage scores across multiple ridge parameters."""
+    n = Xs.shape[0]
+    if V is None or S is None or s2 is None:
+        return np.ones(n, dtype=np.float32)
+
+    s2_pos = s2[s2 > 1e-8]
+    if s2_pos.size:
+        qs = np.percentile(s2_pos, [5, 25, 50, 75, 95]).astype(np.float32)
+        alphas = np.unique(np.clip(np.array([1e-6, *qs], dtype=np.float32), 1e-8, None))
+    else:
+        alphas = np.array([1e-6], dtype=np.float32)
+
+    invS = (1.0 / (S + 1e-12)).astype(np.float32)
+    W = (s2[:, None] / (s2[:, None] + alphas[None, :])).astype(np.float32)
+
+    lev = np.empty(n, dtype=np.float32)
+    B = leverage_batch_size
+    for start in range(0, n, B):
+        stop = min(n, start + B)
+        XV = Xs[start:stop] @ V
+        U_chunk = XV * invS
+        U2 = U_chunk * U_chunk
+        lev_multi = U2 @ W
+        lev[start:stop] = lev_multi.mean(axis=1)
+
+    lev = np.maximum(lev, 1e-12)
+    lev /= lev.mean()
+    return lev
+
+
 # =============================================================================
 # Smart Sampler Configuration
 # =============================================================================
@@ -186,35 +223,7 @@ def smart_sample(
     # -------------------------------------------------------------------------
     # Multi-alpha leverage scores
     # -------------------------------------------------------------------------
-    def leverage_scores_multi_alpha() -> np.ndarray:
-        if V is None:
-            return np.ones(n, dtype=np.float32)
-
-        s2_pos = s2[s2 > 1e-8]
-        if s2_pos.size:
-            qs = np.percentile(s2_pos, [5, 25, 50, 75, 95]).astype(np.float32)
-            alphas = np.unique(np.clip(np.array([1e-6, *qs], dtype=np.float32), 1e-8, None))
-        else:
-            alphas = np.array([1e-6], dtype=np.float32)
-
-        invS = (1.0 / (S + 1e-12)).astype(np.float32)
-        W = (s2[:, None] / (s2[:, None] + alphas[None, :])).astype(np.float32)
-
-        lev = np.empty(n, dtype=np.float32)
-        B = config.leverage_batch_size
-        for start in range(0, n, B):
-            stop = min(n, start + B)
-            XV = Xs[start:stop] @ V
-            U_chunk = XV * invS
-            U2 = U_chunk * U_chunk
-            lev_multi = U2 @ W
-            lev[start:stop] = lev_multi.mean(axis=1)
-
-        lev = np.maximum(lev, 1e-12)
-        lev /= lev.mean()
-        return lev
-
-    lev_scores = leverage_scores_multi_alpha()
+    lev_scores = leverage_scores_multi_alpha(Xs, V, S, s2, config.leverage_batch_size)
 
     # -------------------------------------------------------------------------
     # Pilot model for residual-based scores
@@ -386,3 +395,10 @@ def smart_sample(
         print(f"Sampled {len(out):,} rows ({len(out)/n:.1%}), {n_groups:,}/{total_groups:,} groups")
 
     return out.reset_index(drop=True)
+
+
+__all__ = [
+    "SmartSamplerConfig",
+    "leverage_scores_multi_alpha",
+    "smart_sample",
+]

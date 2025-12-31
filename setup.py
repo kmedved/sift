@@ -15,8 +15,11 @@ def read_version():
         raise RuntimeError("Unable to find __version__ in sift/__init__.py")
     return match.group(1)
 
-with open("README.md", encoding="utf8") as f:
-    long_description = f.read()
+try:
+    with open("README.md", encoding="utf8") as f:
+        long_description = f.read()
+except FileNotFoundError:
+    long_description = "Feature selection toolbox"
 
 setup(
     name='sift',
@@ -31,7 +34,6 @@ setup(
     packages=find_packages(exclude=("tests*", "docs*", "examples*")),
     install_requires=[
         'numba',
-        'tqdm',
         'joblib',
         'pandas>=1.0.3',
         'numpy>=1.18.1',

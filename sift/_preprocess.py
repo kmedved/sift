@@ -136,6 +136,14 @@ def validate_inputs(
         else:
             y_raw = np.asarray(y)
 
+        if pd.api.types.is_numeric_dtype(y_raw):
+            try:
+                y_num = np.asarray(y_raw, dtype=np.float64)
+            except (TypeError, ValueError):
+                y_num = None
+            if y_num is not None and not np.isfinite(y_num).all():
+                raise ValueError("Non-finite values in y are not allowed for classification.")
+
         if pd.isna(y_raw).any():
             raise ValueError("Missing values in y are not allowed for classification.")
 

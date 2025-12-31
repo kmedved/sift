@@ -14,17 +14,17 @@ Usage:
     from sift import catboost_regression, catboost_classif
 
     # Simple API (like mrmr_regression)
-    selected = catboost_regression(X, y, K=20)
+    selected = catboost_regression(X, y, k=20)
 
     # With custom time series splitter
     from sklearn.model_selection import TimeSeriesSplit
     result = catboost_select(
-        X, y, K=20,
+        X, y, k=20,
         cv=TimeSeriesSplit(n_splits=5),
     )
 
-    # Forward selection (faster for small K)
-    selected = catboost_regression(X, y, K=10, algorithm='forward')
+    # Forward selection (faster for small k)
+    selected = catboost_regression(X, y, k=10, algorithm='forward')
 """
 
 from dataclasses import dataclass, field
@@ -107,7 +107,7 @@ def _resolve_higher_is_better(
     higher_is_better: Optional[bool],
     task: str,
 ) -> Tuple[str, bool]:
-    """Resolve metric name and direction. DEPRECATED: use _resolve_metric_and_direction."""
+    """Resolve metric name and direction."""
     if metric is None:
         metric = 'RMSE' if task == 'regression' else 'Logloss'
     if higher_is_better is None:
@@ -131,13 +131,13 @@ class CatBoostSelectionResult:
     best_k : int
         Number of features in best configuration.
     scores_by_k : dict
-        Mean validation score for each K tried.
+        Mean validation score for each k tried.
     scores_std_by_k : dict
         Standard deviation of scores across splits (if n_splits > 1).
     feature_importances : pd.Series
         SHAP or loss-function-change importances from final model.
     features_by_k : dict
-        Feature lists for each K (from final run or first split).
+        Feature lists for each k (from final run or first split).
     stability_scores : pd.Series, optional
         Selection frequency across resampled splits (if stability selection used).
     prefilter_features : list of str, optional
@@ -147,7 +147,7 @@ class CatBoostSelectionResult:
     higher_is_better : bool
         Whether higher metric values are better.
     all_scores : dict, optional
-        Raw scores per split per K: {k: [score1, score2, ...]}.
+        Raw scores per split per k: {k: [score1, score2, ...]}.
     """
     selected_features: List[str]
     best_k: int
@@ -162,7 +162,7 @@ class CatBoostSelectionResult:
     all_scores: Optional[Dict[int, List[float]]] = None
 
     def score_at_k(self, k: int) -> Tuple[float, float]:
-        """Return (mean, std) score at given K."""
+        """Return (mean, std) score at given k."""
         return self.scores_by_k.get(k, np.nan), self.scores_std_by_k.get(k, np.nan)
 
     def features_within_tolerance(self, tolerance: float = 0.01) -> List[str]:
@@ -170,7 +170,7 @@ class CatBoostSelectionResult:
         Get smallest feature set within tolerance of best score.
 
         Uses stored features_by_k when available (exact), falls back to
-        top-K by importance otherwise.
+        top-k by importance otherwise.
         """
         best_score = (max if self.higher_is_better else min)(self.scores_by_k.values())
 
@@ -207,10 +207,10 @@ class CatBoostSelectionResult:
         fig, ax = plt.subplots(figsize=figsize)
         ax.errorbar(ks, means, yerr=stds, marker='o', capsize=3)
         ax.axvline(self.best_k, color='red', linestyle='--', alpha=0.7,
-                   label=f'Best K={self.best_k}')
-        ax.set_xlabel('Number of Features (K)')
+                   label=f'Best k={self.best_k}')
+        ax.set_xlabel('Number of Features (k)')
         ax.set_ylabel(f'{self.metric} ({"↑" if self.higher_is_better else "↓"} better)')
-        ax.set_title('Feature Selection: Score vs K')
+        ax.set_title('Feature Selection: Score vs k')
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -376,10 +376,11 @@ def _catboost_importance_prefilter(
         'depth': 4,  # CatBoost uses 'depth', not 'max_depth' in native API
         'learning_rate': 0.1,
         'verbose': False,
-        'random_seed': random_state,
         'allow_writing_files': False,
         'loss_function': loss_fn,
     }
+    if random_state is not None:
+        params['random_seed'] = int(random_state)
     if n_jobs > 0:
         params['thread_count'] = n_jobs
 
@@ -570,7 +571,7 @@ def _select_features_single_split(
     Run ONE-SHOT feature selection for a single train/val split.
 
     Key optimization: Run select_features once at min_k with train_final_model=True,
-    then reconstruct feature sets for larger K using elimination order.
+    then reconstruct feature sets for larger k using elimination order.
 
     IMPORTANT: Survivors are reordered by importance from the trained model,
     since CatBoost doesn't guarantee ordering in selected_features_names.
@@ -644,7 +645,7 @@ def _select_features_single_split(
     scores = {}
     features_selected = {}
 
-    # Evaluate each K
+    # Evaluate each k
     for k in feature_counts:
         if k >= n_features:
             current_feats = features
@@ -661,7 +662,7 @@ def _select_features_single_split(
             except Exception:
                 pass  # Fall through to retrain
 
-        # Retrain for exact score at this K
+        # Retrain for exact score at this k
         sel_cat = [f for f in cat_features if f in current_feats]
         sel_text = [f for f in text_features if f in current_feats]
 
@@ -920,7 +921,7 @@ def _forward_select_single_split(
 
     Algorithm:
     1. Train model on all features, get importance ranking
-    2. Evaluate ONLY at requested K values (not every k from 1..max)
+    2. Evaluate ONLY at requested k values (not every k from 1..max)
 
     This is O(len(feature_counts)) model fits, not O(max_k).
     Returns ranked features for subset reconstruction.
@@ -948,7 +949,7 @@ def _forward_select_single_split(
     # Rank features by importance (descending)
     ranked_features = importance_series.sort_values(ascending=False).index.tolist()
 
-    # Step 2: Evaluate ONLY at requested K values
+    # Step 2: Evaluate ONLY at requested k values
     scores = {}
     max_k = max(feature_counts) if feature_counts else len(features)
     max_k = min(max_k, len(features))
@@ -997,8 +998,8 @@ def _forward_select_greedy_single_split(
     True greedy forward selection: at each step, try all remaining features
     and pick the one that improves score the most.
 
-    This is O(K * n_remaining) model fits - expensive but principled.
-    Use for small K or final refinement.
+    This is O(k * n_remaining) model fits - expensive but principled.
+    Use for small k or final refinement.
     """
     ModelClass = CatBoostClassifier if task == 'classification' else CatBoostRegressor
 
@@ -1049,7 +1050,7 @@ def _forward_select_greedy_single_split(
 def catboost_select(
     X: pd.DataFrame,
     y: pd.Series,
-    K: Optional[int] = None,
+    k: Optional[int] = None,
     task: Literal['regression', 'classification'] = 'regression',
     # Search parameters
     min_features: int = 5,
@@ -1105,8 +1106,8 @@ def catboost_select(
         Object/string columns are treated as categorical by default.
     y : Series
         Target variable.
-    K : int, optional
-        Exact number of features to select. If None, searches for optimal K.
+    k : int, optional
+        Exact number of features to select. If None, searches for optimal k.
     task : str, default='regression'
         Either 'regression' or 'classification'.
 
@@ -1115,12 +1116,12 @@ def catboost_select(
     min_features : int, default=5
         Minimum number of features to consider.
     step_function : float, default=0.67
-        Geometric step for feature count search (K → K*step → K*step² ...).
+        Geometric step for feature count search (k → k*step → k*step² ...).
     feature_counts : list of int, optional
         Explicit list of feature counts to try. Overrides step_function.
     selection_patience : int, default=3
-        Stop K selection search if score doesn't improve for this many consecutive
-        steps. Note: this only affects which K is chosen, not compute time (all Ks
+        Stop k selection search if score doesn't improve for this many consecutive
+        steps. Note: this only affects which k is chosen, not compute time (all ks
         are still evaluated). For compute savings, use prefilter_k or reduce n_splits.
     tolerance : float, default=0.01
         Score tolerance for considering improvement.
@@ -1184,8 +1185,8 @@ def catboost_select(
         - 'shap': RFE with SHAP importance (most accurate, slowest)
         - 'permutation': RFE with loss-function-change importance (good balance)
         - 'prediction': RFE with prediction change (fastest RFE)
-        - 'forward': Forward selection by importance ranking (fast, O(K) fits)
-        - 'forward_greedy': True greedy forward selection (O(K*n_features) fits)
+        - 'forward': Forward selection by importance ranking (fast, O(k) fits)
+        - 'forward_greedy': True greedy forward selection (O(k*n_features) fits)
     steps : int, default=6
         Number of elimination steps in CatBoost's select_features (RFE modes).
     cat_features : list of str, optional
@@ -1223,23 +1224,24 @@ def catboost_select(
     # Time series data with TimeSeriesSplit
     from sklearn.model_selection import TimeSeriesSplit
     result = catboost_select(
-        X, y, K=20,
+        X, y, k=20,
         cv=TimeSeriesSplit(n_splits=5),
     )
 
     # Grouped data (e.g., NBA players over seasons)
     result = catboost_select(
-        X, y, K=20,
+        X, y, k=20,
         group_col='player_id',
         cv=GroupKFold(n_splits=5),
     )
 
     # Fast forward selection
     result = catboost_select(
-        X, y, K=20,
+        X, y, k=20,
         algorithm='forward',
     )
     """
+    k_req = k
     if CatBoostRegressor is None:
         raise ImportError(
             "CatBoost is required for this function. "
@@ -1327,13 +1329,14 @@ def catboost_select(
     model_params = {
         'iterations': n_estimators,
         'verbose': False,
-        'random_seed': random_state,
         'od_type': 'Iter',
         'od_wait': 30,
         'allow_writing_files': False,
         'eval_metric': resolved_metric,
         'loss_function': resolved_loss,
     }
+    if random_state is not None:
+        model_params['random_seed'] = int(random_state)
 
     if max_depth is not None:
         model_params['depth'] = max_depth
@@ -1356,8 +1359,8 @@ def catboost_select(
                 resolved_hib = infer_higher_is_better(resolved_metric)
 
     # Generate feature counts to try
-    if K is not None:
-        counts = [K]
+    if k_req is not None:
+        counts = [k_req]
     elif feature_counts is not None:
         counts = sorted(set(feature_counts), reverse=True)
     else:
@@ -1367,7 +1370,7 @@ def catboost_select(
 
     # Guard against expensive forward_greedy runs
     if algorithm == 'forward_greedy':
-        max_k = max(counts) if counts else K or len(all_features)
+        max_k = max(counts) if counts else k_req or len(all_features)
         n_feats = len(all_features)
 
         # Hard limits unless explicitly allowed
@@ -1376,14 +1379,14 @@ def catboost_select(
 
         if max_k > MAX_FORWARD_GREEDY_K or n_feats > MAX_FORWARD_GREEDY_FEATURES:
             raise ValueError(
-                f"forward_greedy is O(K × n_features) and would require ~{max_k * n_feats} "
-                f"model fits per split. Limits: K≤{MAX_FORWARD_GREEDY_K}, n_features≤{MAX_FORWARD_GREEDY_FEATURES}. "
+                f"forward_greedy is O(k × n_features) and would require ~{max_k * n_feats} "
+                f"model fits per split. Limits: k≤{MAX_FORWARD_GREEDY_K}, n_features≤{MAX_FORWARD_GREEDY_FEATURES}. "
                 f"Use algorithm='forward' (fast heuristic) or 'permutation' (loss-change RFE) instead, "
-                f"or reduce K/prefilter to fewer features."
+                f"or reduce k/prefilter to fewer features."
             )
 
     if verbose:
-        print(f"  K values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
+        print(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
         print(f"  Algorithm: {algorithm}")
 
     # Setup cross-validation splitter
@@ -1461,7 +1464,7 @@ def catboost_select(
         fold_text = [f for f in text_feat if f in features]
 
         # Adjust counts to this fold's feature count
-        fold_counts = [min(k, len(features)) for k in counts]
+        fold_counts = [min(kk, len(features)) for kk in counts]
         fold_counts = sorted(set(fold_counts), reverse=True)
 
         # Select algorithm
@@ -1477,11 +1480,11 @@ def catboost_select(
                 early_stopping_rounds=train_early_stopping_rounds,
             )
             # Build features_by_k from ranked list
-            feats = {k: selected_feats[:k] for k in fold_counts if k <= len(selected_feats)}
+            feats = {kk: selected_feats[:kk] for kk in fold_counts if kk <= len(selected_feats)}
 
         elif algorithm == 'forward_greedy':
             # True greedy forward selection (expensive)
-            max_k = max(fold_counts) if fold_counts else K or len(features)
+            max_k = max(fold_counts) if fold_counts else k_req or len(features)
             scores, selected_feats = _forward_select_greedy_single_split(
                 X_train, y_train, X_val, y_val, features, max_k,
                 task=task, model_params=model_params,
@@ -1491,7 +1494,7 @@ def catboost_select(
                 early_stopping_rounds=train_early_stopping_rounds,
             )
             # Build features_by_k from greedy selection order
-            feats = {k: selected_feats[:k] for k in fold_counts if k <= len(selected_feats)}
+            feats = {kk: selected_feats[:kk] for kk in fold_counts if kk <= len(selected_feats)}
 
         else:
             # RFE-based selection (shap, loss-change, prediction)
@@ -1505,36 +1508,36 @@ def catboost_select(
                 train_early_stopping_rounds=train_early_stopping_rounds,
             )
 
-        for k, score in scores.items():
-            all_scores[k].append(score)
-        for k, feat_list in feats.items():
-            all_features_by_k[k].append(feat_list)
+        for kk, score in scores.items():
+            all_scores[kk].append(score)
+        for kk, feat_list in feats.items():
+            all_features_by_k[kk].append(feat_list)
 
         if verbose:
             if scores:
                 best_k_fold, best_score_fold = best_score_from_dict(scores, resolved_hib)
-                print(f"best K={best_k_fold}, score={best_score_fold:.4f}")
+                print(f"best k={best_k_fold}, score={best_score_fold:.4f}")
             else:
                 print("no valid scores")
 
     # Aggregate scores across splits
-    scores_mean = {k: np.mean(v) for k, v in all_scores.items()}
-    scores_std = {k: np.std(v) for k, v in all_scores.items()}
+    scores_mean = {kk: np.mean(v) for kk, v in all_scores.items()}
+    scores_std = {kk: np.std(v) for kk, v in all_scores.items()}
 
     if not scores_mean:
         raise RuntimeError("No valid scores computed. Check your data and parameters.")
 
-    # Find best K with proper early stopping
-    # Start from FIRST K (largest), update as we find improvements
+    # Find best k with proper early stopping
+    # Start from FIRST k (largest), update as we find improvements
     sorted_counts = sorted(all_scores.keys(), reverse=True)  # Largest to smallest
 
-    # Initialize with first K, not global best (fixes broken early stopping)
+    # Initialize with first k, not global best (fixes broken early stopping)
     best_k = sorted_counts[0]
     best_score = scores_mean[best_k]
     no_improve_count = 0
 
-    for k in sorted_counts[1:]:  # Skip first, we already used it
-        score = scores_mean[k]
+    for kk in sorted_counts[1:]:  # Skip first, we already used it
+        score = scores_mean[kk]
 
         # Check if this is better than current best
         if resolved_hib:
@@ -1546,35 +1549,35 @@ def catboost_select(
 
         if is_better and rel_improvement > tolerance:
             best_score = score
-            best_k = k
+            best_k = kk
             no_improve_count = 0
         else:
             no_improve_count += 1
 
         if no_improve_count >= selection_patience:
             if verbose:
-                print(f"  Early stopping at K={k}")
+                print(f"  Early stopping at k={kk}")
             break
 
-    # Determine target_k from EVALUATED keys (handles prefilter_k < K case)
+    # Determine target_k from EVALUATED keys (handles prefilter_k < k case)
     max_eval_k = max(all_scores.keys()) if all_scores else 0
 
-    if K is not None:
-        if K > max_eval_k:
+    if k_req is not None:
+        if k_req > max_eval_k:
             warnings.warn(
-                f"K={K} exceeds max evaluated feature count ({max_eval_k}) after "
-                f"prefiltering/fit failures; using K={max_eval_k} instead."
+                f"k={k_req} exceeds max evaluated feature count ({max_eval_k}) after "
+                f"prefiltering/fit failures; using k={max_eval_k} instead."
             )
             target_k = max_eval_k
         else:
-            # Choose closest evaluated K <= requested K
-            valid_ks = [k for k in all_scores.keys() if k <= K]
+            # Choose closest evaluated k <= requested k
+            valid_ks = [kk for kk in all_scores.keys() if kk <= k_req]
             target_k = max(valid_ks) if valid_ks else max_eval_k
     else:
         target_k = best_k
 
     # Get final features using aggregation with rank tie-breaking
-    # GUARANTEE: When K is specified, ALWAYS return exactly target_k features
+    # GUARANTEE: When k is specified, ALWAYS return exactly target_k features
     if use_stability and target_k in all_features_by_k:
         # Stability selection: aggregate with frequency + rank
         ordered_all, stability_scores = _aggregate_feature_lists(
@@ -1584,8 +1587,8 @@ def catboost_select(
         # Apply threshold, but ensure we return exactly target_k if specified
         stable_set = set(stability_scores[stability_scores >= stability_threshold].index)
 
-        if K is not None:
-            # GUARANTEE exactly target_k features when K is specified
+        if k_req is not None:
+            # GUARANTEE exactly target_k features when k is specified
             # Take stable features first, then fill from ordered list
             selected_features = [f for f in ordered_all if f in stable_set]
             if len(selected_features) < target_k:
@@ -1597,7 +1600,7 @@ def catboost_select(
                         break
             selected_features = selected_features[:target_k]
         else:
-            # No fixed K: return stable features or fallback to top by frequency
+            # No fixed k: return stable features or fallback to top by frequency
             stable_features = [f for f in ordered_all if f in stable_set]
             selected_features = stable_features if stable_features else ordered_all[:target_k]
     else:
@@ -1612,7 +1615,7 @@ def catboost_select(
             selected_features = all_features[:target_k]
 
     # Final fallback: if selected_features < target_k (edge case from failed splits)
-    if K is not None and len(selected_features) < target_k:
+    if k_req is not None and len(selected_features) < target_k:
         fill_from = prefilter_features_first or all_features
         for f in fill_from:
             if f not in selected_features:
@@ -1620,12 +1623,12 @@ def catboost_select(
             if len(selected_features) >= target_k:
                 break
 
-    # Build features_by_k using aggregation for each K
+    # Build features_by_k using aggregation for each k
     features_by_k = {}
-    for k, feat_lists in all_features_by_k.items():
+    for kk, feat_lists in all_features_by_k.items():
         if feat_lists:
-            agg_feats, _ = _aggregate_feature_lists(feat_lists, k=k)
-            features_by_k[k] = agg_feats
+            agg_feats, _ = _aggregate_feature_lists(feat_lists, k=kk)
+            features_by_k[kk] = agg_feats
 
     # Train final model on FULL DATA for importance computation
     # This gives more stable importances than aggregating per-split importances
@@ -1651,7 +1654,7 @@ def catboost_select(
         feature_importances = pd.Series(dtype=float)
 
     if verbose:
-        print(f"Selected {len(selected_features)} features (best K={target_k}, score={scores_mean.get(target_k, best_score):.4f})")
+        print(f"Selected {len(selected_features)} features (best k={target_k}, score={scores_mean.get(target_k, best_score):.4f})")
 
     return CatBoostSelectionResult(
         selected_features=selected_features,
@@ -1675,7 +1678,7 @@ def catboost_select(
 def catboost_regression(
     X: pd.DataFrame,
     y: pd.Series,
-    K: int,
+    k: int,
     cv: Optional[Any] = None,
     n_splits: int = 3,
     prefilter_k: Optional[int] = 200,
@@ -1702,14 +1705,14 @@ def catboost_regression(
         Feature matrix.
     y : Series
         Continuous target.
-    K : int
+    k : int
         Number of features to select.
     cv : sklearn splitter, optional
         Custom CV splitter (e.g., TimeSeriesSplit, GroupKFold).
     n_splits : int, default=3
         Number of CV splits (ignored if cv provided).
     prefilter_k : int, optional, default=200
-        Pre-filter to top K features first (inside CV). Set None to disable.
+        Pre-filter to top k features first (inside CV). Set None to disable.
     prefilter_method : str, default='catboost'
         Pre-filter method: 'catboost' (fast), 'cefsplus', 'mrmr', 'none'.
     n_estimators : int, default=500
@@ -1746,13 +1749,13 @@ def catboost_regression(
     --------
     # Time series data
     from sklearn.model_selection import TimeSeriesSplit
-    selected = catboost_regression(X, y, K=20, cv=TimeSeriesSplit(n_splits=5))
+    selected = catboost_regression(X, y, k=20, cv=TimeSeriesSplit(n_splits=5))
 
     # Fast forward selection
-    selected = catboost_regression(X, y, K=20, algorithm='forward')
+    selected = catboost_regression(X, y, k=20, algorithm='forward')
     """
     result = catboost_select(
-        X, y, K=K, task='regression',
+        X, y, k=k, task='regression',
         cv=cv,
         n_splits=n_splits,
         prefilter_k=prefilter_k,
@@ -1774,7 +1777,7 @@ def catboost_regression(
 def catboost_classif(
     X: pd.DataFrame,
     y: pd.Series,
-    K: int,
+    k: int,
     cv: Optional[Any] = None,
     n_splits: int = 3,
     prefilter_k: Optional[int] = 200,
@@ -1801,14 +1804,14 @@ def catboost_classif(
         Feature matrix.
     y : Series
         Categorical target.
-    K : int
+    k : int
         Number of features to select.
     cv : sklearn splitter, optional
         Custom CV splitter (e.g., TimeSeriesSplit, GroupKFold).
     n_splits : int, default=3
         Number of CV splits (ignored if cv provided).
     prefilter_k : int, optional, default=200
-        Pre-filter to top K features first (inside CV). Set None to disable.
+        Pre-filter to top k features first (inside CV). Set None to disable.
     prefilter_method : str, default='catboost'
         Pre-filter method: 'catboost' (fast), 'mrmr', 'none'.
     n_estimators : int, default=500
@@ -1842,7 +1845,7 @@ def catboost_classif(
         Selected feature names.
     """
     result = catboost_select(
-        X, y, K=K, task='classification',
+        X, y, k=k, task='classification',
         cv=cv,
         n_splits=n_splits,
         prefilter_k=prefilter_k,

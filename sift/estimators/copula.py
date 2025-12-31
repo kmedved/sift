@@ -44,6 +44,8 @@ def build_cache(
             )
     X_arr = to_numpy(X, dtype=np.float64)
     n, p = X_arr.shape
+    if feature_names is None:
+        feature_names = [f"x{i}" for i in range(p)]
 
     rng = np.random.default_rng(random_state)
     if subsample is not None and n > subsample:
@@ -63,6 +65,8 @@ def build_cache(
     valid_mask = stds > min_std
     valid_cols = np.where(valid_mask)[0]
     Xs = Xs[:, valid_mask]
+    if Xs.shape[1] == 0:
+        raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
 
     Z = rank_gauss_2d(Xs)
 
@@ -81,16 +85,21 @@ def rank_gauss_1d(x: np.ndarray) -> np.ndarray:
     """Rank-based Gaussian transform for 1D array."""
     mask = np.isfinite(x)
     m = mask.sum()
-    if m == 0:
+    if m <= 1:
         return np.zeros_like(x, dtype=np.float32)
 
     ranks = rankdata(x[mask], method="average")
     u = ranks / (m + 1.0)
-    z = ndtri(u)
-    z = (z - z.mean()) / (z.std() + 1e-12)
+    z = ndtri(u).astype(np.float64)
+    z -= z.mean()
+    std = z.std(ddof=1)
+    if std < 1e-12:
+        z[:] = 0.0
+    else:
+        z /= std
 
     out = np.zeros_like(x, dtype=np.float32)
-    out[mask] = z
+    out[mask] = z.astype(np.float32)
     return out
 
 
