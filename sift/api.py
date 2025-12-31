@@ -19,6 +19,7 @@ from sift._preprocess import (
     extract_feature_names,
     resolve_jmi_estimator,
     subsample_xy,
+    to_numpy,
     validate_inputs,
 )
 from sift.estimators import relevance as rel_est
@@ -394,6 +395,12 @@ def select_cefsplus(
         cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
     if cat_features and cat_encoding != "none":
         X = encode_categoricals(X, y, cat_features, cat_encoding)
+    y_arr = to_numpy(y, dtype=np.float32).ravel()
+    n_rows = X.shape[0] if hasattr(X, "shape") else len(X)
+    if len(y_arr) != n_rows:
+        raise ValueError(f"X has {n_rows} rows but y has {len(y_arr)}")
+    if not np.isfinite(y_arr).all():
+        raise ValueError("Non-finite values in y are not allowed for regression.")
     if verbose:
         print(f"CEFS+: selecting {k} features (top_m={top_m}, corr_prune={corr_prune})")
     cache = build_cache(X, subsample=subsample, random_state=random_state)
