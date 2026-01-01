@@ -18,6 +18,108 @@ from sift.estimators.copula import (
 )
 
 
+def _gaussian_mrmr_select(
+    R: np.ndarray,
+    rel: np.ndarray,
+    k: int,
+    use_quotient: bool,
+    floor: float = 1e-6,
+) -> np.ndarray:
+    m = len(rel)
+    k = min(k, m)
+    selected = np.empty(k, dtype=np.int64)
+    is_sel = np.zeros(m, dtype=bool)
+    red_sum = np.zeros(m, dtype=np.float64)
+
+    j0 = int(np.argmax(rel))
+    selected[0] = j0
+    is_sel[j0] = True
+    count = 1
+
+    for t in range(1, k):
+        last = selected[t - 1]
+        red = gaussian_mi_from_corr(R[last])
+        mask = ~is_sel
+        red_sum[mask] += red[mask]
+
+        mean_red = red_sum / t
+        if use_quotient:
+            score = rel / np.maximum(mean_red, floor)
+        else:
+            score = rel - mean_red
+
+        score[is_sel] = -np.inf
+        j = int(np.argmax(score))
+        if not np.isfinite(score[j]):
+            break
+
+        selected[t] = j
+        is_sel[j] = True
+        count += 1
+
+    return selected[:count]
+
+
+def _gaussian_jmi_select(
+    R: np.ndarray,
+    r_y: np.ndarray,
+    rel: np.ndarray,
+    k: int,
+    use_min: bool,
+) -> np.ndarray:
+    m = len(r_y)
+    k = min(k, m)
+    selected = np.empty(k, dtype=np.int64)
+    is_sel = np.zeros(m, dtype=bool)
+    scores = np.full(m, np.inf, dtype=np.float64) if use_min else np.zeros(m, dtype=np.float64)
+
+    j0 = int(np.argmax(rel))
+    selected[0] = j0
+    is_sel[j0] = True
+    count = 1
+
+    # Scratch buffers to avoid per-iteration allocations.
+    r2 = np.empty(m, dtype=np.float64)
+    frac = np.empty(m, dtype=np.float64)
+    eps = 1e-8
+
+    for t in range(1, k):
+        last = selected[t - 1]
+        r_ys = float(r_y[last])
+
+        # Use row access (contiguous) rather than column access (strided).
+        r_fs = R[last]
+        denom = 1.0 - r_fs * r_fs
+        a = r_y - r_ys * r_fs
+        # Match the original scalar fallback exactly, but without np.where() eager
+        # evaluation (which can emit divide-by-zero warnings):
+        #   if denom < eps: r2 = r_ys^2
+        #   else:          r2 = r_ys^2 + a^2 / denom
+        r2.fill(r_ys * r_ys)
+        frac.fill(0.0)
+        np.divide(a * a, denom, out=frac, where=denom >= eps)
+        r2 += frac
+        np.clip(r2, 0.0, 0.99999, out=r2)
+        mi = -0.5 * np.log(1.0 - r2)
+
+        mask = ~is_sel
+        if use_min:
+            scores[mask] = np.minimum(scores[mask], mi[mask])
+        else:
+            scores[mask] += mi[mask]
+
+        scores[is_sel] = -np.inf
+        j = int(np.argmax(scores))
+        if not np.isfinite(scores[j]):
+            break
+
+        selected[t] = j
+        is_sel[j] = True
+        count += 1
+
+    return selected[:count]
+
+
 @njit(cache=True)
 def cefsplus_loop(
     R: np.ndarray,
@@ -188,7 +290,6 @@ def select_cached(
 ) -> List[str]:
     """Select features using pre-built cache."""
     from sift._preprocess import to_numpy
-    from sift.selection.greedy import jmi_loop, mrmr_loop
 
     y_arr = to_numpy(y, dtype=np.float32).ravel()
     ys = y_arr[cache.row_idx]
@@ -200,6 +301,7 @@ def select_cached(
     p_valid = len(r)
     if top_m is None:
         top_m = max(5 * k, 250)
+    top_m = max(int(top_m), int(k))
     top_m = min(top_m, p_valid)
 
     if top_m < p_valid:
@@ -212,7 +314,7 @@ def select_cached(
 
     keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)
     cand = cand[keep]
-    R_cand = R_cand[np.ix_(keep, keep)]
+    R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)])
     r_cand = r[cand].astype(np.float64)
     rel_cand = rel[cand].astype(np.float64)
 
@@ -221,28 +323,20 @@ def select_cached(
     if method == "cefsplus":
         sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
     elif method in ("mrmr_quot", "mrmr_diff"):
-        red_mi = gaussian_mi_from_corr(R_cand)
-        np.fill_diagonal(red_mi, 0.0)
-        use_quot = method == "mrmr_quot"
-        sel_local = mrmr_loop(rel_cand, np.abs(red_mi), k_actual, use_quotient=use_quot)
+        sel_local = _gaussian_mrmr_select(
+            R_cand,
+            rel_cand,
+            k_actual,
+            use_quotient=method == "mrmr_quot",
+        )
     elif method in ("jmi", "jmim"):
-        joint_mi = np.empty_like(R_cand)
-        for i in range(len(cand)):
-            for j in range(len(cand)):
-                r_fi_y = r_cand[i]
-                r_fj_y = r_cand[j]
-                r_fi_fj = R_cand[i, j]
-                denom = 1.0 - r_fi_fj**2
-                if denom < 1e-8:
-                    r2 = r_fj_y**2
-                else:
-                    a = r_fi_y - r_fj_y * r_fi_fj
-                    r2 = r_fj_y**2 + a**2 / denom
-                r2 = min(max(r2, 0.0), 0.99999)
-                joint_mi[i, j] = -0.5 * np.log(1.0 - r2)
-
-        use_min = method == "jmim"
-        sel_local = jmi_loop(rel_cand, joint_mi, k_actual, use_min=use_min)
+        sel_local = _gaussian_jmi_select(
+            R_cand,
+            r_cand,
+            rel_cand,
+            k_actual,
+            use_min=method == "jmim",
+        )
     else:
         raise ValueError(f"Unknown method: {method}")
 

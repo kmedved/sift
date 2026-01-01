@@ -1,5 +1,5 @@
 """Selection algorithms."""
 
-from sift.selection import cefsplus, greedy, jmi, mrmr
+from sift.selection import cefsplus, loops
 
-__all__ = ["cefsplus", "greedy", "jmi", "mrmr"]
+__all__ = ["cefsplus", "loops"]

@@ -16,17 +16,51 @@ from sift._preprocess import (
     Task,
     check_regression_only,
     encode_categoricals,
-    extract_feature_names,
     resolve_jmi_estimator,
     subsample_xy,
-    to_numpy,
     validate_inputs,
 )
 from sift.estimators import relevance as rel_est
 from sift.estimators.copula import FeatureCache, build_cache
 from sift.selection.cefsplus import select_cached
-from sift.selection.jmi import jmi_select
-from sift.selection.mrmr import mrmr_select
+from sift.selection.loops import jmi_select, mrmr_select
+
+
+def _default_top_m(top_m: Optional[int], k: int) -> int:
+    tm = max(5 * k, 250) if top_m is None else int(top_m)
+    # Ensure we can still return k features when a user passes top_m < k.
+    return max(tm, int(k))
+
+
+def _prepare_xy_classic(
+    X,
+    y,
+    *,
+    task: Task,
+    cat_features: Optional[List[str]],
+    cat_encoding: CatEncoding,
+    subsample: Optional[int],
+    random_state: int,
+):
+    """
+    Shared preparation for 'classic' selectors:
+    - infer cat_features for DataFrames
+    - optional categorical encoding
+    - validate_inputs + subsample_xy
+    Returns: (X_arr, y_arr, feature_names)
+    """
+    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
+        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
+
+    if isinstance(X, pd.DataFrame) and cat_features is None:
+        cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+
+    if cat_features and cat_encoding != "none":
+        X = encode_categoricals(X, y, cat_features, cat_encoding)
+
+    X_arr, y_arr, feature_names = validate_inputs(X, y, task)
+    X_arr, y_arr = subsample_xy(X_arr, y_arr, subsample, random_state)
+    return X_arr, y_arr, feature_names
 
 
 def select_mrmr(
@@ -120,19 +154,15 @@ def _mrmr_classic(
     verbose,
 ):
     """Classic mRMR implementation."""
-    feature_names = extract_feature_names(X)
-
-    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
-        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
-
-    if isinstance(X, pd.DataFrame) and cat_features is None:
-        cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
-
-    if cat_features and cat_encoding != "none":
-        X = encode_categoricals(X, y, cat_features, cat_encoding)
-
-    X_arr, y_arr, feature_names = validate_inputs(X, y, task)
-    X_arr, y_arr = subsample_xy(X_arr, y_arr, subsample, random_state)
+    X_arr, y_arr, feature_names = _prepare_xy_classic(
+        X,
+        y,
+        task=task,
+        cat_features=cat_features,
+        cat_encoding=cat_encoding,
+        subsample=subsample,
+        random_state=random_state,
+    )
 
     if task == "regression":
         rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
@@ -151,8 +181,7 @@ def _mrmr_classic(
 
     rel = rel_funcs[relevance_method](X_arr, y_arr)
 
-    if top_m is None:
-        top_m = max(5 * k, 250)
+    top_m = _default_top_m(top_m, k)
 
     if verbose:
         print(f"mRMR classic: selecting {k} features from {X_arr.shape[1]} (top_m={top_m})")
@@ -316,19 +345,15 @@ def _jmi_classic(
     verbose,
 ):
     """Classic JMI/JMIM implementation."""
-    feature_names = extract_feature_names(X)
-
-    if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
-        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
-
-    if isinstance(X, pd.DataFrame) and cat_features is None:
-        cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
-
-    if cat_features and cat_encoding != "none":
-        X = encode_categoricals(X, y, cat_features, cat_encoding)
-
-    X_arr, y_arr, feature_names = validate_inputs(X, y, task)
-    X_arr, y_arr = subsample_xy(X_arr, y_arr, subsample, random_state)
+    X_arr, y_arr, feature_names = _prepare_xy_classic(
+        X,
+        y,
+        task=task,
+        cat_features=cat_features,
+        cat_encoding=cat_encoding,
+        subsample=subsample,
+        random_state=random_state,
+    )
 
     if task == "regression":
         rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
@@ -350,8 +375,7 @@ def _jmi_classic(
     y_kind = "discrete" if task == "classification" else "continuous"
     aggregation = "min" if use_min else "sum"
 
-    if top_m is None:
-        top_m = max(5 * k, 250)
+    top_m = _default_top_m(top_m, k)
 
     if verbose:
         method = "JMIM" if use_min else "JMI"
@@ -395,12 +419,15 @@ def select_cefsplus(
         cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
     if cat_features and cat_encoding != "none":
         X = encode_categoricals(X, y, cat_features, cat_encoding)
+    from sift._preprocess import to_numpy
+
     y_arr = to_numpy(y, dtype=np.float32).ravel()
     n_rows = X.shape[0] if hasattr(X, "shape") else len(X)
     if len(y_arr) != n_rows:
         raise ValueError(f"X has {n_rows} rows but y has {len(y_arr)}")
     if not np.isfinite(y_arr).all():
         raise ValueError("Non-finite values in y are not allowed for regression.")
+    top_m = _default_top_m(top_m, k)
     if verbose:
         print(f"CEFS+: selecting {k} features (top_m={top_m}, corr_prune={corr_prune})")
     cache = build_cache(X, subsample=subsample, random_state=random_state)
