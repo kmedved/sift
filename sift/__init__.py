@@ -9,6 +9,7 @@ from sift.api import (
     select_jmim,
     select_mrmr,
 )
+from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boruta_shap
 from sift.importance import permutation_importance
 from sift.sampling import SmartSamplerConfig, cross_section_config, panel_config, smart_sample
 from sift.stability import StabilitySelector, stability_classif, stability_regression
@@ -31,6 +32,10 @@ __all__ = [
     "select_jmi",
     "select_jmim",
     "select_mrmr",
+    "BorutaSelector",
+    "BorutaResult",
+    "select_boruta",
+    "select_boruta_shap",
     "permutation_importance",
     "SmartSamplerConfig",
     "smart_sample",

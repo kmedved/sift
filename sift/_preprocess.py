@@ -103,6 +103,53 @@ def extract_feature_names(X) -> Optional[List[str]]:
 # --- Validation ---
 
 
+def ensure_weights(
+    w: np.ndarray | None,
+    n: int,
+    *,
+    normalize_sum_to_n: bool = True,
+) -> np.ndarray:
+    """
+    Validate and normalize sample weights.
+
+    Parameters
+    ----------
+    w : sample weights or None
+    n : expected length
+    normalize_sum_to_n : if True, scale weights so sum equals n
+
+    Returns
+    -------
+    Validated weight array of shape (n,)
+
+    Raises
+    ------
+    ValueError if weights are invalid
+    """
+    if w is None:
+        return np.ones(n, dtype=np.float64)
+
+    w = np.asarray(w, dtype=np.float64)
+    if w.ndim != 1:
+        w = w.reshape(-1)
+
+    if w.shape[0] != n:
+        raise ValueError(f"sample_weight has {w.shape[0]} elements but expected {n}")
+    if not np.isfinite(w).all():
+        raise ValueError("sample_weight must be finite")
+    if (w < 0).any():
+        raise ValueError("sample_weight must be non-negative")
+
+    w_sum = float(w.sum())
+    if w_sum <= 0:
+        raise ValueError("sample_weight must sum to > 0")
+
+    if normalize_sum_to_n:
+        w = w * (n / w_sum)
+
+    return w
+
+
 def validate_inputs(
     X, y, task: str, impute: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
