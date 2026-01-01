@@ -61,8 +61,6 @@ def _prepare_xy_classic(
 
     X_arr, y_arr, feature_names = validate_inputs(X, y, task)
     w = rel_est._ensure_weights(sample_weight, X_arr.shape[0])
-    if w.shape[0] != X_arr.shape[0]:
-        raise ValueError(f"sample_weight has {w.shape[0]} rows but X has {X_arr.shape[0]}")
     X_arr, y_arr, w = subsample_xy(X_arr, y_arr, subsample, random_state, sample_weight=w)
     return X_arr, y_arr, w, feature_names
 

@@ -53,8 +53,7 @@ def build_cache(
 
     if subsample is not None and n > subsample:
         rng = np.random.default_rng(random_state)
-        probs = w / w.sum()
-        row_idx = rng.choice(n, size=subsample, replace=False, p=probs)
+        row_idx = rng.choice(n, size=subsample, replace=False)
     else:
         row_idx = np.arange(n)
 

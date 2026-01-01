@@ -58,12 +58,13 @@ def permutation_importance(
     -------
     DataFrame with: feature, importance_mean, importance_std, baseline_score
     """
-    rng = np.random.default_rng(random_state)
     features = list(X.columns)
     X_arr = X.values.copy()
     n = len(y)
 
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, 2**31, size=(len(features), n_repeats))
 
     if permute_method == "auto":
         if groups is not None and time is not None:
@@ -86,8 +87,8 @@ def permutation_importance(
         col = X_arr[:, feat_idx].copy()
         drops = []
 
-        for _ in range(n_repeats):
-            seed = rng.integers(0, 2**31)
+        for rep in range(n_repeats):
+            seed = seeds[feat_idx, rep]
             permuted = _permute(col, group_info, permute_method, block_size, seed)
 
             X_perm = X_arr.copy()

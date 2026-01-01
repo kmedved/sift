@@ -9,7 +9,13 @@ from numba import njit, prange
 def _ensure_weights(w: np.ndarray | None, n: int) -> np.ndarray:
     if w is None:
         return np.ones(n, dtype=np.float64)
-    return np.asarray(w, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    if w.shape[0] != n:
+        raise ValueError(f"sample_weight has {w.shape[0]} rows but expected {n}")
+    w_sum = w.sum()
+    if w_sum <= 0:
+        raise ValueError("sample_weight must sum to a positive value.")
+    return w * (n / w_sum)
 
 
 @njit(cache=True, parallel=True)
