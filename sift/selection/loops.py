@@ -166,11 +166,13 @@ def jmi_select(
     aggregation: Literal["sum", "min"] = "sum",
     top_m: Optional[int] = None,
     y_kind: Literal["discrete", "continuous"] = "continuous",
+    sample_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     """JMI/JMIM selection with incremental scoring."""
     from sift.estimators import joint_mi as jmi_est
 
     n, p = X.shape
+    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
 
     valid_mask = relevance > 0
     if not valid_mask.any():
@@ -193,12 +195,14 @@ def jmi_select(
     m = X_cand.shape[1]
     k = min(k, m)
 
-    mi_funcs = {
-        "binned": lambda s, c: jmi_est.binned_joint_mi(s, c, y, y_kind=y_kind),
-        "r2": lambda s, c: jmi_est.r2_joint_mi(s, c, y),
-        "ksg": lambda s, c: jmi_est.ksg_joint_mi(s, c, y),
-    }
-    mi_func = mi_funcs[mi_estimator]
+    if mi_estimator == "binned":
+        mi_func = lambda s, c: jmi_est.binned_joint_mi(s, c, y, w, y_kind=y_kind)
+    elif mi_estimator == "r2":
+        mi_func = lambda s, c: jmi_est.r2_joint_mi(s, c, y, w)
+    elif mi_estimator == "ksg":
+        mi_func = lambda s, c: jmi_est.ksg_joint_mi(s, c, y)
+    else:
+        raise ValueError(f"Unknown mi_estimator: {mi_estimator}")
 
     if aggregation == "sum":
         scores = np.zeros(m, dtype=np.float64)

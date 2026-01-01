@@ -404,6 +404,7 @@ def _jmi_classic(
         aggregation=aggregation,
         top_m=top_m,
         y_kind=y_kind,
+        sample_weight=w,
     )
 
     return [feature_names[i] for i in selected_idx]

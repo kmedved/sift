@@ -28,6 +28,7 @@ def binned_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
     y: np.ndarray,
+    w: np.ndarray,
     n_bins: int = 10,
     y_kind: Literal["discrete", "continuous"] = "continuous",
 ) -> np.ndarray:
@@ -59,9 +60,9 @@ def binned_joint_mi(
         fs_binned = f_binned * n_bins + s_binned
         fsy_binned = fs_binned * n_y_bins + y_binned
 
-        h_fs = _entropy_from_array(fs_binned)
-        h_y = _entropy_from_array(y_binned)
-        h_fsy = _entropy_from_array(fsy_binned)
+        h_fs = _weighted_entropy_from_array(fs_binned, w)
+        h_y = _weighted_entropy_from_array(y_binned, w)
+        h_fsy = _weighted_entropy_from_array(fsy_binned, w)
 
         scores[j] = max(0.0, h_fs + h_y - h_fsy)
 
@@ -73,30 +74,90 @@ def r2_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
     y: np.ndarray,
+    w: np.ndarray,
 ) -> np.ndarray:
     """
-    R²-based joint MI approximation.
+    Weighted R²-based joint MI approximation.
 
     For predicting y from (f, s), uses analytic R² formula:
     R² = r_ys² + (r_yf - r_ys * r_fs)² / (1 - r_fs²)
 
     Then: I(f, s; y) ≈ -0.5 * log(1 - R²)
+
+    Parameters
+    ----------
+    selected : ndarray of shape (n,)
+        Previously selected feature values.
+    candidates : ndarray of shape (n, p)
+        Candidate feature matrix.
+    y : ndarray of shape (n,)
+        Target values.
+    w : ndarray of shape (n,)
+        Sample weights (should be normalized to sum=n).
     """
     n, p = candidates.shape
 
-    y_s = (y - np.mean(y)) / (np.std(y) + 1e-12)
-    s_s = (selected - np.mean(selected)) / (np.std(selected) + 1e-12)
+    w_sum = 0.0
+    for i in range(n):
+        w_sum += w[i]
 
-    r_ys = np.sum(s_s * y_s) / n
+    y_mean = 0.0
+    for i in range(n):
+        y_mean += w[i] * y[i]
+    y_mean /= w_sum
+
+    y_var = 0.0
+    for i in range(n):
+        y_var += w[i] * (y[i] - y_mean) ** 2
+    y_var /= w_sum
+    y_std = np.sqrt(y_var) if y_var > 1e-12 else 1.0
+
+    y_s = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        y_s[i] = (y[i] - y_mean) / y_std
+
+    s_mean = 0.0
+    for i in range(n):
+        s_mean += w[i] * selected[i]
+    s_mean /= w_sum
+
+    s_var = 0.0
+    for i in range(n):
+        s_var += w[i] * (selected[i] - s_mean) ** 2
+    s_var /= w_sum
+    s_std = np.sqrt(s_var) if s_var > 1e-12 else 1.0
+
+    s_s = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        s_s[i] = (selected[i] - s_mean) / s_std
+
+    r_ys = 0.0
+    for i in range(n):
+        r_ys += w[i] * s_s[i] * y_s[i]
+    r_ys /= w_sum
 
     scores = np.empty(p, dtype=np.float64)
 
     for j in range(p):
-        f = candidates[:, j]
-        f_s = (f - np.mean(f)) / (np.std(f) + 1e-12)
+        f_mean = 0.0
+        for i in range(n):
+            f_mean += w[i] * candidates[i, j]
+        f_mean /= w_sum
 
-        r_yf = np.sum(f_s * y_s) / n
-        r_fs = np.sum(f_s * s_s) / n
+        f_var = 0.0
+        for i in range(n):
+            f_var += w[i] * (candidates[i, j] - f_mean) ** 2
+        f_var /= w_sum
+        f_std = np.sqrt(f_var) if f_var > 1e-12 else 1.0
+
+        r_yf = 0.0
+        r_fs = 0.0
+        for i in range(n):
+            f_s_i = (candidates[i, j] - f_mean) / f_std
+            r_yf += w[i] * f_s_i * y_s[i]
+            r_fs += w[i] * f_s_i * s_s[i]
+        r_yf /= w_sum
+        r_fs /= w_sum
 
         denom = 1.0 - r_fs * r_fs
         if denom < 1e-8:
@@ -117,7 +178,11 @@ def ksg_joint_mi(
     y: np.ndarray,
     k: int = 3,
 ) -> np.ndarray:
-    """KSG k-NN estimator for joint MI."""
+    """
+    KSG k-NN estimator for joint MI.
+
+    Note: This estimator does not support sample weights.
+    """
     n, p = candidates.shape
     scores = np.empty(p, dtype=np.float64)
 
@@ -172,6 +237,22 @@ def _entropy_from_array(x: np.ndarray) -> float:
     """Entropy from discrete array."""
     _, counts = np.unique(x, return_counts=True)
     return _entropy_from_counts(counts)
+
+
+def _weighted_entropy_from_array(x: np.ndarray, w: np.ndarray) -> float:
+    """Weighted entropy from discrete array."""
+    unique_vals = np.unique(x)
+    w_sum = w.sum()
+    if w_sum <= 0:
+        return 0.0
+
+    ent = 0.0
+    for val in unique_vals:
+        mask = x == val
+        p = w[mask].sum() / w_sum
+        if p > 1e-12:
+            ent -= p * np.log(p)
+    return ent
 
 
 def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, n: int) -> np.ndarray:
