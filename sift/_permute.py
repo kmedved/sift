@@ -50,7 +50,7 @@ def build_group_info(
     if time is None:
         order = np.argsort(inv, kind="mergesort")
     else:
-        order = np.lexsort((time, inv))
+        order = np.lexsort((np.arange(inv.size), time, inv))
 
     inv_sorted = inv[order]
     cuts = np.flatnonzero(np.diff(inv_sorted)) + 1

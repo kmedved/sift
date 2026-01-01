@@ -229,17 +229,17 @@ def _group_time_holdout_split(
     train_idx = []
     test_idx = []
 
-        for g in np.unique(groups):
-            idx = np.flatnonzero(groups == g)
-            idx = idx[np.argsort(time[idx], kind="mergesort")]
-            n = len(idx)
-            if n <= 1:
-                train_idx.append(idx)
-                continue
-            n_test = max(1, int(np.ceil(n * test_size)))
-            n_test = min(n_test, n - 1)
-            train_idx.append(idx[:-n_test])
-            test_idx.append(idx[-n_test:])
+    for g in np.unique(groups):
+        idx = np.flatnonzero(groups == g)
+        idx = idx[np.argsort(time[idx], kind="mergesort")]
+        n = len(idx)
+        if n <= 1:
+            train_idx.append(idx)
+            continue
+        n_test = max(1, int(np.ceil(n * test_size)))
+        n_test = min(n_test, n - 1)
+        train_idx.append(idx[:-n_test])
+        test_idx.append(idx[-n_test:])
 
     train = np.concatenate(train_idx) if train_idx else np.array([], dtype=np.int64)
     test = np.concatenate(test_idx) if test_idx else np.array([], dtype=np.int64)
@@ -478,6 +478,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 else:
                     y_for_encoder = y
                 X = encode_categoricals(X, y_for_encoder, cat_features, self.cat_encoding)
+                feature_names = extract_feature_names(X)
 
             non_numeric = X.select_dtypes(
                 include=["object", "category", "string"]

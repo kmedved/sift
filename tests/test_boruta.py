@@ -332,6 +332,7 @@ class TestBorutaCategoricals:
 
     def test_cat_encoding_runs(self):
         """Categorical columns should be encodable for Boruta."""
+        pytest.importorskip("category_encoders")
         rng = np.random.default_rng(0)
         n = 200
         X = pd.DataFrame(
