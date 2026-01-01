@@ -41,6 +41,7 @@ def _prepare_xy_classic(
     cat_encoding: CatEncoding,
     subsample: Optional[int],
     random_state: int,
+    sample_weight: Optional[np.ndarray],
 ):
     """
     Shared preparation for 'classic' selectors:
@@ -59,8 +60,9 @@ def _prepare_xy_classic(
         X = encode_categoricals(X, y, cat_features, cat_encoding)
 
     X_arr, y_arr, feature_names = validate_inputs(X, y, task)
-    X_arr, y_arr = subsample_xy(X_arr, y_arr, subsample, random_state)
-    return X_arr, y_arr, feature_names
+    w = rel_est._ensure_weights(sample_weight, X_arr.shape[0])
+    X_arr, y_arr, w = subsample_xy(X_arr, y_arr, subsample, random_state, sample_weight=w)
+    return X_arr, y_arr, w, feature_names
 
 
 def select_mrmr(
@@ -69,6 +71,7 @@ def select_mrmr(
     k: int,
     *,
     task: Task,
+    sample_weight: np.ndarray | None = None,
     relevance: RelevanceMethod = "f",
     estimator: EstimatorMRMR = "classic",
     formula: Formula = "quotient",
@@ -118,6 +121,7 @@ def select_mrmr(
             top_m,
             cat_features,
             cat_encoding,
+            sample_weight,
             subsample,
             random_state,
             verbose,
@@ -133,6 +137,7 @@ def select_mrmr(
         top_m,
         cat_features,
         cat_encoding,
+        sample_weight,
         subsample,
         random_state,
         verbose,
@@ -149,12 +154,13 @@ def _mrmr_classic(
     top_m,
     cat_features,
     cat_encoding,
+    sample_weight,
     subsample,
     random_state,
     verbose,
 ):
     """Classic mRMR implementation."""
-    X_arr, y_arr, feature_names = _prepare_xy_classic(
+    X_arr, y_arr, w, feature_names = _prepare_xy_classic(
         X,
         y,
         task=task,
@@ -162,6 +168,7 @@ def _mrmr_classic(
         cat_encoding=cat_encoding,
         subsample=subsample,
         random_state=random_state,
+        sample_weight=sample_weight,
     )
 
     if task == "regression":
@@ -179,14 +186,14 @@ def _mrmr_classic(
             f"Valid options: {sorted(rel_funcs.keys())}"
         )
 
-    rel = rel_funcs[relevance_method](X_arr, y_arr)
+    rel = rel_funcs[relevance_method](X_arr, y_arr, w)
 
     top_m = _default_top_m(top_m, k)
 
     if verbose:
         print(f"mRMR classic: selecting {k} features from {X_arr.shape[1]} (top_m={top_m})")
 
-    selected_idx = mrmr_select(X_arr, rel, k, formula=formula, top_m=top_m)
+    selected_idx = mrmr_select(X_arr, rel, k, formula=formula, top_m=top_m, sample_weight=w)
 
     return [feature_names[i] for i in selected_idx]
 
@@ -199,6 +206,7 @@ def _mrmr_gaussian(
     top_m,
     cat_features,
     cat_encoding,
+    sample_weight,
     subsample,
     random_state,
     verbose,
@@ -214,7 +222,7 @@ def _mrmr_gaussian(
         X = encode_categoricals(X, y, cat_features, cat_encoding)
     if verbose:
         print(f"mRMR gaussian: selecting {k} features (top_m={top_m})")
-    cache = build_cache(X, subsample=subsample, random_state=random_state)
+    cache = build_cache(X, sample_weight=sample_weight, subsample=subsample, random_state=random_state)
     method = "mrmr_quot" if formula == "quotient" else "mrmr_diff"
     return select_cached(cache, y, k, method=method, top_m=top_m)
 
@@ -225,6 +233,7 @@ def select_jmi(
     k: int,
     *,
     task: Task,
+    sample_weight: np.ndarray | None = None,
     estimator: EstimatorJMI = "auto",
     relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None,
@@ -254,7 +263,7 @@ def select_jmi(
             X = encode_categoricals(X, y, cat_features, cat_encoding)
         if verbose:
             print(f"JMI gaussian: selecting {k} features (top_m={top_m})")
-        cache = build_cache(X, subsample=subsample, random_state=random_state)
+        cache = build_cache(X, sample_weight=sample_weight, subsample=subsample, random_state=random_state)
         return select_cached(cache, y, k, method="jmi", top_m=top_m)
 
     return _jmi_classic(
@@ -268,6 +277,7 @@ def select_jmi(
         top_m,
         cat_features,
         cat_encoding,
+        sample_weight,
         subsample,
         random_state,
         verbose,
@@ -280,6 +290,7 @@ def select_jmim(
     k: int,
     *,
     task: Task,
+    sample_weight: np.ndarray | None = None,
     estimator: EstimatorJMI = "auto",
     relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None,
@@ -309,7 +320,7 @@ def select_jmim(
             X = encode_categoricals(X, y, cat_features, cat_encoding)
         if verbose:
             print(f"JMIM gaussian: selecting {k} features (top_m={top_m})")
-        cache = build_cache(X, subsample=subsample, random_state=random_state)
+        cache = build_cache(X, sample_weight=sample_weight, subsample=subsample, random_state=random_state)
         return select_cached(cache, y, k, method="jmim", top_m=top_m)
 
     return _jmi_classic(
@@ -323,6 +334,7 @@ def select_jmim(
         top_m,
         cat_features,
         cat_encoding,
+        sample_weight,
         subsample,
         random_state,
         verbose,
@@ -340,12 +352,13 @@ def _jmi_classic(
     top_m,
     cat_features,
     cat_encoding,
+    sample_weight,
     subsample,
     random_state,
     verbose,
 ):
     """Classic JMI/JMIM implementation."""
-    X_arr, y_arr, feature_names = _prepare_xy_classic(
+    X_arr, y_arr, w, feature_names = _prepare_xy_classic(
         X,
         y,
         task=task,
@@ -353,6 +366,7 @@ def _jmi_classic(
         cat_encoding=cat_encoding,
         subsample=subsample,
         random_state=random_state,
+        sample_weight=sample_weight,
     )
 
     if task == "regression":
@@ -370,7 +384,7 @@ def _jmi_classic(
             f"Valid options: {sorted(rel_funcs.keys())}"
         )
 
-    rel = rel_funcs[relevance_method](X_arr, y_arr)
+    rel = rel_funcs[relevance_method](X_arr, y_arr, w)
 
     y_kind = "discrete" if task == "classification" else "continuous"
     aggregation = "min" if use_min else "sum"
@@ -400,6 +414,7 @@ def select_cefsplus(
     y: Union[pd.Series, np.ndarray],
     k: int,
     *,
+    sample_weight: np.ndarray | None = None,
     top_m: Optional[int] = None,
     corr_prune: float = 0.95,
     cat_features: Optional[List[str]] = None,
@@ -430,7 +445,7 @@ def select_cefsplus(
     top_m = _default_top_m(top_m, k)
     if verbose:
         print(f"CEFS+: selecting {k} features (top_m={top_m}, corr_prune={corr_prune})")
-    cache = build_cache(X, subsample=subsample, random_state=random_state)
+    cache = build_cache(X, sample_weight=sample_weight, subsample=subsample, random_state=random_state)
     return select_cached(
         cache,
         y,

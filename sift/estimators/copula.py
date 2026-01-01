@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
 
 import numpy as np
 from numba import njit
 from scipy.special import ndtri
-from scipy.stats import rankdata
 
 
 @dataclass
@@ -16,15 +14,17 @@ class FeatureCache:
     """Cached feature data for multi-target selection."""
 
     Z: np.ndarray
-    Rxx: Optional[np.ndarray]
+    Rxx: np.ndarray | None
     valid_cols: np.ndarray
     row_idx: np.ndarray
-    feature_names: Optional[List[str]] = None
+    sample_weight: np.ndarray
+    feature_names: list[str] | None = None
 
 
 def build_cache(
     X,
-    subsample: Optional[int] = 50_000,
+    sample_weight: np.ndarray | None = None,
+    subsample: int | None = 50_000,
     random_state: int = 0,
     compute_Rxx: bool = False,
     min_std: float = 1e-12,
@@ -47,13 +47,18 @@ def build_cache(
     if feature_names is None:
         feature_names = [f"x{i}" for i in range(p)]
 
-    rng = np.random.default_rng(random_state)
+    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    if w.shape[0] != n:
+        raise ValueError(f"sample_weight has {w.shape[0]} rows but X has {n}")
+
     if subsample is not None and n > subsample:
+        rng = np.random.default_rng(random_state)
         row_idx = rng.choice(n, size=subsample, replace=False)
     else:
         row_idx = np.arange(n)
 
     Xs = X_arr[row_idx]
+    ws = w[row_idx]
 
     Xs = np.where(np.isfinite(Xs), Xs, np.nan)
     col_means = np.nanmean(Xs, axis=0)
@@ -68,72 +73,97 @@ def build_cache(
     if Xs.shape[1] == 0:
         raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
 
-    Z = rank_gauss_2d(Xs)
+    Z = weighted_rank_gauss_2d(Xs, ws)
 
-    Rxx = correlation_matrix_fast(Z) if compute_Rxx else None
+    Rxx = weighted_correlation_matrix(Z, ws) if compute_Rxx else None
 
     return FeatureCache(
         Z=Z.astype(np.float32),
         Rxx=Rxx.astype(np.float32) if Rxx is not None else None,
         valid_cols=valid_cols,
         row_idx=row_idx,
+        sample_weight=ws.astype(np.float32),
         feature_names=feature_names,
     )
 
 
-def rank_gauss_1d(x: np.ndarray) -> np.ndarray:
-    """Rank-based Gaussian transform for 1D array."""
+def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Weighted rank-based Gaussian transform."""
     mask = np.isfinite(x)
     m = mask.sum()
     if m <= 1:
         return np.zeros_like(x, dtype=np.float32)
 
-    ranks = rankdata(x[mask], method="average")
-    u = ranks / (m + 1.0)
-    z = ndtri(u).astype(np.float64)
-    z -= z.mean()
-    std = z.std(ddof=1)
-    if std < 1e-12:
-        z[:] = 0.0
-    else:
-        z /= std
+    x_valid = x[mask]
+    w_valid = w[mask]
 
+    order = np.argsort(x_valid)
+    w_sorted = w_valid[order]
+
+    cumsum = np.cumsum(w_sorted)
+    total = cumsum[-1]
+
+    ranks = np.empty_like(cumsum)
+    ranks[0] = 0.5 * w_sorted[0]
+    ranks[1:] = cumsum[:-1] + 0.5 * w_sorted[1:]
+
+    u = np.clip(ranks / total, 1e-6, 1 - 1e-6)
+    z = ndtri(u)
+
+    z_mean = np.dot(w_sorted, z) / total
+    z_centered = z - z_mean
+    z_var = np.dot(w_sorted, z_centered ** 2) / total
+    z_std = np.sqrt(z_var) if z_var > 1e-12 else 1.0
+    z_standardized = z_centered / z_std
+
+    inv_order = np.argsort(order)
     out = np.zeros_like(x, dtype=np.float32)
-    out[mask] = z.astype(np.float32)
+    out[mask] = z_standardized[inv_order].astype(np.float32)
     return out
 
 
-def rank_gauss_2d(X: np.ndarray) -> np.ndarray:
-    """Apply rank-Gaussian transform to each column."""
+def weighted_rank_gauss_2d(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = X.shape
     Z = np.empty((n, p), dtype=np.float32)
     for j in range(p):
-        Z[:, j] = rank_gauss_1d(X[:, j])
+        Z[:, j] = weighted_rank_gauss_1d(X[:, j], w)
     return Z
 
 
 @njit(cache=True)
-def correlation_matrix_fast(Z: np.ndarray) -> np.ndarray:
-    """Correlation matrix from standardized data."""
+def weighted_correlation_matrix(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = Z.shape
-    R = (Z.T @ Z) / max(n - 1, 1)
-    for i in range(p):
-        for j in range(p):
-            if R[i, j] > 0.999999:
-                R[i, j] = 0.999999
-            elif R[i, j] < -0.999999:
-                R[i, j] = -0.999999
-        R[i, i] = 1.0
+    w_sum = 0.0
+    for i in range(n):
+        w_sum += w[i]
+
+    R = np.empty((p, p), dtype=np.float64)
+    for j in range(p):
+        for k in range(j, p):
+            val = 0.0
+            for i in range(n):
+                val += w[i] * Z[i, j] * Z[i, k]
+            val /= w_sum
+            val = max(-0.999999, min(0.999999, val))
+            R[j, k] = val
+            R[k, j] = val
+        R[j, j] = 1.0
     return R
 
 
 @njit(cache=True)
-def corr_with_vector(Z: np.ndarray, zy: np.ndarray) -> np.ndarray:
-    """Correlation of each column of Z with vector zy."""
+def weighted_corr_with_vector(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = Z.shape
+    w_sum = 0.0
+    for i in range(n):
+        w_sum += w[i]
+
     r = np.empty(p, dtype=np.float32)
     for j in range(p):
-        r[j] = np.sum(Z[:, j] * zy) / max(n - 1, 1)
+        val = 0.0
+        for i in range(n):
+            val += w[i] * Z[i, j] * zy[i]
+        r[j] = val / w_sum
     return np.clip(r, -0.999999, 0.999999)
 
 

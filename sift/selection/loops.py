@@ -15,44 +15,43 @@ FLOOR = 1e-6
 # =============================================================================
 
 @njit(cache=True)
-def _standardize_columns(X: np.ndarray) -> np.ndarray:
-    """Standardize columns to zero mean, unit variance (sample std)."""
+def _standardize_columns_weighted(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = X.shape
-    if n < 2:
-        return np.zeros_like(X)
+    w_sum = 0.0
+    for i in range(n):
+        w_sum += w[i]
+
     Z = np.empty((n, p), dtype=np.float64)
     for j in range(p):
-        s = 0.0
+        mean = 0.0
         for i in range(n):
-            s += X[i, j]
-        mean = s / n
+            mean += w[i] * X[i, j]
+        mean /= w_sum
 
-        ss = 0.0
+        var = 0.0
         for i in range(n):
-            ss += (X[i, j] - mean) ** 2
-        std = np.sqrt(ss / (n - 1))
+            var += w[i] * (X[i, j] - mean) ** 2
+        var /= w_sum
+        std = np.sqrt(var) if var > 1e-12 else 1.0
 
-        if std < 1e-12:
-            for i in range(n):
-                Z[i, j] = 0.0
-        else:
-            for i in range(n):
-                Z[i, j] = (X[i, j] - mean) / std
+        for i in range(n):
+            Z[i, j] = (X[i, j] - mean) / std
     return Z
 
 
 @njit(cache=True)
-def _corr_with_last(Z: np.ndarray, last_idx: int, p: int) -> np.ndarray:
-    """Compute |correlation| of each column with column last_idx."""
+def _weighted_corr_with_last(Z: np.ndarray, last_idx: int, p: int, w: np.ndarray) -> np.ndarray:
     n = Z.shape[0]
+    w_sum = 0.0
+    for i in range(n):
+        w_sum += w[i]
+
     corrs = np.empty(p, dtype=np.float64)
-
     for j in range(p):
-        dot = 0.0
+        val = 0.0
         for i in range(n):
-            dot += Z[i, j] * Z[i, last_idx]
-        corrs[j] = np.abs(dot / (n - 1))
-
+            val += w[i] * Z[i, j] * Z[i, last_idx]
+        corrs[j] = np.abs(val / w_sum)
     return corrs
 
 
@@ -62,8 +61,9 @@ def mrmr_loop_incremental(
     relevance: np.ndarray,
     k: int,
     use_quotient: bool,
+    w: np.ndarray,
 ) -> np.ndarray:
-    """mRMR greedy selection with O(p) memory."""
+    """mRMR with weighted correlation for redundancy."""
     n, p = Z.shape
     k = min(k, p)
 
@@ -83,8 +83,8 @@ def mrmr_loop_incremental(
 
     for t in range(1, k):
         last = selected[t - 1]
+        new_red = _weighted_corr_with_last(Z, last, p, w)
 
-        new_red = _corr_with_last(Z, last, p)
         for j in range(p):
             if not is_selected[j]:
                 red_sum[j] += new_red[j]
@@ -97,7 +97,6 @@ def mrmr_loop_incremental(
                 continue
 
             mean_red = red_sum[j] / t
-
             if use_quotient:
                 score = relevance[j] / max(mean_red, FLOOR)
             else:
@@ -122,9 +121,11 @@ def mrmr_select(
     k: int,
     formula: str = "quotient",
     top_m: Optional[int] = None,
+    sample_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     """mRMR feature selection with incremental redundancy."""
     n, p = X.shape
+    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
 
     valid_mask = relevance > 0
     if not valid_mask.any():
@@ -144,10 +145,10 @@ def mrmr_select(
         rel_sub = rel_valid
         idx_map = valid_idx
 
-    Z = _standardize_columns(X_sub.astype(np.float64))
+    Z = _standardize_columns_weighted(X_sub.astype(np.float64), w)
     use_quot = formula == "quotient"
 
-    sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot)
+    sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot, w)
 
     return idx_map[sel_local]
 
