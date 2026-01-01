@@ -188,13 +188,16 @@ def subsample_xy(
     y: np.ndarray,
     subsample: Optional[int],
     random_state: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+    sample_weight: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Subsample to at most `subsample` rows."""
     if subsample is None or len(X) <= subsample:
-        return X, y
+        return X, y, sample_weight
     rng = np.random.default_rng(random_state)
     idx = rng.choice(len(X), size=subsample, replace=False)
-    return X[idx], y[idx]
+    if sample_weight is None:
+        return X[idx], y[idx], None
+    return X[idx], y[idx], sample_weight[idx]
 
 
 # --- Categorical encoding ---
