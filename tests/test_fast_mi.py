@@ -11,8 +11,9 @@ def test_r2_joint_mi_shape():
 
     selected = X[:, 0]
     candidates = X[:, 1:]
+    w = np.ones(n, dtype=np.float64)
 
-    scores = joint_mi.r2_joint_mi(selected, candidates, y)
+    scores = joint_mi.r2_joint_mi(selected, candidates, y, w)
 
     assert scores.shape == (p - 1,)
 
@@ -25,8 +26,9 @@ def test_binned_joint_mi_returns_nonnegative():
 
     selected = X[:, 0]
     candidates = X[:, 1:]
+    w = np.ones(n, dtype=np.float64)
 
-    scores = joint_mi.binned_joint_mi(selected, candidates, y, y_kind="discrete")
+    scores = joint_mi.binned_joint_mi(selected, candidates, y, w, y_kind="discrete")
 
     assert scores.shape == (p - 1,)
     assert (scores >= 0).all()
