@@ -49,5 +49,11 @@ setup(
             'catboost',
         ],
     },
+    python_requires=">=3.10",
+    classifiers=[
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+    ],
     zip_safe=False
 )
