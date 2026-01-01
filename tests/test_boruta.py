@@ -285,17 +285,11 @@ class TestBorutaOptions:
 
 
 class TestBorutaShap:
-    """Boruta-Shap tests (requires catboost or shap)."""
+    """Boruta-Shap tests (requires catboost)."""
 
-    @pytest.mark.skipif(
-        not any(
-            __import__("importlib").util.find_spec(pkg)
-            for pkg in ["catboost", "shap"]
-        ),
-        reason="catboost or shap required",
-    )
     def test_shap_backend(self):
         """select_boruta_shap should use SHAP importance."""
+        pytest.importorskip("catboost")
         rng = np.random.default_rng(42)
         n, p = 200, 6
         X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
