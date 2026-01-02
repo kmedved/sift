@@ -104,48 +104,43 @@ def extract_feature_names(X) -> Optional[List[str]]:
 
 
 def ensure_weights(
-    w: np.ndarray | None,
+    sample_weight: np.ndarray | None,
     n: int,
     *,
-    normalize_sum_to_n: bool = True,
+    normalize: bool = True,
 ) -> np.ndarray:
-    """
-    Validate and normalize sample weights.
+    """Validate and normalize sample weights.
 
     Parameters
     ----------
-    w : sample weights or None
-    n : expected length
-    normalize_sum_to_n : if True, scale weights so sum equals n
+    sample_weight : array-like or None
+        Sample weights. If None, returns uniform weights.
+    n : int
+        Expected number of samples.
+    normalize : bool
+        If True, normalize weights to mean=1.
 
     Returns
     -------
-    Validated weight array of shape (n,)
-
-    Raises
-    ------
-    ValueError if weights are invalid
+    w : ndarray of shape (n,)
+        Validated, non-negative, finite weights.
     """
-    if w is None:
+    if sample_weight is None:
         return np.ones(n, dtype=np.float64)
 
-    w = np.asarray(w, dtype=np.float64)
-    if w.ndim != 1:
-        w = w.reshape(-1)
+    w = np.asarray(sample_weight, dtype=np.float64).ravel()
 
     if w.shape[0] != n:
         raise ValueError(f"sample_weight has {w.shape[0]} elements but expected {n}")
     if not np.isfinite(w).all():
-        raise ValueError("sample_weight must be finite")
-    if (w < 0).any():
-        raise ValueError("sample_weight must be non-negative")
-
-    w_sum = float(w.sum())
-    if w_sum <= 0:
+        raise ValueError("sample_weight contains non-finite values")
+    if np.any(w < 0):
+        raise ValueError("sample_weight contains negative values")
+    if float(w.sum()) <= 0.0:
         raise ValueError("sample_weight must sum to > 0")
 
-    if normalize_sum_to_n:
-        w = w * (n / w_sum)
+    if normalize:
+        w = w / (w.mean() + 1e-12)
 
     return w
 
@@ -154,6 +149,8 @@ def validate_inputs(
     X, y, task: str, impute: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Validate and convert inputs."""
+    from sift._impute import mean_impute
+
     feature_names = extract_feature_names(X)
     if hasattr(X, "select_dtypes"):
         non_numeric = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
@@ -168,12 +165,7 @@ def validate_inputs(
     X_arr = to_numpy(X, dtype=np.float64)
 
     if impute:
-        X_arr = np.where(np.isfinite(X_arr), X_arr, np.nan)
-        col_means = np.nanmean(X_arr, axis=0)
-        col_means = np.where(np.isnan(col_means), 0.0, col_means)
-        nan_mask = np.isnan(X_arr)
-        if nan_mask.any():
-            X_arr[nan_mask] = col_means[np.where(nan_mask)[1]]
+        X_arr = mean_impute(X_arr, copy=False)
 
     X_arr = X_arr.astype(np.float32)
 
@@ -235,16 +227,25 @@ def subsample_xy(
     y: np.ndarray,
     subsample: Optional[int],
     random_state: int,
+    *,
     sample_weight: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """Subsample to at most `subsample` rows."""
-    if subsample is None or len(X) <= subsample:
-        return X, y, sample_weight
-    rng = np.random.default_rng(random_state)
-    idx = rng.choice(len(X), size=subsample, replace=False)
-    if sample_weight is None:
-        return X[idx], y[idx], None
-    return X[idx], y[idx], sample_weight[idx]
+    return_idx: bool = False,
+) -> tuple:
+    """Subsample X, y, and optionally sample_weight."""
+    n = X.shape[0]
+    w = ensure_weights(sample_weight, n, normalize=True)
+
+    if subsample is not None and n > subsample:
+        rng = np.random.default_rng(random_state)
+        row_idx = rng.choice(n, size=subsample, replace=False)
+        X_sub, y_sub, w_sub = X[row_idx], y[row_idx], w[row_idx]
+    else:
+        row_idx = np.arange(n)
+        X_sub, y_sub, w_sub = X, y, w
+
+    if return_idx:
+        return X_sub, y_sub, w_sub, row_idx
+    return X_sub, y_sub, w_sub
 
 
 # --- Categorical encoding ---

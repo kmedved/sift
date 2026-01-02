@@ -169,19 +169,13 @@ def smart_sample(
     X = df[feature_cols].to_numpy(dtype=np.float32)
     y = df[y_col].to_numpy(dtype=np.float32)
 
-    # Treat inf as missing before imputation
-    X = np.where(np.isfinite(X), X, np.nan)
+    from sift._impute import mean_impute
 
     # Check y finiteness (only needed when residual weighting is enabled)
     if config.residual_weight_cap > 0 and not np.isfinite(y).all():
         raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
 
-    # Mean-impute missing values (replace all-NaN columns with 0)
-    col_means = np.nanmean(X, axis=0)
-    col_means = np.where(np.isnan(col_means), 0.0, col_means)  # Handle all-NaN columns
-    nan_mask = np.isnan(X)
-    if nan_mask.any():
-        X[nan_mask] = col_means[np.where(nan_mask)[1]]
+    X = mean_impute(X, copy=False)
 
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X).astype(np.float32)

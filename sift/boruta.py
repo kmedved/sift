@@ -501,7 +501,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         if X_arr.shape[0] != y_arr.shape[0]:
             raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
 
-        w_score = ensure_weights(sample_weight, n, normalize_sum_to_n=True)
+        w_score = ensure_weights(sample_weight, n, normalize=True)
         w_fit = w_score if sample_weight is not None else None
 
         if groups is not None:

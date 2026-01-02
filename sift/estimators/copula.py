@@ -31,7 +31,8 @@ def build_cache(
     min_std: float = 1e-12,
 ) -> FeatureCache:
     """Build feature cache for multi-target selection."""
-    from sift._preprocess import extract_feature_names, to_numpy
+    from sift._impute import mean_impute
+    from sift._preprocess import ensure_weights, extract_feature_names, to_numpy
 
     feature_names = extract_feature_names(X)
     if hasattr(X, "select_dtypes"):
@@ -48,15 +49,7 @@ def build_cache(
     if feature_names is None:
         feature_names = [f"x{i}" for i in range(p)]
 
-    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
-    if w.shape[0] != n:
-        raise ValueError(f"sample_weight has {w.shape[0]} rows but X has {n}")
-    if not np.isfinite(w).all():
-        raise ValueError("Non-finite sample_weight")
-    if np.any(w < 0):
-        raise ValueError("Negative sample_weight not allowed")
-    if float(w.sum()) <= 0.0:
-        raise ValueError("sample_weight must sum to > 0")
+    w = ensure_weights(sample_weight, n, normalize=True)
 
     if subsample is not None and n > subsample:
         rng = np.random.default_rng(random_state)
@@ -66,13 +59,7 @@ def build_cache(
 
     Xs = X_arr[row_idx]
     ws = w[row_idx]
-    ws = ws / (ws.mean() + 1e-12)
-
-    Xs = np.where(np.isfinite(Xs), Xs, np.nan)
-    col_means = np.nanmean(Xs, axis=0)
-    col_means = np.where(np.isnan(col_means), 0.0, col_means)
-    nan_mask = np.isnan(Xs)
-    Xs[nan_mask] = col_means[np.where(nan_mask)[1]]
+    Xs = mean_impute(Xs, copy=False)
 
     stds = np.std(Xs, axis=0)
     valid_mask = stds > min_std
