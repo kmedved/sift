@@ -70,7 +70,7 @@ def permutation_importance(
     X_arr = X.values.copy()
     n = len(y)
 
-    w = ensure_weights(sample_weight, n, normalize_sum_to_n=True)
+    w = ensure_weights(sample_weight, n, normalize=True)
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, 2**31, size=(len(features), n_repeats))
 

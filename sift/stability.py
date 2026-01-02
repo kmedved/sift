@@ -365,12 +365,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             if len(time) != n:
                 raise ValueError(f"time has {len(time)} rows but X has {n}")
 
-        # Impute NaNs (smart_sample may return original rows with NaNs)
-        if np.isnan(X).any():
-            col_means = np.nanmean(X, axis=0)
-            col_means = np.where(np.isnan(col_means), 0.0, col_means)
-            nan_mask = np.isnan(X)
-            X[nan_mask] = col_means[np.where(nan_mask)[1]]
+        # Impute non-finite values (smart_sample may return original rows with NaNs)
+        if not np.isfinite(X).all():
+            from sift._impute import mean_impute
+
+            X = mean_impute(X, copy=False)
 
         # Standardize
         self._scaler = StandardScaler()
