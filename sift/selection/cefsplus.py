@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 import numpy as np
 from numba import njit
@@ -280,6 +280,239 @@ def cefsplus_loop(
     return selected[:count]
 
 
+@njit(cache=True)
+def cefsplus_loop_with_objective(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    CEFS+ selection returning both selected indices AND objective path.
+
+    The objective at step t is: log|Σ_S| - log|Σ_{y,S}| = 2 * I(y; S)
+    """
+    m = len(r)
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    k = min(k, m)
+
+    R_shrunk = (1.0 - shrink) * R.copy()
+    for i in range(m):
+        R_shrunk[i, i] = 1.0
+    r_shrunk = (1.0 - shrink) * r.copy()
+
+    selected = np.empty(k, dtype=np.int64)
+    objective = np.empty(k, dtype=np.float64)
+    remaining = np.ones(m, dtype=np.bool_)
+
+    j0 = 0
+    best_rel = tie_break_rel[0]
+    for j in range(1, m):
+        if tie_break_rel[j] > best_rel:
+            best_rel = tie_break_rel[j]
+            j0 = j
+
+    selected[0] = j0
+    remaining[j0] = False
+    count = 1
+
+    inv_S = np.array([[1.0]], dtype=np.float64)
+    logdet_S = 0.0
+
+    r0 = r_shrunk[j0]
+    det_yS = max(1.0 - r0 * r0, eps)
+    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
+    logdet_yS = np.log(det_yS)
+
+    objective[0] = logdet_S - logdet_yS
+
+    while count < k:
+        n_rem = 0
+        for j in range(m):
+            if remaining[j]:
+                n_rem += 1
+        if n_rem == 0:
+            break
+
+        rem = np.empty(n_rem, dtype=np.int64)
+        idx = 0
+        for j in range(m):
+            if remaining[j]:
+                rem[idx] = j
+                idx += 1
+
+        s = count
+
+        B = np.empty((s, n_rem), dtype=np.float64)
+        for si in range(s):
+            for ri in range(n_rem):
+                B[si, ri] = R_shrunk[selected[si], rem[ri]]
+
+        tmp = inv_S @ B
+        t1 = np.zeros(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            for si in range(s):
+                t1[ri] += B[si, ri] * tmp[si, ri]
+
+        s1 = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            s1[ri] = max(1.0 - t1[ri], eps)
+
+        lf = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            lf[ri] = logdet_S + np.log(s1[ri])
+
+        B2 = np.empty((s + 1, n_rem), dtype=np.float64)
+        for ri in range(n_rem):
+            B2[0, ri] = r_shrunk[rem[ri]]
+        for si in range(s):
+            for ri in range(n_rem):
+                B2[si + 1, ri] = B[si, ri]
+
+        tmp2 = inv_yS @ B2
+        t2 = np.zeros(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            for si in range(s + 1):
+                t2[ri] += B2[si, ri] * tmp2[si, ri]
+
+        s2 = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            s2[ri] = max(1.0 - t2[ri], eps)
+
+        lc = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            lc[ri] = logdet_yS + np.log(s2[ri])
+
+        score = np.empty(n_rem, dtype=np.float64)
+        for ri in range(n_rem):
+            score[ri] = lf[ri] - lc[ri]
+
+        best_pos = 0
+        best_score = score[0]
+        for ri in range(1, n_rem):
+            if score[ri] > best_score:
+                best_score = score[ri]
+                best_pos = ri
+
+        best_rel = tie_break_rel[rem[best_pos]]
+        for ri in range(n_rem):
+            if np.abs(score[ri] - best_score) < 1e-12:
+                if tie_break_rel[rem[ri]] > best_rel:
+                    best_rel = tie_break_rel[rem[ri]]
+                    best_pos = ri
+
+        j = rem[best_pos]
+
+        b = B[:, best_pos].copy().reshape(-1, 1)
+        v = inv_S @ b
+        s1_best = s1[best_pos]
+
+        inv_S_new = np.empty((s + 1, s + 1), dtype=np.float64)
+        for i in range(s):
+            for jj in range(s):
+                inv_S_new[i, jj] = inv_S[i, jj] + v[i, 0] * v[jj, 0] / s1_best
+        for i in range(s):
+            inv_S_new[i, s] = -v[i, 0] / s1_best
+            inv_S_new[s, i] = -v[i, 0] / s1_best
+        inv_S_new[s, s] = 1.0 / s1_best
+        inv_S = inv_S_new
+        logdet_S += np.log(s1_best)
+
+        b2 = B2[:, best_pos].copy().reshape(-1, 1)
+        v2 = inv_yS @ b2
+        s2_best = s2[best_pos]
+
+        inv_yS_new = np.empty((s + 2, s + 2), dtype=np.float64)
+        for i in range(s + 1):
+            for jj in range(s + 1):
+                inv_yS_new[i, jj] = inv_yS[i, jj] + v2[i, 0] * v2[jj, 0] / s2_best
+        for i in range(s + 1):
+            inv_yS_new[i, s + 1] = -v2[i, 0] / s2_best
+            inv_yS_new[s + 1, i] = -v2[i, 0] / s2_best
+        inv_yS_new[s + 1, s + 1] = 1.0 / s2_best
+        inv_yS = inv_yS_new
+        logdet_yS += np.log(s2_best)
+
+        selected[count] = j
+        objective[count] = logdet_S - logdet_yS
+        remaining[j] = False
+        count += 1
+
+    return selected[:count], objective[:count]
+
+
+def _objective_from_corr_path(
+    R_path: np.ndarray,
+    r_path: np.ndarray,
+    *,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Objective path from correlation matrix and y-correlations (order matters)."""
+    r = np.asarray(r_path, dtype=np.float64).ravel()
+    k = int(r.size)
+    if k == 0:
+        return np.empty(0, dtype=np.float64)
+
+    R = np.asarray(R_path, dtype=np.float64)
+    if R.shape != (k, k):
+        raise ValueError("R_path must be (k,k) and match r_path length")
+
+    if shrink > 0.0:
+        R = (1.0 - shrink) * R.copy()
+        r = (1.0 - shrink) * r.copy()
+        np.fill_diagonal(R, 1.0)
+
+    obj = np.empty(k, dtype=np.float64)
+
+    logdet_S = 0.0
+    inv_S = np.array([[1.0]], dtype=np.float64)
+
+    r0 = float(r[0])
+    det_yS = max(1.0 - r0 * r0, eps)
+    logdet_yS = float(np.log(det_yS))
+    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
+
+    obj[0] = logdet_S - logdet_yS
+
+    for t in range(1, k):
+        b = R[:t, t].reshape(-1, 1)
+        v = inv_S @ b
+        s1 = float(1.0 - (b.T @ v)[0, 0])
+        s1 = max(s1, eps)
+
+        inv_S_new = np.empty((t + 1, t + 1), dtype=np.float64)
+        inv_S_new[:t, :t] = inv_S + (v @ v.T) / s1
+        inv_S_new[:t, t] = -v[:, 0] / s1
+        inv_S_new[t, :t] = -v[:, 0] / s1
+        inv_S_new[t, t] = 1.0 / s1
+        inv_S = inv_S_new
+        logdet_S += np.log(s1)
+
+        b2 = np.empty((t + 1, 1), dtype=np.float64)
+        b2[0, 0] = r[t]
+        b2[1:, 0] = b[:, 0]
+
+        v2 = inv_yS @ b2
+        s2 = float(1.0 - (b2.T @ v2)[0, 0])
+        s2 = max(s2, eps)
+
+        inv_yS_new = np.empty((t + 2, t + 2), dtype=np.float64)
+        inv_yS_new[: t + 1, : t + 1] = inv_yS + (v2 @ v2.T) / s2
+        inv_yS_new[: t + 1, t + 1] = -v2[:, 0] / s2
+        inv_yS_new[t + 1, : t + 1] = -v2[:, 0] / s2
+        inv_yS_new[t + 1, t + 1] = 1.0 / s2
+        inv_yS = inv_yS_new
+        logdet_yS += np.log(s2)
+
+        obj[t] = logdet_S - logdet_yS
+
+    return obj
+
+
 def select_cached(
     cache: FeatureCache,
     y,
@@ -287,7 +520,8 @@ def select_cached(
     method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"] = "cefsplus",
     top_m: Optional[int] = None,
     corr_prune: float = 0.95,
-) -> List[str]:
+    return_objective: bool = False,
+) -> List[str] | Tuple[List[str], np.ndarray]:
     """Select features using pre-built cache."""
     from sift._preprocess import to_numpy
 
@@ -309,8 +543,16 @@ def select_cached(
     else:
         cand = np.arange(p_valid)
 
-    Z_cand = np.ascontiguousarray(cache.Z[:, cand], dtype=np.float64)
-    R_cand = weighted_correlation_matrix(Z_cand, cache.sample_weight)
+    if cache.Rxx is not None:
+        R_full = np.asarray(cache.Rxx, dtype=np.float64)
+        R_cand = np.ascontiguousarray(R_full[np.ix_(cand, cand)], dtype=np.float64)
+    else:
+        Z_cand = np.ascontiguousarray(cache.Z[:, cand], dtype=np.float64)
+        R_cand = weighted_correlation_matrix(
+            Z_cand,
+            np.asarray(cache.sample_weight, dtype=np.float64),
+            backend="blas",
+        )
 
     keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)
     cand = cand[keep]
@@ -320,8 +562,12 @@ def select_cached(
 
     k_actual = min(k, len(cand))
 
+    objective = None
     if method == "cefsplus":
-        sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
+        if return_objective:
+            sel_local, objective = cefsplus_loop_with_objective(R_cand, r_cand, k_actual, rel_cand)
+        else:
+            sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
     elif method in ("mrmr_quot", "mrmr_diff"):
         sel_local = _gaussian_mrmr_select(
             R_cand,
@@ -344,5 +590,14 @@ def select_cached(
     selected_original = cache.valid_cols[selected_valid]
 
     if cache.feature_names is not None:
-        return [cache.feature_names[i] for i in selected_original]
-    return selected_original.tolist()
+        out = [cache.feature_names[i] for i in selected_original]
+    else:
+        out = selected_original.tolist()
+
+    if return_objective:
+        if objective is None:
+            R_path = R_cand[np.ix_(sel_local, sel_local)]
+            r_path = r_cand[sel_local]
+            objective = _objective_from_corr_path(R_path, r_path)
+        return out, objective
+    return out

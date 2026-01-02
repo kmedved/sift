@@ -173,6 +173,8 @@ def jmi_select(
 
     n, p = X.shape
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    y_arr = y.astype(np.float64)
+    w_arr = w.astype(np.float64)
 
     valid_mask = relevance > 0
     if not valid_mask.any():
@@ -195,12 +197,26 @@ def jmi_select(
     m = X_cand.shape[1]
     k = min(k, m)
 
-    if mi_estimator == "binned":
-        mi_func = lambda s, c: jmi_est.binned_joint_mi(s, c, y, w, y_kind=y_kind)
-    elif mi_estimator == "r2":
-        mi_func = lambda s, c: jmi_est.r2_joint_mi(s, c, y, w)
+    use_indexed = mi_estimator in ("r2", "binned")
+
+    if mi_estimator == "r2":
+        def mi_func_indexed(s, idx):
+            return jmi_est.r2_joint_mi_indexed(X_cand, idx, s, y_arr, w_arr)
+    elif mi_estimator == "binned":
+        def mi_func_indexed(s, idx):
+            return jmi_est.binned_joint_mi_indexed(
+                X_cand,
+                idx,
+                s,
+                y_arr,
+                w_arr,
+                n_bins=10,
+                y_kind=y_kind,
+            )
     elif mi_estimator == "ksg":
-        mi_func = lambda s, c: jmi_est.ksg_joint_mi(s, c, y)
+        def mi_func_matrix(s, c):
+            return jmi_est.ksg_joint_mi(s, c, y_arr)
+        use_indexed = False
     else:
         raise ValueError(f"Unknown mi_estimator: {mi_estimator}")
 
@@ -225,8 +241,12 @@ def jmi_select(
         if len(cand_indices) == 0:
             break
 
-        candidates = X_cand[:, cand_indices]
-        mi_values = mi_func(s_feat, candidates)
+        if use_indexed:
+            cand_idx64 = cand_indices.astype(np.int64, copy=False)
+            mi_values = mi_func_indexed(s_feat, cand_idx64)
+        else:
+            candidates = X_cand[:, cand_indices]
+            mi_values = mi_func_matrix(s_feat, candidates)
 
         for i, idx in enumerate(cand_indices):
             if aggregation == "sum":

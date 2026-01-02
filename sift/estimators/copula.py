@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numba import njit
@@ -50,6 +51,12 @@ def build_cache(
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
     if w.shape[0] != n:
         raise ValueError(f"sample_weight has {w.shape[0]} rows but X has {n}")
+    if not np.isfinite(w).all():
+        raise ValueError("Non-finite sample_weight")
+    if np.any(w < 0):
+        raise ValueError("Negative sample_weight not allowed")
+    if float(w.sum()) <= 0.0:
+        raise ValueError("sample_weight must sum to > 0")
 
     if subsample is not None and n > subsample:
         rng = np.random.default_rng(random_state)
@@ -59,6 +66,7 @@ def build_cache(
 
     Xs = X_arr[row_idx]
     ws = w[row_idx]
+    ws = ws / (ws.mean() + 1e-12)
 
     Xs = np.where(np.isfinite(Xs), Xs, np.nan)
     col_means = np.nanmean(Xs, axis=0)
@@ -131,7 +139,8 @@ def weighted_rank_gauss_2d(X: np.ndarray, w: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True)
-def weighted_correlation_matrix(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
+def weighted_correlation_matrix_numba(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Numba fallback for small matrices or when BLAS is slower."""
     n, p = Z.shape
     w_sum = 0.0
     for i in range(n):
@@ -149,6 +158,83 @@ def weighted_correlation_matrix(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
             R[k, j] = val
         R[j, j] = 1.0
     return R
+
+
+def weighted_correlation_matrix_blas(
+    Z: np.ndarray,
+    w: np.ndarray,
+    batch_size: int = 50_000,
+) -> np.ndarray:
+    """Weighted correlation matrix using chunked BLAS."""
+    if Z.ndim != 2:
+        raise ValueError("Z must be 2D")
+
+    Z = np.asarray(Z)
+    n, p = Z.shape
+    w = np.asarray(w, dtype=np.float64).ravel()
+
+    if w.shape[0] != n:
+        raise ValueError("w length must match Z rows")
+    if not np.isfinite(w).all():
+        raise ValueError("Non-finite weights are not allowed")
+    if np.any(w < 0):
+        raise ValueError("Negative weights are not allowed")
+
+    w_sum = float(w.sum())
+    if w_sum <= 0.0:
+        raise ValueError("Weights must sum to > 0")
+
+    R = np.zeros((p, p), dtype=np.float64)
+    batch_size = max(1, int(batch_size))
+
+    for start in range(0, n, batch_size):
+        stop = min(n, start + batch_size)
+        Zb = Z[start:stop]
+        wb = w[start:stop]
+        if Zb.dtype != np.float64:
+            Zb = Zb.astype(np.float64, copy=False)
+        R += Zb.T @ (Zb * wb[:, None])
+
+    R /= w_sum
+    R = 0.5 * (R + R.T)
+    np.clip(R, -0.999999, 0.999999, out=R)
+    np.fill_diagonal(R, 1.0)
+
+    return R
+
+
+def weighted_correlation_matrix(
+    Z: np.ndarray,
+    w: np.ndarray,
+    *,
+    backend: Literal["auto", "blas", "numba"] = "auto",
+    batch_size: int = 50_000,
+) -> np.ndarray:
+    """
+    Weighted correlation matrix.
+
+    backend="blas" (default): chunked BLAS, fast for moderate/large p
+    backend="numba": njit loop fallback, useful for tiny p or njit-call sites
+    """
+    if backend == "auto":
+        Z0 = np.asarray(Z)
+        n, p = Z0.shape
+        backend = "numba" if p <= 32 and n <= 50_000 else "blas"
+    if backend == "blas":
+        return weighted_correlation_matrix_blas(Z, w, batch_size=batch_size)
+    if backend == "numba":
+        Z64 = np.asarray(Z, dtype=np.float64)
+        w64 = np.asarray(w, dtype=np.float64).ravel()
+        if Z64.shape[0] != w64.shape[0]:
+            raise ValueError("w length must match Z rows")
+        if not np.isfinite(w64).all():
+            raise ValueError("Non-finite weights are not allowed")
+        if np.any(w64 < 0):
+            raise ValueError("Negative weights are not allowed")
+        if float(w64.sum()) <= 0.0:
+            raise ValueError("Weights must sum to > 0")
+        return weighted_correlation_matrix_numba(Z64, w64)
+    raise ValueError(f"Unknown backend: {backend}")
 
 
 @njit(cache=True)
