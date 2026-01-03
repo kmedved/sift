@@ -96,6 +96,93 @@ def _fit_estimator(
         raise
 
 
+# Fast-by-default auto tree heuristic
+_AUTO_N_EST_MULT = 50.0
+_AUTO_N_EST_MIN = 50
+_AUTO_N_EST_MAX = 500
+
+
+def _get_estimator_depth(estimator) -> int:
+    """
+    Extract max_depth from estimator, handling different libraries.
+
+    Returns depth or 10 as default. Treats None, -1, 0 as unbounded (returns 10).
+    """
+    for attr in ("max_depth", "depth"):
+        val = None
+        if hasattr(estimator, "get_params"):
+            try:
+                params = estimator.get_params()
+                if attr in params:
+                    val = params[attr]
+            except Exception:
+                pass
+
+        if val is None and hasattr(estimator, attr):
+            val = getattr(estimator, attr)
+
+        if val is None:
+            continue
+
+        try:
+            d = int(val)
+        except (ValueError, TypeError):
+            continue
+
+        if d <= 0:
+            continue
+        return d
+
+    return 10
+
+
+def _compute_auto_n_estimators(n_features: int, depth: int) -> int:
+    """
+    Fast heuristic for automatic n_estimators.
+
+    - Scales ~sqrt(#features) and inverse with depth.
+    - Doubles features because Boruta concatenates shadow features.
+    - Clamped for speed and to avoid invalid (0) trees.
+    """
+    n_total = max(int(n_features), 1) * 2
+    depth_i = max(int(depth), 1)
+
+    n_est = int(_AUTO_N_EST_MULT * np.sqrt(n_total) / depth_i)
+    if n_est < _AUTO_N_EST_MIN:
+        return _AUTO_N_EST_MIN
+    if n_est > _AUTO_N_EST_MAX:
+        return _AUTO_N_EST_MAX
+    return n_est
+
+
+def _set_n_estimators(estimator, n_estimators: int) -> None:
+    """
+    Set n_estimators on estimator, handling different libraries.
+
+    - sklearn: n_estimators
+    - CatBoost: iterations
+    - LightGBM: n_estimators
+    - XGBoost: n_estimators
+    """
+    param_names = ["n_estimators", "iterations", "num_iterations", "n_iter"]
+
+    if hasattr(estimator, "set_params"):
+        for param in param_names:
+            try:
+                estimator.set_params(**{param: n_estimators})
+                return
+            except (ValueError, TypeError):
+                continue
+
+    for param in param_names:
+        if hasattr(estimator, param):
+            try:
+                setattr(estimator, param, n_estimators)
+                return
+            except Exception:
+                continue
+
+
 def _get_native_importance(estimator) -> np.ndarray:
     """Get feature importance from fitted estimator."""
     if hasattr(estimator, "feature_importances_"):
@@ -351,6 +438,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
     estimator : estimator object, optional
         Base estimator. If None, uses RandomForest for native importance
         or CatBoost for SHAP importance.
+    n_estimators : int or "auto"
+        Number of trees/iterations for the estimator. When "auto", compute
+        a fast bounded heuristic based on active features and depth. Auto
+        only applies when estimator is None.
     task : {"regression", "classification"}
         Problem type.
     importance : {"native", "shap"}
@@ -400,6 +491,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self,
         estimator=None,
         *,
+        n_estimators: int | str = "auto",
         task: Task = "regression",
         importance: ImportanceBackend = "native",
         max_iter: int = 50,
@@ -420,6 +512,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         verbose: bool = True,
     ):
         self.estimator = estimator
+        self.n_estimators = n_estimators
         self.task = task
         self.importance = importance
         self.max_iter = max_iter
@@ -527,6 +620,17 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         _impute_nonfinite_inplace(X_arr)
 
         base_est = self._get_default_estimator()
+        if isinstance(self.n_estimators, str):
+            if self.n_estimators != "auto":
+                raise ValueError("n_estimators must be an int or 'auto'")
+        else:
+            try:
+                n_est_int = int(self.n_estimators)
+            except Exception as exc:
+                raise ValueError("n_estimators must be an int or 'auto'") from exc
+            if n_est_int < 1:
+                raise ValueError("n_estimators must be >= 1")
+        base_depth = _get_estimator_depth(base_est)
 
         rng = np.random.default_rng(self.random_state)
 
@@ -559,11 +663,22 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 break
 
             active_idx = np.where(status != -1)[0]
+            n_active = active_idx.size
             X_active = X_arr[:, active_idx]
-            n_active = X_active.shape[1]
-
             seed = int(rng.integers(0, 2**31 - 1))
             est = _clone_estimator(base_est, seed=seed)
+
+            if self.n_estimators == "auto":
+                if self.estimator is None:
+                    iter_n_estimators = _compute_auto_n_estimators(
+                        n_active, base_depth
+                    )
+                    _set_n_estimators(est, iter_n_estimators)
+                else:
+                    iter_n_estimators = None
+            else:
+                iter_n_estimators = int(self.n_estimators)
+                _set_n_estimators(est, iter_n_estimators)
 
             shadow = permute_matrix(
                 X_active,
@@ -596,11 +711,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
             thr = float(np.percentile(imp_shadow, self.perc))
             shadow_thresholds.append(thr)
-            if self.perc < 100:
-                p_null = float(np.mean(imp_shadow > thr))
-                p_null = max(min(p_null, 1.0 - 1e-12), 1e-12)
-            else:
-                p_null = 1.0 / (len(imp_shadow) + 1.0)
+            # Laplace smoothing: avoids p_null = 0 or 1
+            k = float(np.sum(imp_shadow > thr))
+            m_shadow = float(len(imp_shadow))
+            p_null = (k + 1.0) / (m_shadow + 2.0)
             p_trials.append(p_null)
 
             for i_local in range(n_active):
@@ -634,11 +748,18 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 n_acc = int((status == 1).sum())
                 n_rej = int((status == -1).sum())
                 n_ten = int((status == 0).sum())
-                print(
-                    "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
-                        it + 1, thr, n_acc, n_rej, n_ten
+                if iter_n_estimators is not None:
+                    print(
+                        "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
+                            it + 1, iter_n_estimators, thr, n_acc, n_rej, n_ten
+                        )
                     )
-                )
+                else:
+                    print(
+                        "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
+                            it + 1, thr, n_acc, n_rej, n_ten
+                        )
+                    )
 
             if decided_this_round == 0:
                 no_progress_count += 1
@@ -694,13 +815,13 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             if self.task == "regression":
                 return RandomForestRegressor(
                     n_estimators=500,
-                    max_depth=None,
+                    max_depth=5,
                     n_jobs=-1,
                     random_state=self.random_state,
                 )
             return RandomForestClassifier(
                 n_estimators=500,
-                max_depth=None,
+                max_depth=5,
                 n_jobs=-1,
                 random_state=self.random_state,
             )
@@ -711,7 +832,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             if self.task == "regression":
                 return CatBoostRegressor(
                     iterations=500,
-                    depth=6,
+                    depth=5,
                     learning_rate=0.05,
                     loss_function="RMSE",
                     verbose=False,
@@ -719,7 +840,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 )
             return CatBoostClassifier(
                 iterations=500,
-                depth=6,
+                depth=5,
                 learning_rate=0.05,
                 loss_function="Logloss",
                 verbose=False,
@@ -826,6 +947,7 @@ def select_boruta(
     y,
     *,
     task: Task = "regression",
+    n_estimators: int | str = "auto",
     sample_weight: np.ndarray | None = None,
     groups: np.ndarray | None = None,
     time: np.ndarray | None = None,
@@ -859,6 +981,10 @@ def select_boruta(
     X : DataFrame or ndarray
     y : array-like
     task : {"regression", "classification"}
+    n_estimators : int or "auto"
+        Number of trees/iterations for the estimator. When "auto", use a fast
+        bounded heuristic based on active features and depth. Auto only applies
+        when estimator is None.
     sample_weight : array-like, optional
     groups : array-like, optional
         Group labels for shadow permutation.
@@ -905,6 +1031,7 @@ def select_boruta(
 
     sel = BorutaSelector(
         estimator=estimator,
+        n_estimators=n_estimators,
         task=task,
         importance=importance,
         max_iter=max_iter,
@@ -936,6 +1063,7 @@ def select_boruta_shap(
     y,
     *,
     task: Task = "regression",
+    n_estimators: int | str = "auto",
     sample_weight: np.ndarray | None = None,
     groups: np.ndarray | None = None,
     time: np.ndarray | None = None,
@@ -960,7 +1088,16 @@ def select_boruta_shap(
     verbose: bool = True,
     return_result: bool = False,
 ) -> list[str] | BorutaResult:
-    """Boruta-Shap feature selection (convenience wrapper for importance='shap')."""
+    """
+    Boruta-Shap feature selection (convenience wrapper for importance='shap').
+
+    Parameters
+    ----------
+    n_estimators : int or "auto"
+        Number of trees/iterations for the estimator. When "auto", use a fast
+        bounded heuristic based on active features and depth. Auto only applies
+        when estimator is None.
+    """
     return select_boruta(
         X,
         y,
@@ -972,6 +1109,7 @@ def select_boruta_shap(
         time_col=time_col,
         estimator=estimator,
         importance="shap",
+        n_estimators=n_estimators,
         max_iter=max_iter,
         alpha=alpha,
         perc=perc,

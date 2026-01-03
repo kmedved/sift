@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boruta_shap
+from sift.boruta import (
+    BorutaResult,
+    BorutaSelector,
+    _compute_auto_n_estimators,
+    select_boruta,
+    select_boruta_shap,
+)
 
 
 class TestBorutaBasic:
@@ -231,6 +237,26 @@ class TestBorutaSelector:
 
 class TestBorutaOptions:
     """Configuration option tests."""
+
+    def test_auto_n_estimators(self):
+        """Auto n_estimators should be bounded + scale sensibly (fast-by-default)."""
+        a = _compute_auto_n_estimators(10, 10)
+        b = _compute_auto_n_estimators(100, 10)
+        c = _compute_auto_n_estimators(100, 5)
+        d = _compute_auto_n_estimators(50_000, 5)
+        e = _compute_auto_n_estimators(1, 10_000)
+
+        assert 50 <= a <= 500
+        assert 50 <= b <= 500
+        assert 50 <= c <= 500
+        assert 50 <= d <= 500
+        assert 50 <= e <= 500
+
+        assert b >= a
+        assert c >= b
+
+        assert d == 500
+        assert e == 50
 
     def test_max_features_cap(self):
         """max_features should limit output size."""
