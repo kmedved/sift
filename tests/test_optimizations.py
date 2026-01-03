@@ -236,7 +236,7 @@ class TestClassificationAutoK:
         assert len(selected) == best_k
         assert (diag["score"][diag["score"] < np.inf] >= 0).all()
 
-    def test_group_cv_accuracy(self, classification_data):
+    def test_group_cv_error(self, classification_data):
         from sift.selection.auto_k import AutoKConfig, select_k_auto
 
         X, y, groups, _ = classification_data
@@ -378,6 +378,21 @@ class TestCentralizedUtilities:
         X_orig = X.copy()
         _ = build_cache(X, subsample=None)
         np.testing.assert_array_equal(X, X_orig)
+
+    def test_ensure_weights_overflow_safe(self):
+        from sift._preprocess import ensure_weights
+
+        w = np.array([1e308, 1e308], dtype=np.float64)
+        wn = ensure_weights(w, 2, normalize=True)
+        assert np.isfinite(wn).all()
+        np.testing.assert_allclose(wn.mean(), 1.0, rtol=0, atol=1e-12)
+
+    def test_ensure_weights_underflow_safe(self):
+        from sift._preprocess import ensure_weights
+
+        w = np.array([np.nextafter(0, 1), 0.0], dtype=np.float64)
+        wn = ensure_weights(w, 2, normalize=True)
+        np.testing.assert_allclose(wn.mean(), 1.0, rtol=0, atol=1e-12)
 
 
 class TestSelectKAutoOptimized:

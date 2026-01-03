@@ -136,12 +136,17 @@ def ensure_weights(
         raise ValueError("sample_weight contains non-finite values")
     if np.any(w < 0):
         raise ValueError("sample_weight contains negative values")
-    if float(w.sum()) <= 0.0:
-        raise ValueError("sample_weight must sum to > 0")
+    if not np.any(w > 0):
+        raise ValueError("sample_weight must contain at least one positive value")
 
     if normalize:
-        mean = w.mean()
-        mean = max(mean, np.finfo(np.float64).tiny)
+        scale = float(np.max(w))
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("sample_weight max must be finite and > 0 to normalize")
+        w = w / scale
+        mean = float(w.mean())
+        if not np.isfinite(mean) or mean <= 0.0:
+            raise ValueError("sample_weight mean must be finite and > 0 to normalize")
         w = w / mean
 
     return w
@@ -247,8 +252,9 @@ def subsample_xy(
         row_idx = np.arange(n)
         X_sub, y_sub, w_sub = X, y, w
 
-    mean = w_sub.mean()
-    mean = max(mean, np.finfo(np.float64).tiny)
+    mean = float(w_sub.mean())
+    if not np.isfinite(mean) or mean <= 0.0:
+        raise ValueError("Subsample weight mean must be finite and > 0")
     w_sub = w_sub / mean
 
     if return_idx:
