@@ -81,7 +81,16 @@ def binned_joint_mi(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_binned = _factorize(y)
+        y_arr = np.asarray(y)
+        if (
+            np.issubdtype(y_arr.dtype, np.integer)
+            and y_arr.size > 0
+            and y_arr.min() >= 0
+            and y_arr.max() <= 200_000
+        ):
+            y_binned = y_arr.astype(np.int64, copy=False)
+        else:
+            y_binned = _factorize(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)
@@ -331,7 +340,16 @@ def binned_joint_mi_indexed(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_binned = _factorize(y)
+        y_arr = np.asarray(y)
+        if (
+            np.issubdtype(y_arr.dtype, np.integer)
+            and y_arr.size > 0
+            and y_arr.min() >= 0
+            and y_arr.max() <= 200_000
+        ):
+            y_binned = y_arr.astype(np.int64, copy=False)
+        else:
+            y_binned = _factorize(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)

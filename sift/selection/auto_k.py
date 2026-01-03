@@ -1,20 +1,19 @@
-"""Automatic k selection for filter methods.
-
-Design principle: Run selector ONCE to get ordered path, then evaluate prefixes.
-This keeps filter methods fast while enabling principled k selection.
-"""
+"""Automatic k selection for filter methods."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import LogisticRegression, Ridge, RidgeCV
+from sklearn.metrics import log_loss
 from sklearn.model_selection import GroupKFold
-from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+
+if TYPE_CHECKING:
+    from sift.estimators.copula import FeatureCache
 
 
 @dataclass
@@ -23,7 +22,7 @@ class AutoKConfig:
 
     k_method: Literal["evaluate", "elbow"] = "evaluate"
     strategy: Literal["time_holdout", "group_cv"] = "time_holdout"
-    metric: Literal["rmse", "mae"] = "rmse"
+    metric: Literal["rmse", "mae", "logloss", "error", "auto"] = "auto"
     max_k: int = 100
     min_k: int = 5
     val_frac: float = 0.2
@@ -36,7 +35,10 @@ class AutoKConfig:
 def _build_k_grid(min_k: int, max_k: int) -> List[int]:
     """Build sensible k grid: dense early, sparse later."""
     if max_k <= 30:
-        return list(range(min_k, max_k + 1, 2))
+        grid = list(range(min_k, max_k + 1, 2))
+        if grid and grid[-1] != max_k:
+            grid.append(max_k)
+        return grid
 
     grid = set()
     grid.update(range(min_k, min(30, max_k) + 1, 5))
@@ -47,13 +49,35 @@ def _build_k_grid(min_k: int, max_k: int) -> List[int]:
     return sorted(k for k in grid if min_k <= k <= max_k)
 
 
-def _compute_metric(y_true: np.ndarray, y_pred: np.ndarray, metric: str) -> float:
+def _resolve_metric(metric: str, task: str) -> str:
+    """Resolve metric, defaulting based on task."""
+    if metric == "auto":
+        return "rmse" if task == "regression" else "logloss"
+    if task == "regression" and metric in ("logloss", "error"):
+        raise ValueError(f"metric='{metric}' is invalid for task='regression'")
+    if task == "classification" and metric in ("rmse", "mae"):
+        raise ValueError(f"metric='{metric}' is invalid for task='classification'")
+    return metric
+
+
+def _compute_metric(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    metric: str,
+    *,
+    y_proba: np.ndarray | None = None,
+) -> float:
     """Compute error metric (lower is better)."""
-    err = y_true - y_pred
     if metric == "rmse":
-        return float(np.sqrt(np.mean(err**2)))
+        return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
     if metric == "mae":
-        return float(np.mean(np.abs(err)))
+        return float(np.mean(np.abs(y_true - y_pred)))
+    if metric == "error":
+        return float(1.0 - np.mean(y_true == y_pred))
+    if metric == "logloss":
+        if y_proba is None:
+            return float(np.inf)
+        return float(log_loss(y_true, y_proba))
     raise ValueError(f"Unknown metric: {metric}")
 
 
@@ -76,6 +100,7 @@ def select_k_auto(
     config: AutoKConfig,
     groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
+    task: Literal["regression", "classification"] = "regression",
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
     if not feature_path:
@@ -90,59 +115,85 @@ def select_k_auto(
         return 0, [], pd.DataFrame()
 
     max_k = min(max_k, len(valid_features))
+    valid_features = valid_features[:max_k]
     k_grid = _build_k_grid(min_k, max_k)
 
-    model = make_pipeline(
-        StandardScaler(),
-        RidgeCV(alphas=np.logspace(-3, 3, 10)),
-    )
-    results = []
+    X_path = X[valid_features].to_numpy(dtype=np.float64, copy=False)
+
+    metric = _resolve_metric(config.metric, task)
+    alphas = np.logspace(-3, 3, 10)
+
+    def _eval_split(train_idx: np.ndarray, val_idx: np.ndarray) -> dict:
+        """Evaluate all k values for one train/val split."""
+        Xtr = X_path[train_idx]
+        Xva = X_path[val_idx]
+        ytr = y_arr[train_idx]
+        yva = y_arr[val_idx]
+
+        scaler = StandardScaler().fit(Xtr)
+        Xtr_s = scaler.transform(Xtr)
+        Xva_s = scaler.transform(Xva)
+
+        if task == "regression":
+            ridgecv = RidgeCV(alphas=alphas).fit(Xtr_s, ytr)
+            alpha = float(ridgecv.alpha_)
+            model = Ridge(alpha=alpha)
+        else:
+            model = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+
+        split_scores = {}
+        for k in k_grid:
+            try:
+                if task == "classification" and len(np.unique(ytr)) < 2:
+                    split_scores[k] = np.inf
+                    continue
+
+                model.fit(Xtr_s[:, :k], ytr)
+
+                if task == "classification" and metric == "logloss":
+                    proba = model.predict_proba(Xva_s[:, :k])
+                    if not np.isin(np.unique(yva), model.classes_).all():
+                        split_scores[k] = np.inf
+                    else:
+                        split_scores[k] = float(log_loss(yva, proba, labels=model.classes_))
+                else:
+                    pred = model.predict(Xva_s[:, :k])
+                    split_scores[k] = _compute_metric(yva, pred, metric)
+            except Exception:
+                split_scores[k] = np.inf
+        return split_scores
 
     if config.strategy == "time_holdout":
         if time is None:
             raise ValueError("time_holdout strategy requires time parameter")
 
         train_idx, val_idx = _time_holdout_split(time, config.val_frac)
-
-        for k in k_grid:
-            feats = valid_features[:k]
-            X_train = X.iloc[train_idx][feats].values
-            X_val = X.iloc[val_idx][feats].values
-            y_train = y_arr[train_idx]
-            y_val = y_arr[val_idx]
-
-            try:
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_val)
-                score = _compute_metric(y_val, y_pred, config.metric)
-                results.append({"k": k, "score": score})
-            except Exception:
-                results.append({"k": k, "score": np.inf})
+        scores = _eval_split(train_idx, val_idx)
+        diag = pd.DataFrame({"k": list(scores.keys()), "score": list(scores.values())})
 
     elif config.strategy == "group_cv":
         if groups is None:
             raise ValueError("group_cv strategy requires groups parameter")
 
-        gkf = GroupKFold(n_splits=config.n_splits)
+        n_unique = len(np.unique(groups))
+        n_splits = min(config.n_splits, n_unique)
+        if n_splits < 2:
+            raise ValueError(f"group_cv requires at least 2 groups, got {n_unique}")
 
-        for k in k_grid:
-            feats = valid_features[:k]
-            X_k = X[feats].values
+        gkf = GroupKFold(n_splits=n_splits)
 
-            fold_scores = []
-            try:
-                for train_idx, val_idx in gkf.split(X_k, y_arr, groups):
-                    model.fit(X_k[train_idx], y_arr[train_idx])
-                    y_pred = model.predict(X_k[val_idx])
-                    fold_scores.append(_compute_metric(y_arr[val_idx], y_pred, config.metric))
-                results.append({"k": k, "score": np.mean(fold_scores)})
-            except Exception:
-                results.append({"k": k, "score": np.inf})
+        all_scores = {k: [] for k in k_grid}
+        for train_idx, val_idx in gkf.split(X_path, y_arr, groups):
+            fold_scores = _eval_split(train_idx, val_idx)
+            for k, score in fold_scores.items():
+                all_scores[k].append(score)
+
+        diag = pd.DataFrame(
+            {"k": k_grid, "score": [np.mean(all_scores[k]) for k in k_grid]}
+        )
 
     else:
         raise ValueError(f"Unknown strategy: {config.strategy}")
-
-    diag = pd.DataFrame(results)
 
     if diag.empty or not np.isfinite(diag["score"]).any():
         return max_k, valid_features[:max_k], diag
@@ -160,7 +211,7 @@ def select_k_elbow(
     min_rel_gain: float = 0.02,
     patience: int = 3,
 ) -> Tuple[int, pd.DataFrame]:
-    """Select k via elbow detection on an objective path (e.g. 2*I(y; S))."""
+    """Select k via elbow detection on an objective path."""
     obj = np.asarray(objective_path).ravel()
     max_k = min(max_k, len(obj))
 
@@ -214,16 +265,13 @@ def compute_objective_for_path(
     Objective at step t:
         obj[t] = log|Σ_S| - log|Σ_{y,S}|
                = 2 * I(y; S)   (Gaussian MI proxy)
-
-    This implementation is efficient:
-      - builds R_path once (from cache.Rxx if available, else one BLAS corr)
-      - uses Schur-complement logdet updates along the path
     """
     from sift.estimators.copula import (
         weighted_corr_with_vector,
         weighted_correlation_matrix,
         weighted_rank_gauss_1d,
     )
+    from sift.selection.objective import objective_from_corr_path
 
     if not feature_path:
         return np.empty(0, dtype=np.float64)
@@ -253,7 +301,6 @@ def compute_objective_for_path(
         return np.empty(0, dtype=np.float64)
 
     path_valid_pos = np.asarray(path_valid_pos, dtype=np.int64)
-    k = int(path_valid_pos.size)
 
     y_arr = np.asarray(y).ravel()
     ys = y_arr[np.asarray(cache.row_idx)]
@@ -274,53 +321,4 @@ def compute_objective_for_path(
             backend="blas",
         )
 
-    if shrink > 0.0:
-        R_path *= (1.0 - shrink)
-        r_path *= (1.0 - shrink)
-        np.fill_diagonal(R_path, 1.0)
-
-    obj = np.empty(k, dtype=np.float64)
-
-    logdet_S = 0.0
-    inv_S = np.array([[1.0]], dtype=np.float64)
-
-    r0 = float(r_path[0])
-    det_yS = max(1.0 - r0 * r0, eps)
-    logdet_yS = float(np.log(det_yS))
-    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
-
-    obj[0] = logdet_S - logdet_yS
-
-    for t in range(1, k):
-        b = R_path[:t, t].reshape(-1, 1)
-        v = inv_S @ b
-        s1 = float(1.0 - (b.T @ v)[0, 0])
-        s1 = max(s1, eps)
-
-        inv_S_new = np.empty((t + 1, t + 1), dtype=np.float64)
-        inv_S_new[:t, :t] = inv_S + (v @ v.T) / s1
-        inv_S_new[:t, t] = -v[:, 0] / s1
-        inv_S_new[t, :t] = -v[:, 0] / s1
-        inv_S_new[t, t] = 1.0 / s1
-        inv_S = inv_S_new
-        logdet_S += np.log(s1)
-
-        b2 = np.empty((t + 1, 1), dtype=np.float64)
-        b2[0, 0] = r_path[t]
-        b2[1:, 0] = b[:, 0]
-
-        v2 = inv_yS @ b2
-        s2 = float(1.0 - (b2.T @ v2)[0, 0])
-        s2 = max(s2, eps)
-
-        inv_yS_new = np.empty((t + 2, t + 2), dtype=np.float64)
-        inv_yS_new[: t + 1, : t + 1] = inv_yS + (v2 @ v2.T) / s2
-        inv_yS_new[: t + 1, t + 1] = -v2[:, 0] / s2
-        inv_yS_new[t + 1, : t + 1] = -v2[:, 0] / s2
-        inv_yS_new[t + 1, t + 1] = 1.0 / s2
-        inv_yS = inv_yS_new
-        logdet_yS += np.log(s2)
-
-        obj[t] = logdet_S - logdet_yS
-
-    return obj
+    return objective_from_corr_path(R_path, r_path, shrink=shrink, eps=eps)
