@@ -85,6 +85,15 @@ def _prepare_eval_data(
     return eval_X, eval_y, eval_groups, eval_time
 
 
+def _resolve_cat_features(
+    X: Union[pd.DataFrame, np.ndarray],
+    cat_features: Optional[List[str]],
+) -> Optional[List[str]]:
+    if cat_features is None and isinstance(X, pd.DataFrame):
+        return X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    return cat_features
+
+
 def _auto_k_gaussian(
     *,
     cache: FeatureCache,
@@ -97,6 +106,8 @@ def _auto_k_gaussian(
     eval_y: np.ndarray,
     groups: Optional[np.ndarray],
     time: Optional[np.ndarray],
+    cat_features: Optional[List[str]],
+    cat_encoding: CatEncoding,
     corr_prune: float = 0.95,
     verbose: bool = True,
 ) -> List[str]:
@@ -138,6 +149,8 @@ def _auto_k_gaussian(
         groups=groups,
         time=time,
         task="regression",
+        cat_features=cat_features,
+        cat_encoding=cat_encoding,
     )
     if verbose:
         print(f"  CV/holdout selected k={best_k}")
@@ -146,23 +159,20 @@ def _auto_k_gaussian(
 
 def _auto_k_classic(
     *,
-    X_arr: np.ndarray,
     y_arr: np.ndarray,
+    eval_X: pd.DataFrame,
     feature_names: List[str],
     path_idx: np.ndarray,
-    row_idx: np.ndarray,
     auto_k_config: AutoKConfig,
-    groups: Optional[np.ndarray],
-    time: Optional[np.ndarray],
+    eval_groups: Optional[np.ndarray],
+    eval_time: Optional[np.ndarray],
     task: Task,
+    cat_features: Optional[List[str]],
+    cat_encoding: CatEncoding,
     verbose: bool = True,
 ) -> List[str]:
     """Shared auto-k evaluation for classic estimators."""
     path = [feature_names[i] for i in path_idx]
-    X_df = pd.DataFrame(X_arr, columns=feature_names)
-
-    eval_groups = groups[row_idx] if groups is not None else None
-    eval_time = time[row_idx] if time is not None else None
 
     if auto_k_config.strategy == "time_holdout" and eval_time is None:
         raise ValueError("auto-k evaluate with strategy='time_holdout' requires time parameter")
@@ -170,13 +180,15 @@ def _auto_k_classic(
         raise ValueError("auto-k evaluate with strategy='group_cv' requires groups parameter")
 
     best_k, selected, _ = select_k_auto(
-        X_df,
+        eval_X,
         y_arr,
         path,
         auto_k_config,
         groups=eval_groups,
         time=eval_time,
         task=task,
+        cat_features=cat_features,
+        cat_encoding=cat_encoding,
     )
     if verbose:
         print(f"  CV/holdout selected k={best_k}")
@@ -282,6 +294,7 @@ def select_mrmr(
     groups, time = _validate_groups_time(groups, time, n_rows)
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
         top_m_eff = _default_top_m(top_m, max_k)
@@ -294,8 +307,6 @@ def select_mrmr(
                     f"(top_m={top_m_eff})"
                 )
             X_enc = X
-            if isinstance(X, pd.DataFrame) and cat_features is None:
-                cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
             if cat_features and cat_encoding != "none":
                 if not isinstance(X, pd.DataFrame):
                     raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
@@ -309,7 +320,7 @@ def select_mrmr(
                 )
             method = "mrmr_quot" if formula == "quotient" else "mrmr_diff"
             eval_X, eval_y, eval_groups, eval_time = _prepare_eval_data(
-                X_enc, y, cache, groups, time
+                X, y, cache, groups, time
             )
 
             return _auto_k_gaussian(
@@ -323,6 +334,8 @@ def select_mrmr(
                 eval_y=eval_y,
                 groups=eval_groups,
                 time=eval_time,
+                cat_features=cat_features,
+                cat_encoding=cat_encoding,
                 verbose=verbose,
             )
 
@@ -360,16 +373,22 @@ def select_mrmr(
             )
 
         path_idx = mrmr_select(X_arr, rel, max_k, formula=formula, top_m=top_m_eff, sample_weight=w)
+        X_eval = pd.DataFrame(X, columns=feature_names) if not isinstance(X, pd.DataFrame) else X
+        X_eval = X_eval.iloc[row_idx]
+        eval_groups = groups[row_idx] if groups is not None else None
+        eval_time = time[row_idx] if time is not None else None
+
         return _auto_k_classic(
-            X_arr=X_arr,
             y_arr=y_arr,
+            eval_X=X_eval,
             feature_names=feature_names,
             path_idx=path_idx,
-            row_idx=row_idx,
             auto_k_config=auto_k_config,
-            groups=groups,
-            time=time,
+            eval_groups=eval_groups,
+            eval_time=eval_time,
             task=task,
+            cat_features=cat_features,
+            cat_encoding=cat_encoding,
             verbose=verbose,
         )
 
@@ -525,6 +544,7 @@ def select_jmi(
 
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
         top_m_eff = _default_top_m(top_m, max_k)
@@ -535,8 +555,6 @@ def select_jmi(
                     f"JMI gaussian auto-k: building path to {max_k} features (top_m={top_m_eff})"
                 )
             X_enc = X
-            if isinstance(X, pd.DataFrame) and cat_features is None:
-                cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
             if cat_features and cat_encoding != "none":
                 if not isinstance(X, pd.DataFrame):
                     raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
@@ -549,7 +567,7 @@ def select_jmi(
                     random_state=random_state,
                 )
             eval_X, eval_y, eval_groups, eval_time = _prepare_eval_data(
-                X_enc, y, cache, groups, time
+                X, y, cache, groups, time
             )
 
             return _auto_k_gaussian(
@@ -563,6 +581,8 @@ def select_jmi(
                 eval_y=eval_y,
                 groups=eval_groups,
                 time=eval_time,
+                cat_features=cat_features,
+                cat_encoding=cat_encoding,
                 verbose=verbose,
             )
 
@@ -612,16 +632,22 @@ def select_jmi(
             y_kind=y_kind,
             sample_weight=w,
         )
+        X_eval = pd.DataFrame(X, columns=feature_names) if not isinstance(X, pd.DataFrame) else X
+        X_eval = X_eval.iloc[row_idx]
+        eval_groups = groups[row_idx] if groups is not None else None
+        eval_time = time[row_idx] if time is not None else None
+
         return _auto_k_classic(
-            X_arr=X_arr,
             y_arr=y_arr,
+            eval_X=X_eval,
             feature_names=feature_names,
             path_idx=path_idx,
-            row_idx=row_idx,
             auto_k_config=auto_k_config,
-            groups=groups,
-            time=time,
+            eval_groups=eval_groups,
+            eval_time=eval_time,
             task=task,
+            cat_features=cat_features,
+            cat_encoding=cat_encoding,
             verbose=verbose,
         )
 
@@ -691,6 +717,7 @@ def select_jmim(
 
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
         top_m_eff = _default_top_m(top_m, max_k)
@@ -701,8 +728,6 @@ def select_jmim(
                     f"JMIM gaussian auto-k: building path to {max_k} features (top_m={top_m_eff})"
                 )
             X_enc = X
-            if isinstance(X, pd.DataFrame) and cat_features is None:
-                cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
             if cat_features and cat_encoding != "none":
                 if not isinstance(X, pd.DataFrame):
                     raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
@@ -715,7 +740,7 @@ def select_jmim(
                     random_state=random_state,
                 )
             eval_X, eval_y, eval_groups, eval_time = _prepare_eval_data(
-                X_enc, y, cache, groups, time
+                X, y, cache, groups, time
             )
 
             return _auto_k_gaussian(
@@ -729,6 +754,8 @@ def select_jmim(
                 eval_y=eval_y,
                 groups=eval_groups,
                 time=eval_time,
+                cat_features=cat_features,
+                cat_encoding=cat_encoding,
                 verbose=verbose,
             )
 
@@ -778,16 +805,22 @@ def select_jmim(
             y_kind=y_kind,
             sample_weight=w,
         )
+        X_eval = pd.DataFrame(X, columns=feature_names) if not isinstance(X, pd.DataFrame) else X
+        X_eval = X_eval.iloc[row_idx]
+        eval_groups = groups[row_idx] if groups is not None else None
+        eval_time = time[row_idx] if time is not None else None
+
         return _auto_k_classic(
-            X_arr=X_arr,
             y_arr=y_arr,
+            eval_X=X_eval,
             feature_names=feature_names,
             path_idx=path_idx,
-            row_idx=row_idx,
             auto_k_config=auto_k_config,
-            groups=groups,
-            time=time,
+            eval_groups=eval_groups,
+            eval_time=eval_time,
             task=task,
+            cat_features=cat_features,
+            cat_encoding=cat_encoding,
             verbose=verbose,
         )
 
@@ -920,8 +953,8 @@ def select_cefsplus(
     groups, time = _validate_groups_time(groups, time, n_rows)
     if cat_features and cat_encoding != "none" and not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
-    if isinstance(X, pd.DataFrame) and cat_features is None:
-        cat_features = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    cat_features = _resolve_cat_features(X, cat_features)
+    X_raw = X
     if cat_features and cat_encoding != "none":
         X = encode_categoricals(X, y, cat_features, cat_encoding)
     from sift._preprocess import to_numpy
@@ -949,7 +982,7 @@ def select_cefsplus(
             )
 
         eval_X, eval_y, eval_groups, eval_time = _prepare_eval_data(
-            X, y, cache, groups, time
+            X_raw, y, cache, groups, time
         )
 
         return _auto_k_gaussian(
@@ -963,6 +996,8 @@ def select_cefsplus(
             eval_y=eval_y,
             groups=eval_groups,
             time=eval_time,
+            cat_features=cat_features,
+            cat_encoding=cat_encoding,
             corr_prune=corr_prune,
             verbose=verbose,
         )

@@ -871,6 +871,21 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 train_idx, test_idx = _group_time_holdout_split(
                     groups, time, self.test_size
                 )
+            elif groups is not None:
+                if len(np.unique(groups)) < 2:
+                    train_idx = np.arange(len(y))
+                    test_idx = train_idx
+                else:
+                    from sklearn.model_selection import GroupShuffleSplit
+
+                    gss = GroupShuffleSplit(
+                        n_splits=1,
+                        test_size=self.test_size,
+                        random_state=seed,
+                    )
+                    train_idx, test_idx = next(gss.split(X, y, groups))
+                    train_idx = np.asarray(train_idx)
+                    test_idx = np.asarray(test_idx)
             elif time is not None:
                 train_idx, test_idx = _time_holdout_indices(time, self.test_size)
             else:

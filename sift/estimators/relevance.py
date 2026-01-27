@@ -107,6 +107,38 @@ def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     return scores
 
 
+def _weighted_ks_2samp(x1: np.ndarray, w1: np.ndarray, x2: np.ndarray, w2: np.ndarray) -> float:
+    x1 = np.asarray(x1, dtype=np.float64)
+    x2 = np.asarray(x2, dtype=np.float64)
+    w1 = np.asarray(w1, dtype=np.float64)
+    w2 = np.asarray(w2, dtype=np.float64)
+
+    m1 = np.isfinite(x1) & np.isfinite(w1) & (w1 > 0)
+    m2 = np.isfinite(x2) & np.isfinite(w2) & (w2 > 0)
+    x1, w1 = x1[m1], w1[m1]
+    x2, w2 = x2[m2], w2[m2]
+    if x1.size == 0 or x2.size == 0:
+        return 0.0
+
+    o1 = np.argsort(x1, kind="mergesort")
+    o2 = np.argsort(x2, kind="mergesort")
+    x1, w1 = x1[o1], w1[o1]
+    x2, w2 = x2[o2], w2[o2]
+
+    c1 = np.cumsum(w1)
+    c2 = np.cumsum(w2)
+    c1 /= c1[-1]
+    c2 /= c2[-1]
+
+    xs = np.unique(np.concatenate([x1, x2]))
+    i1 = np.searchsorted(x1, xs, side="right") - 1
+    i2 = np.searchsorted(x2, xs, side="right") - 1
+
+    F1 = np.where(i1 >= 0, c1[i1], 0.0)
+    F2 = np.where(i2 >= 0, c2[i2], 0.0)
+    return float(np.max(np.abs(F1 - F2)))
+
+
 def ks_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> np.ndarray:
     """Kolmogorov-Smirnov statistic for classification."""
     from scipy.stats import ks_2samp
@@ -115,15 +147,39 @@ def ks_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> np.
     n, p = X.shape
     scores = np.zeros(p, dtype=np.float64)
 
+    w_arr = None
+    if w is not None:
+        w_arr = np.asarray(w, dtype=np.float64).reshape(-1)
+        if w_arr.shape[0] != n:
+            raise ValueError(f"w has {w_arr.shape[0]} elements but X has {n} rows")
+        if not np.isfinite(w_arr).all():
+            raise ValueError("w must be finite.")
+        if np.any(w_arr < 0):
+            raise ValueError("w must be non-negative.")
+
     for j in range(p):
         x = X[:, j]
+        finite_mask = np.isfinite(x)
         ks_sum = 0.0
         count = 0
         for c in classes:
-            mask = y == c
-            if mask.sum() < 2:
-                continue
-            stat, _ = ks_2samp(x[mask], x[~mask])
+            mask = (y == c) & finite_mask
+            other_mask = (y != c) & finite_mask
+            if w_arr is None:
+                if mask.sum() < 2 or other_mask.sum() < 2:
+                    continue
+                stat, _ = ks_2samp(x[mask], x[other_mask])
+            else:
+                mask_w = mask & (w_arr > 0)
+                other_mask_w = other_mask & (w_arr > 0)
+                if mask_w.sum() < 2 or other_mask_w.sum() < 2:
+                    continue
+                stat = _weighted_ks_2samp(
+                    x[mask_w],
+                    w_arr[mask_w],
+                    x[other_mask_w],
+                    w_arr[other_mask_w],
+                )
             ks_sum += stat
             count += 1
         scores[j] = ks_sum / max(count, 1)
