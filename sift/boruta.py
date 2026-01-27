@@ -47,8 +47,16 @@ def _clone_estimator(estimator, seed: int):
         est = copy.deepcopy(estimator)
 
     if hasattr(est, "get_params") and hasattr(est, "set_params"):
-        params = est.get_params(deep=False)
-        for key in ("random_seed", "random_state", "seed"):
+        try:
+            params = est.get_params(deep=False)
+        except TypeError:
+            params = est.get_params()
+        keys = ("random_seed", "random_state", "seed")
+        for key in keys:
+            if key in params and params[key] is not None:
+                est.set_params(**{key: seed})
+                return est
+        for key in keys:
             if key in params:
                 est.set_params(**{key: seed})
                 return est
@@ -170,10 +178,25 @@ def _set_n_estimators(estimator, n_estimators: int) -> None:
     """
     Set n_estimators/iterations on estimator without introducing synonym conflicts.
     """
-    param_names = ["n_estimators", "iterations", "num_iterations", "n_iter"]
+    # Prefer CatBoost's native params first to avoid synonym collisions.
+    param_names = [
+        "iterations",
+        "num_boost_round",
+        "num_trees",
+        "n_estimators",
+        "num_iterations",
+        "n_iter",
+    ]
 
     if hasattr(estimator, "get_params") and hasattr(estimator, "set_params"):
-        params = estimator.get_params(deep=False)
+        try:
+            params = estimator.get_params(deep=False)
+        except TypeError:
+            params = estimator.get_params()
+        for param in param_names:
+            if param in params and params[param] is not None:
+                estimator.set_params(**{param: n_estimators})
+                return
         for param in param_names:
             if param in params:
                 estimator.set_params(**{param: n_estimators})
