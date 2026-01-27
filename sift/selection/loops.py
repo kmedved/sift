@@ -198,20 +198,41 @@ def jmi_select(
     k = min(k, m)
 
     use_indexed = mi_estimator in ("r2", "binned")
+    y_binned = None
+    n_y_bins = None
+    X_binned = None
 
     if mi_estimator == "r2":
         def mi_func_indexed(s, idx):
             return jmi_est.r2_joint_mi_indexed(X_cand, idx, s, y_arr, w_arr)
     elif mi_estimator == "binned":
+        X_binned = jmi_est.quantile_bin_matrix(X_cand, n_bins=10)
+        if y_kind == "discrete":
+            y_vals = np.asarray(y_arr)
+            if (
+                np.issubdtype(y_vals.dtype, np.integer)
+                and y_vals.size > 0
+                and y_vals.min() >= 0
+                and y_vals.max() <= 200_000
+            ):
+                y_binned = y_vals.astype(np.int64, copy=False)
+            else:
+                y_binned = jmi_est._factorize(y_vals)
+            n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
+        else:
+            y_binned = jmi_est._quantile_bin(y_arr, 10)
+            n_y_bins = 10
+
         def mi_func_indexed(s, idx):
-            return jmi_est.binned_joint_mi_indexed(
-                X_cand,
+            s_binned = jmi_est._quantile_bin(s, 10)
+            return jmi_est.binned_joint_mi_indexed_prebinned(
+                X_binned,
                 idx,
-                s,
-                y_arr,
+                s_binned,
+                y_binned,
                 w_arr,
                 n_bins=10,
-                y_kind=y_kind,
+                n_y_bins=n_y_bins,
             )
     elif mi_estimator == "ksg":
         def mi_func_matrix(s, c):

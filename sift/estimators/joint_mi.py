@@ -377,6 +377,69 @@ def binned_joint_mi_indexed(
     return scores
 
 
+def binned_joint_mi_indexed_prebinned(
+    X_binned: np.ndarray,
+    cand_idx: np.ndarray,
+    s_binned: np.ndarray,
+    y_binned: np.ndarray,
+    w: np.ndarray,
+    n_bins: int,
+    n_y_bins: int,
+) -> np.ndarray:
+    """Binned joint MI with prebinned candidate matrix and target."""
+    X_binned = np.asarray(X_binned)
+    if X_binned.ndim != 2:
+        raise ValueError("X_binned must be 2D")
+
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    m = cand_idx.size
+    if m == 0:
+        return np.empty(0, dtype=np.float64)
+
+    w = np.asarray(w, dtype=np.float64).ravel()
+    w_sum = float(w.sum())
+    if w_sum <= 0.0:
+        return np.zeros(m, dtype=np.float64)
+
+    s_binned = np.asarray(s_binned, dtype=np.int64).ravel()
+    y_binned = np.asarray(y_binned, dtype=np.int64).ravel()
+    if X_binned.shape[0] != s_binned.size or s_binned.size != y_binned.size:
+        raise ValueError("Row mismatch between X_binned, s_binned, y_binned")
+
+    h_y = _weighted_entropy_from_codes(y_binned, w, n_states=n_y_bins, w_sum=w_sum)
+
+    fs_states = n_bins * n_bins
+    fsy_states = fs_states * n_y_bins
+
+    scores = np.empty(m, dtype=np.float64)
+
+    for ci in range(m):
+        j = int(cand_idx[ci])
+        f_binned = X_binned[:, j]
+
+        fs_binned = f_binned * n_bins + s_binned
+        fsy_binned = fs_binned * n_y_bins + y_binned
+
+        h_fs = _weighted_entropy_from_codes(fs_binned, w, n_states=fs_states, w_sum=w_sum)
+        h_fsy = _weighted_entropy_from_codes(fsy_binned, w, n_states=fsy_states, w_sum=w_sum)
+
+        scores[ci] = max(0.0, h_fs + h_y - h_fsy)
+
+    return scores
+
+
+def quantile_bin_matrix(X: np.ndarray, n_bins: int) -> np.ndarray:
+    """Quantile-bin each column of X into integer codes."""
+    X = np.asarray(X)
+    if X.ndim != 2:
+        raise ValueError("X must be 2D")
+    n, p = X.shape
+    out = np.empty((n, p), dtype=np.int32)
+    for j in range(p):
+        out[:, j] = _quantile_bin(X[:, j], n_bins)
+    return out
+
+
 def ksg_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
