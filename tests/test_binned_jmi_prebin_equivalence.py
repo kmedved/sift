@@ -38,3 +38,15 @@ def test_binned_jmi_prebin_equivalence():
     )
 
     np.testing.assert_allclose(scores_old, scores_new, atol=1e-8, rtol=1e-6)
+
+
+def test_quantile_bin_matrix_indexed_matches_full():
+    rng = np.random.default_rng(1)
+    n, p = 128, 12
+    X_full = rng.normal(size=(n, p)).astype(np.float64)
+    cand_idx = np.array([0, 3, 5, 9])
+
+    full = jmi.quantile_bin_matrix(X_full, 7)[:, cand_idx]
+    indexed = jmi.quantile_bin_matrix_indexed(X_full, cand_idx, 7)
+
+    np.testing.assert_array_equal(indexed, full)

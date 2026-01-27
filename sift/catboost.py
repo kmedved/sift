@@ -633,20 +633,33 @@ def _select_features_single_split(
         # Reorder survivors by importance from the trained model
         if len(survivors) > 1:
             model_feats = list(getattr(model, "feature_names_", []))
-            if not model_feats:
-                model_feats = list(survivors)
-
-            sel_cat = [f for f in cat_features if f in model_feats]
-            sel_text = [f for f in text_features if f in model_feats]
-            train_pool_sel = _create_pool(X_train, y_train, model_feats, w_train, sel_cat, sel_text)
-            try:
-                imp = model.get_feature_importance(train_pool_sel, type='PredictionValuesChange')
-            except Exception:
-                pass  # Keep original order if importance fails
-            else:
-                imp_series = pd.Series(imp, index=model_feats)
-                survivors = [f for f in survivors if f in imp_series.index]
-                survivors = imp_series.loc[survivors].sort_values(ascending=False).index.tolist()
+            if model_feats:
+                sel_cat = [f for f in cat_features if f in model_feats]
+                sel_text = [f for f in text_features if f in model_feats]
+                train_pool_sel = _create_pool(
+                    X_train,
+                    y_train,
+                    model_feats,
+                    w_train,
+                    sel_cat,
+                    sel_text,
+                )
+                try:
+                    imp = model.get_feature_importance(
+                        train_pool_sel, type='PredictionValuesChange'
+                    )
+                except Exception:
+                    pass  # Keep original order if importance fails
+                else:
+                    if len(imp) != len(model_feats):
+                        raise RuntimeError(
+                            "CatBoost importance length mismatch with model feature names"
+                        )
+                    imp_series = pd.Series(imp, index=model_feats)
+                    survivors = [f for f in survivors if f in imp_series.index]
+                    survivors = (
+                        imp_series.loc[survivors].sort_values(ascending=False).index.tolist()
+                    )
 
         # Full ranking: survivors (sorted by importance) + eliminated in reverse (best losers first)
         ranked_features = list(survivors) + list(reversed(eliminated))

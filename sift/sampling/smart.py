@@ -70,7 +70,8 @@ class SmartSamplerConfig:
     leverage_batch_size : int
         Batch size for leverage score computation (memory vs speed).
     svd_sample_size : int, optional
-        Row subsample size for randomized SVD (speed on huge n). If None, uses all rows.
+        Row subsample size for randomized SVD (speed on huge n). If set below n, leverage
+        scores become approximate. If None, uses all rows.
     weight_clip_quantile : float
         Quantile for clipping extreme weights.
     residual_weight_cap : float
@@ -224,6 +225,10 @@ def smart_sample(
         if config.svd_sample_size is not None:
             svd_rows = min(n, int(config.svd_sample_size))
             if svd_rows < n:
+                if config.verbose:
+                    print(
+                        f"SVD computed on {svd_rows:,}/{n:,} rows; leverage scores are approximate."
+                    )
                 svd_idx = rng.choice(n, size=svd_rows, replace=False)
                 X_svd = Xs[svd_idx]
         n_svd = X_svd.shape[0]

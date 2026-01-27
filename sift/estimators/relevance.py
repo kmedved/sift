@@ -208,10 +208,9 @@ def rf_regression(
     rf.fit(X_filled, y, sample_weight=w)
     importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)
     if importances.size != X_filled.shape[1]:
-        out = np.zeros(X_filled.shape[1], dtype=np.float64)
-        count = min(out.size, importances.size)
-        out[:count] = importances[:count]
-        return out
+        raise RuntimeError(
+            f"RandomForest returned {importances.size} importances for {X_filled.shape[1]} features"
+        )
     return importances
 
 
@@ -236,8 +235,7 @@ def rf_classif(
     rf.fit(X_filled, y, sample_weight=w)
     importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)
     if importances.size != X_filled.shape[1]:
-        out = np.zeros(X_filled.shape[1], dtype=np.float64)
-        count = min(out.size, importances.size)
-        out[:count] = importances[:count]
-        return out
+        raise RuntimeError(
+            f"RandomForest returned {importances.size} importances for {X_filled.shape[1]} features"
+        )
     return importances
