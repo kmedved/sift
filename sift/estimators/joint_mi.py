@@ -322,7 +322,11 @@ def binned_joint_mi_indexed(
     n_bins: int = 10,
     y_kind: Literal["discrete", "continuous"] = "continuous",
 ) -> np.ndarray:
-    """Binned joint MI WITHOUT candidate-matrix copying."""
+    """Binned joint MI with streaming per-candidate binning (low-memory).
+
+    Convenience wrapper; for repeated scoring, prebin once with
+    ``quantile_bin_matrix`` + ``binned_joint_mi_indexed_prebinned``.
+    """
     X_full = np.asarray(X_full)
     if X_full.ndim != 2:
         raise ValueError("X_full must be 2D")
@@ -437,6 +441,28 @@ def quantile_bin_matrix(X: np.ndarray, n_bins: int) -> np.ndarray:
     out = np.empty((n, p), dtype=np.int32)
     for j in range(p):
         out[:, j] = _quantile_bin(X[:, j], n_bins)
+    return out
+
+
+def quantile_bin_matrix_indexed(
+    X_full: np.ndarray,
+    cand_idx: np.ndarray,
+    n_bins: int,
+) -> np.ndarray:
+    """Quantile-bin candidate columns into an (n, m) int32 matrix.
+
+    WARNING: allocates O(n*m) memory; intended for smaller problems or when
+    you explicitly want prebinned matrices.
+    """
+    X_full = np.asarray(X_full)
+    if X_full.ndim != 2:
+        raise ValueError("X_full must be 2D")
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    n = X_full.shape[0]
+    m = cand_idx.size
+    out = np.empty((n, m), dtype=np.int32)
+    for i, j in enumerate(cand_idx):
+        out[:, i] = _quantile_bin(X_full[:, int(j)], n_bins)
     return out
 
 
