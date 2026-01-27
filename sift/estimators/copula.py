@@ -92,7 +92,7 @@ def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
     x_valid = x[mask]
     w_valid = w[mask]
 
-    order = np.argsort(x_valid)
+    order = np.argsort(x_valid, kind="mergesort")
     w_sorted = w_valid[order]
 
     cumsum = np.cumsum(w_sorted)

@@ -4,7 +4,6 @@ from typing import Optional, List, Dict, Tuple, Union, Callable
 from dataclasses import dataclass
 import warnings
 
-from sklearn.preprocessing import StandardScaler
 from sklearn.utils.extmath import randomized_svd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
@@ -70,6 +69,8 @@ class SmartSamplerConfig:
         Size of pilot sample for residual estimation.
     leverage_batch_size : int
         Batch size for leverage score computation (memory vs speed).
+    svd_sample_size : int, optional
+        Row subsample size for randomized SVD (speed on huge n). If None, uses all rows.
     weight_clip_quantile : float
         Quantile for clipping extreme weights.
     residual_weight_cap : float
@@ -92,6 +93,7 @@ class SmartSamplerConfig:
     min_per_group: int = 2
     pilot_sample_size: int = 50_000
     leverage_batch_size: int = 200_000
+    svd_sample_size: Optional[int] = None
     weight_clip_quantile: float = 0.99
     residual_weight_cap: float = 0.4
     uniform_floor: float = 0.05
@@ -177,8 +179,12 @@ def smart_sample(
 
     X = mean_impute(X, copy=False)
 
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(X).astype(np.float32)
+    mu = X.mean(axis=0, dtype=np.float64)
+    sigma = X.std(axis=0, dtype=np.float64)
+    sigma[sigma < 1e-12] = 1.0
+    X -= mu.astype(np.float32)
+    X /= sigma.astype(np.float32)
+    Xs = X
 
     # Verify finiteness after scaling
     if not np.isfinite(Xs).all():
@@ -206,7 +212,15 @@ def smart_sample(
     k = int(min(128, d, max(16, np.ceil(np.log2(d + 1)) * 8)))
     k = min(k, max(1, min(n, d) - 1))  # Cap by matrix dimensions
     try:
-        _, S, Vt = randomized_svd(Xs, n_components=k, n_iter=4, random_state=config.random_state)
+        X_svd = Xs
+        if config.svd_sample_size is not None:
+            svd_rows = min(n, int(config.svd_sample_size))
+            if svd_rows < n:
+                svd_idx = rng.choice(n, size=svd_rows, replace=False)
+                X_svd = Xs[svd_idx]
+        n_svd = X_svd.shape[0]
+        k_svd = min(k, max(1, min(n_svd, d) - 1))
+        _, S, Vt = randomized_svd(X_svd, n_components=k_svd, n_iter=4, random_state=config.random_state)
         V = Vt.T.astype(np.float32)
         S = S.astype(np.float32)
         s2 = S * S
@@ -332,20 +346,26 @@ def smart_sample(
             continue
 
         # Anchors for this group (cap share)
-        g_anchor = g_idx[anchor_mask[g_idx]]
-        if g_anchor.size:
+        anchor_pos = np.flatnonzero(anchor_mask[g_idx])
+        if anchor_pos.size:
             if config.anchor_max_share <= 0:
-                g_anchor = np.array([], dtype=int)
+                anchor_pos = np.array([], dtype=int)
             else:
                 max_anchor_keep = max(1, int(np.floor(config.anchor_max_share * target_g)))
                 max_anchor_keep = min(max_anchor_keep, target_g)
-                if g_anchor.size > max_anchor_keep:
-                    top_local = np.argpartition(-base_scores[g_anchor], max_anchor_keep - 1)[:max_anchor_keep]
-                    g_anchor = g_anchor[top_local]
+                if anchor_pos.size > max_anchor_keep:
+                    anchor_scores = base_scores[g_idx[anchor_pos]]
+                    top_local = np.argpartition(-anchor_scores, max_anchor_keep - 1)[:max_anchor_keep]
+                    anchor_pos = anchor_pos[top_local]
+
+        g_anchor = g_idx[anchor_pos]
         if g_anchor.size:
             add_rows(g_anchor, np.ones(g_anchor.size, dtype=np.float32))
 
-        pool = g_idx[~np.isin(g_idx, g_anchor)]
+        pool_mask = np.ones(n_g, dtype=bool)
+        if anchor_pos.size:
+            pool_mask[anchor_pos] = False
+        pool = g_idx[pool_mask]
         remaining = max(0, target_g - g_anchor.size)
 
         if remaining > 0 and pool.size > 0:

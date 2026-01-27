@@ -562,6 +562,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 cat_features = X.select_dtypes(
                     include=["object", "category", "string"]
                 ).columns.tolist()
+            elif cat_features:
+                cat_features = [c for c in cat_features if c in X.columns]
 
             if cat_features and self.cat_encoding != "none":
                 if self.task == "classification":
@@ -1028,6 +1030,8 @@ def select_boruta(
                 raise ValueError("Cannot specify both time and time_col")
             time = X[time_col].values
             X = X.drop(columns=[time_col])
+        if cat_features is not None:
+            cat_features = [c for c in cat_features if c in X.columns]
 
     sel = BorutaSelector(
         estimator=estimator,

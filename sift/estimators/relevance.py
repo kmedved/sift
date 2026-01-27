@@ -138,12 +138,25 @@ def rf_regression(
     max_depth: int = 5,
 ) -> np.ndarray:
     """Random forest importance for regression."""
+    from sift._impute import mean_impute
     from sklearn.ensemble import RandomForestRegressor
 
-    X_filled = np.nan_to_num(X, nan=np.nanmin(X) - 1)
+    X_arr = np.asarray(X)
+    if X_arr.dtype == np.float32:
+        X_arr = X_arr.astype(np.float32, copy=False)
+    elif X_arr.dtype != np.float64:
+        X_arr = X_arr.astype(np.float64, copy=False)
+
+    X_filled = mean_impute(X_arr, copy=True)
     rf = RandomForestRegressor(max_depth=max_depth, n_estimators=100, random_state=0)
     rf.fit(X_filled, y, sample_weight=w)
-    return rf.feature_importances_
+    importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)
+    if importances.size != X_filled.shape[1]:
+        out = np.zeros(X_filled.shape[1], dtype=np.float64)
+        count = min(out.size, importances.size)
+        out[:count] = importances[:count]
+        return out
+    return importances
 
 
 def rf_classif(
@@ -153,9 +166,22 @@ def rf_classif(
     max_depth: int = 5,
 ) -> np.ndarray:
     """Random forest importance for classification."""
+    from sift._impute import mean_impute
     from sklearn.ensemble import RandomForestClassifier
 
-    X_filled = np.nan_to_num(X, nan=np.nanmin(X) - 1)
+    X_arr = np.asarray(X)
+    if X_arr.dtype == np.float32:
+        X_arr = X_arr.astype(np.float32, copy=False)
+    elif X_arr.dtype != np.float64:
+        X_arr = X_arr.astype(np.float64, copy=False)
+
+    X_filled = mean_impute(X_arr, copy=True)
     rf = RandomForestClassifier(max_depth=max_depth, n_estimators=100, random_state=0)
     rf.fit(X_filled, y, sample_weight=w)
-    return rf.feature_importances_
+    importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)
+    if importances.size != X_filled.shape[1]:
+        out = np.zeros(X_filled.shape[1], dtype=np.float64)
+        count = min(out.size, importances.size)
+        out[:count] = importances[:count]
+        return out
+    return importances
