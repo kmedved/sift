@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 
 import numpy as np
@@ -101,6 +102,8 @@ def select_k_auto(
     groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     task: Literal["regression", "classification"] = "regression",
+    cat_encoding: Literal["none", "target", "loo", "james_stein"] = "none",
+    cat_features: Optional[List[str]] = None,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
     if not feature_path:
@@ -118,17 +121,66 @@ def select_k_auto(
     valid_features = valid_features[:max_k]
     k_grid = _build_k_grid(min_k, max_k)
 
-    X_path = X[valid_features].to_numpy(dtype=np.float64, copy=False)
+    X_path_df = X[valid_features]
 
     metric = _resolve_metric(config.metric, task)
     alphas = np.logspace(-3, 3, 10)
 
     def _eval_split(train_idx: np.ndarray, val_idx: np.ndarray) -> dict:
         """Evaluate all k values for one train/val split."""
-        Xtr = X_path[train_idx]
-        Xva = X_path[val_idx]
+        Xtr_df = X_path_df.iloc[train_idx]
+        Xva_df = X_path_df.iloc[val_idx]
         ytr = y_arr[train_idx]
         yva = y_arr[val_idx]
+
+        if cat_features is None:
+            fold_cat = (
+                Xtr_df.select_dtypes(include=["object", "category", "string"])
+                .columns.intersection(valid_features)
+                .tolist()
+            )
+        else:
+            fold_cat = [col for col in cat_features if col in Xtr_df.columns]
+
+        if cat_encoding != "none" and fold_cat:
+            if importlib.util.find_spec("category_encoders") is None:
+                raise ImportError(
+                    "cat_encoding requires category_encoders. Install with: pip install category_encoders"
+                )
+            import category_encoders as ce
+
+            enc_map = {
+                "loo": ce.LeaveOneOutEncoder,
+                "target": ce.TargetEncoder,
+                "james_stein": ce.JamesSteinEncoder,
+            }
+            Encoder = enc_map[cat_encoding]
+            try:
+                enc = Encoder(
+                    cols=fold_cat,
+                    handle_missing="return_nan",
+                    handle_unknown="value",
+                )
+            except TypeError:
+                enc = Encoder(cols=fold_cat, handle_missing="return_nan")
+            Xtr_df = enc.fit_transform(Xtr_df, ytr)
+            Xva_df = enc.transform(Xva_df)
+
+        Xtr = Xtr_df.to_numpy(dtype=np.float64, copy=False)
+        Xva = Xva_df.to_numpy(dtype=np.float64, copy=False)
+
+        col_means = np.nanmean(Xtr, axis=0)
+        col_means = np.where(np.isfinite(col_means), col_means, 0.0)
+
+        mask_tr = ~np.isfinite(Xtr)
+        if mask_tr.any():
+            Xtr = Xtr.copy()
+            Xtr[mask_tr] = col_means[np.where(mask_tr)[1]]
+
+        mask_va = ~np.isfinite(Xva)
+        if mask_va.any():
+            Xva = Xva.copy()
+            Xva[mask_va] = col_means[np.where(mask_va)[1]]
 
         scaler = StandardScaler().fit(Xtr)
         Xtr_s = scaler.transform(Xtr)
@@ -183,7 +235,7 @@ def select_k_auto(
         gkf = GroupKFold(n_splits=n_splits)
 
         all_scores = {k: [] for k in k_grid}
-        for train_idx, val_idx in gkf.split(X_path, y_arr, groups):
+        for train_idx, val_idx in gkf.split(X_path_df, y_arr, groups):
             fold_scores = _eval_split(train_idx, val_idx)
             for k, score in fold_scores.items():
                 all_scores[k].append(score)

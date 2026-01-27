@@ -200,8 +200,16 @@ def smart_sample(
 
     # Build group indices
     if config.group_col:
+        group_vals = df[config.group_col]
+        group_key = group_vals.astype("object")
+        if group_vals.isna().any():
+            sentinel = "__SIFT_MISSING_GROUP__"
+            existing = set(group_key[~group_vals.isna()].unique().tolist())
+            while sentinel in existing:
+                sentinel += "_"
+            group_key = group_key.where(~group_vals.isna(), sentinel)
         group_indices: Dict[Union[int, str], np.ndarray] = {
-            g: idx for g, idx in df.groupby(config.group_col, sort=False).indices.items()
+            g: idx for g, idx in df.groupby(group_key, sort=False).indices.items()
         }
     else:
         group_indices = {'_all': np.arange(n)}
