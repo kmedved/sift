@@ -40,21 +40,32 @@ Task = Literal["regression", "classification"]
 
 
 def _clone_estimator(estimator, seed: int):
-    """Clone estimator and set random state."""
+    """Clone estimator and set random seed exactly once (avoid synonym conflicts)."""
     try:
         est = clone(estimator)
     except Exception:
         est = copy.deepcopy(estimator)
 
-    for param in ("random_state", "random_seed", "seed"):
-        if hasattr(est, "set_params"):
+    if hasattr(est, "get_params") and hasattr(est, "set_params"):
+        params = est.get_params(deep=False)
+        for key in ("random_seed", "random_state", "seed"):
+            if key in params:
+                est.set_params(**{key: seed})
+                return est
+
+    if hasattr(est, "set_params"):
+        for key in ("random_seed", "random_state", "seed"):
             try:
-                est.set_params(**{param: seed})
+                est.set_params(**{key: seed})
+                return est
             except (ValueError, TypeError):
                 pass
-        elif hasattr(est, param):
+
+    for key in ("random_seed", "random_state", "seed"):
+        if hasattr(est, key):
             try:
-                setattr(est, param, seed)
+                setattr(est, key, seed)
+                break
             except Exception:
                 pass
     return est
@@ -157,14 +168,16 @@ def _compute_auto_n_estimators(n_features: int, depth: int) -> int:
 
 def _set_n_estimators(estimator, n_estimators: int) -> None:
     """
-    Set n_estimators on estimator, handling different libraries.
-
-    - sklearn: n_estimators
-    - CatBoost: iterations
-    - LightGBM: n_estimators
-    - XGBoost: n_estimators
+    Set n_estimators/iterations on estimator without introducing synonym conflicts.
     """
     param_names = ["n_estimators", "iterations", "num_iterations", "n_iter"]
+
+    if hasattr(estimator, "get_params") and hasattr(estimator, "set_params"):
+        params = estimator.get_params(deep=False)
+        for param in param_names:
+            if param in params:
+                estimator.set_params(**{param: n_estimators})
+                return
 
     if hasattr(estimator, "set_params"):
         for param in param_names:
