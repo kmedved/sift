@@ -24,12 +24,12 @@ except FileNotFoundError:
 setup(
     name='sift',
     version=read_version(),
-    description='Feature selection toolbox (mRMR, JMI/JMIM, CEFS+, Stability Selection, ...)',
+    description='Sift feature selection toolbox for mRMR, JMI/JMIM, CEFS+, stability selection, and CatBoost selectors',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/kmedved/sift',
-    author='Samuele Mazzanti',
-    author_email='mazzanti.sam@gmail.com',
+    author='kmedved',
+    author_email='bibigon@gmail.com',
     license='MIT',
     packages=find_packages(exclude=("tests*", "docs*", "examples*")),
     install_requires=[
