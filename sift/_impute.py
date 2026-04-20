@@ -36,9 +36,15 @@ def mean_impute(X: np.ndarray, *, copy: bool = True) -> np.ndarray:
         return X
 
     X[mask] = np.nan
-    with np.errstate(all="ignore"):
-        col_means = np.nanmean(X, axis=0)
-    col_means = np.where(np.isfinite(col_means), col_means, 0.0).astype(X.dtype, copy=False)
+    finite = np.isfinite(X)
+    counts = finite.sum(axis=0)
+    sums = np.where(finite, X, 0.0).sum(axis=0, dtype=np.float64)
+    col_means = np.divide(
+        sums,
+        counts,
+        out=np.zeros_like(sums, dtype=np.float64),
+        where=counts > 0,
+    ).astype(X.dtype, copy=False)
 
     row_idx, col_idx = np.where(mask)
     X[row_idx, col_idx] = col_means[col_idx]

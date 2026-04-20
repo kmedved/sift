@@ -5,6 +5,35 @@ import pytest
 from sift import catboost as cb
 
 
+@pytest.mark.parametrize("bad_value", ["bad", None, [], 1])
+def test_catboost_validate_choice_rejects_bad_values(bad_value):
+    with pytest.raises(ValueError, match="algorithm=.*invalid"):
+        cb._validate_choice("algorithm", bad_value, {"shap", "prediction"})
+
+
+@pytest.mark.parametrize("bad_value", [1.0, 0.0, "0.5", None, np.nan])
+def test_catboost_step_function_validation_rejects_bad_values(bad_value):
+    with pytest.raises(ValueError, match="step_function"):
+        cb._validate_step_function(bad_value)
+
+
+@pytest.mark.parametrize(
+    ("n_bootstrap", "stability_threshold"),
+    [
+        (0, 0.5),
+        (True, 0.5),
+        (10, "0.5"),
+        (10, np.nan),
+        (10, 1.5),
+    ],
+)
+def test_catboost_stability_validation_rejects_bad_values(
+    n_bootstrap, stability_threshold
+):
+    with pytest.raises(ValueError):
+        cb._validate_stability_params(n_bootstrap, stability_threshold)
+
+
 def test_catboost_select_features_reorders_survivors():
     pytest.importorskip("catboost")
 

@@ -32,6 +32,50 @@ from sift._preprocess import CatEncoding, encode_categoricals, ensure_weights, e
 
 ImportanceBackend = Literal["native", "shap"]
 Task = Literal["regression", "classification"]
+_VALID_TASKS = ("regression", "classification")
+_VALID_IMPORTANCE = ("native", "shap")
+_VALID_IMPORTANCE_DATA = ("train", "test")
+_VALID_SHADOW_METHODS = ("auto", "global", "within_group", "block", "circular_shift")
+_VALID_SHADOW_MODES = ("columns", "rows")
+
+
+def _format_valid_choices(valid_choices) -> str:
+    return ", ".join(repr(choice) for choice in valid_choices)
+
+
+def _validate_enum_option(name: str, value, valid_choices) -> None:
+    if value not in valid_choices:
+        raise ValueError(
+            f"{name} must be one of {_format_valid_choices(valid_choices)}; got {value!r}"
+        )
+
+
+def _validate_block_size(block_size) -> None:
+    if block_size == "auto":
+        return
+    if isinstance(block_size, (int, np.integer)) and not isinstance(block_size, bool):
+        if int(block_size) >= 1:
+            return
+    raise ValueError(
+        f"block_size must be a positive integer or 'auto'; got {block_size!r}"
+    )
+
+
+def _validate_boruta_options(
+    *,
+    task: Task,
+    importance: ImportanceBackend,
+    importance_data: Literal["train", "test"],
+    shadow_method: PermutationMethod,
+    shadow_mode: PermutationAxis,
+    block_size: int | str,
+) -> None:
+    _validate_enum_option("task", task, _VALID_TASKS)
+    _validate_enum_option("importance", importance, _VALID_IMPORTANCE)
+    _validate_enum_option("importance_data", importance_data, _VALID_IMPORTANCE_DATA)
+    _validate_enum_option("shadow_method", shadow_method, _VALID_SHADOW_METHODS)
+    _validate_enum_option("shadow_mode", shadow_mode, _VALID_SHADOW_MODES)
+    _validate_block_size(block_size)
 
 
 # =============================================================================
@@ -590,6 +634,25 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         time : array-like of shape (n_samples,), optional
             Time values for ordering within groups.
         """
+        if self.importance_data == "test" and self.importance == "native":
+            raise ValueError(
+                "BorutaSelector(importance_data='test') is not supported with "
+                "importance='native' because native importances are read from "
+                "the fitted model and do not evaluate held-out rows. Use "
+                "importance='shap' or another held-out-compatible importance "
+                "backend if available."
+            )
+
+        y_arr = np.asarray(y).reshape(-1)
+        _validate_boruta_options(
+            task=self.task,
+            importance=self.importance,
+            importance_data=self.importance_data,
+            shadow_method=self.shadow_method,
+            shadow_mode=self.shadow_mode,
+            block_size=self.block_size,
+        )
+
         feature_names = extract_feature_names(X)
         if isinstance(X, pd.DataFrame):
             X = X.copy()
@@ -623,7 +686,6 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     "cat_encoding in other sift methods."
                 )
         X_arr = to_numpy(X, dtype=np.float64)
-        y_arr = np.asarray(y).reshape(-1)
 
         n, p = X_arr.shape
         if feature_names is None:
@@ -649,15 +711,13 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         shadow_method = resolve_permutation_method(
             self.shadow_method, groups=groups, time=time
         )
-        if shadow_method in ("within_group", "block", "circular_shift") and groups is None:
-            raise ValueError(f"shadow_method='{shadow_method}' requires groups")
         if shadow_method in ("block", "circular_shift") and time is None:
-            raise ValueError(f"shadow_method='{shadow_method}' requires time for ordering")
+            raise ValueError(f"shadow_method='{shadow_method}' requires time")
 
         X_arr = X_arr.copy()
         _impute_nonfinite_inplace(X_arr)
 
-        base_est = self._get_default_estimator()
+        base_est = self._get_default_estimator(y_arr)
         if isinstance(self.n_estimators, str):
             if self.n_estimators != "auto":
                 raise ValueError("n_estimators must be an int or 'auto'")
@@ -689,9 +749,11 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 )
             )
 
-        group_info = None
-        if shadow_method in ("within_group", "block", "circular_shift"):
-            group_info = build_group_info(groups, time)
+        group_info = (
+            build_group_info(groups, time, n_samples=n)
+            if shadow_method != "global"
+            else None
+        )
 
         for it in range(self.max_iter):
             tentative_idx = np.where(status == 0)[0]
@@ -844,7 +906,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
         return self
 
-    def _get_default_estimator(self):
+    def _get_default_estimator(self, y: np.ndarray | None = None):
         """Get default estimator based on importance backend and task."""
         if self.estimator is not None:
             return self.estimator
@@ -876,11 +938,16 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     verbose=False,
                     random_seed=self.random_state,
                 )
+            loss_function = "Logloss"
+            if y is not None:
+                n_classes = np.unique(np.asarray(y).reshape(-1)).size
+                if n_classes >= 3:
+                    loss_function = "MultiClass"
             return CatBoostClassifier(
                 iterations=500,
                 depth=5,
                 learning_rate=0.05,
-                loss_function="Logloss",
+                loss_function=loss_function,
                 verbose=False,
                 random_seed=self.random_state,
             )

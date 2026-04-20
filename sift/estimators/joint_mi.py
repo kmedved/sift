@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 from scipy.spatial import cKDTree
 from scipy.special import digamma
 
@@ -220,7 +220,9 @@ def r2_joint_mi(
     return scores
 
 
-@njit(cache=True, parallel=True)
+# Keep this kernel serial for the same CatBoost/OpenMP compatibility reason as
+# the relevance kernels.
+@njit(cache=True)
 def r2_joint_mi_indexed(
     X_full: np.ndarray,
     cand_idx: np.ndarray,
@@ -277,7 +279,7 @@ def r2_joint_mi_indexed(
 
     scores = np.empty(m, dtype=np.float64)
 
-    for ci in prange(m):
+    for ci in range(m):
         j = cand_idx[ci]
 
         f_mean = 0.0
@@ -311,6 +313,96 @@ def r2_joint_mi_indexed(
         scores[ci] = -0.5 * np.log(1.0 - r2)
 
     return scores
+
+
+def _weighted_standardize_2d(
+    X: np.ndarray,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """Weighted-standardize columns with the same zero-variance convention as R2 JMI."""
+    X_arr = np.asarray(X, dtype=np.float64)
+    mean = (X_arr * w[:, None]).sum(axis=0) / w_sum
+    centered = X_arr - mean
+    var = (centered * centered * w[:, None]).sum(axis=0) / w_sum
+    std = np.where(var > 1e-12, np.sqrt(var), 1.0)
+    return centered / std
+
+
+def _weighted_standardize_1d(
+    x: np.ndarray,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """Weighted-standardize one vector with the same zero-variance convention as R2 JMI."""
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    mean = float(np.dot(w, x_arr) / w_sum)
+    centered = x_arr - mean
+    var = float(np.dot(w, centered * centered) / w_sum)
+    std = np.sqrt(var) if var > 1e-12 else 1.0
+    return centered / std
+
+
+def _prepare_r2_joint_mi_state(
+    X_full: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Precompute standardized features and feature-target correlations for R2 JMI."""
+    w_arr = np.asarray(w, dtype=np.float64).ravel()
+    w_sum = float(w_arr.sum())
+    if w_sum <= 0.0:
+        raise ValueError("w must have positive total weight")
+
+    Z = _weighted_standardize_2d(X_full, w_arr, w_sum)
+    y_s = _weighted_standardize_1d(y, w_arr, w_sum)
+    r_y = Z.T @ (w_arr * y_s) / w_sum
+    return Z, r_y, w_arr, w_sum
+
+
+def _r2_joint_mi_scores_from_correlations(
+    r_ys: float,
+    r_yf: np.ndarray,
+    r_fs: np.ndarray,
+) -> np.ndarray:
+    """Vectorized R2 JMI formula from weighted correlations."""
+    denom = 1.0 - r_fs * r_fs
+    r2 = np.empty_like(r_yf, dtype=np.float64)
+
+    near_singular = denom < 1e-8
+    r2[near_singular] = r_ys * r_ys
+
+    stable = ~near_singular
+    if np.any(stable):
+        a = r_yf[stable] - r_ys * r_fs[stable]
+        r2[stable] = r_ys * r_ys + (a * a) / denom[stable]
+
+    r2 = np.clip(r2, 0.0, 0.99999)
+    return -0.5 * np.log(1.0 - r2)
+
+
+def _r2_joint_mi_indexed_from_state(
+    Z_full: np.ndarray,
+    r_y: np.ndarray,
+    cand_idx: np.ndarray,
+    selected_idx: int,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """R2 JMI for candidate indices using precomputed standardized features."""
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    if cand_idx.size == 0:
+        return np.empty(0, dtype=np.float64)
+    if w_sum <= 0.0:
+        return np.zeros(cand_idx.size, dtype=np.float64)
+
+    selected_idx = int(selected_idx)
+    r_ys = float(r_y[selected_idx])
+    r_yf = r_y[cand_idx]
+    weighted_selected = w * Z_full[:, selected_idx]
+    r_fs_all = Z_full.T @ weighted_selected / w_sum
+    r_fs = r_fs_all[cand_idx]
+    return _r2_joint_mi_scores_from_correlations(r_ys, r_yf, r_fs)
 
 
 def binned_joint_mi_indexed(

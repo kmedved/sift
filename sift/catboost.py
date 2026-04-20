@@ -30,6 +30,7 @@ Usage:
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Union, Literal, Tuple, Any, Iterator
 from collections import defaultdict
+import numbers
 import warnings
 
 import numpy as np
@@ -43,6 +44,58 @@ from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedS
 # =============================================================================
 # Score direction handling
 # =============================================================================
+
+_VALID_TASKS = {"regression", "classification"}
+_VALID_ALGORITHMS = {"shap", "permutation", "prediction", "forward", "forward_greedy"}
+_VALID_PREFILTER_METHODS = {"catboost", "cefsplus", "mrmr", "none"}
+_VALID_IMPORTANCE_TYPES = {
+    "PredictionValuesChange",
+    "LossFunctionChange",
+    "FeatureImportance",
+    "ShapValues",
+}
+
+
+def _validate_choice(name: str, value: str, allowed: set[str]) -> None:
+    if not isinstance(value, str) or value not in allowed:
+        allowed_str = ", ".join(sorted(repr(v) for v in allowed))
+        raise ValueError(f"{name}={value!r} is invalid; expected one of: {allowed_str}")
+
+
+def _validate_step_function(step_function: float) -> None:
+    if (
+        isinstance(step_function, (bool, np.bool_))
+        or not isinstance(step_function, numbers.Real)
+        or not np.isfinite(float(step_function))
+        or not (0 < float(step_function) < 1)
+    ):
+        raise ValueError("step_function must be a finite float in the open interval (0, 1)")
+
+
+def _validate_stability_params(n_bootstrap: int, stability_threshold: float) -> None:
+    if (
+        isinstance(n_bootstrap, (bool, np.bool_))
+        or not isinstance(n_bootstrap, numbers.Integral)
+        or n_bootstrap <= 0
+    ):
+        raise ValueError("n_bootstrap must be a positive integer")
+    if (
+        isinstance(stability_threshold, (bool, np.bool_))
+        or not isinstance(stability_threshold, numbers.Real)
+        or not np.isfinite(float(stability_threshold))
+        or not (0 <= float(stability_threshold) <= 1)
+    ):
+        raise ValueError("stability_threshold must be a finite float in the closed interval [0, 1]")
+
+
+def _validate_group_splitter_groups(cv: Any, groups: Optional[np.ndarray]) -> None:
+    if cv is None or groups is not None:
+        return
+    splitter_name = type(cv).__name__.lower()
+    if "group" in splitter_name:
+        raise ValueError(
+            f"{type(cv).__name__} requires group_col or an explicit groups array"
+        )
 
 try:
     from catboost import (  # type: ignore[import-not-found]
@@ -268,6 +321,8 @@ def _prefilter_features(
     list of str
         Pre-filtered feature names.
     """
+    _validate_choice("prefilter_method", method, _VALID_PREFILTER_METHODS)
+
     all_features = list(X_train.columns)
 
     if method == 'none' or k >= len(all_features):
@@ -578,6 +633,8 @@ def _select_features_single_split(
 
     Returns (scores_by_k, features_by_k).
     """
+    _validate_choice("algorithm", algorithm, {"shap", "permutation", "prediction"})
+
     train_pool = _create_pool(X_train, y_train, features, w_train, cat_features, text_features)
     val_pool = _create_pool(X_val, y_val, features, w_val, cat_features, text_features)
 
@@ -591,7 +648,7 @@ def _select_features_single_split(
         'permutation': EFeaturesSelectionAlgorithm.RecursiveByLossFunctionChange,
         'prediction': EFeaturesSelectionAlgorithm.RecursiveByPredictionValuesChange,
     }
-    algo_enum = algo_map.get(algorithm, EFeaturesSelectionAlgorithm.RecursiveByShapValues)
+    algo_enum = algo_map[algorithm]
 
     min_k = min(feature_counts)
     n_features = len(features)
@@ -710,6 +767,8 @@ def _generate_feature_counts(
     max_counts: int = 20,
 ) -> List[int]:
     """Generate geometric sequence of feature counts to try."""
+    _validate_step_function(step_function)
+
     counts = [n_features]  # Always include baseline
     k = n_features
 
@@ -951,6 +1010,8 @@ def _forward_select_single_split(
     NOTE: This is "prefix" selection, not true iterative forward selection.
     The ranking is computed once from the full model, not recomputed at each step.
     """
+    _validate_choice("importance_type", importance_type, _VALID_IMPORTANCE_TYPES)
+
     ModelClass = CatBoostClassifier if task == 'classification' else CatBoostRegressor
 
     # Step 1: Get importance ranking from full model
@@ -1270,6 +1331,12 @@ def catboost_select(
             "Install with: pip install catboost"
         )
 
+    _validate_choice("task", task, _VALID_TASKS)
+    _validate_choice("algorithm", algorithm, _VALID_ALGORITHMS)
+    _validate_choice("prefilter_method", prefilter_method, _VALID_PREFILTER_METHODS)
+    _validate_step_function(step_function)
+    _validate_stability_params(n_bootstrap, stability_threshold)
+
     if isinstance(y, pd.DataFrame):
         y = y.iloc[:, 0]
     if not isinstance(y, pd.Series):
@@ -1294,14 +1361,16 @@ def catboost_select(
     groups = None
 
     if sample_weight_col is not None:
-        if sample_weight_col in X_work.columns:
-            sample_weights = X_work[sample_weight_col]
-            X_work = X_work.drop(columns=[sample_weight_col])
+        if sample_weight_col not in X_work.columns:
+            raise ValueError(f"sample_weight_col={sample_weight_col!r} not found in X")
+        sample_weights = X_work[sample_weight_col]
+        X_work = X_work.drop(columns=[sample_weight_col])
 
     if group_col is not None:
-        if group_col in X_work.columns:
-            groups = X_work[group_col]
-            X_work = X_work.drop(columns=[group_col])
+        if group_col not in X_work.columns:
+            raise ValueError(f"group_col={group_col!r} not found in X")
+        groups = X_work[group_col]
+        X_work = X_work.drop(columns=[group_col])
 
     all_features = list(X_work.columns)
 
@@ -1414,6 +1483,7 @@ def catboost_select(
     # Setup cross-validation splitter
     # Priority: use_stability > cv > auto-select based on groups/task
     groups_array = groups.values if groups is not None else None
+    _validate_group_splitter_groups(cv, groups_array)
 
     if use_stability:
         # Group-resampled stability selection (group-aware if groups provided)

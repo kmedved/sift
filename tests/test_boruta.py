@@ -276,8 +276,28 @@ class TestBorutaOptions:
 
         assert len(selected) <= 2
 
-    def test_importance_data_test(self):
-        """importance_data='test' should use held-out data."""
+    def test_native_importance_data_test_raises(self):
+        """Native importances cannot honestly score held-out data."""
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(200, 5)), columns=list("abcde"))
+        y = X["a"] + rng.normal(size=200) * 0.1
+
+        selector = BorutaSelector(
+            importance="native",
+            importance_data="test",
+            test_size=0.3,
+            max_iter=5,
+            verbose=False,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="importance_data='test'.*importance='native'.*importance='shap'",
+        ):
+            selector.fit(X, y)
+
+    def test_native_importance_data_train_still_runs(self):
+        """Native importances remain supported on fit data."""
         rng = np.random.default_rng(0)
         X = pd.DataFrame(rng.normal(size=(200, 5)), columns=list("abcde"))
         y = X["a"] + rng.normal(size=200) * 0.1
@@ -285,8 +305,8 @@ class TestBorutaOptions:
         selected = select_boruta(
             X,
             y,
-            importance_data="test",
-            test_size=0.3,
+            importance="native",
+            importance_data="train",
             max_iter=10,
             verbose=False,
         )
@@ -329,6 +349,111 @@ class TestBorutaShap:
         )
 
         assert isinstance(selected, list)
+
+    def test_shap_importance_data_test(self):
+        """SHAP importances can score the held-out split."""
+        pytest.importorskip("catboost")
+        rng = np.random.default_rng(0)
+        n, p = 160, 5
+        X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
+        y = X["f0"] + rng.normal(size=n) * 0.2
+
+        selected = select_boruta_shap(
+            X,
+            y,
+            importance_data="test",
+            test_size=0.25,
+            max_iter=5,
+            verbose=False,
+        )
+
+        assert isinstance(selected, list)
+
+    @pytest.mark.parametrize(
+        "y, expected_loss",
+        [
+            (np.array([0, 1] * 20), "Logloss"),
+            (np.array([0, 1, 2] * 14 + [0, 1]), "MultiClass"),
+        ],
+    )
+    def test_default_classification_loss_matches_class_count(
+        self, monkeypatch, y, expected_loss
+    ):
+        """Default SHAP classification estimator should pick the right loss."""
+        pytest.importorskip("catboost")
+        rng = np.random.default_rng(123)
+        X = pd.DataFrame(
+            rng.normal(size=(y.shape[0], 4)), columns=[f"f{i}" for i in range(4)]
+        )
+        captured = {}
+
+        def fake_compute_importance(self, est, X, y, w_score, *, w_fit, groups, time, seed):
+            captured["estimator"] = est
+            return np.zeros(X.shape[1], dtype=np.float64)
+
+        monkeypatch.setattr(BorutaSelector, "_compute_importance", fake_compute_importance)
+
+        selector = BorutaSelector(
+            task="classification",
+            importance="shap",
+            max_iter=1,
+            early_stop_rounds=1,
+            verbose=False,
+        )
+        selector.fit(X, y)
+
+        est = captured["estimator"]
+        loss = None
+        if hasattr(est, "get_params"):
+            loss = est.get_params(deep=False).get("loss_function")
+        if loss is None and hasattr(est, "get_all_params"):
+            loss = est.get_all_params().get("loss_function")
+
+        assert loss == expected_loss
+
+
+class TestBorutaValidation:
+    """Runtime validation for enum-like options."""
+
+    @pytest.mark.parametrize(
+        "kwargs, pattern",
+        [
+            ({"task": "bogus"}, r"task must be one of .*'regression'.*'classification'"),
+            (
+                {"importance": "bogus"},
+                r"importance must be one of .*'native'.*'shap'",
+            ),
+            (
+                {"importance_data": "bogus"},
+                r"importance_data must be one of .*'train'.*'test'",
+            ),
+            (
+                {"shadow_method": "bogus"},
+                r"shadow_method must be one of .*'auto'.*'global'.*'within_group'.*'block'.*'circular_shift'",
+            ),
+            (
+                {"shadow_mode": "bogus"},
+                r"shadow_mode must be one of .*'columns'.*'rows'",
+            ),
+            (
+                {"block_size": "bogus"},
+                r"block_size must be a positive integer or 'auto'",
+            ),
+            (
+                {"block_size": 0},
+                r"block_size must be a positive integer or 'auto'",
+            ),
+        ],
+    )
+    def test_invalid_options_raise_clear_value_error(self, kwargs, pattern):
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(40, 4)), columns=list("abcd"))
+        y = X["a"] + rng.normal(size=40) * 0.1
+
+        selector = BorutaSelector(max_iter=1, verbose=False, **kwargs)
+
+        with pytest.raises(ValueError, match=pattern):
+            selector.fit(X, y)
 
 
 class TestBorutaNanHandling:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 
 from sift._preprocess import ensure_weights as _ensure_weights
 
 
-@njit(cache=True, parallel=True)
+# Keep these kernels serial: CatBoost/OpenMP can crash when Numba's parallel
+# runtime is initialized after CatBoost has already been imported.
+@njit(cache=True)
 def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     """
     Weighted F-statistic for regression.
@@ -30,7 +32,7 @@ def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
         y_ss += w[i] * (y[i] - y_mean) ** 2
 
     scores = np.empty(p, dtype=np.float64)
-    for j in prange(p):
+    for j in range(p):
         x_mean = 0.0
         for i in range(n):
             x_mean += w[i] * X[i, j]
@@ -54,7 +56,7 @@ def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     return scores
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True)
 def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     """Weighted F-statistic for classification (weighted ANOVA)."""
     n, p = X.shape
@@ -70,7 +72,7 @@ def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
 
     scores = np.empty(p, dtype=np.float64)
 
-    for j in prange(p):
+    for j in range(p):
         x_mean = 0.0
         for i in range(n):
             x_mean += w[i] * X[i, j]

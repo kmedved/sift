@@ -111,6 +111,95 @@ class TestFeatureTypes:
         assert 'text_col' not in cat_features
 
 
+class TestCatBoostInputValidation:
+    """Tests for typo-sensitive input columns."""
+
+    def test_catboost_import_does_not_break_numba_relevance(self):
+        """Importing CatBoost should not make classic filter relevance crash."""
+        from sift import select_mrmr
+
+        rng = np.random.default_rng(20260420)
+        n = 80
+        signal = rng.normal(size=n)
+        X = pd.DataFrame(
+            {
+                "signal": signal,
+                "noise_a": rng.normal(size=n),
+                "noise_b": rng.normal(size=n),
+            }
+        )
+        y = signal + 0.1 * rng.normal(size=n)
+
+        selected = select_mrmr(
+            X,
+            y,
+            k=2,
+            task="regression",
+            estimator="classic",
+            subsample=None,
+            verbose=False,
+        )
+
+        assert selected[0] == "signal"
+
+    def test_missing_group_col_raises(self):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="group_col"):
+            catboost_select(X, y, k=1, group_col="missing", verbose=False)
+
+    def test_missing_sample_weight_col_raises(self):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="sample_weight_col"):
+            catboost_select(X, y, k=1, sample_weight_col="missing", verbose=False)
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"task": "bogus"}, "task=.*invalid"),
+            ({"algorithm": "bogus"}, "algorithm=.*invalid"),
+            ({"prefilter_method": "bogus"}, "prefilter_method=.*invalid"),
+            ({"step_function": 1.0}, "step_function must be a finite float"),
+            ({"use_stability": True, "n_bootstrap": 0}, "n_bootstrap must be a positive integer"),
+        ],
+    )
+    def test_invalid_public_options_raise(self, kwargs, match):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match=match):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                prefilter_k=None,
+                n_estimators=10,
+                n_splits=2,
+                verbose=False,
+                **kwargs,
+            )
+
+    def test_group_kfold_without_groups_raises(self):
+        from sklearn.model_selection import GroupKFold
+
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="GroupKFold requires group_col"):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                cv=GroupKFold(n_splits=2),
+                prefilter_k=None,
+                n_estimators=10,
+                verbose=False,
+            )
+
+
 class TestFeatureCounts:
     """Tests for feature count generation."""
 
@@ -370,6 +459,30 @@ class TestKGuarantee:
                 random_state=42,
             )
             assert len(result.selected_features) == k, f"Expected {k} features, got {len(result.selected_features)}"
+
+    def test_k_larger_than_feature_count_caps(self):
+        """When K exceeds available features, the selector caps to n_features."""
+        np.random.seed(42)
+        n, p = 120, 4
+        X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
+        y = X['f0'] + np.random.randn(n) * 0.3
+
+        import warnings as w
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            result = catboost_select(
+                X, y, k=10,
+                task='regression',
+                n_splits=2,
+                prefilter_k=None,
+                n_estimators=30,
+                verbose=False,
+                random_state=42,
+            )
+
+        assert len(result.selected_features) == p
+        assert result.best_k == p
+        assert any("exceeds max evaluated feature count" in str(item.message) for item in caught)
 
     def test_exact_k_with_stability(self):
         """K guarantee should hold even with stability selection."""

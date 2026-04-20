@@ -16,7 +16,7 @@ def read_version():
     return match.group(1)
 
 try:
-    with open("README.md", encoding="utf8") as f:
+    with open("DOCS.MD", encoding="utf8") as f:
         long_description = f.read()
 except FileNotFoundError:
     long_description = "Feature selection toolbox"

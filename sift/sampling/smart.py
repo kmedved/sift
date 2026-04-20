@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
+import numbers
 from typing import Optional, List, Dict, Tuple, Union, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 import warnings
 
 from sklearn.utils.extmath import randomized_svd
@@ -43,6 +44,57 @@ def leverage_scores_multi_alpha(
     lev = np.maximum(lev, 1e-12)
     lev /= lev.mean()
     return lev
+
+
+def _is_int_like(value: object) -> bool:
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
+def _is_real_like(value: object) -> bool:
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
+    if not _is_real_like(config.sample_frac):
+        raise TypeError("sample_frac must be a real number.")
+    if not np.isfinite(config.sample_frac):
+        raise ValueError("sample_frac must be finite.")
+    if not (0 < config.sample_frac <= 1):
+        raise ValueError("sample_frac must be in (0, 1].")
+    if not _is_int_like(config.min_per_group) or config.min_per_group < 1:
+        raise ValueError("min_per_group must be an integer >= 1.")
+    if not _is_int_like(config.pilot_sample_size) or config.pilot_sample_size < 1:
+        raise ValueError("pilot_sample_size must be an integer >= 1.")
+    if not _is_int_like(config.leverage_batch_size) or config.leverage_batch_size < 1:
+        raise ValueError("leverage_batch_size must be an integer >= 1.")
+    if config.svd_sample_size is not None and (
+        not _is_int_like(config.svd_sample_size) or config.svd_sample_size < 1
+    ):
+        raise ValueError("svd_sample_size must be an integer >= 1 or None.")
+    for name in ("weight_clip_quantile", "residual_weight_cap", "uniform_floor", "anchor_max_share"):
+        value = getattr(config, name)
+        if not _is_real_like(value):
+            raise TypeError(f"{name} must be a real number.")
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite.")
+    if not (0 <= config.weight_clip_quantile <= 1):
+        raise ValueError("weight_clip_quantile must be in [0, 1].")
+    if config.residual_weight_cap < 0:
+        raise ValueError("residual_weight_cap must be >= 0.")
+    if not (0 <= config.uniform_floor <= 1):
+        raise ValueError("uniform_floor must be in [0, 1].")
+    if not (0 <= config.anchor_max_share <= 1):
+        raise ValueError("anchor_max_share must be in [0, 1].")
+    if config.group_col is not None and not isinstance(config.group_col, str):
+        raise TypeError("group_col must be a string or None.")
+    if config.time_col is not None and not isinstance(config.time_col, str):
+        raise TypeError("time_col must be a string or None.")
+    if config.anchor_fn is not None and not callable(config.anchor_fn):
+        raise TypeError("anchor_fn must be callable or None.")
+    if config.random_state is not None and not _is_int_like(config.random_state):
+        raise TypeError("random_state must be an integer or None.")
+    if not isinstance(config.verbose, bool):
+        raise TypeError("verbose must be a bool.")
 
 
 # =============================================================================
@@ -103,6 +155,9 @@ class SmartSamplerConfig:
     random_state: Optional[int] = 42
     verbose: bool = True
 
+    def __post_init__(self) -> None:
+        _validate_smart_sampler_config(self)
+
 
 # =============================================================================
 # Smart Sampler
@@ -148,10 +203,14 @@ def smart_sample(
     if config is None:
         config = SmartSamplerConfig(**kwargs)
     else:
-        # Apply any overrides
-        for k, v in kwargs.items():
-            if hasattr(config, k):
-                setattr(config, k, v)
+        if kwargs:
+            valid_fields = {field.name for field in fields(SmartSamplerConfig)}
+            unknown = sorted(set(kwargs) - valid_fields)
+            if unknown:
+                raise TypeError(f"Unknown SmartSamplerConfig override(s): {unknown}")
+            config = replace(config, **kwargs)
+        else:
+            _validate_smart_sampler_config(config)
 
     rng = np.random.default_rng(config.random_state)
 
