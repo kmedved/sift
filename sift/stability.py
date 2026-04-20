@@ -1,3 +1,5 @@
+from dataclasses import replace
+import numbers
 import numpy as np
 import pandas as pd
 from typing import Iterator, Optional, List, Tuple, Union
@@ -11,6 +13,7 @@ from sklearn.linear_model import (
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from joblib import Parallel, delayed
 
+from sift._preprocess import ensure_weights
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
 
 
@@ -341,8 +344,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self
         """
         # Input validation
-        if self.task not in ('regression', 'classification'):
-            raise ValueError(f"task must be 'regression' or 'classification', got '{self.task}'")
+        self._validate_runtime_params()
         if self.use_smart_sampler and (groups is not None or time is not None):
             raise ValueError("groups/time are not supported when use_smart_sampler=True.")
         if self.use_smart_sampler:
@@ -366,10 +368,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 raise ValueError(f"time has {len(time)} rows but X has {n}")
 
         # Impute non-finite values (smart_sample may return original rows with NaNs)
-        if not np.isfinite(X).all():
-            from sift._impute import mean_impute
-
-            X = mean_impute(X, copy=False)
+        X = self._impute_with_fit_stats(X, fit=True)
 
         # Standardize
         self._scaler = StandardScaler()
@@ -522,6 +521,83 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         return self
 
+    def _validate_runtime_params(self) -> None:
+        """Validate estimator options before fitting or threshold tuning."""
+        if self.task not in ('regression', 'classification'):
+            raise ValueError(
+                f"task must be 'regression' or 'classification', got '{self.task}'"
+            )
+
+        if not isinstance(self.n_bootstrap, numbers.Integral) or self.n_bootstrap <= 0:
+            raise ValueError("n_bootstrap must be a positive integer.")
+
+        if not isinstance(self.sample_frac, numbers.Real) or not (0 < float(self.sample_frac) <= 1):
+            raise ValueError("sample_frac must be in (0, 1].")
+
+        if not isinstance(self.threshold, numbers.Real) or not (0 <= float(self.threshold) <= 1):
+            raise ValueError("threshold must be in [0, 1].")
+
+        if self.block_method not in ("moving", "circular", "stationary"):
+            raise ValueError(
+                "block_method must be one of 'moving', 'circular', or 'stationary'. "
+                f"Got '{self.block_method}'."
+            )
+
+        if self.parallel_backend is not None and self.parallel_backend not in ("threads", "processes"):
+            raise ValueError(
+                "parallel_backend must be one of 'threads', 'processes', or None. "
+                f"Got '{self.parallel_backend}'."
+            )
+
+        if self.max_features is not None:
+            if not isinstance(self.max_features, numbers.Integral) or self.max_features <= 0:
+                raise ValueError("max_features must be a positive integer or None.")
+
+        if self.block_size != "auto" and (
+            not isinstance(self.block_size, numbers.Integral) or self.block_size <= 0
+        ):
+            raise ValueError("block_size must be a positive integer or 'auto'.")
+
+        if not isinstance(self.coef_threshold, numbers.Real) or self.coef_threshold < 0:
+            raise ValueError("coef_threshold must be non-negative.")
+
+        if self.alpha is not None and (
+            not isinstance(self.alpha, numbers.Real) or self.alpha <= 0
+        ):
+            raise ValueError("alpha must be positive when provided.")
+
+        if not isinstance(self.l1_ratio, numbers.Real) or not (0 <= float(self.l1_ratio) <= 1):
+            raise ValueError("l1_ratio must be in [0, 1].")
+
+    def _impute_with_fit_stats(self, X: np.ndarray, *, fit: bool = False) -> np.ndarray:
+        """Mean-impute using fit-time statistics, optionally storing them."""
+        from sift._impute import mean_impute
+
+        X_arr = np.asarray(X, dtype=np.float32)
+        X_arr = np.where(np.isfinite(X_arr), X_arr, np.nan)
+        if not np.isnan(X_arr).any():
+            if fit:
+                self._impute_means_ = np.mean(X_arr, axis=0).astype(np.float32, copy=False)
+                self._impute_means_ = np.where(np.isfinite(self._impute_means_), self._impute_means_, 0.0)
+            return X_arr
+
+        if fit:
+            with np.errstate(all="ignore"):
+                means = np.nanmean(X_arr, axis=0)
+            self._impute_means_ = np.where(np.isfinite(means), means, 0.0).astype(np.float32, copy=False)
+        elif not hasattr(self, "_impute_means_"):
+            # Fallback for selectors fitted before this feature existed.
+            return mean_impute(X_arr, copy=False)
+
+        means = np.asarray(self._impute_means_, dtype=X_arr.dtype)
+        mask = ~np.isfinite(X_arr)
+        if mask.any():
+            X_arr = X_arr.copy()
+            X_arr[mask] = np.nan
+            row_idx, col_idx = np.where(mask)
+            X_arr[row_idx, col_idx] = means[col_idx]
+        return X_arr
+
     def _prep_arrays(
         self,
         X,
@@ -566,10 +642,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 raise ValueError("Target values must be finite for regression.")
             y = y_raw.astype(np.float32)
 
-        if sample_weight is None:
-            sample_weight = np.ones(len(y), dtype=np.float32)
-        else:
-            sample_weight = np.asarray(sample_weight, dtype=np.float32)
+        sample_weight = ensure_weights(sample_weight, len(y), normalize=True).astype(np.float32)
 
         return X, y, sample_weight, feature_names
 
@@ -591,7 +664,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 "with use_smart_sampler=False, or let the smart sampler generate weights."
             )
 
-        config = self.sampler_config or SmartSamplerConfig()
+        config = replace(self.sampler_config) if self.sampler_config is not None else SmartSamplerConfig()
         # Fix: use `is None` check to handle random_state=0
         if config.random_state is None:
             config.random_state = self.random_state if self.random_state is not None else 42
@@ -834,11 +907,23 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         if not hasattr(self, 'selection_frequencies_'):
             raise ValueError("Must call fit() before tune_threshold()")
+        self._validate_runtime_params()
+
+        if not isinstance(cv, numbers.Integral) or cv <= 1:
+            raise ValueError("cv must be an integer greater than 1.")
+
+        if not isinstance(thresholds, (list, tuple, np.ndarray)) or len(thresholds) == 0:
+            raise ValueError("thresholds must be a non-empty sequence of floats.")
+        for thresh in thresholds:
+            if not isinstance(thresh, numbers.Real) or not (0 <= float(thresh) <= 1):
+                raise ValueError("thresholds must contain values in [0, 1].")
 
         if isinstance(X, pd.DataFrame):
             X = X[self.feature_names_in_].values
         X = np.asarray(X)
         y = np.asarray(y).ravel()
+
+        X = self._impute_with_fit_stats(X, fit=False)
 
         # Scale X
         X_scaled = self._scaler.transform(X)
@@ -918,6 +1003,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         """
         if not hasattr(self, 'selection_frequencies_'):
             raise ValueError("Must call fit() before set_threshold()")
+        if not isinstance(threshold, numbers.Real) or not (0 <= float(threshold) <= 1):
+            raise ValueError("threshold must be in [0, 1].")
 
         self.threshold = threshold
         mask = self.selection_frequencies_ >= threshold

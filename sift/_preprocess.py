@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import List, Literal, Optional, Tuple
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -152,6 +154,22 @@ def ensure_weights(
     return w
 
 
+def validate_k(k, *, allow_auto: bool = True) -> int | Literal["auto"]:
+    """Validate a public feature-count argument."""
+    if k == "auto":
+        if allow_auto:
+            return "auto"
+        raise ValueError("k='auto' is not supported here")
+
+    if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)):
+        raise ValueError("k must be a positive integer")
+
+    k_int = int(k)
+    if k_int < 1:
+        raise ValueError("k must be >= 1")
+    return k_int
+
+
 def validate_inputs(
     X, y, task: str, impute: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
@@ -265,6 +283,23 @@ def subsample_xy(
 # --- Categorical encoding ---
 
 
+@contextmanager
+def suppress_category_encoder_pandas_warnings():
+    """Hide narrow pandas 3.0 deprecation warnings emitted by category_encoders."""
+    try:
+        from pandas.errors import Pandas4Warning
+    except (ImportError, AttributeError):
+        Pandas4Warning = Warning
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*future\.no_silent_downcasting.*",
+            category=Pandas4Warning,
+        )
+        yield
+
+
 def encode_categoricals(
     X: pd.DataFrame,
     y: pd.Series,
@@ -288,4 +323,5 @@ def encode_categoricals(
         "james_stein": ce.JamesSteinEncoder,
     }
     encoder = encoders[method](cols=cat_features, handle_missing="return_nan")
-    return encoder.fit_transform(X, y)
+    with suppress_category_encoder_pandas_warnings():
+        return encoder.fit_transform(X, y)

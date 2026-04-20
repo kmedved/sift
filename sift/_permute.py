@@ -9,6 +9,27 @@ import numpy as np
 PermutationMethod = Literal["auto", "global", "within_group", "block", "circular_shift"]
 PermutationAxis = Literal["columns", "rows"]
 
+_PERMUTATION_METHODS = ("auto", "global", "within_group", "block", "circular_shift")
+_PERMUTATION_AXES = ("columns", "rows")
+
+
+def _validate_permutation_method(method: str) -> PermutationMethod:
+    if method not in _PERMUTATION_METHODS:
+        raise ValueError(
+            f"Unknown permutation method: {method!r}. "
+            f"Expected one of {list(_PERMUTATION_METHODS)}."
+        )
+    return method  # type: ignore[return-value]
+
+
+def _validate_permutation_axis(axis: str) -> PermutationAxis:
+    if axis not in _PERMUTATION_AXES:
+        raise ValueError(
+            f"Unknown permutation axis: {axis!r}. "
+            f"Expected one of {list(_PERMUTATION_AXES)}."
+        )
+    return axis  # type: ignore[return-value]
+
 
 def resolve_permutation_method(
     method: PermutationMethod,
@@ -17,9 +38,10 @@ def resolve_permutation_method(
     time: np.ndarray | None,
 ) -> PermutationMethod:
     """Resolve 'auto' to concrete permutation method."""
+    method = _validate_permutation_method(method)
     if method != "auto":
         return method
-    if groups is not None and time is not None:
+    if time is not None:
         return "circular_shift"
     if groups is not None:
         return "within_group"
@@ -27,8 +49,10 @@ def resolve_permutation_method(
 
 
 def build_group_info(
-    groups: np.ndarray,
+    groups: np.ndarray | None,
     time: np.ndarray | None = None,
+    *,
+    n_samples: int | None = None,
 ) -> dict[Any, np.ndarray]:
     """
     Build mapping from group value to row indices.
@@ -39,18 +63,34 @@ def build_group_info(
     -------
     dict mapping group_value -> array of row indices
     """
-    groups = np.asarray(groups).reshape(-1)
-    if time is not None:
-        time = np.asarray(time).reshape(-1)
-        if time.shape[0] != groups.shape[0]:
-            raise ValueError("time and groups must have same length")
+    groups_arr = None if groups is None else np.asarray(groups).reshape(-1)
+    time_arr = None if time is None else np.asarray(time).reshape(-1)
 
-    uniq, inv = np.unique(groups, return_inverse=True)
+    if groups_arr is None and time_arr is None:
+        raise ValueError("build_group_info requires groups or time")
 
-    if time is None:
+    if n_samples is None:
+        n_samples = (
+            groups_arr.shape[0] if groups_arr is not None else time_arr.shape[0]  # type: ignore[union-attr]
+        )
+
+    if groups_arr is not None and groups_arr.shape[0] != n_samples:
+        raise ValueError(
+            f"groups has {groups_arr.shape[0]} elements but expected {n_samples}"
+        )
+    if time_arr is not None and time_arr.shape[0] != n_samples:
+        raise ValueError(f"time has {time_arr.shape[0]} elements but expected {n_samples}")
+
+    if groups_arr is None:
+        order = np.argsort(time_arr, kind="mergesort")
+        return {0: order}
+
+    uniq, inv = np.unique(groups_arr, return_inverse=True)
+
+    if time_arr is None:
         order = np.argsort(inv, kind="mergesort")
     else:
-        order = np.lexsort((np.arange(inv.size), time, inv))
+        order = np.lexsort((np.arange(inv.size), time_arr, inv))
 
     inv_sorted = inv[order]
     cuts = np.flatnonzero(np.diff(inv_sorted)) + 1
@@ -87,6 +127,7 @@ def permute_array(
     -------
     Permuted copy of x
     """
+    method = _validate_permutation_method(method)
     if method == "global":
         return rng.permutation(x)
 
@@ -123,7 +164,10 @@ def permute_array(
             out[idx] = x[new_order]
         return out
 
-    raise ValueError(f"Unknown permutation method: {method}")
+    raise ValueError(
+        f"Unknown permutation method: {method!r}. "
+        f"Expected one of {list(_PERMUTATION_METHODS)}."
+    )
 
 
 def permute_rows(
@@ -139,6 +183,7 @@ def permute_rows(
 
     Preserves cross-feature covariance - recommended for time series.
     """
+    method = _validate_permutation_method(method)
     if X.ndim != 2:
         raise ValueError("permute_rows expects a 2D array")
 
@@ -183,7 +228,10 @@ def permute_rows(
             out[idx, :] = X[new_order, :]
         return out
 
-    raise ValueError(f"Unknown permutation method: {method}")
+    raise ValueError(
+        f"Unknown permutation method: {method!r}. "
+        f"Expected one of {list(_PERMUTATION_METHODS)}."
+    )
 
 
 def permute_matrix(
@@ -217,15 +265,15 @@ def permute_matrix(
     -------
     Permuted copy of X with shape (n, p)
     """
+    method = _validate_permutation_method(method)
+    axis = _validate_permutation_axis(axis)
     rng = np.random.default_rng(seed)
     _, p = X.shape
 
     if group_info is None and method in ("within_group", "block", "circular_shift"):
-        if groups is None:
-            raise ValueError(f"method='{method}' requires groups or group_info")
         if method in ("block", "circular_shift") and time is None:
             raise ValueError(f"method='{method}' requires time")
-        group_info = build_group_info(groups, time)
+        group_info = build_group_info(groups, time, n_samples=X.shape[0])
 
     if axis == "rows":
         return permute_rows(

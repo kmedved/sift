@@ -18,6 +18,24 @@ from sift.estimators.copula import (
 )
 from sift.selection.objective import objective_from_corr_path
 
+CorrPrune = float | None | Literal["auto"]
+
+
+def _resolve_corr_prune(
+    method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"],
+    corr_prune: CorrPrune,
+) -> float | None:
+    if corr_prune == "auto":
+        return 0.95 if method == "cefsplus" else None
+    if corr_prune is None:
+        return None
+    if isinstance(corr_prune, (bool, np.bool_)):
+        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
+    threshold = float(corr_prune)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
+    return threshold
+
 
 def _gaussian_mrmr_select(
     R: np.ndarray,
@@ -451,13 +469,28 @@ def select_cached(
     k: int,
     method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"] = "cefsplus",
     top_m: Optional[int] = None,
-    corr_prune: float = 0.95,
+    corr_prune: CorrPrune = "auto",
     return_objective: bool = False,
-) -> List[str] | Tuple[List[str], np.ndarray]:
-    """Select features using pre-built cache."""
-    from sift._preprocess import to_numpy
+    return_indices: bool = False,
+) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
+    List[str], List[int], np.ndarray
+]:
+    """Select features using pre-built cache.
 
+    corr_prune="auto" preserves CEFS+'s default 0.95 pruning while leaving
+    cached Gaussian mRMR/JMI/JMIM unpruned. Pass a float to opt into pruning for
+    any cached method, or None to disable pruning.
+    """
+    from sift._preprocess import to_numpy, validate_k
+
+    k = validate_k(k, allow_auto=False)
+    corr_prune_eff = _resolve_corr_prune(method, corr_prune)
     y_arr = to_numpy(y, dtype=np.float32).ravel()
+    if y_arr.shape[0] != cache.n_rows_original:
+        raise ValueError(
+            f"y has {y_arr.shape[0]} rows but cache was built from "
+            f"{cache.n_rows_original} rows"
+        )
     ys = y_arr[cache.row_idx]
     zy = weighted_rank_gauss_1d(ys, cache.sample_weight)
 
@@ -486,9 +519,15 @@ def select_cached(
             backend="blas",
         )
 
-    keep = greedy_corr_prune(np.arange(len(cand)), R_cand, np.abs(r[cand]), corr_prune)
-    cand = cand[keep]
-    R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)])
+    if corr_prune_eff is not None:
+        keep = greedy_corr_prune(
+            np.arange(len(cand)),
+            R_cand,
+            np.abs(r[cand]),
+            corr_prune_eff,
+        )
+        cand = cand[keep]
+        R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)])
     r_cand = r[cand].astype(np.float64)
     rel_cand = rel[cand].astype(np.float64)
 
@@ -531,5 +570,11 @@ def select_cached(
             R_path = R_cand[np.ix_(sel_local, sel_local)]
             r_path = r_cand[sel_local]
             objective = objective_from_corr_path(R_path, r_path)
+        if return_indices:
+            return out, selected_original.tolist(), objective
         return out, objective
+
+    if return_indices:
+        return out, selected_original.tolist()
+
     return out

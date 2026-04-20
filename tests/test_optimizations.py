@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import warnings
 import sift
 from sift.selection.auto_k import AutoKConfig
 
@@ -221,6 +222,15 @@ class TestAutoKElbowGaussian:
 
 
 class TestClassificationAutoK:
+    def test_large_auto_k_grid_includes_common_prefix_cutoffs(self):
+        from sift.selection.auto_k import _build_k_grid
+
+        grid = _build_k_grid(5, 400)
+
+        assert 200 in grid
+        assert 300 in grid
+        assert 400 in grid
+
     def test_time_holdout_logloss(self, classification_data):
         from sift.selection.auto_k import AutoKConfig, select_k_auto
 
@@ -274,6 +284,16 @@ class TestClassificationAutoK:
         with pytest.raises(ValueError, match="invalid for.*classification"):
             select_k_auto(X, y, feature_path, config, time=time, task="classification")
 
+    def test_unknown_metric_raises_instead_of_returning_all_inf(self, classification_data):
+        from sift.selection.auto_k import AutoKConfig, select_k_auto
+
+        X, y, _, time = classification_data
+        config = AutoKConfig(strategy="time_holdout", metric="bogus")
+        feature_path = [f"x{i}" for i in range(20)]
+
+        with pytest.raises(ValueError, match="metric='bogus'.*classification"):
+            select_k_auto(X, y, feature_path, config, time=time, task="classification")
+
     def test_logloss_handles_single_class_val_fold(self):
         """Ensure logloss doesn't fail when validation fold has one class."""
         from sift.selection.auto_k import AutoKConfig, select_k_auto
@@ -302,6 +322,19 @@ class TestClassificationAutoK:
         X = np.array([[1.0, np.nan]], dtype=np.float32)
         X_imp = mean_impute(X, copy=True)
         assert X_imp.dtype == np.float32
+
+    def test_mean_impute_all_nan_column_does_not_warn(self):
+        from sift._impute import mean_impute
+
+        X = np.array([[np.nan, 1.0], [np.nan, 3.0]], dtype=np.float32)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            X_imp = mean_impute(X, copy=True)
+
+        assert X_imp.dtype == np.float32
+        np.testing.assert_allclose(X_imp[:, 0], 0.0)
+        np.testing.assert_allclose(X_imp[:, 1], [1.0, 3.0])
 
     def test_validate_inputs_does_not_mutate(self):
         from sift._preprocess import validate_inputs

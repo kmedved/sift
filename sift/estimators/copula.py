@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from joblib import Parallel, delayed, effective_n_jobs
 from numba import njit
 from scipy.special import ndtri
+
+RankBackend = Literal["serial", "processes"]
 
 
 @dataclass
@@ -19,6 +22,7 @@ class FeatureCache:
     valid_cols: np.ndarray
     row_idx: np.ndarray
     sample_weight: np.ndarray
+    n_rows_original: int
     feature_names: list[str] | None = None
 
 
@@ -29,6 +33,8 @@ def build_cache(
     random_state: int = 0,
     compute_Rxx: bool = False,
     min_std: float = 1e-12,
+    n_jobs: int = 1,
+    rank_backend: RankBackend = "serial",
 ) -> FeatureCache:
     """Build feature cache for multi-target selection."""
     from sift._impute import mean_impute
@@ -59,6 +65,8 @@ def build_cache(
 
     Xs = X_arr[row_idx]
     ws = w[row_idx]
+    if float(ws.sum()) <= 0.0:
+        raise ValueError("Subsample has zero total weight; check sample_weight/subsample.")
     Xs = mean_impute(Xs, copy=False)
 
     stds = np.std(Xs, axis=0)
@@ -68,7 +76,7 @@ def build_cache(
     if Xs.shape[1] == 0:
         raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
 
-    Z = weighted_rank_gauss_2d(Xs, ws)
+    Z = weighted_rank_gauss_2d(Xs, ws, n_jobs=n_jobs, rank_backend=rank_backend)
 
     Rxx = weighted_correlation_matrix(Z, ws) if compute_Rxx else None
 
@@ -78,6 +86,7 @@ def build_cache(
         valid_cols=valid_cols,
         row_idx=row_idx,
         sample_weight=ws.astype(np.float32),
+        n_rows_original=n,
         feature_names=feature_names,
     )
 
@@ -93,14 +102,24 @@ def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
     w_valid = w[mask]
 
     order = np.argsort(x_valid, kind="mergesort")
+    x_sorted = x_valid[order]
     w_sorted = w_valid[order]
 
-    cumsum = np.cumsum(w_sorted)
-    total = cumsum[-1]
+    total = float(w_sorted.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return np.zeros_like(x, dtype=np.float32)
 
-    ranks = np.empty_like(cumsum)
-    ranks[0] = 0.5 * w_sorted[0]
-    ranks[1:] = cumsum[:-1] + 0.5 * w_sorted[1:]
+    ranks = np.empty_like(w_sorted, dtype=np.float64)
+    cum_weight = 0.0
+    start = 0
+    while start < m:
+        stop = start + 1
+        while stop < m and x_sorted[stop] == x_sorted[start]:
+            stop += 1
+        block_weight = float(w_sorted[start:stop].sum())
+        ranks[start:stop] = cum_weight + 0.5 * block_weight
+        cum_weight += block_weight
+        start = stop
 
     u = np.clip(ranks / total, 1e-6, 1 - 1e-6)
     z = ndtri(u)
@@ -117,11 +136,50 @@ def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
     return out
 
 
-def weighted_rank_gauss_2d(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+def _validate_rank_backend(rank_backend: RankBackend, n_jobs: int) -> RankBackend:
+    if n_jobs == 0:
+        raise ValueError("n_jobs must not be 0")
+    if rank_backend not in ("serial", "processes"):
+        raise ValueError("rank_backend must be one of 'serial' or 'processes'")
+    return rank_backend
+
+
+def _weighted_rank_gauss_chunk(
+    X: np.ndarray,
+    w: np.ndarray,
+    start: int,
+    stop: int,
+) -> tuple[int, np.ndarray]:
+    chunk = np.empty((X.shape[0], stop - start), dtype=np.float32)
+    for offset, j in enumerate(range(start, stop)):
+        chunk[:, offset] = weighted_rank_gauss_1d(X[:, j], w)
+    return start, chunk
+
+
+def weighted_rank_gauss_2d(
+    X: np.ndarray,
+    w: np.ndarray,
+    *,
+    n_jobs: int = 1,
+    rank_backend: RankBackend = "serial",
+) -> np.ndarray:
+    rank_backend = _validate_rank_backend(rank_backend, n_jobs)
     n, p = X.shape
     Z = np.empty((n, p), dtype=np.float32)
-    for j in range(p):
-        Z[:, j] = weighted_rank_gauss_1d(X[:, j], w)
+    n_workers = max(1, min(p, effective_n_jobs(n_jobs))) if p else 1
+    if rank_backend == "serial" or n_workers <= 1:
+        for j in range(p):
+            Z[:, j] = weighted_rank_gauss_1d(X[:, j], w)
+        return Z
+
+    bounds = np.linspace(0, p, n_workers + 1, dtype=np.int64)
+    chunks = Parallel(n_jobs=n_jobs, prefer="processes", max_nbytes="16M", batch_size=1)(
+        delayed(_weighted_rank_gauss_chunk)(X, w, int(bounds[i]), int(bounds[i + 1]))
+        for i in range(n_workers)
+        if bounds[i] < bounds[i + 1]
+    )
+    for start, chunk in chunks:
+        Z[:, start : start + chunk.shape[1]] = chunk
     return Z
 
 

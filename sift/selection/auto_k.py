@@ -13,13 +13,21 @@ from sklearn.metrics import log_loss
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 
+from sift._preprocess import ensure_weights, suppress_category_encoder_pandas_warnings
+
 if TYPE_CHECKING:
     from sift.estimators.copula import FeatureCache
 
 
 @dataclass
 class AutoKConfig:
-    """Configuration for automatic k selection."""
+    """Configuration for automatic k selection.
+
+    ``auto_k_mode="prefix_only"`` is the current public behavior: build one
+    supervised feature path, then evaluate prefixes of that fixed path. It is
+    fast, but it is not an unbiased estimate of a nested selector procedure.
+    ``auto_k_mode="nested"`` is reserved and raises until implemented.
+    """
 
     k_method: Literal["evaluate", "elbow"] = "evaluate"
     strategy: Literal["time_holdout", "group_cv"] = "time_holdout"
@@ -31,6 +39,25 @@ class AutoKConfig:
     random_state: int = 42
     elbow_min_rel_gain: float = 0.02
     elbow_patience: int = 3
+    auto_k_mode: Literal["prefix_only", "nested"] = "prefix_only"
+
+
+def _ensure_supported_auto_k_mode(config: AutoKConfig) -> None:
+    """Validate path-selection semantics for the current implementation."""
+    if config.auto_k_mode == "prefix_only":
+        return
+    if config.auto_k_mode == "nested":
+        raise NotImplementedError(
+            "AutoKConfig(auto_k_mode='nested') is not implemented yet. "
+            "Use auto_k_mode='prefix_only' for the current behavior: build one "
+            "supervised feature path on the rows available to the selector, "
+            "then evaluate prefixes. This is fast but is not an unbiased "
+            "estimate of the full nested selector-plus-k-selection procedure."
+        )
+    raise ValueError(
+        "auto_k_mode must be 'prefix_only' or 'nested'; "
+        f"got {config.auto_k_mode!r}"
+    )
 
 
 def _build_k_grid(min_k: int, max_k: int) -> List[int]:
@@ -43,7 +70,9 @@ def _build_k_grid(min_k: int, max_k: int) -> List[int]:
 
     grid = set()
     grid.update(range(min_k, min(30, max_k) + 1, 5))
-    grid.update([40, 50, 60, 75, 100, 125, 150])
+    grid.update(
+        [40, 50, 60, 75, 100, 125, 150, 175, 200, 250, 300, 400, 500, 750, 1000]
+    )
     grid.add(min_k)
     grid.add(max_k)
 
@@ -54,10 +83,22 @@ def _resolve_metric(metric: str, task: str) -> str:
     """Resolve metric, defaulting based on task."""
     if metric == "auto":
         return "rmse" if task == "regression" else "logloss"
-    if task == "regression" and metric in ("logloss", "error"):
-        raise ValueError(f"metric='{metric}' is invalid for task='regression'")
-    if task == "classification" and metric in ("rmse", "mae"):
-        raise ValueError(f"metric='{metric}' is invalid for task='classification'")
+    if task == "regression":
+        valid = ("rmse", "mae")
+        if metric not in valid:
+            raise ValueError(
+                f"metric='{metric}' is invalid for task='regression'. "
+                f"Valid metrics: {valid} or 'auto'"
+            )
+    elif task == "classification":
+        valid = ("logloss", "error")
+        if metric not in valid:
+            raise ValueError(
+                f"metric='{metric}' is invalid for task='classification'. "
+                f"Valid metrics: {valid} or 'auto'"
+            )
+    else:
+        raise ValueError(f"task must be 'regression' or 'classification', got {task!r}")
     return metric
 
 
@@ -67,19 +108,32 @@ def _compute_metric(
     metric: str,
     *,
     y_proba: np.ndarray | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> float:
     """Compute error metric (lower is better)."""
     if metric == "rmse":
-        return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+        return float(np.sqrt(np.average((y_true - y_pred) ** 2, weights=sample_weight)))
     if metric == "mae":
-        return float(np.mean(np.abs(y_true - y_pred)))
+        return float(np.average(np.abs(y_true - y_pred), weights=sample_weight))
     if metric == "error":
-        return float(1.0 - np.mean(y_true == y_pred))
+        return float(np.average(y_true != y_pred, weights=sample_weight))
     if metric == "logloss":
         if y_proba is None:
             return float(np.inf)
-        return float(log_loss(y_true, y_proba))
+        return float(log_loss(y_true, y_proba, sample_weight=sample_weight))
     raise ValueError(f"Unknown metric: {metric}")
+
+
+def _split_weights(w: np.ndarray, idx: np.ndarray, label: str) -> np.ndarray:
+    """Return fold-local mean-one weights for fitting/scoring."""
+    out = np.asarray(w[idx], dtype=np.float64)
+    total = float(out.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError(f"{label} split has zero total sample_weight")
+    mean = float(out.mean())
+    if not np.isfinite(mean) or mean <= 0.0:
+        raise ValueError(f"{label} split has invalid sample_weight mean")
+    return out / mean
 
 
 def _time_holdout_split(
@@ -104,12 +158,16 @@ def select_k_auto(
     task: Literal["regression", "classification"] = "regression",
     cat_encoding: Literal["none", "target", "loo", "james_stein"] = "none",
     cat_features: Optional[List[str]] = None,
+    sample_weight: Optional[np.ndarray] = None,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
+    _ensure_supported_auto_k_mode(config)
+
     if not feature_path:
         return 0, [], pd.DataFrame()
 
     y_arr = np.asarray(y).ravel()
+    w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
     max_k = min(config.max_k, len(feature_path))
     min_k = max(1, min(config.min_k, max_k))
 
@@ -132,6 +190,8 @@ def select_k_auto(
         Xva_df = X_path_df.iloc[val_idx]
         ytr = y_arr[train_idx]
         yva = y_arr[val_idx]
+        wtr = _split_weights(w_arr, train_idx, "train")
+        wva = _split_weights(w_arr, val_idx, "validation")
 
         if cat_features is None:
             fold_cat = (
@@ -163,8 +223,9 @@ def select_k_auto(
                 )
             except TypeError:
                 enc = Encoder(cols=fold_cat, handle_missing="return_nan")
-            Xtr_df = enc.fit_transform(Xtr_df, ytr)
-            Xva_df = enc.transform(Xva_df)
+            with suppress_category_encoder_pandas_warnings():
+                Xtr_df = enc.fit_transform(Xtr_df, ytr)
+                Xva_df = enc.transform(Xva_df)
 
         Xtr = Xtr_df.to_numpy(dtype=np.float64, copy=False)
         Xva = Xva_df.to_numpy(dtype=np.float64, copy=False)
@@ -187,7 +248,7 @@ def select_k_auto(
         Xva_s = scaler.transform(Xva)
 
         if task == "regression":
-            ridgecv = RidgeCV(alphas=alphas).fit(Xtr_s, ytr)
+            ridgecv = RidgeCV(alphas=alphas).fit(Xtr_s, ytr, sample_weight=wtr)
             alpha = float(ridgecv.alpha_)
             model = Ridge(alpha=alpha)
         else:
@@ -200,17 +261,29 @@ def select_k_auto(
                     split_scores[k] = np.inf
                     continue
 
-                model.fit(Xtr_s[:, :k], ytr)
+                model.fit(Xtr_s[:, :k], ytr, sample_weight=wtr)
 
                 if task == "classification" and metric == "logloss":
                     proba = model.predict_proba(Xva_s[:, :k])
                     if not np.isin(np.unique(yva), model.classes_).all():
                         split_scores[k] = np.inf
                     else:
-                        split_scores[k] = float(log_loss(yva, proba, labels=model.classes_))
+                        split_scores[k] = float(
+                            log_loss(
+                                yva,
+                                proba,
+                                labels=model.classes_,
+                                sample_weight=wva,
+                            )
+                        )
                 else:
                     pred = model.predict(Xva_s[:, :k])
-                    split_scores[k] = _compute_metric(yva, pred, metric)
+                    split_scores[k] = _compute_metric(
+                        yva,
+                        pred,
+                        metric,
+                        sample_weight=wva,
+                    )
             except Exception:
                 split_scores[k] = np.inf
         return split_scores
@@ -355,6 +428,11 @@ def compute_objective_for_path(
     path_valid_pos = np.asarray(path_valid_pos, dtype=np.int64)
 
     y_arr = np.asarray(y).ravel()
+    if y_arr.shape[0] != cache.n_rows_original:
+        raise ValueError(
+            f"y has {y_arr.shape[0]} rows but cache was built from "
+            f"{cache.n_rows_original} rows"
+        )
     ys = y_arr[np.asarray(cache.row_idx)]
     zy = weighted_rank_gauss_1d(ys, cache.sample_weight)
     r_y_full = weighted_corr_with_vector(cache.Z, zy, cache.sample_weight).astype(np.float64)

@@ -5,9 +5,27 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 import numpy as np
+from joblib import Parallel, delayed, effective_n_jobs
 from numba import njit
+from threadpoolctl import threadpool_limits
+
+from sift._preprocess import validate_k
 
 FLOOR = 1e-6
+MrmrBackend = Literal["auto", "serial", "blas", "processes"]
+
+
+def resolve_mrmr_backend(mrmr_backend: MrmrBackend, n_jobs: int) -> Literal["serial", "blas", "processes"]:
+    """Validate and resolve mRMR backend options."""
+    if n_jobs == 0:
+        raise ValueError("n_jobs must not be 0")
+    if mrmr_backend not in ("auto", "serial", "blas", "processes"):
+        raise ValueError(
+            "mrmr_backend must be one of 'auto', 'serial', 'blas', or 'processes'"
+        )
+    if mrmr_backend == "auto":
+        return "serial" if n_jobs == 1 else "processes"
+    return mrmr_backend
 
 
 # =============================================================================
@@ -115,6 +133,137 @@ def mrmr_loop_incremental(
     return selected
 
 
+def _mrmr_loop_blas(
+    Z: np.ndarray,
+    relevance: np.ndarray,
+    k: int,
+    use_quotient: bool,
+    w: np.ndarray,
+) -> np.ndarray:
+    """mRMR loop using BLAS matrix-vector redundancy updates."""
+    n, p = Z.shape
+    k = min(k, p)
+    if k <= 0 or p == 0:
+        return np.empty(0, dtype=np.int64)
+
+    selected = np.empty(k, dtype=np.int64)
+    is_selected = np.zeros(p, dtype=bool)
+    red_sum = np.zeros(p, dtype=np.float64)
+    w_sum = float(w.sum())
+
+    best = int(np.argmax(relevance))
+    selected[0] = best
+    is_selected[best] = True
+    count = 1
+
+    for t in range(1, k):
+        last = int(selected[t - 1])
+        weighted_last = w * Z[:, last]
+        new_red = np.abs(Z.T @ weighted_last / w_sum)
+
+        mask = ~is_selected
+        red_sum[mask] += new_red[mask]
+        mean_red = red_sum / t
+        if use_quotient:
+            score = relevance / np.maximum(mean_red, FLOOR)
+        else:
+            score = relevance - mean_red
+        score[is_selected] = -np.inf
+
+        best_idx = int(np.argmax(score))
+        if not np.isfinite(score[best_idx]):
+            break
+
+        selected[t] = best_idx
+        is_selected[best_idx] = True
+        count += 1
+
+    return selected[:count]
+
+
+def _corr_chunk_process(
+    Z: np.ndarray,
+    weighted_last: np.ndarray,
+    w_sum: float,
+    start: int,
+    stop: int,
+) -> np.ndarray:
+    """Worker helper for process-backed correlation chunks."""
+    with threadpool_limits(limits=1):
+        return np.abs(Z[:, start:stop].T @ weighted_last / w_sum)
+
+
+def _weighted_corr_with_last_processes(
+    Z: np.ndarray,
+    last_idx: int,
+    w: np.ndarray,
+    n_jobs: int,
+) -> np.ndarray:
+    """Compute one redundancy update across process workers."""
+    p = Z.shape[1]
+    n_workers = max(1, min(p, effective_n_jobs(n_jobs)))
+    if n_workers <= 1:
+        weighted_last = w * Z[:, last_idx]
+        return np.abs(Z.T @ weighted_last / float(w.sum()))
+
+    bounds = np.linspace(0, p, n_workers + 1, dtype=np.int64)
+    weighted_last = w * Z[:, last_idx]
+    w_sum = float(w.sum())
+    chunks = Parallel(n_jobs=n_jobs, prefer="processes", max_nbytes="16M", batch_size=1)(
+        delayed(_corr_chunk_process)(Z, weighted_last, w_sum, int(bounds[i]), int(bounds[i + 1]))
+        for i in range(n_workers)
+        if bounds[i] < bounds[i + 1]
+    )
+    return np.concatenate(chunks)
+
+
+def _mrmr_loop_processes(
+    Z: np.ndarray,
+    relevance: np.ndarray,
+    k: int,
+    use_quotient: bool,
+    w: np.ndarray,
+    n_jobs: int,
+) -> np.ndarray:
+    """mRMR loop using process-backed redundancy updates."""
+    n, p = Z.shape
+    k = min(k, p)
+    if k <= 0 or p == 0:
+        return np.empty(0, dtype=np.int64)
+
+    selected = np.empty(k, dtype=np.int64)
+    is_selected = np.zeros(p, dtype=bool)
+    red_sum = np.zeros(p, dtype=np.float64)
+
+    best = int(np.argmax(relevance))
+    selected[0] = best
+    is_selected[best] = True
+    count = 1
+
+    for t in range(1, k):
+        last = int(selected[t - 1])
+        new_red = _weighted_corr_with_last_processes(Z, last, w, n_jobs)
+
+        mask = ~is_selected
+        red_sum[mask] += new_red[mask]
+        mean_red = red_sum / t
+        if use_quotient:
+            score = relevance / np.maximum(mean_red, FLOOR)
+        else:
+            score = relevance - mean_red
+        score[is_selected] = -np.inf
+
+        best_idx = int(np.argmax(score))
+        if not np.isfinite(score[best_idx]):
+            break
+
+        selected[t] = best_idx
+        is_selected[best_idx] = True
+        count += 1
+
+    return selected[:count]
+
+
 def mrmr_select(
     X: np.ndarray,
     relevance: np.ndarray,
@@ -122,8 +271,12 @@ def mrmr_select(
     formula: str = "quotient",
     top_m: Optional[int] = None,
     sample_weight: np.ndarray | None = None,
+    n_jobs: int = 1,
+    mrmr_backend: MrmrBackend = "auto",
 ) -> np.ndarray:
     """mRMR feature selection with incremental redundancy."""
+    k = validate_k(k, allow_auto=False)
+    backend = resolve_mrmr_backend(mrmr_backend, n_jobs)
     n, p = X.shape
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
 
@@ -148,7 +301,14 @@ def mrmr_select(
     Z = _standardize_columns_weighted(X_sub.astype(np.float64), w)
     use_quot = formula == "quotient"
 
-    sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot, w)
+    if backend == "serial":
+        sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot, w)
+    elif backend == "blas":
+        sel_local = _mrmr_loop_blas(Z, rel_sub, k, use_quot, w)
+    elif backend == "processes":
+        sel_local = _mrmr_loop_processes(Z, rel_sub, k, use_quot, w, n_jobs)
+    else:  # pragma: no cover - guarded by resolve_mrmr_backend
+        raise ValueError(f"Unknown mRMR backend: {backend}")
 
     return idx_map[sel_local]
 
@@ -170,6 +330,10 @@ def jmi_select(
 ) -> np.ndarray:
     """JMI/JMIM selection with incremental scoring."""
     from sift.estimators import joint_mi as jmi_est
+
+    k = validate_k(k, allow_auto=False)
+    if mi_estimator == "ksg" and sample_weight is not None:
+        raise ValueError("estimator='ksg' does not support sample_weight")
 
     n, p = X.shape
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
@@ -203,8 +367,21 @@ def jmi_select(
     X_binned = None
 
     if mi_estimator == "r2":
-        def mi_func_indexed(s, idx):
-            return jmi_est.r2_joint_mi_indexed(X_cand, idx, s, y_arr, w_arr)
+        Z_cand, r_y, r2_w, r2_w_sum = jmi_est._prepare_r2_joint_mi_state(
+            X_cand,
+            y_arr,
+            w_arr,
+        )
+
+        def mi_func_indexed(last_idx, idx):
+            return jmi_est._r2_joint_mi_indexed_from_state(
+                Z_cand,
+                r_y,
+                idx,
+                last_idx,
+                r2_w,
+                r2_w_sum,
+            )
     elif mi_estimator == "binned":
         X_binned = jmi_est.quantile_bin_matrix(X_cand, n_bins=10)
         if y_kind == "discrete":
@@ -223,8 +400,8 @@ def jmi_select(
             y_binned = jmi_est._quantile_bin(y_arr, 10)
             n_y_bins = 10
 
-        def mi_func_indexed(s, idx):
-            s_binned = jmi_est._quantile_bin(s, 10)
+        def mi_func_indexed(last_idx, idx):
+            s_binned = X_binned[:, int(last_idx)]
             return jmi_est.binned_joint_mi_indexed_prebinned(
                 X_binned,
                 idx,
@@ -255,8 +432,7 @@ def jmi_select(
     count = 1
 
     for t in range(1, k):
-        last = selected[t - 1]
-        s_feat = X_cand[:, last]
+        last = int(selected[t - 1])
 
         cand_indices = np.where(~is_selected)[0]
         if len(cand_indices) == 0:
@@ -264,8 +440,9 @@ def jmi_select(
 
         if use_indexed:
             cand_idx64 = cand_indices.astype(np.int64, copy=False)
-            mi_values = mi_func_indexed(s_feat, cand_idx64)
+            mi_values = mi_func_indexed(last, cand_idx64)
         else:
+            s_feat = X_cand[:, last]
             candidates = X_cand[:, cand_indices]
             mi_values = mi_func_matrix(s_feat, candidates)
 

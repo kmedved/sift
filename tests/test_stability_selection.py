@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from sift import StabilitySelector
+from sift.sampling.smart import SmartSamplerConfig
 from sift.stability import stability_select
 
 
@@ -116,6 +118,146 @@ def test_stability_classif_wrapper():
     assert isinstance(selected, list)
     assert len(selected) <= 10
     assert all(isinstance(f, str) for f in selected)
+
+
+def test_stability_selector_validates_sample_weight():
+    rng = np.random.default_rng(123)
+    n, p = 40, 5
+    X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
+    y = X["f0"] + rng.normal(size=n) * 0.1
+
+    bad_weights = [
+        np.ones(n - 1),
+        np.r_[np.ones(n - 1), -1.0],
+        np.r_[np.ones(n - 1), np.nan],
+        np.zeros(n),
+    ]
+
+    for weights in bad_weights:
+        selector = StabilitySelector(
+            n_bootstrap=2,
+            threshold=0.1,
+            alpha=0.1,
+            n_jobs=1,
+            verbose=False,
+        )
+        with pytest.raises(ValueError, match="sample_weight"):
+            selector.fit(X, y, sample_weight=weights)
+
+
+@pytest.mark.parametrize(
+    "selector_kwargs, match",
+    [
+        ({"task": "bad"}, "task must be"),
+        ({"block_method": "bad"}, "block_method must be"),
+        ({"parallel_backend": "bad"}, "parallel_backend must be"),
+        ({"sample_frac": 0}, "sample_frac must be"),
+        ({"sample_frac": 1.5}, "sample_frac must be"),
+        ({"n_bootstrap": 0}, "n_bootstrap must be"),
+        ({"threshold": -0.1}, "threshold must be"),
+    ],
+)
+def test_stability_selector_validates_runtime_options(selector_kwargs, match):
+    rng = np.random.default_rng(321)
+    X = pd.DataFrame(rng.normal(size=(20, 4)), columns=[f"f{i}" for i in range(4)])
+    y = X["f0"] + rng.normal(size=20) * 0.1
+
+    selector = StabilitySelector(n_jobs=1, verbose=False, **selector_kwargs)
+
+    with pytest.raises(ValueError, match=match):
+        selector.fit(X, y)
+
+
+def test_tune_threshold_reuses_fit_time_imputation(monkeypatch):
+    rng = np.random.default_rng(777)
+    X_fit = pd.DataFrame(
+        {
+            "f0": [1.0, 3.0, np.nan, 7.0, 9.0, 11.0],
+            "f1": [2.0, np.nan, 6.0, 8.0, 10.0, 12.0],
+        }
+    )
+    y_fit = X_fit["f0"].fillna(0).to_numpy() + rng.normal(size=len(X_fit)) * 0.01
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.1,
+        alpha=0.1,
+        n_jobs=1,
+        verbose=False,
+    )
+    selector.fit(X_fit, y_fit)
+
+    selector.selection_frequencies_ = np.array([1.0, 0.0], dtype=np.float32)
+
+    X_tune = pd.DataFrame(
+        {
+            "f0": [100.0, np.nan, 300.0, 400.0],
+            "f1": [np.nan, 500.0, 600.0, 700.0],
+        }
+    )
+    y_tune = np.array([1.0, 2.0, 3.0, 4.0])
+
+    captured = {}
+
+    def fake_cross_val_score(model, X, y, cv=None, scoring=None):
+        captured["X"] = np.array(X, copy=True)
+        captured["y"] = np.array(y, copy=True)
+        captured["cv"] = cv
+        captured["scoring"] = scoring
+        return np.array([0.25, 0.5, 0.75], dtype=np.float32)
+
+    monkeypatch.setattr("sklearn.model_selection.cross_val_score", fake_cross_val_score)
+
+    best_threshold, results = selector.tune_threshold(X_tune, y_tune, thresholds=[0.5], cv=3)
+
+    assert best_threshold == 0.5
+    assert results.loc[0, "n_features"] == 1
+    assert captured["cv"] == 3
+    assert captured["scoring"] == "r2"
+
+    expected_imputed = np.array(
+        [
+            [100.0, 7.6],
+            [6.2, 500.0],
+            [300.0, 600.0],
+            [400.0, 700.0],
+        ],
+        dtype=np.float32,
+    )
+    expected_scaled = selector._scaler.transform(expected_imputed)
+
+    np.testing.assert_allclose(captured["X"], expected_scaled[:, [0]])
+
+
+def test_smart_sampler_config_is_not_mutated():
+    rng = np.random.default_rng(456)
+    n, p = 80, 4
+    X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
+    y = np.where(X["f0"] > 0, "win", "loss")
+    config = SmartSamplerConfig(
+        sample_frac=0.5,
+        min_per_group=1,
+        residual_weight_cap=0.4,
+        random_state=None,
+        verbose=True,
+    )
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.1,
+        alpha=0.1,
+        task="classification",
+        use_smart_sampler=True,
+        sampler_config=config,
+        n_jobs=1,
+        random_state=7,
+        verbose=False,
+    )
+    selector.fit(X, y)
+
+    assert config.residual_weight_cap == 0.4
+    assert config.random_state is None
+    assert config.verbose is True
 
 
 def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
