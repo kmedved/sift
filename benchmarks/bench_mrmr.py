@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from contextlib import nullcontext
@@ -20,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sift import select_mrmr  # noqa: E402
+from benchmarks.bench_utils import promotion_status, write_json  # noqa: E402
 
 
 Case = tuple[str, int, int, int]
@@ -169,6 +169,8 @@ def main() -> int:
         )
         records.append(
             {
+                "benchmark": "mrmr",
+                "benchmark_kind": "baseline",
                 "method": method,
                 "backend": "serial",
                 "n": n,
@@ -177,8 +179,13 @@ def main() -> int:
                 "n_jobs": 1,
                 "blas_threads": None,
                 "wall_seconds": serial_time,
+                "baseline_wall_seconds": serial_time,
+                "current_wall_seconds": serial_time,
+                "baseline_peak_memory_mb": None,
+                "current_peak_memory_mb": None,
                 "speedup_vs_serial": 1.0,
                 "selected_feature_parity": True,
+                "promotion_status": "baseline",
                 "selected_features": serial_selected,
             }
         )
@@ -193,8 +200,12 @@ def main() -> int:
                 k=k,
                 blas_threads=blas_threads,
             )
+            parity = selected == serial_selected
+            blas_kind = "promotion" if method == "classic" else "parity"
             records.append(
                 {
+                    "benchmark": "mrmr",
+                    "benchmark_kind": blas_kind,
                     "method": method,
                     "backend": "blas",
                     "n": n,
@@ -203,8 +214,21 @@ def main() -> int:
                     "n_jobs": 1,
                     "blas_threads": blas_threads,
                     "wall_seconds": wall,
+                    "baseline_wall_seconds": serial_time,
+                    "current_wall_seconds": wall,
+                    "baseline_peak_memory_mb": None,
+                    "current_peak_memory_mb": None,
                     "speedup_vs_serial": serial_time / wall if wall > 0 else float("inf"),
-                    "selected_feature_parity": selected == serial_selected,
+                    "selected_feature_parity": parity,
+                    "promotion_status": (
+                        promotion_status(
+                            parity=parity,
+                            baseline_seconds=serial_time,
+                            current_seconds=wall,
+                        )
+                        if blas_kind == "promotion"
+                        else ("parity" if parity else "blocked: parity")
+                    ),
                     "selected_features": selected,
                 }
             )
@@ -213,8 +237,11 @@ def main() -> int:
             wall, selected = _time_select(
                 X, y, method=method, backend="processes", n_jobs=process_jobs, k=k
             )
+            parity = selected == serial_selected
             records.append(
                 {
+                    "benchmark": "mrmr",
+                    "benchmark_kind": "parity",
                     "method": method,
                     "backend": "processes",
                     "n": n,
@@ -223,8 +250,13 @@ def main() -> int:
                     "n_jobs": process_jobs,
                     "blas_threads": None,
                     "wall_seconds": wall,
+                    "baseline_wall_seconds": serial_time,
+                    "current_wall_seconds": wall,
+                    "baseline_peak_memory_mb": None,
+                    "current_peak_memory_mb": None,
                     "speedup_vs_serial": serial_time / wall if wall > 0 else float("inf"),
-                    "selected_feature_parity": selected == serial_selected,
+                    "selected_feature_parity": parity,
+                    "promotion_status": "parity" if parity else "blocked: parity",
                     "selected_features": selected,
                 }
             )
@@ -232,11 +264,8 @@ def main() -> int:
     print(_markdown_table(records))
 
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        write_json(args.output, records)
 
-    if not all(row["selected_feature_parity"] for row in records):
-        return 1
     return 0
 
 

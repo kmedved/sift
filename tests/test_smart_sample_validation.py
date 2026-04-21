@@ -77,3 +77,39 @@ def test_smart_sample_revalidates_mutated_config_without_overrides():
 
     with pytest.raises(ValueError, match="residual_weight_cap"):
         smart_sample(df, ["f0", "f1"], "y", config=config)
+
+
+def test_smart_sample_residual_disabled_accepts_non_float_target():
+    df = _sample_frame(30)
+    df["label"] = np.where(df["time"] % 2 == 0, "win", "loss")
+    config = SmartSamplerConfig(
+        sample_frac=0.4,
+        residual_weight_cap=0.0,
+        min_per_group=1,
+        random_state=0,
+        verbose=False,
+    )
+
+    out = smart_sample(df, ["f0", "f1"], "label", config=config)
+
+    assert len(out) > 0
+    assert "sample_weight" in out.columns
+    assert np.isfinite(out["sample_weight"]).all()
+
+
+def test_smart_sample_dense_probabilities_are_deterministic():
+    df = _sample_frame(60)
+    config = SmartSamplerConfig(
+        sample_frac=0.35,
+        residual_weight_cap=0.0,
+        min_per_group=2,
+        group_col="group",
+        random_state=7,
+        verbose=False,
+    )
+
+    out1 = smart_sample(df, ["f0", "f1"], "y", config=config)
+    out2 = smart_sample(df, ["f0", "f1"], "y", config=config)
+
+    pd.testing.assert_frame_equal(out1.reset_index(drop=True), out2.reset_index(drop=True))
+    assert out1["time"].is_monotonic_increasing

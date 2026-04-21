@@ -158,11 +158,11 @@ def _block_bootstrap_indices(
             else:
                 raise ValueError(f"Unknown block_method: {block_method}")
 
-            in_bag_set = set(in_bag)
-            oob = [i for i in sorted_idx if i not in in_bag_set]
+            in_bag_arr = np.asarray(in_bag, dtype=np.int64)
+            oob = np.setdiff1d(sorted_idx, np.unique(in_bag_arr), assume_unique=True)
 
-            train_idx.extend(in_bag)
-            val_idx.extend(oob)
+            train_idx.extend(in_bag_arr.tolist())
+            val_idx.extend(oob.tolist())
 
         train_arr = np.array(train_idx, dtype=np.int64)
         val_arr = np.array(val_idx, dtype=np.int64)
@@ -394,7 +394,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if use_block:
             if self.verbose:
                 print(f"Using block bootstrap (method={self.block_method}, size={self.block_size})")
-            splits = list(_block_bootstrap_indices(
+            split_iter = _block_bootstrap_indices(
                 n=n,
                 n_bootstrap=self.n_bootstrap,
                 groups=groups,
@@ -404,24 +404,20 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 y=y if self.task == "classification" else None,
                 task=self.task,
                 random_state=self.random_state,
-            ))
+            )
         else:
             if self.verbose:
                 print("Using i.i.d. bootstrap")
-            splits = list(_bootstrap_indices(
+            split_iter = _bootstrap_indices(
                 n=n,
                 n_bootstrap=self.n_bootstrap,
                 sample_frac=self.sample_frac,
                 y=y if self.task == "classification" else None,
                 task=self.task,
                 random_state=self.random_state,
-            ))
-
-        if not splits:
-            raise ValueError("No valid bootstrap splits could be generated.")
+            )
 
         rng = np.random.default_rng(self.random_state)
-        seeds = rng.integers(0, 2**31, size=len(splits))
 
         def single_run(train_idx, seed):
             idx = train_idx
@@ -466,26 +462,36 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
             return selected.astype(np.int8), coef_summary.astype(np.float32)
 
-        # Chunked execution to reduce peak memory
-        # (avoids holding all n_bootstrap results in memory at once)
-        n_splits = len(splits)
-        chunk_size = min(20, n_splits)  # Process 20 at a time
+        # Chunked execution to reduce peak memory. Splits are streamed instead
+        # of materialized up front, which matters for large block bootstraps.
+        chunk_size = min(20, self.n_bootstrap)
 
         sel_count = np.zeros(p, dtype=np.int32)
         sum_abs_coef = np.zeros(p, dtype=np.float64)
 
         if self.store_coefs:
-            self.coef_bootstrap_ = np.empty((n_splits, p), dtype=np.float32)
+            self.coef_bootstrap_ = np.empty((self.n_bootstrap, p), dtype=np.float32)
 
         bootstrap_idx = 0
-        for chunk_start in range(0, n_splits, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, n_splits)
-            chunk_splits = splits[chunk_start:chunk_end]
-            chunk_seeds = seeds[chunk_start:chunk_end]
+        split_iterator = iter(split_iter)
+        while True:
+            chunk_splits = []
+            chunk_seeds = []
+            for _ in range(chunk_size):
+                try:
+                    chunk_splits.append(next(split_iterator))
+                except StopIteration:
+                    break
+                chunk_seeds.append(int(rng.integers(0, 2**31)))
+
+            if not chunk_splits:
+                break
+
+            chunk_seeds_arr = np.asarray(chunk_seeds, dtype=np.int64)
 
             chunk_results = Parallel(n_jobs=self.n_jobs, prefer=self.parallel_backend)(
                 delayed(single_run)(train_idx, seed)
-                for (train_idx, _), seed in zip(chunk_splits, chunk_seeds)
+                for (train_idx, _), seed in zip(chunk_splits, chunk_seeds_arr)
             )
 
             # Aggregate this chunk immediately, then discard
@@ -499,8 +505,14 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
             # chunk_results goes out of scope here, memory freed
 
-        self.selection_frequencies_ = (sel_count / n_splits).astype(np.float32)
-        self.mean_abs_coef_ = (sum_abs_coef / n_splits).astype(np.float32)
+        if bootstrap_idx == 0:
+            raise ValueError("No valid bootstrap splits could be generated.")
+
+        if self.store_coefs:
+            self.coef_bootstrap_ = self.coef_bootstrap_[:bootstrap_idx]
+
+        self.selection_frequencies_ = (sel_count / bootstrap_idx).astype(np.float32)
+        self.mean_abs_coef_ = (sum_abs_coef / bootstrap_idx).astype(np.float32)
 
         # Select features
         mask = self.selection_frequencies_ >= self.threshold

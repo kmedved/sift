@@ -50,11 +50,30 @@ def test_filter_selectors_return_result_has_indices_and_metadata_fixed_k():
         assert result.selector_metadata["k"] == len(result.selected_features)
         assert result.selector_metadata["k_requested"] == 4
 
+        ranking = result.get_feature_ranking()
+        assert list(ranking.columns) == [
+            "feature",
+            "rank",
+            "selected",
+            "selected_index",
+            "relevance",
+            "selector",
+        ]
+        assert ranking["selected"].all()
+        assert ranking["rank"].tolist() == list(range(1, len(result.selected_features) + 1))
+
 
 def test_filter_selectors_auto_k_return_result():
     X, y = _make_regression_data(seed=1)
     feature_names = list(X.columns)
-    auto_cfg = AutoKConfig(k_method="elbow", max_k=6, min_k=1)
+    eval_cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        max_k=6,
+        min_k=1,
+        val_frac=0.25,
+    )
+    elbow_cfg = AutoKConfig(k_method="elbow", max_k=6, min_k=1)
 
     result_mrmr = select_mrmr(
         X,
@@ -62,7 +81,7 @@ def test_filter_selectors_auto_k_return_result():
         k="auto",
         task="regression",
         estimator="classic",
-        auto_k_config=auto_cfg,
+        auto_k_config=eval_cfg,
         time=np.arange(len(X)),
         verbose=False,
         return_result=True,
@@ -72,7 +91,7 @@ def test_filter_selectors_auto_k_return_result():
         y,
         k="auto",
         task="regression",
-        auto_k_config=auto_cfg,
+        auto_k_config=eval_cfg,
         time=np.arange(len(X)),
         verbose=False,
         return_result=True,
@@ -82,8 +101,18 @@ def test_filter_selectors_auto_k_return_result():
         y,
         k="auto",
         task="regression",
-        auto_k_config=auto_cfg,
+        auto_k_config=eval_cfg,
         time=np.arange(len(X)),
+        verbose=False,
+        return_result=True,
+    )
+    result_gaussian_mrmr = select_mrmr(
+        X,
+        y,
+        k="auto",
+        task="regression",
+        estimator="gaussian",
+        auto_k_config=elbow_cfg,
         verbose=False,
         return_result=True,
     )
@@ -91,15 +120,29 @@ def test_filter_selectors_auto_k_return_result():
         X,
         y,
         k="auto",
-        auto_k_config=auto_cfg,
-        time=np.arange(len(X)),
+        auto_k_config=elbow_cfg,
         verbose=False,
         return_result=True,
     )
 
-    for result in (result_mrmr, result_jmi, result_jmim, result_cefsplus):
+    for result in (result_mrmr, result_jmi, result_jmim):
         assert isinstance(result, FilterSelectionResult)
         assert result.selector_metadata["auto_k"] is True
+        assert result.selector_metadata["auto_k_mode"] == "prefix_only"
+        assert result.selector_metadata["k_method"] == "evaluate"
+        assert 1 <= len(result.selected_features) <= 6
+        assert result.selector_metadata["k"] == len(result.selected_features)
+        assert result.selected_indices is None or len(result.selected_indices) == len(result.selected_features)
+        if result.selected_indices is not None:
+            assert [feature_names[i] for i in result.selected_indices] == result.selected_features
+        assert result.selector_metadata["k_requested"] == "auto"
+        assert result.selector_metadata["n_features"] == X.shape[1]
+
+    for result in (result_gaussian_mrmr, result_cefsplus):
+        assert isinstance(result, FilterSelectionResult)
+        assert result.selector_metadata["auto_k"] is True
+        assert result.selector_metadata["auto_k_mode"] == "prefix_only"
+        assert result.selector_metadata["k_method"] == "elbow"
         assert 1 <= len(result.selected_features) <= 6
         assert result.selector_metadata["k"] == len(result.selected_features)
         assert result.selected_indices is None or len(result.selected_indices) == len(result.selected_features)

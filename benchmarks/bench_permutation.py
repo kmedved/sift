@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -17,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sift.importance import permutation_importance  # noqa: E402
+from benchmarks.bench_utils import write_json  # noqa: E402
 
 
 class LinearPredictor:
@@ -151,6 +151,7 @@ def main() -> int:
                 )
                 records.append(
                     {
+                        "benchmark": "permutation",
                         "input": input_name,
                         "backend": backend,
                         "n_samples": n_samples,
@@ -163,11 +164,31 @@ def main() -> int:
                     }
                 )
 
+    baselines = {
+        row["input"]: row
+        for row in records
+        if row["backend"] == "threads" and row["n_jobs"] == 1
+    }
+    for row in records:
+        baseline = baselines.get(row["input"], row)
+        parity = row["top_feature"] == baseline["top_feature"]
+        is_baseline = row is baseline
+        row["benchmark_kind"] = "baseline" if is_baseline else "parity"
+        row["baseline_wall_seconds"] = baseline["wall_seconds"]
+        row["current_wall_seconds"] = row["wall_seconds"]
+        row["baseline_peak_memory_mb"] = None
+        row["current_peak_memory_mb"] = None
+        row["selected_feature_parity"] = parity
+        row["promotion_status"] = (
+            "baseline"
+            if is_baseline
+            else ("parity" if parity else "blocked: parity")
+        )
+
     print(_markdown_table(records))
 
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        write_json(args.output, records)
 
     return 0
 

@@ -188,10 +188,10 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ### C. Smart sampling residual pilot
 
-- [ ] Skip unnecessary residual-pilot preparation in smart sampling.
+- [x] Skip unnecessary residual-pilot preparation in smart sampling.
   Scope: `sift/sampling/smart.py::smart_sample`.
-  Notes: defer float conversion of `y` until residual weighting is enabled; avoid failures when `residual_weight_cap == 0`.
-  Benchmark: large DataFrame with `residual_weight_cap=0.0`.
+  Notes: `y` is converted to float only when residual weighting is enabled; `residual_weight_cap == 0` now supports classification-like non-float target columns.
+  Benchmark: `benchmarks/bench_stability.py` includes a residual-disabled smart-sampler row with non-float labels.
 
 ### D. Permutation importance parallel backend
 
@@ -205,10 +205,10 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ### E. Stability split materialization
 
-- [ ] Stream stability splits instead of materializing all at once.
+- [x] Stream stability splits instead of materializing all at once.
   Scope: `sift/stability.py::StabilitySelector.fit`.
-  Notes: preserve behavior and random-state determinism while processing chunks directly.
-  Benchmark: `n=1_000_000`, `n_bootstrap=100`, block bootstrap with groups/time.
+  Notes: split iterators are consumed in chunks and coefficient storage is sliced to the number of valid generated splits.
+  Benchmark: `benchmarks/bench_stability.py` covers split generation and fit memory modes.
 
 ### F. R2 JMI vectorized correlations
 
@@ -240,23 +240,23 @@ This file tracks the public-release work from the Oracle/source review plus the 
   Scope: `sift/api.py`, `sift/selection/cefsplus.py`, and `sift/selection/loops.py`.
   Notes: default return type remains a list. `return_result=True` returns a
   compact `FilterSelectionResult` with selected names, best-effort input-column
-  indices, and selector metadata. Richer diagnostics such as relevance,
-  redundancy, objective path, and candidate features remain part of the
-  unified selector diagnostics follow-up.
+  indices, selector metadata, and an on-demand conservative ranking table.
+  Richer diagnostics such as redundancy, objective path, and candidate features
+  remain future polish.
 
 ### J. Smart sampler probability accumulation
 
-- [ ] Replace dictionary accumulation in `smart_sample` with dense/vectorized probabilities.
+- [x] Replace dictionary accumulation in `smart_sample` with dense/vectorized probabilities.
   Scope: `sift/sampling/smart.py::smart_sample`.
-  Notes: the follow-up review flagged `pi_dict` and `add_rows(...)` as Python-heavy. Consider a dense `pi = np.zeros(n)` updated by indexed vector operations, and factorize groups once instead of repeatedly leaning on object-key grouping.
-  Benchmark: `n=1_000_000`, grouped panel data with anchors/residual weighting on and off, track wall time and peak memory.
+  Notes: inclusion probabilities now accumulate into a dense `pi` array with indexed updates. Output rows are returned in ascending original row order.
+  Benchmark: deterministic tests cover row/weight stability; grouped panel timing is covered by the benchmark runner.
 
 ### K. Bootstrap OOB construction
 
-- [ ] Reduce Python set/list OOB work in bootstrap generators.
+- [x] Reduce Python set/list OOB work in bootstrap generators.
   Scope: `sift/stability.py::_block_bootstrap_indices` and `sift/catboost.py` bootstrap helpers.
-  Notes: `_block_bootstrap_indices` currently builds `in_bag_set` and list-comprehension OOB rows per group. CatBoost bootstrap paths have related OOB construction. Use boolean masks, integer group codes, or vectorized set differences where benchmarks show a win.
-  Benchmark: large grouped/time panel, `n_bootstrap=100`, measure split-generation time and memory.
+  Notes: stability block bootstrap now uses vectorized set differences for OOB rows. CatBoost split helpers are covered in benchmark smoke rows and remain unchanged where already vectorized.
+  Benchmark: `benchmarks/bench_stability.py` and `benchmarks/bench_catboost.py`.
 
 ### L. Permutation importance copy pressure
 
@@ -277,14 +277,14 @@ This file tracks the public-release work from the Oracle/source review plus the 
   DataFrame transforms validate fitted column order, and sklearn
   `set_params(...)` flows through to the next fit.
 
-- [ ] Add leakage-safe categorical encoders inside selector classes.
-  Notes: fit encoders only in `fit`, apply in `transform`, support `cat_features` and `cat_encoding`, and consider nested-CV auto-k.
+- [x] Add explicit fitted categorical encoders inside selector classes.
+  Notes: selector classes now default to `cat_encoding="none"`. When supervised encoders are explicitly enabled, `fit_transform` returns the selected columns from the y-aware encoded training matrix used for selection, `transform` applies the fitted encoder to future rows without target access, and prefix-only/evaluate auto-k rejects the unsafe supervised-encoder combination. Failed refits clear prior fitted state. These encoders are fitted, not cross-fitted.
 
 - [ ] Add cross-fitted categorical encoding modes for selection workflows.
   Notes: consider `cat_encoding="target_cv"` / `"loo_cv"` for DataFrame inputs, using fold-local encoders during path construction and evaluation. This is distinct from the current explicit unsafe full-data opt-in.
 
-- [ ] Implement `auto_k_mode="nested"`.
-  Notes: refit the selector path inside each split using train rows only, with fold-local categorical encoding, fold-local weights, groups/time handling, and clear cache semantics. Keep `prefix_only` as the fast heuristic mode.
+- [x] Implement `auto_k_mode="nested"` for selector classes.
+  Notes: selector classes refit train-only selector paths inside time-holdout or group-CV splits, evaluate prefixes with the same `fit_transform` training representation used by sklearn pipelines plus fold-local validation preprocessing/weights, reject prebuilt caches, reject `k_method="elbow"` until a nested-elbow contract exists, and refit final features on all rows passed to `fit`. Function-style selectors keep the prefix-only contract and still reject nested mode. Class and function selectors now share auto-k strategy inference, so groups-only calls infer group CV without an explicit config.
 
 - [x] Add a first-class feature-path evaluation helper.
   Notes: `sift.selection.evaluate_feature_path` and the top-level
@@ -313,8 +313,11 @@ This file tracks the public-release work from the Oracle/source review plus the 
 - [x] Add time-only permutation support or explicit documentation.
   Notes: single time series are treated as one implicit ordered group for auto/block/circular-shift permutation; Boruta and permutation importance use the same shared behavior.
 
-- [ ] Add unified selector diagnostics.
-  Notes: feature ranking DataFrame with `feature`, `rank`, `selected`, `relevance`, `redundancy_at_selection`, and `objective_gain`; consider `get_feature_ranking()` and `plot_path()`.
+- [x] Add selected-feature result summary.
+  Notes: `FilterSelectionResult.get_feature_ranking()` now returns a conservative selected-feature table with `feature`, `rank`, `selected`, `selected_index`, `relevance`, and selector metadata. Metrics not exposed by the selector are left as `NaN`.
+
+- [ ] Add richer unified selector diagnostics.
+  Notes: include unselected candidates where available, non-NaN selector-specific relevance, redundancy at selection, objective gains, candidate-pool size, filtered/pruned features, and objective/path diagnostics.
 
 - [ ] Add reproducibility manifests.
   Notes: expose `result.reproducibility_` with package version, selector name, seeds, selected features, column list or feature hash, key parameters, and dependency versions where available.
@@ -335,11 +338,14 @@ This file tracks the public-release work from the Oracle/source review plus the 
   exposes compact result objects for diagnostics/tests.
 
 - [x] Step 5: Add class-based selectors.
-  Notes: thin sklearn-style wrappers are in place. Leakage-safe fitted
-  categorical encoders and nested auto-k remain separate follow-up items.
+  Notes: sklearn-style wrappers, explicit fitted categorical encoders with
+  guardrails, and selector-class nested auto-k are in place.
 
-- [ ] Step 6: Optimize hot loops with benchmarks.
-  Notes: add benchmarks before changing implementations; then tackle BLAS mRMR, vectorized R2 JMI, binned JMI reuse, stability split streaming, smart sampler probability accumulation, bootstrap OOB construction, and permutation importance backend/DataFrame work.
+- [x] Step 6a: Add benchmark foundation and promote completed hot-loop optimizations.
+  Notes: mRMR BLAS/process backends, vectorized R2 JMI, binned JMI reuse, stability split streaming, smart sampler dense probability accumulation, bootstrap OOB construction, and permutation importance backend/DataFrame work now have tests and benchmark coverage. CEFS+ allocation pressure remains benchmarked but not promoted as a public optimization yet.
+
+- [ ] Step 6b: Finish remaining cache/CEFS+ allocation work.
+  Notes: reusable standardized/cache design and CEFS+ allocation-pressure reduction remain open optimization work.
 
 ## Test Plan
 
@@ -373,11 +379,15 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ## Benchmark Suite
 
-- [ ] Add a benchmark suite under `benchmarks/`.
-  Notes: `bench_mrmr.py`, `bench_jmi.py`, and `bench_permutation.py` now exist.
-  Remaining suite files include `bench_filters.py`, `bench_cefsplus.py`,
-  `bench_stability.py`, and `bench_catboost.py`. Track wall time, peak memory,
-  selected feature agreement, and objective/path agreement where applicable.
+- [x] Add a benchmark suite under `benchmarks/`.
+  Notes: `bench_mrmr.py`, `bench_jmi.py`, `bench_permutation.py`,
+  `bench_filters.py`, `bench_cefsplus.py`, `bench_stability.py`,
+  `bench_catboost.py`, and `run_benchmarks.py` now share a promotion JSON schema.
+  Track wall time, optional peak memory, selected feature agreement, and
+  benchmark kind/promotion status where applicable. Informational/smoke/parity
+  rows are not treated as promoted optimizations. Benchmark scripts write row
+  metadata and return success unless they crash; `run_benchmarks.py` owns the
+  aggregate promotion-gate decision.
 
 Benchmark matrix:
 
@@ -400,7 +410,7 @@ Benchmark matrix:
 - [x] Should target encoders inside function-style selectors be allowed at all?
   Decision: allowed only with explicit `allow_full_data_target_encoding=True`; default behavior rejects supervised full-data encoding.
 - [x] Should `k="auto"` mean nested selector refitting for this release?
-  Decision: no. Current release semantics are `auto_k_mode="prefix_only"`: fast prefix evaluation over one fitted path. `auto_k_mode="nested"` is reserved and raises until implemented.
+  Decision: function-style selectors remain `auto_k_mode="prefix_only"` by default and still reject nested mode. Selector classes now support opt-in `auto_k_mode="nested"` for train-split refits.
 - [x] Should filter functions return exactly `k` features or up to `k` features?
   Decision: fixed `k` is an upper bound for filter selectors. They return up to
   `k`, because constant-feature filtering, non-positive relevance filtering,

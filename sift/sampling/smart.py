@@ -229,13 +229,15 @@ def smart_sample(
     df = df.reset_index(drop=True)
 
     X = df[feature_cols].to_numpy(dtype=np.float32, copy=True)
-    y = df[y_col].to_numpy(dtype=np.float32)
 
     from sift._impute import mean_impute
 
     # Check y finiteness (only needed when residual weighting is enabled)
-    if config.residual_weight_cap > 0 and not np.isfinite(y).all():
-        raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
+    y = None
+    if config.residual_weight_cap > 0:
+        y = df[y_col].to_numpy(dtype=np.float32)
+        if not np.isfinite(y).all():
+            raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
 
     X = mean_impute(X, copy=False)
 
@@ -404,11 +406,15 @@ def smart_sample(
         chosen_idx = np.nonzero(chosen)[0]
         return chosen_idx.astype(int), pi.astype(np.float32)
 
-    pi_dict: Dict[int, float] = {}
+    pi = np.zeros(n, dtype=np.float32)
 
     def add_rows(indices: np.ndarray, pis: np.ndarray):
-        for j, ridx in enumerate(indices):
-            pi_dict[ridx] = min(1.0, pi_dict.get(ridx, 0.0) + float(pis[j]))
+        if indices.size == 0:
+            return
+        idx = np.asarray(indices, dtype=np.intp)
+        vals = np.asarray(pis, dtype=np.float32)
+        np.add.at(pi, idx, vals)
+        np.minimum(pi, 1.0, out=pi)
 
     for g, g_idx in group_indices.items():
         n_g = g_idx.size
@@ -462,8 +468,8 @@ def smart_sample(
     # -------------------------------------------------------------------------
     # Assemble output
     # -------------------------------------------------------------------------
-    final_idx = np.fromiter(pi_dict.keys(), dtype=int, count=len(pi_dict))
-    final_pi = np.fromiter(pi_dict.values(), dtype=np.float32, count=len(pi_dict))
+    final_idx = np.flatnonzero(pi > 0)
+    final_pi = pi[final_idx].astype(np.float32, copy=True)
     final_pi = np.clip(final_pi, 1e-12, 1.0)
     final_w = 1.0 / final_pi
 

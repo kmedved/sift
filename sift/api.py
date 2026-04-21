@@ -26,7 +26,7 @@ from sift.estimators import relevance as rel_est
 from sift.estimators.copula import FeatureCache, build_cache
 from sift.selection.auto_k import (
     AutoKConfig,
-    _ensure_supported_auto_k_mode,
+    resolve_auto_k_config,
     select_k_auto,
     select_k_elbow,
 )
@@ -41,20 +41,7 @@ def _resolve_auto_k_config(
     groups: Optional[np.ndarray],
 ) -> AutoKConfig:
     """Resolve auto-k config, inferring strategy from available data."""
-    if auto_k_config is not None:
-        _ensure_supported_auto_k_mode(auto_k_config)
-        return auto_k_config
-    if time is not None:
-        config = AutoKConfig(strategy="time_holdout")
-        _ensure_supported_auto_k_mode(config)
-        return config
-    if groups is not None:
-        config = AutoKConfig(strategy="group_cv")
-        _ensure_supported_auto_k_mode(config)
-        return config
-    raise ValueError(
-        "k='auto' requires time, groups, or auto_k_config with k_method='elbow'"
-    )
+    return resolve_auto_k_config(auto_k_config, time, groups)
 
 
 def _validate_groups_time(
@@ -341,6 +328,13 @@ def _auto_k_classic(
     return_indices: bool = False,
 ) -> List[str] | Tuple[List[str], List[int]]:
     """Shared auto-k evaluation for classic estimators."""
+    if auto_k_config.k_method == "elbow":
+        raise ValueError(
+            "k_method='elbow' is not supported for classic MRMR/JMI/JMIM "
+            "auto-k paths. Use k_method='evaluate' with time/groups, or use a "
+            "Gaussian/cache-backed path that exposes an objective path."
+        )
+
     path = [feature_names[i] for i in path_idx]
 
     if auto_k_config.strategy == "time_holdout" and eval_time is None:
@@ -580,7 +574,8 @@ def select_mrmr(
                             "estimator": estimator,
                             "formula": formula,
                             "relevance": relevance,
-                            "auto_k_mode": auto_k_config.k_method,
+                            "auto_k_mode": auto_k_config.auto_k_mode,
+                            "k_method": auto_k_config.k_method,
                             "auto_k_strategy": auto_k_config.strategy,
                         },
                     ),
@@ -689,7 +684,8 @@ def select_mrmr(
                         "estimator": estimator,
                         "formula": formula,
                         "relevance": relevance,
-                        "auto_k_mode": auto_k_config.k_method,
+                        "auto_k_mode": auto_k_config.auto_k_mode,
+                        "k_method": auto_k_config.k_method,
                         "auto_k_strategy": auto_k_config.strategy,
                     },
                 ),
@@ -1091,7 +1087,8 @@ def select_jmi(
                             "task": task,
                             "estimator": estimator,
                             "relevance": relevance,
-                            "auto_k_mode": auto_k_config.k_method,
+                            "auto_k_mode": auto_k_config.auto_k_mode,
+                            "k_method": auto_k_config.k_method,
                             "auto_k_strategy": auto_k_config.strategy,
                         },
                     ),
@@ -1202,7 +1199,8 @@ def select_jmi(
                         "task": task,
                         "estimator": estimator,
                         "relevance": relevance,
-                        "auto_k_mode": auto_k_config.k_method,
+                        "auto_k_mode": auto_k_config.auto_k_mode,
+                        "k_method": auto_k_config.k_method,
                         "auto_k_strategy": auto_k_config.strategy,
                     },
                 ),
@@ -1458,7 +1456,8 @@ def select_jmim(
                             "task": task,
                             "estimator": estimator,
                             "relevance": relevance,
-                            "auto_k_mode": auto_k_config.k_method,
+                            "auto_k_mode": auto_k_config.auto_k_mode,
+                            "k_method": auto_k_config.k_method,
                             "auto_k_strategy": auto_k_config.strategy,
                         },
                     ),
@@ -1569,7 +1568,8 @@ def select_jmim(
                         "task": task,
                         "estimator": estimator,
                         "relevance": relevance,
-                        "auto_k_mode": auto_k_config.k_method,
+                        "auto_k_mode": auto_k_config.auto_k_mode,
+                        "k_method": auto_k_config.k_method,
                         "auto_k_strategy": auto_k_config.strategy,
                     },
                 ),
@@ -1895,7 +1895,11 @@ def select_cefsplus(
                     top_m=top_m_eff,
                     n_features=n_features_input,
                     auto_k=True,
-                    extra={"auto_k_mode": auto_k_config.k_method, "auto_k_strategy": auto_k_config.strategy},
+                    extra={
+                        "auto_k_mode": auto_k_config.auto_k_mode,
+                        "k_method": auto_k_config.k_method,
+                        "auto_k_strategy": auto_k_config.strategy,
+                    },
                 ),
                 return_result,
             )

@@ -258,12 +258,15 @@ result = select_mrmr(
 selected = result.selected_features
 selected_indices = result.selected_indices
 metadata = result.selector_metadata
+ranking = result.get_feature_ranking()
 ```
 
 `return_result=True` is available on `select_mrmr`, `select_jmi`,
 `select_jmim`, and `select_cefsplus`. The default remains `list[str]`. The
 result object currently contains selected feature names, best-effort input-column
-indices, and compact selector metadata.
+indices, compact selector metadata, and a conservative diagnostic ranking table.
+Unknown diagnostics, such as relevance for selectors that did not expose it, are
+reported as `NaN` rather than guessed.
 
 ### `select_jmi`
 
@@ -379,9 +382,18 @@ Each class supports `fit`, `transform`, `fit_transform`, and
 - `n_features_in_`
 
 For pandas inputs, `transform` validates that columns match the fitted columns
-and order before selecting by stored positions. These wrappers are intentionally
-thin around the function APIs; leakage-safe fitted categorical encoders and
-nested auto-k remain future additions.
+and order before selecting by stored positions.
+
+Selector classes default to `cat_encoding="none"`. When you explicitly set
+`cat_encoding` to `"target"`, `"loo"`, or `"james_stein"`, the encoder is fitted
+only inside `fit(X_train, y_train)` and reused by `transform(X_test)` without
+access to test targets. `fit_transform(X_train, y_train)` returns the selected
+columns from the y-aware encoded matrix used during selection, so sklearn
+pipeline training does not silently switch to target-blind transform semantics.
+These fitted encoders are not cross-fitted; use external cross-fitting or
+selector-class `auto_k_mode="nested"` when you need fold-local evaluation.
+Function-style selectors still reject supervised full-data categorical encoding
+by default unless `allow_full_data_target_encoding=True` is passed explicitly.
 
 ## Automatic `k` Selection
 
@@ -392,7 +404,7 @@ from sift import AutoKConfig, select_mrmr
 
 config = AutoKConfig(
     k_method="evaluate",      # "evaluate" or "elbow"
-    auto_k_mode="prefix_only", # "prefix_only"; "nested" is reserved
+    auto_k_mode="prefix_only", # "prefix_only" or selector-class "nested"
     strategy="time_holdout",  # "time_holdout" or "group_cv"
     metric="rmse",            # "auto", "rmse", "mae", "logloss", "error"
     min_k=5,
@@ -415,18 +427,31 @@ selected = select_mrmr(
 
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model.
-- `k_method="elbow"` chooses where objective gains flatten out.
+- `k_method="elbow"` chooses where objective gains flatten out. It requires an
+  objective path and is currently supported by Gaussian/cache-backed filter
+  paths such as CEFS+ and Gaussian mRMR. Classic MRMR/JMI/JMIM auto-k paths use
+  `k_method="evaluate"`; requesting elbow there raises.
 - `auto_k_mode="prefix_only"` is the current public semantic. Selectors build
   one supervised feature path on the rows available to the selector, then
-  evaluate prefixes of that fixed path or choose an elbow on that path. For
-  `k_method="evaluate"`, the scores are not an unbiased estimate of refitting
-  the full selector inside each split. Prefix evaluation does honor
-  `sample_weight` when provided.
-- `auto_k_mode="nested"` is reserved for a future implementation that would
-  refit the selector path inside each split. Requesting it currently raises
-  `NotImplementedError` instead of silently using prefix-only behavior.
+  evaluate prefixes of that fixed path. For `k_method="evaluate"`, the scores
+  are not an unbiased estimate of refitting the full selector inside each
+  split. Prefix evaluation does honor `sample_weight` when provided.
+- `auto_k_mode="nested"` is implemented by the sklearn-style selector classes.
+  For each split, the class fits a train-only selector path, uses the same
+  `fit_transform` training representation that sklearn pipelines receive,
+  transforms validation rows with train-fitted preprocessing, evaluates prefix
+  lengths, and refits the final selector on all rows passed to `fit` using the
+  chosen `k`. Nested mode currently supports `k_method="evaluate"` only;
+  `k_method="elbow"` raises instead of being silently ignored. Function-style
+  selectors still reject nested mode and keep the prefix-only contract.
+- Selector classes reject `k_method="evaluate"`, `auto_k_mode="prefix_only"`,
+  and explicit supervised categorical encoding together, because that would
+  evaluate already target-encoded validation rows. Use nested mode or
+  pre-encode/cross-fit categoricals outside the selector.
 - `strategy="time_holdout"` requires `time` and validates on the latest rows.
 - `strategy="group_cv"` requires `groups` and uses `GroupKFold`.
+- If `auto_k_config` is omitted, selectors infer `strategy="time_holdout"` when
+  `time` is supplied and `strategy="group_cv"` when only `groups` is supplied.
 - `metric="auto"` resolves to RMSE for regression and log loss for
   classification.
 - `min_k`, `max_k`, `val_frac`, `n_splits`, `random_state`,
@@ -1384,6 +1409,22 @@ selector = StabilitySelector(
 selector.fit(df, y)
 selected = selector.selected_feature_names_
 ```
+
+### Benchmark Gates
+
+Benchmark scripts live under `benchmarks/` and are opt-in, not part of normal
+pytest runs:
+
+```bash
+python benchmarks/run_benchmarks.py --quick --output benchmarks/latest.json
+python benchmarks/run_benchmarks.py --full --output benchmarks/latest-full.json
+```
+
+The shared JSON schema records baseline/current wall time, optional peak memory,
+semantic parity, benchmark kind, and promotion status. Promotion rows are
+intended as gates; informational/smoke/parity rows are coverage and comparison
+signals, not proof that an optimization was promoted. Generated benchmark JSON
+files are local artifacts and are not committed by default.
 
 ## Return Types
 

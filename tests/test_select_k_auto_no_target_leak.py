@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 import sift.api as sift_api
-from sift import select_cefsplus, select_jmi, select_mrmr
+from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
 from sift.selection.auto_k import AutoKConfig, select_k_auto
 
 
@@ -58,6 +58,20 @@ def test_select_k_auto_nested_mode_raises():
     )
 
     with pytest.raises(NotImplementedError, match=NESTED_MODE_ERROR):
+        select_k_auto(X, y, list(X.columns), cfg, time=time)
+
+
+def test_select_k_auto_rejects_elbow_method():
+    X, y, time = _numeric_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="elbow",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=6,
+        val_frac=0.25,
+    )
+
+    with pytest.raises(ValueError, match="select_k_auto.*k_method='evaluate'"):
         select_k_auto(X, y, list(X.columns), cfg, time=time)
 
 
@@ -169,6 +183,7 @@ def test_public_auto_k_passes_sample_weight_to_prefix_evaluation(monkeypatch):
     [
         (select_mrmr, {"task": "regression"}),
         (select_jmi, {"task": "regression"}),
+        (select_jmim, {"task": "regression"}),
         (select_cefsplus, {}),
     ],
 )
@@ -192,6 +207,83 @@ def test_public_selectors_reject_nested_auto_k_mode(selector, kwargs):
             verbose=False,
             **kwargs,
         )
+
+
+@pytest.mark.parametrize(
+    "config_kwargs, match",
+    [
+        ({"k_method": "bad"}, "k_method"),
+        ({"strategy": "bad"}, "strategy"),
+        ({"val_frac": 1.0}, "val_frac"),
+        ({"val_frac": "0.2"}, "val_frac"),
+        ({"min_k": 5, "max_k": 3}, "min_k"),
+        ({"min_k": True}, "min_k"),
+        ({"elbow_min_rel_gain": "0.02"}, "elbow_min_rel_gain"),
+    ],
+)
+def test_public_selectors_validate_auto_k_config(config_kwargs, match):
+    X, y, time = _numeric_auto_k_data()
+    cfg = AutoKConfig(**config_kwargs)
+
+    with pytest.raises(ValueError, match=match):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            time=time,
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("selector", "kwargs"),
+    [
+        (select_mrmr, {"task": "regression", "estimator": "classic"}),
+        (select_jmi, {"task": "regression", "estimator": "r2"}),
+        (select_jmim, {"task": "regression", "estimator": "r2"}),
+    ],
+)
+def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs):
+    X, y, time = _numeric_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="elbow",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    with pytest.raises(ValueError, match="k_method='elbow'.*classic"):
+        selector(
+            X,
+            y,
+            k="auto",
+            time=time,
+            auto_k_config=cfg,
+            verbose=False,
+            **kwargs,
+        )
+
+
+def test_gaussian_auto_k_elbow_still_works_without_split_context():
+    X, y, _ = _numeric_auto_k_data()
+    cfg = AutoKConfig(k_method="elbow", min_k=1, max_k=4)
+
+    cefs = select_cefsplus(X, y, k="auto", auto_k_config=cfg, verbose=False)
+    gaussian_mrmr = select_mrmr(
+        X,
+        y,
+        k="auto",
+        task="regression",
+        estimator="gaussian",
+        auto_k_config=cfg,
+        verbose=False,
+    )
+
+    assert 1 <= len(cefs) <= 4
+    assert 1 <= len(gaussian_mrmr) <= 4
 
 
 def test_select_k_auto_target_encoding_not_leaky():

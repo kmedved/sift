@@ -26,7 +26,10 @@ class AutoKConfig:
     ``auto_k_mode="prefix_only"`` is the current public behavior: build one
     supervised feature path, then evaluate prefixes of that fixed path. It is
     fast, but it is not an unbiased estimate of a nested selector procedure.
-    ``auto_k_mode="nested"`` is reserved and raises until implemented.
+    ``auto_k_mode="nested"`` is implemented by sklearn-style selector classes,
+    where each validation split fits its own train-only selector path. The
+    function-style selectors still reject nested mode and keep this helper on
+    the prefix-only contract.
     """
 
     k_method: Literal["evaluate", "elbow"] = "evaluate"
@@ -42,11 +45,69 @@ class AutoKConfig:
     auto_k_mode: Literal["prefix_only", "nested"] = "prefix_only"
 
 
-def _ensure_supported_auto_k_mode(config: AutoKConfig) -> None:
+_VALID_K_METHODS = frozenset({"evaluate", "elbow"})
+_VALID_STRATEGIES = frozenset({"time_holdout", "group_cv"})
+_POSITIVE_INT_FIELDS = ("min_k", "max_k", "n_splits", "elbow_patience")
+_REAL_TYPES = (int, float, np.integer, np.floating)
+
+
+def _is_real_number(value) -> bool:
+    return not isinstance(value, (bool, np.bool_)) and isinstance(value, _REAL_TYPES)
+
+
+def validate_auto_k_config(config: AutoKConfig) -> None:
+    """Validate runtime values on an AutoKConfig instance."""
+    if config.k_method not in _VALID_K_METHODS:
+        raise ValueError(
+            "AutoKConfig.k_method must be one of "
+            f"{sorted(_VALID_K_METHODS)}; got {config.k_method!r}"
+        )
+
+    if config.strategy not in _VALID_STRATEGIES:
+        raise ValueError(
+            "AutoKConfig.strategy must be one of "
+            f"{sorted(_VALID_STRATEGIES)}; got {config.strategy!r}"
+        )
+
+    for name in _POSITIVE_INT_FIELDS:
+        value = getattr(config, name)
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < 1
+        ):
+            raise ValueError(f"AutoKConfig.{name} must be a positive integer")
+
+    if int(config.min_k) > int(config.max_k):
+        raise ValueError("AutoKConfig.min_k must be <= AutoKConfig.max_k")
+
+    if (
+        not _is_real_number(config.val_frac)
+        or not np.isfinite(config.val_frac)
+        or not 0.0 < float(config.val_frac) < 1.0
+    ):
+        raise ValueError("AutoKConfig.val_frac must be finite and between 0 and 1")
+
+    if (
+        not _is_real_number(config.elbow_min_rel_gain)
+        or not np.isfinite(config.elbow_min_rel_gain)
+        or float(config.elbow_min_rel_gain) < 0.0
+    ):
+        raise ValueError("AutoKConfig.elbow_min_rel_gain must be finite and non-negative")
+
+
+def _ensure_supported_auto_k_mode(
+    config: AutoKConfig,
+    *,
+    allow_nested: bool = False,
+) -> None:
     """Validate path-selection semantics for the current implementation."""
+    validate_auto_k_config(config)
     if config.auto_k_mode == "prefix_only":
         return
     if config.auto_k_mode == "nested":
+        if allow_nested:
+            return
         raise NotImplementedError(
             "AutoKConfig(auto_k_mode='nested') is not implemented yet. "
             "Use auto_k_mode='prefix_only' for the current behavior: build one "
@@ -57,6 +118,30 @@ def _ensure_supported_auto_k_mode(config: AutoKConfig) -> None:
     raise ValueError(
         "auto_k_mode must be 'prefix_only' or 'nested'; "
         f"got {config.auto_k_mode!r}"
+    )
+
+
+def resolve_auto_k_config(
+    auto_k_config: Optional[AutoKConfig],
+    time: Optional[np.ndarray],
+    groups: Optional[np.ndarray],
+    *,
+    allow_nested: bool = False,
+) -> AutoKConfig:
+    """Resolve auto-k config, inferring strategy from supplied split context."""
+    if auto_k_config is not None:
+        _ensure_supported_auto_k_mode(auto_k_config, allow_nested=allow_nested)
+        return auto_k_config
+    if time is not None:
+        config = AutoKConfig(strategy="time_holdout")
+        _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
+        return config
+    if groups is not None:
+        config = AutoKConfig(strategy="group_cv")
+        _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
+        return config
+    raise ValueError(
+        "k='auto' requires time, groups, or auto_k_config with k_method='elbow'"
     )
 
 
@@ -162,6 +247,12 @@ def select_k_auto(
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
     _ensure_supported_auto_k_mode(config)
+    if config.k_method != "evaluate":
+        raise ValueError(
+            "select_k_auto supports only AutoKConfig(k_method='evaluate'). "
+            "Use select_k_elbow(...) or a selector path that explicitly supports "
+            "elbow auto-k."
+        )
 
     if not feature_path:
         return 0, [], pd.DataFrame()

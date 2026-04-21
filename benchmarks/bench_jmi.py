@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -18,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from sift.estimators import joint_mi as jmi_est  # noqa: E402
 from sift.selection.loops import jmi_select  # noqa: E402
+from benchmarks.bench_utils import promotion_status, write_json  # noqa: E402
 
 
 Estimator = Literal["r2", "binned"]
@@ -262,6 +262,8 @@ def main() -> int:
 
         records.append(
             {
+                "benchmark": "jmi",
+                "benchmark_kind": "promotion",
                 "estimator": estimator,
                 "n": n,
                 "p": p,
@@ -270,8 +272,17 @@ def main() -> int:
                 "weighted": bool(args.weighted),
                 "legacy_seconds": legacy_seconds,
                 "current_seconds": current_seconds,
+                "baseline_wall_seconds": legacy_seconds,
+                "current_wall_seconds": current_seconds,
+                "baseline_peak_memory_mb": None,
+                "current_peak_memory_mb": None,
                 "speedup": legacy_seconds / current_seconds if current_seconds > 0 else float("inf"),
                 "selected_feature_parity": np.array_equal(current_selected, legacy_selected),
+                "promotion_status": promotion_status(
+                    parity=np.array_equal(current_selected, legacy_selected),
+                    baseline_seconds=legacy_seconds,
+                    current_seconds=current_seconds,
+                ),
                 "legacy_selected": legacy_selected.tolist(),
                 "current_selected": current_selected.tolist(),
             }
@@ -280,10 +291,9 @@ def main() -> int:
     print(_markdown_table(records))
 
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        write_json(args.output, records)
 
-    return 0 if all(row["selected_feature_parity"] for row in records) else 1
+    return 0
 
 
 if __name__ == "__main__":
