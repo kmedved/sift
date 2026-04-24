@@ -33,7 +33,7 @@ Core dependencies are `numpy`, `pandas`, `scipy`, `scikit-learn`, `joblib`, and
 ```python
 import pandas as pd
 from sklearn.datasets import make_regression
-from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus
+from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus, select_cefsplus_binary
 
 X_arr, y = make_regression(
     n_samples=500,
@@ -48,6 +48,7 @@ mrmr = select_mrmr(X, y, k=10, task="regression", verbose=False)
 jmi = select_jmi(X, y, k=10, task="regression", verbose=False)
 jmim = select_jmim(X, y, k=10, task="regression", verbose=False)
 cefs = select_cefsplus(X, y, k=10, verbose=False)
+binary_cefs = select_cefsplus_binary(X, (y > y.mean()).astype(int), k=10, verbose=False)
 ```
 
 Most selectors return feature names for `pandas.DataFrame` inputs and synthetic
@@ -62,6 +63,7 @@ return integer indices.
 | JMI | `select_jmi` | Joint mutual-information ranking, usually less pairwise than mRMR. |
 | JMIM | `select_jmim` | Conservative JMI variant using a minimum joint score. |
 | CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
+| Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
 | Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow` | Choosing feature count by holdout, group CV, or objective elbow. |
 | Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
@@ -80,6 +82,7 @@ from sift import (
     build_cache,
     select_cached,
     select_cefsplus,
+    select_cefsplus_binary,
     select_jmi,
     select_jmim,
     select_mrmr,
@@ -97,6 +100,7 @@ from sift import (
     JMISelector,
     JMIMSelector,
     CEFSPlusSelector,
+    CEFSPlusBinarySelector,
     permutation_importance,
     SmartSamplerConfig,
     smart_sample,
@@ -113,7 +117,8 @@ from sift import (
 
 ## Data Requirements
 
-`select_mrmr`, `select_jmi`, `select_jmim`, and `select_cefsplus` accept
+`select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, and
+`select_cefsplus_binary` accept
 `pandas.DataFrame` or `numpy.ndarray` features and `pandas.Series` or array-like
 targets.
 
@@ -131,9 +136,13 @@ Numeric requirements:
 
 Sample weights:
 
-- `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_boruta`,
-  `select_k_auto`, `StabilitySelector.fit`, `stability_regression`,
-  `stability_classif`, and `permutation_importance` accept sample weights.
+- `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
+  `select_cefsplus_binary`, `select_boruta`, `select_k_auto`,
+  `StabilitySelector.fit`, `stability_regression`, `stability_classif`, and
+  `permutation_importance` accept sample weights.
+- `select_cefsplus_binary` also accepts `class_weight=None`, `"balanced"`, or a
+  class-label dictionary. Resolved sample/class weights are used by the
+  logistic score test and by `cat_encoding="loo_logit"`.
 - Weights must be finite, non-negative, length-matched to `X`, and contain at
   least one positive value.
 - For `k="auto"` with `k_method="evaluate"`, sample weights are used both for
@@ -144,10 +153,12 @@ Sample weights:
 Categorical encoding:
 
 - Filter selectors support `cat_features=[...]` and `cat_encoding="loo"`,
-  `"target"`, `"james_stein"`, or `"none"`.
-- `cat_encoding` requires the `category_encoders` package.
+  `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
+- `cat_encoding="loo"`, `"target"`, and `"james_stein"` require the
+  `category_encoders` package. `cat_encoding="loo_logit"` is built into SIFT
+  and is intended for binary targets.
 - Function-style filter selectors are safe by default: supervised categorical
-  encodings (`"loo"`, `"target"`, and `"james_stein"`) raise unless
+  encodings (`"loo"`, `"target"`, `"james_stein"`, and `"loo_logit"`) raise unless
   `allow_full_data_target_encoding=True` is passed. That flag preserves the old
   full-dataset encoding behavior and should only be used when leakage has been
   handled outside the selector.
@@ -160,11 +171,12 @@ Categorical encoding:
 ## Core Filter Selectors
 
 Fixed `k` is an upper bound for filter selectors, not an exact-size guarantee.
-`select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, and
-`select_cached` return up to `k` features. They can return fewer when fewer
-valid candidates remain after constant-feature filtering, non-positive
-relevance filtering, `top_m`, explicit correlation pruning, or other validity
-checks. CatBoost selectors document their own exact-`k` behavior separately.
+`select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
+`select_cefsplus_binary`, and `select_cached` return up to `k` features. They
+can return fewer when fewer valid candidates remain after constant-feature
+filtering, non-positive relevance filtering, `top_m`, explicit correlation
+pruning, or other validity checks. CatBoost selectors document their own
+exact-`k` behavior separately.
 
 ### `select_mrmr`
 
@@ -349,6 +361,71 @@ Important options:
 - `top_m`: number of relevance-prefiltered candidates to keep before CEFS+.
 - `cache`: pass a `FeatureCache` to reuse the expensive transform.
 
+### `select_cefsplus_binary`
+
+```python
+from sift import select_cefsplus_binary
+
+selected = select_cefsplus_binary(
+    X,
+    y_binary,
+    k=20,
+    loss="logloss",
+    top_m=None,
+    corr_prune=0.95,
+    sample_weight=None,
+    class_weight=None,
+    ridge=1e-4,
+    refit_every=1,
+    subsample=None,
+    verbose=False,
+)
+```
+
+Binary CEFS+ is a logistic-score analogue of CEFS+: it greedily ranks features by
+conditional Bernoulli deviance reduction using a Rao/Fisher score-test update.
+It is intended for binary screening, not as the same estimator as Gaussian
+log-det CEFS+.
+
+Important options:
+
+- `loss="logloss"`: default Bernoulli/log-loss criterion. `sample_weight` and
+  `class_weight` are honored directly. When `cat_encoding="loo_logit"` is used,
+  the resolved binary weights also drive the leave-one-out category statistics.
+- `loss="weighted_logloss"`: alias for weighted log-loss; requires explicit
+  weights.
+- `loss="brier"`: compatibility mode that delegates to `select_cefsplus` with
+  the binary target cast to float.
+- `ridge`: stabilizes the selected-feature logistic fit and candidate score-test
+  information. The default score includes the same ridge term in each candidate
+  denominator.
+- `refit_every`: refits the selected-feature logistic null every step by default.
+  The default exact path uses direct row-level score products. Larger values use
+  a block-Gram accelerator: after `top_m` and correlation pruning, SIFT
+  materializes the Fisher-weighted Gram and score vector over the remaining
+  candidate matrix once per refit block, then scores within-block candidates
+  from Schur-complement submatrices with efficient-score adjustment. Treat
+  larger values as an approximate speed mode.
+- `corr_prune`: absolute weighted feature-correlation pruning threshold in
+  `(0, 1]`. Pass `None` to disable pruning.
+- `cat_encoding="loo_logit"`: smoothed leave-one-out logit encoding for binary
+  categorical features. Function-style selectors still require
+  `allow_full_data_target_encoding=True` before fitting supervised encoders on
+  the full matrix.
+- `CEFSPlusBinarySelector(loss="brier", cat_encoding="loo_logit")` rejects
+  categorical inputs because selector-class pre-encoding would otherwise use
+  logit encodings while the function API maps brier compatibility mode to
+  ordinary `"loo"`. Use `cat_encoding="loo"` for brier compatibility or
+  `loss="logloss"` for logistic `loo_logit` encoding.
+- `class_weight`: class weights are resolved on the input rows before any
+  optional `subsample` draw. Returned metadata records this as
+  `class_weight_scope="pre_subsample"`.
+- `CEFSPlusBinarySelector` fits supervised categorical encoders against the
+  validated binary `0/1` target, including for string labels. Preprocessing
+  parameters such as `loss`, `cat_encoding`, `cat_features`, `class_weight`, and
+  `loo_*` settings must be set on the estimator or with `set_params()` before
+  `fit`; fit-time overrides for those parameters are rejected.
+
 ## Scikit-Learn Selector Classes
 
 Sift also exposes thin transformer wrappers around the filter selectors:
@@ -372,6 +449,7 @@ Available classes:
 - `JMISelector`
 - `JMIMSelector`
 - `CEFSPlusSelector`
+- `CEFSPlusBinarySelector`
 
 Each class supports `fit`, `transform`, `fit_transform`, and
 `get_support(indices=False)`. After fitting, the selectors expose:
@@ -385,11 +463,12 @@ For pandas inputs, `transform` validates that columns match the fitted columns
 and order before selecting by stored positions.
 
 Selector classes default to `cat_encoding="none"`. When you explicitly set
-`cat_encoding` to `"target"`, `"loo"`, or `"james_stein"`, the encoder is fitted
-only inside `fit(X_train, y_train)` and reused by `transform(X_test)` without
-access to test targets. `fit_transform(X_train, y_train)` returns the selected
-columns from the y-aware encoded matrix used during selection, so sklearn
-pipeline training does not silently switch to target-blind transform semantics.
+`cat_encoding` to `"target"`, `"loo"`, `"james_stein"`, or `"loo_logit"`, the
+encoder is fitted only inside `fit(X_train, y_train)` and reused by
+`transform(X_test)` without access to test targets. `fit_transform(X_train,
+y_train)` returns the selected columns from the y-aware encoded matrix used
+during selection, so sklearn pipeline training does not silently switch to
+target-blind transform semantics.
 These fitted encoders are not cross-fitted; use external cross-fitting or
 selector-class `auto_k_mode="nested"` when you need fold-local evaluation.
 Function-style selectors still reject supervised full-data categorical encoding
@@ -1431,9 +1510,11 @@ files are local artifacts and are not committed by default.
 Filter selectors:
 
 - `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
+  `select_cefsplus_binary`,
   `select_cached` return `list[str]` when feature names are available.
-- `select_mrmr`, `select_jmi`, `select_jmim`, and `select_cefsplus` return
-  `FilterSelectionResult` when `return_result=True`.
+- `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, and
+  `select_cefsplus_binary` return `FilterSelectionResult` when
+  `return_result=True`.
 - Low-level `mrmr_select` and `jmi_select` return integer indices.
 
 Stability selection:
@@ -1462,8 +1543,11 @@ CatBoost:
 
 ## Performance Notes
 
-- Use `top_m` for wide datasets. The default is `max(5*k, 250)`.
-- Use `subsample` for large row counts. The default cap is `50_000` rows.
+- Use `top_m` for wide datasets. Most classic/Gaussian filter selectors default
+  `top_m` to `max(5*k, 250)`. `select_cefsplus_binary` leaves `top_m=None` as
+  "all finite candidates"; set `top_m` explicitly for wide binary screens.
+- Use `subsample` for large row counts. Most filter selectors default to a
+  `50_000` row cap; `select_cefsplus_binary` defaults to `subsample=None`.
 - Build a `FeatureCache` once when running multiple Gaussian/cache selectors or
   selecting against many targets.
 - Set `compute_Rxx=True` in `build_cache` when you will reuse the cache many
@@ -1483,7 +1567,8 @@ CatBoost:
 
 Set `random_state` wherever available:
 
-- `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`
+- `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
+  `select_cefsplus_binary`
 - `build_cache`
 - `AutoKConfig`
 - `StabilitySelector` and wrappers

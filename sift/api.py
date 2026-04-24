@@ -31,6 +31,11 @@ from sift.selection.auto_k import (
     select_k_elbow,
 )
 from sift.selection.cefsplus import select_cached
+from sift.selection.cefsplus_binary import (
+    make_diagnostics as _binary_cefsplus_diagnostics,
+    select_binary_logistic_path,
+    validate_corr_prune as _validate_binary_corr_prune,
+)
 from sift.selection.loops import MrmrBackend, jmi_select, mrmr_select, resolve_mrmr_backend
 from sift.selection.result import FilterSelectionResult
 
@@ -176,7 +181,7 @@ def _safe_name_indices(
     return selected_indices
 
 
-_SUPERVISED_CAT_ENCODINGS = frozenset({"target", "loo", "james_stein"})
+_SUPERVISED_CAT_ENCODINGS = frozenset({"target", "loo", "james_stein", "loo_logit"})
 
 
 def _encode_categoricals_for_selector(
@@ -206,6 +211,156 @@ def _encode_categoricals_for_selector(
             "leakage-safe pipeline."
         )
     return encode_categoricals(X, y, cat_features, cat_encoding)
+
+
+def _validate_binary_target(y) -> tuple[np.ndarray, np.ndarray, dict]:
+    raw = np.asarray(y).ravel()
+    if pd.isna(raw).any():
+        raise ValueError("Missing values in y are not allowed for binary CEFS+.")
+    if raw.size == 0:
+        raise ValueError("y must contain at least one row")
+
+    try:
+        numeric = raw.astype(np.float64)
+    except (TypeError, ValueError):
+        numeric = None
+    if numeric is not None and not np.isfinite(numeric).all():
+        raise ValueError("Non-finite values in y are not allowed for binary CEFS+.")
+
+    unique = pd.unique(raw)
+    if len(unique) != 2:
+        raise ValueError("binary CEFS+ requires exactly two target classes")
+
+    if numeric is not None and set(np.unique(numeric).tolist()) == {0.0, 1.0}:
+        y01 = numeric.astype(np.float64)
+        classes = np.array([0.0, 1.0], dtype=np.float64)
+    elif set(unique.tolist()) == {False, True}:
+        y01 = raw.astype(bool).astype(np.float64)
+        classes = np.array([False, True], dtype=object)
+    else:
+        classes = unique
+        mapping = {classes[0]: 0.0, classes[1]: 1.0}
+        y01 = np.array([mapping[value] for value in raw], dtype=np.float64)
+
+    target_mapping = {repr(classes[0]): 0, repr(classes[1]): 1}
+    return y01, raw, target_mapping
+
+
+def _resolve_binary_weights(
+    y01: np.ndarray,
+    raw_y: np.ndarray,
+    *,
+    sample_weight: np.ndarray | None,
+    class_weight,
+) -> tuple[np.ndarray, bool]:
+    def class_weight_value(raw_key):
+        if raw_key not in class_weight:
+            raise ValueError(
+                "class_weight dict must provide weights for both raw binary "
+                "class labels"
+            )
+        try:
+            value = float(class_weight[raw_key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("class_weight values must be finite and non-negative") from exc
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError("class_weight values must be finite and non-negative")
+        return value
+
+    n = len(y01)
+    w = ensure_weights(sample_weight, n, normalize=False)
+    weighted = sample_weight is not None
+
+    if class_weight is None:
+        return ensure_weights(w, n, normalize=True), weighted
+
+    weighted = True
+    multipliers = np.ones(n, dtype=np.float64)
+    if isinstance(class_weight, str):
+        if class_weight != "balanced":
+            raise ValueError("class_weight must be None, 'balanced', or a dict")
+        total = float(np.sum(w))
+        for cls in (0.0, 1.0):
+            mask = y01 == cls
+            cls_total = float(np.sum(w[mask]))
+            if cls_total <= 0.0:
+                raise ValueError("Each binary class must have positive effective weight")
+            multipliers[mask] = total / (2.0 * cls_total)
+    elif isinstance(class_weight, dict):
+        for code in (0.0, 1.0):
+            mask = y01 == code
+            raw_values = pd.unique(raw_y[mask])
+            raw_key = raw_values[0]
+            multipliers[mask] = class_weight_value(raw_key)
+    else:
+        raise ValueError("class_weight must be None, 'balanced', or a dict")
+
+    return ensure_weights(w * multipliers, n, normalize=True), weighted
+
+
+def _check_binary_effective_weights(y01: np.ndarray, w: np.ndarray) -> None:
+    for cls in (0.0, 1.0):
+        if float(np.sum(w[y01 == cls])) <= 0.0:
+            raise ValueError("Each binary class must have positive effective weight")
+
+
+def _validate_optional_positive_int(value, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be a positive integer or None")
+    value_int = int(value)
+    if value_int < 1:
+        raise ValueError(f"{name} must be a positive integer or None")
+    return value_int
+
+
+def _encode_categoricals_for_binary_selector(
+    X: Union[pd.DataFrame, np.ndarray],
+    y01: np.ndarray,
+    cat_features: Optional[List[str]],
+    cat_encoding: str,
+    *,
+    allow_full_data_target_encoding: bool,
+    loo_smoothing: float,
+    loo_clip_min: float,
+    loo_clip_max: float,
+    sample_weight: np.ndarray | None,
+) -> Union[pd.DataFrame, np.ndarray]:
+    if not cat_features or cat_encoding == "none":
+        return X
+    if cat_encoding not in {"none", "target", "loo", "james_stein", "loo_logit"}:
+        raise ValueError(
+            "cat_encoding must be one of 'none', 'target', 'loo', "
+            "'james_stein', or 'loo_logit'."
+        )
+    if not isinstance(X, pd.DataFrame):
+        raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
+    present_cat_features = [col for col in cat_features if col in X.columns]
+    if not present_cat_features:
+        return X
+    if (
+        present_cat_features
+        and cat_encoding in _SUPERVISED_CAT_ENCODINGS
+        and not allow_full_data_target_encoding
+    ):
+        raise ValueError(
+            f"cat_encoding='{cat_encoding}' fits a supervised categorical encoder "
+            "on the full dataset in function-style selectors. Pass "
+            "allow_full_data_target_encoding=True to opt into this leakage-prone "
+            "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
+            "leakage-safe pipeline."
+        )
+    return encode_categoricals(
+        X,
+        y01,
+        present_cat_features,
+        cat_encoding,
+        loo_smoothing=loo_smoothing,
+        loo_clip_min=loo_clip_min,
+        loo_clip_max=loo_clip_max,
+        sample_weight=sample_weight,
+    )
 
 
 def _auto_k_gaussian(
@@ -1953,11 +2108,245 @@ def select_cefsplus(
     )
 
 
+def select_cefsplus_binary(
+    X: Union[pd.DataFrame, np.ndarray],
+    y: Union[pd.Series, np.ndarray],
+    k: int,
+    *,
+    loss: str = "logloss",
+    top_m: Optional[int] = None,
+    corr_prune: float | None = 0.95,
+    sample_weight: np.ndarray | None = None,
+    class_weight=None,
+    ridge: float = 1e-4,
+    refit_every: int = 1,
+    cat_features: Optional[List[str]] = None,
+    cat_encoding: str = "loo_logit",
+    loo_smoothing: float = 20.0,
+    loo_clip_min: float = 1e-4,
+    loo_clip_max: float = 1.0 - 1e-4,
+    allow_full_data_target_encoding: bool = False,
+    subsample: Optional[int] = None,
+    random_state: int = 0,
+    verbose: bool = True,
+    return_result: bool = False,
+) -> List[str] | FilterSelectionResult:
+    """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy.
+
+    The default ``loss="logloss"`` path uses logistic Rao/score-test updates.
+    ``loss="weighted_logloss"`` is an alias for ``loss="logloss"`` with
+    explicit sample or class weights. ``loss="brier"`` delegates to the existing
+    Gaussian CEFS+ selector with the binary target cast to float.
+    """
+    k_int = validate_k(k, allow_auto=False)
+    try:
+        ridge_float = float(ridge)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ridge must be positive and finite") from exc
+    if not np.isfinite(ridge_float) or ridge_float <= 0.0:
+        raise ValueError("ridge must be positive and finite")
+    if (
+        isinstance(refit_every, (bool, np.bool_))
+        or not isinstance(refit_every, (int, np.integer))
+        or int(refit_every) < 1
+    ):
+        raise ValueError("refit_every must be a positive integer")
+    refit_every = int(refit_every)
+    corr_prune_eff = _validate_binary_corr_prune(corr_prune)
+    top_m_validated = _validate_optional_positive_int(top_m, "top_m")
+    subsample_validated = _validate_optional_positive_int(subsample, "subsample")
+
+    loss_eff = str(loss).lower()
+    if loss_eff not in {"logloss", "weighted_logloss", "brier"}:
+        raise ValueError("loss must be one of 'logloss', 'weighted_logloss', or 'brier'")
+    if cat_encoding not in {"none", "target", "loo", "james_stein", "loo_logit"}:
+        raise ValueError(
+            "cat_encoding must be one of 'none', 'target', 'loo', "
+            "'james_stein', or 'loo_logit'."
+        )
+    try:
+        loo_smoothing_float = float(loo_smoothing)
+        loo_clip_min_float = float(loo_clip_min)
+        loo_clip_max_float = float(loo_clip_max)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "loo_smoothing and LOO-logit clip bounds must be finite numeric values"
+        ) from exc
+    if loo_smoothing_float <= 0.0 or not np.isfinite(loo_smoothing_float):
+        raise ValueError("loo_smoothing must be positive and finite")
+    if (
+        not np.isfinite(loo_clip_min_float)
+        or not np.isfinite(loo_clip_max_float)
+        or not 0.0 < loo_clip_min_float < loo_clip_max_float < 1.0
+    ):
+        raise ValueError("loo_clip_min and loo_clip_max must satisfy 0 < min < max < 1")
+    if loss_eff == "weighted_logloss":
+        if sample_weight is None and class_weight is None:
+            raise ValueError("loss='weighted_logloss' requires sample_weight or class_weight")
+        loss_eff = "logloss"
+
+    x_shape = X.shape if hasattr(X, "shape") else np.asarray(X).shape
+    if len(x_shape) != 2:
+        raise ValueError("X must be a 2D feature matrix")
+    n_rows = int(x_shape[0])
+    n_features_input = int(x_shape[1])
+    y01, raw_y, target_mapping = _validate_binary_target(y)
+    if len(y01) != n_rows:
+        raise ValueError(f"X has {n_rows} rows but y has {len(y01)}")
+    weights, weighted = _resolve_binary_weights(
+        y01,
+        raw_y,
+        sample_weight=sample_weight,
+        class_weight=class_weight,
+    )
+    _check_binary_effective_weights(y01, weights)
+
+    if loss_eff == "brier":
+        cat_encoding_eff = "loo" if cat_encoding == "loo_logit" else cat_encoding
+        result = select_cefsplus(
+            X,
+            y01.astype(float),
+            k=k_int,
+            sample_weight=weights if weighted else None,
+            top_m=top_m_validated,
+            corr_prune=corr_prune_eff,
+            cat_features=cat_features,
+            cat_encoding=cat_encoding_eff,
+            allow_full_data_target_encoding=allow_full_data_target_encoding,
+            subsample=subsample_validated,
+            random_state=random_state,
+            verbose=verbose,
+            return_result=return_result,
+        )
+        if not return_result:
+            return result
+        assert isinstance(result, FilterSelectionResult)
+        metadata = dict(result.selector_metadata)
+        metadata.update(
+            {
+                "selector": "cefsplus_binary",
+                "loss": "brier",
+                "delegate_selector": "cefsplus",
+                "weighted": weighted,
+                "class_weight": class_weight,
+                "class_weight_scope": "pre_subsample" if class_weight is not None else None,
+                "target_mapping": target_mapping,
+                "cat_encoding": cat_encoding_eff,
+            }
+        )
+        return FilterSelectionResult(
+            selected_features=result.selected_features,
+            selected_indices=result.selected_indices,
+            selector_metadata=metadata,
+            ranking_=result.ranking_,
+            diagnostics_=result.diagnostics_,
+        )
+
+    cat_features = _resolve_cat_features(X, cat_features)
+    X_encoded = _encode_categoricals_for_binary_selector(
+        X,
+        y01,
+        cat_features,
+        cat_encoding,
+        allow_full_data_target_encoding=allow_full_data_target_encoding,
+        loo_smoothing=loo_smoothing_float,
+        loo_clip_min=loo_clip_min_float,
+        loo_clip_max=loo_clip_max_float,
+        sample_weight=weights,
+    )
+    X_arr, _, feature_names = validate_inputs(X_encoded, y01, "regression")
+    X_sub, y_sub, w_sub, row_idx = subsample_xy(
+        X_arr,
+        y01,
+        subsample_validated,
+        random_state,
+        sample_weight=weights,
+        return_idx=True,
+    )
+    _check_binary_effective_weights(y_sub, w_sub)
+
+    top_m_eff = None if top_m_validated is None else max(top_m_validated, k_int)
+    if verbose:
+        weighted_label = "weighted " if weighted else ""
+        print(
+            f"CEFS+ binary {weighted_label}logloss: selecting {k_int} features "
+            f"(top_m={top_m_eff}, corr_prune={corr_prune_eff})"
+        )
+
+    path = select_binary_logistic_path(
+        X_sub.astype(np.float64, copy=False),
+        y_sub.astype(np.float64, copy=False),
+        w_sub.astype(np.float64, copy=False),
+        feature_names,
+        k=k_int,
+        top_m=top_m_eff,
+        corr_prune=corr_prune_eff,
+        ridge=ridge_float,
+        refit_every=refit_every,
+    )
+
+    if not return_result:
+        return path.selected_features
+
+    diagnostics = _binary_cefsplus_diagnostics(path)
+    diagnostics.update(
+        {
+            "subsample_row_idx": None
+            if len(row_idx) == n_rows
+            else row_idx.astype(int).tolist(),
+            "cat_features_requested": list(cat_features or []),
+            "cat_features_used": [col for col in (cat_features or []) if col in feature_names],
+        }
+    )
+    ranking = pd.DataFrame(
+        {
+            "feature": path.selected_features,
+            "rank": np.arange(1, len(path.selected_features) + 1, dtype=np.int64),
+            "selected": np.ones(len(path.selected_features), dtype=bool),
+            "selected_index": path.selected_original,
+            "score": path.path_scores,
+            "selector": "cefsplus_binary",
+        }
+    )
+    metadata = _build_selector_metadata(
+        "cefsplus_binary",
+        k=len(path.selected_features),
+        k_requested=k_int,
+        top_m=top_m_eff,
+        n_features=n_features_input,
+        auto_k=False,
+        extra={
+            "loss": "logloss",
+            "weighted": weighted,
+            "class_weight": class_weight,
+            "class_weight_scope": "pre_subsample" if class_weight is not None else None,
+            "target_mapping": target_mapping,
+            "ridge": ridge_float,
+            "refit_every": refit_every,
+            "corr_prune": corr_prune_eff,
+            "subsample": subsample_validated,
+            "random_state": random_state,
+            "cat_encoding": cat_encoding,
+            "loo_smoothing": loo_smoothing_float,
+            "loo_clip_min": loo_clip_min_float,
+            "loo_clip_max": loo_clip_max_float,
+        },
+    )
+    return FilterSelectionResult(
+        selected_features=path.selected_features,
+        selected_indices=path.selected_original,
+        selector_metadata=metadata,
+        ranking_=ranking,
+        diagnostics_=diagnostics,
+    )
+
+
 __all__ = [
     "FeatureCache",
     "build_cache",
     "select_cached",
     "select_cefsplus",
+    "select_cefsplus_binary",
     "select_jmi",
     "select_jmim",
     "select_mrmr",

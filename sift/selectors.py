@@ -15,11 +15,20 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 from sift._preprocess import (
+    LeaveOneOutLogitEncoder,
     ensure_weights,
     extract_feature_names,
     suppress_category_encoder_pandas_warnings,
 )
-from sift.api import select_cefsplus, select_jmim, select_jmi, select_mrmr
+from sift.api import (
+    _resolve_binary_weights,
+    _validate_binary_target,
+    select_cefsplus,
+    select_cefsplus_binary,
+    select_jmim,
+    select_jmi,
+    select_mrmr,
+)
 from sift.selection.auto_k import (
     _build_k_grid,
     _compute_metric,
@@ -29,7 +38,18 @@ from sift.selection.auto_k import (
     resolve_auto_k_config,
 )
 
-_SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein"})
+_SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
+_BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
+    {
+        "loss",
+        "cat_features",
+        "cat_encoding",
+        "class_weight",
+        "loo_smoothing",
+        "loo_clip_min",
+        "loo_clip_max",
+    }
+)
 
 
 def _coerce_selection_indices(
@@ -87,12 +107,27 @@ def _selected_training_output(X_fit, selected_indices: np.ndarray):
     return np.asarray(X_fit)[:, selected_indices].copy()
 
 
-def _make_category_encoder(method: str, columns: list[str]):
+def _make_category_encoder(
+    method: str,
+    columns: list[str],
+    *,
+    loo_smoothing: float = 20.0,
+    loo_clip_min: float = 1e-4,
+    loo_clip_max: float = 1.0 - 1e-4,
+):
     if method == "none" or not columns:
         return None
+    if method == "loo_logit":
+        return LeaveOneOutLogitEncoder(
+            columns,
+            smoothing=loo_smoothing,
+            clip_min=loo_clip_min,
+            clip_max=loo_clip_max,
+        )
     if method not in {"loo", "target", "james_stein"}:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target', 'loo', or 'james_stein'. "
+            "cat_encoding must be one of 'none', 'target', 'loo', 'james_stein', "
+            "or 'loo_logit'. "
             f"Got {method!r}."
         )
     if importlib.util.find_spec("category_encoders") is None:
@@ -176,13 +211,22 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     def _task(self) -> str:
         return getattr(self, "task", "regression")
 
+    def _supports_auto_k(self) -> bool:
+        return True
+
+    def _categorical_target(self, y):
+        return y
+
+    def _categorical_sample_weight(self, y, sample_weight):
+        return sample_weight
+
     def _would_fit_supervised_categoricals(self, X) -> bool:
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding not in _SUPERVISED_CLASS_ENCODINGS or not isinstance(X, pd.DataFrame):
             return False
         return bool(_categorical_columns(X, getattr(self, "cat_features", None)))
 
-    def _fit_transform_categoricals(self, X, y):
+    def _fit_transform_categoricals(self, X, y, sample_weight=None):
         self.categorical_encoder_ = None
         self.categorical_features_ = []
         self._categorical_encoding_applied_ = False
@@ -196,9 +240,23 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         if not cat_features:
             return X
 
-        encoder = _make_category_encoder(cat_encoding, cat_features)
+        encoder = _make_category_encoder(
+            cat_encoding,
+            cat_features,
+            loo_smoothing=getattr(self, "loo_smoothing", 20.0),
+            loo_clip_min=getattr(self, "loo_clip_min", 1e-4),
+            loo_clip_max=getattr(self, "loo_clip_max", 1.0 - 1e-4),
+        )
+        y_enc = self._categorical_target(y)
         with suppress_category_encoder_pandas_warnings():
-            X_encoded = encoder.fit_transform(X, y)
+            if isinstance(encoder, LeaveOneOutLogitEncoder):
+                X_encoded = encoder.fit_transform(
+                    X,
+                    y_enc,
+                    sample_weight=self._categorical_sample_weight(y, sample_weight),
+                )
+            else:
+                X_encoded = encoder.fit_transform(X, y_enc)
 
         self.categorical_encoder_ = encoder
         self._categorical_encoding_applied_ = True
@@ -246,7 +304,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             call_params.update(fit_params)
 
         feature_names = _feature_names_or_default(X)
-        X_fit = self._fit_transform_categoricals(X, y)
+        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
         if getattr(self, "_categorical_encoding_applied_", False):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
@@ -302,6 +360,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             )
 
         if self.k == "auto":
+            if not self._supports_auto_k():
+                raise ValueError(
+                    f"{self.__class__.__name__} requires a fixed positive integer k; "
+                    "k='auto' is not supported."
+                )
             effective_auto_k = resolve_auto_k_config(
                 resolved_auto_k,
                 time,
@@ -860,9 +923,171 @@ class CEFSPlusSelector(_BaseSelector):
         )
 
 
+class CEFSPlusBinarySelector(_BaseSelector):
+    """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`."""
+
+    def __init__(
+        self,
+        k: int = 75,
+        *,
+        loss: str = "logloss",
+        top_m: int | None = None,
+        corr_prune: float | None = 0.95,
+        class_weight=None,
+        ridge: float = 1e-4,
+        refit_every: int = 1,
+        cat_features: list[str] | None = None,
+        cat_encoding: str = "none",
+        loo_smoothing: float = 20.0,
+        loo_clip_min: float = 1e-4,
+        loo_clip_max: float = 1.0 - 1e-4,
+        allow_full_data_target_encoding: bool = False,
+        subsample: int | None = None,
+        random_state: int = 0,
+        verbose: bool = True,
+    ):
+        self.k = k
+        self.loss = loss
+        self.top_m = top_m
+        self.corr_prune = corr_prune
+        self.class_weight = class_weight
+        self.ridge = ridge
+        self.refit_every = refit_every
+        self.cat_features = cat_features
+        self.cat_encoding = cat_encoding
+        self.loo_smoothing = loo_smoothing
+        self.loo_clip_min = loo_clip_min
+        self.loo_clip_max = loo_clip_max
+        self.allow_full_data_target_encoding = allow_full_data_target_encoding
+        self.subsample = subsample
+        self.random_state = random_state
+        self.verbose = verbose
+
+        self._selector_fn = select_cefsplus_binary
+
+    def _task(self) -> str:
+        return "classification"
+
+    def _supports_auto_k(self) -> bool:
+        return False
+
+    def _categorical_target(self, y):
+        y01, _, _ = _validate_binary_target(y)
+        return y01
+
+    def _categorical_sample_weight(self, y, sample_weight):
+        y01, raw_y, _ = _validate_binary_target(y)
+        weights, _ = _resolve_binary_weights(
+            y01,
+            raw_y,
+            sample_weight=sample_weight,
+            class_weight=self.class_weight,
+        )
+        return weights
+
+    def _selector_params(self) -> dict:
+        return dict(
+            loss=self.loss,
+            top_m=self.top_m,
+            corr_prune=self.corr_prune,
+            class_weight=self.class_weight,
+            ridge=self.ridge,
+            refit_every=self.refit_every,
+            cat_features=self.cat_features,
+            cat_encoding=self.cat_encoding,
+            loo_smoothing=self.loo_smoothing,
+            loo_clip_min=self.loo_clip_min,
+            loo_clip_max=self.loo_clip_max,
+            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
+            subsample=self.subsample,
+            random_state=self.random_state,
+            verbose=self.verbose,
+        )
+
+    def _fit_selector(
+        self,
+        X,
+        y,
+        *,
+        k,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        cache=None,
+        auto_k_config=None,
+        fit_params=None,
+        capture_training_output: bool = False,
+    ):
+        if cache is not None:
+            raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
+        if auto_k_config is not None:
+            raise ValueError("CEFSPlusBinarySelector does not support auto_k_config.")
+
+        call_params = dict(self._selector_params())
+        call_params["sample_weight"] = sample_weight
+        if fit_params:
+            blocked = sorted(_BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES.intersection(fit_params))
+            if blocked:
+                blocked_text = ", ".join(blocked)
+                raise ValueError(
+                    "CEFSPlusBinarySelector preprocessing-affecting parameters "
+                    f"must be set on the estimator before fit, not as fit-time "
+                    f"overrides: {blocked_text}"
+                )
+            call_params.update(fit_params)
+        call_params.pop("return_result", None)
+
+        loss_eff = str(self.loss).lower()
+        if (
+            loss_eff == "brier"
+            and self.cat_encoding == "loo_logit"
+            and isinstance(X, pd.DataFrame)
+            and _categorical_columns(X, self.cat_features)
+        ):
+            raise ValueError(
+                "CEFSPlusBinarySelector(loss='brier', cat_encoding='loo_logit') "
+                "has no selector-class parity with the function API. Use "
+                "cat_encoding='loo' for brier compatibility or loss='logloss' "
+                "for logistic loo_logit encoding."
+            )
+
+        feature_names = _feature_names_or_default(X)
+        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+        if getattr(self, "_categorical_encoding_applied_", False):
+            call_params["cat_features"] = None
+            call_params["cat_encoding"] = "none"
+            call_params["allow_full_data_target_encoding"] = False
+
+        result = self._selector_fn(
+            X_fit,
+            y,
+            k=k,
+            return_result=True,
+            **call_params,
+        )
+        selected_indices = result.selected_indices
+        if selected_indices is None:
+            selected_indices = _coerce_selection_indices(
+                feature_names,
+                list(result.selected_features),
+            ).tolist()
+
+        self.feature_names_in_ = feature_names
+        self.n_features_in_ = len(feature_names)
+        self.selected_features_ = list(result.selected_features)
+        self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
+        if capture_training_output:
+            self._fit_transform_output_ = _selected_training_output(
+                X_fit,
+                self.selected_indices_,
+            )
+        return self
+
+
 __all__ = [
     "MRMRSelector",
     "JMISelector",
     "JMIMSelector",
     "CEFSPlusSelector",
+    "CEFSPlusBinarySelector",
 ]
