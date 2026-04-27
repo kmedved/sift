@@ -13,7 +13,11 @@ from sklearn.metrics import log_loss
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 
-from sift._preprocess import ensure_weights, suppress_category_encoder_pandas_warnings
+from sift._preprocess import (
+    LeaveOneOutLogitEncoder,
+    ensure_weights,
+    suppress_category_encoder_pandas_warnings,
+)
 
 if TYPE_CHECKING:
     from sift.estimators.copula import FeatureCache
@@ -241,9 +245,12 @@ def select_k_auto(
     groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     task: Literal["regression", "classification"] = "regression",
-    cat_encoding: Literal["none", "target", "loo", "james_stein"] = "none",
+    cat_encoding: Literal["none", "target", "loo", "james_stein", "loo_logit"] = "none",
     cat_features: Optional[List[str]] = None,
     sample_weight: Optional[np.ndarray] = None,
+    loo_smoothing: float = 20.0,
+    loo_clip_min: float = 1e-4,
+    loo_clip_max: float = 1.0 - 1e-4,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
     _ensure_supported_auto_k_mode(config)
@@ -293,7 +300,18 @@ def select_k_auto(
         else:
             fold_cat = [col for col in cat_features if col in Xtr_df.columns]
 
-        if cat_encoding != "none" and fold_cat:
+        if cat_encoding == "loo_logit" and fold_cat:
+            if task != "classification":
+                raise ValueError("cat_encoding='loo_logit' requires task='classification'")
+            enc = LeaveOneOutLogitEncoder(
+                cols=fold_cat,
+                smoothing=loo_smoothing,
+                clip_min=loo_clip_min,
+                clip_max=loo_clip_max,
+            )
+            Xtr_df = enc.fit_transform(Xtr_df, ytr, sample_weight=wtr)
+            Xva_df = enc.transform(Xva_df)
+        elif cat_encoding != "none" and fold_cat:
             if importlib.util.find_spec("category_encoders") is None:
                 raise ImportError(
                     "cat_encoding requires category_encoders. Install with: pip install category_encoders"

@@ -2111,11 +2111,14 @@ def select_cefsplus(
 def select_cefsplus_binary(
     X: Union[pd.DataFrame, np.ndarray],
     y: Union[pd.Series, np.ndarray],
-    k: int,
+    k: Union[int, Literal["auto"]],
     *,
     loss: str = "logloss",
     top_m: Optional[int] = None,
     corr_prune: float | None = 0.95,
+    groups: Optional[np.ndarray] = None,
+    time: Optional[np.ndarray] = None,
+    auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
     class_weight=None,
     ridge: float = 1e-4,
@@ -2138,7 +2141,7 @@ def select_cefsplus_binary(
     explicit sample or class weights. ``loss="brier"`` delegates to the existing
     Gaussian CEFS+ selector with the binary target cast to float.
     """
-    k_int = validate_k(k, allow_auto=False)
+    k_value = validate_k(k)
     try:
         ridge_float = float(ridge)
     except (TypeError, ValueError) as exc:
@@ -2190,6 +2193,7 @@ def select_cefsplus_binary(
         raise ValueError("X must be a 2D feature matrix")
     n_rows = int(x_shape[0])
     n_features_input = int(x_shape[1])
+    groups, time = _validate_groups_time(groups, time, n_rows)
     y01, raw_y, target_mapping = _validate_binary_target(y)
     if len(y01) != n_rows:
         raise ValueError(f"X has {n_rows} rows but y has {len(y01)}")
@@ -2200,13 +2204,19 @@ def select_cefsplus_binary(
         class_weight=class_weight,
     )
     _check_binary_effective_weights(y01, weights)
+    auto_k = k_value == "auto"
+    if auto_k:
+        auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
 
     if loss_eff == "brier":
         cat_encoding_eff = "loo" if cat_encoding == "loo_logit" else cat_encoding
         result = select_cefsplus(
             X,
             y01.astype(float),
-            k=k_int,
+            k=k_value,
+            groups=groups,
+            time=time,
+            auto_k_config=auto_k_config,
             sample_weight=weights if weighted else None,
             top_m=top_m_validated,
             corr_prune=corr_prune_eff,
@@ -2242,6 +2252,7 @@ def select_cefsplus_binary(
             diagnostics_=result.diagnostics_,
         )
 
+    path_k = int(auto_k_config.max_k) if auto_k else int(k_value)
     cat_features = _resolve_cat_features(X, cat_features)
     X_encoded = _encode_categoricals_for_binary_selector(
         X,
@@ -2265,28 +2276,96 @@ def select_cefsplus_binary(
     )
     _check_binary_effective_weights(y_sub, w_sub)
 
-    top_m_eff = None if top_m_validated is None else max(top_m_validated, k_int)
+    top_m_eff = None if top_m_validated is None else max(top_m_validated, path_k)
     if verbose:
         weighted_label = "weighted " if weighted else ""
-        print(
-            f"CEFS+ binary {weighted_label}logloss: selecting {k_int} features "
-            f"(top_m={top_m_eff}, corr_prune={corr_prune_eff})"
-        )
+        if auto_k:
+            mode = (
+                "elbow"
+                if auto_k_config.k_method == "elbow"
+                else f"evaluate/{auto_k_config.strategy}"
+            )
+            print(
+                f"CEFS+ binary {weighted_label}logloss auto-k ({mode}): "
+                f"building path to {path_k} features "
+                f"(top_m={top_m_eff}, corr_prune={corr_prune_eff})"
+            )
+        else:
+            print(
+                f"CEFS+ binary {weighted_label}logloss: selecting {path_k} features "
+                f"(top_m={top_m_eff}, corr_prune={corr_prune_eff})"
+            )
 
     path = select_binary_logistic_path(
         X_sub.astype(np.float64, copy=False),
         y_sub.astype(np.float64, copy=False),
         w_sub.astype(np.float64, copy=False),
         feature_names,
-        k=k_int,
+        k=path_k,
         top_m=top_m_eff,
         corr_prune=corr_prune_eff,
         ridge=ridge_float,
         refit_every=refit_every,
     )
 
+    auto_diag = None
+    auto_objective = None
+    if auto_k:
+        if auto_k_config.k_method == "elbow":
+            auto_objective = np.cumsum(np.asarray(path.path_scores, dtype=np.float64))
+            best_k, auto_diag = select_k_elbow(
+                auto_objective,
+                min_k=auto_k_config.min_k,
+                max_k=len(path.selected_features),
+                min_rel_gain=auto_k_config.elbow_min_rel_gain,
+                patience=auto_k_config.elbow_patience,
+            )
+            selected_count = min(best_k, len(path.selected_features))
+            selected_features = path.selected_features[:selected_count]
+            if verbose:
+                print(f"  Elbow selected k={selected_count}")
+        else:
+            eval_X = (
+                X
+                if isinstance(X, pd.DataFrame)
+                else pd.DataFrame(np.asarray(X), columns=feature_names)
+            )
+            if len(row_idx) < n_rows:
+                eval_X = eval_X.iloc[row_idx]
+                eval_y = y01[row_idx]
+                eval_groups = groups[row_idx] if groups is not None else None
+                eval_time = time[row_idx] if time is not None else None
+            else:
+                eval_y = y01
+                eval_groups = groups
+                eval_time = time
+            best_k, selected_features, auto_diag = select_k_auto(
+                eval_X,
+                eval_y,
+                path.selected_features,
+                auto_k_config,
+                groups=eval_groups,
+                time=eval_time,
+                task="classification",
+                cat_features=cat_features,
+                cat_encoding=cat_encoding,
+                sample_weight=w_sub,
+                loo_smoothing=loo_smoothing_float,
+                loo_clip_min=loo_clip_min_float,
+                loo_clip_max=loo_clip_max_float,
+            )
+            selected_count = len(selected_features)
+            if verbose:
+                print(f"  CV/holdout selected k={best_k}")
+        selected_original = path.selected_original[:selected_count]
+        selected_scores = path.path_scores[:selected_count]
+    else:
+        selected_features = path.selected_features
+        selected_original = path.selected_original
+        selected_scores = path.path_scores
+
     if not return_result:
-        return path.selected_features
+        return selected_features
 
     diagnostics = _binary_cefsplus_diagnostics(path)
     diagnostics.update(
@@ -2298,43 +2377,56 @@ def select_cefsplus_binary(
             "cat_features_used": [col for col in (cat_features or []) if col in feature_names],
         }
     )
+    if auto_k:
+        diagnostics["auto_k_diagnostics"] = auto_diag
+        if auto_objective is not None:
+            diagnostics["auto_k_objective"] = auto_objective.tolist()
     ranking = pd.DataFrame(
         {
-            "feature": path.selected_features,
-            "rank": np.arange(1, len(path.selected_features) + 1, dtype=np.int64),
-            "selected": np.ones(len(path.selected_features), dtype=bool),
-            "selected_index": path.selected_original,
-            "score": path.path_scores,
+            "feature": selected_features,
+            "rank": np.arange(1, len(selected_features) + 1, dtype=np.int64),
+            "selected": np.ones(len(selected_features), dtype=bool),
+            "selected_index": selected_original,
+            "score": selected_scores,
             "selector": "cefsplus_binary",
         }
     )
+    extra_metadata = {
+        "loss": "logloss",
+        "weighted": weighted,
+        "class_weight": class_weight,
+        "class_weight_scope": "pre_subsample" if class_weight is not None else None,
+        "target_mapping": target_mapping,
+        "ridge": ridge_float,
+        "refit_every": refit_every,
+        "corr_prune": corr_prune_eff,
+        "subsample": subsample_validated,
+        "random_state": random_state,
+        "cat_encoding": cat_encoding,
+        "loo_smoothing": loo_smoothing_float,
+        "loo_clip_min": loo_clip_min_float,
+        "loo_clip_max": loo_clip_max_float,
+    }
+    if auto_k:
+        extra_metadata.update(
+            {
+                "auto_k_mode": auto_k_config.auto_k_mode,
+                "k_method": auto_k_config.k_method,
+                "auto_k_strategy": auto_k_config.strategy,
+            }
+        )
     metadata = _build_selector_metadata(
         "cefsplus_binary",
-        k=len(path.selected_features),
-        k_requested=k_int,
+        k=len(selected_features),
+        k_requested="auto" if auto_k else int(k_value),
         top_m=top_m_eff,
         n_features=n_features_input,
-        auto_k=False,
-        extra={
-            "loss": "logloss",
-            "weighted": weighted,
-            "class_weight": class_weight,
-            "class_weight_scope": "pre_subsample" if class_weight is not None else None,
-            "target_mapping": target_mapping,
-            "ridge": ridge_float,
-            "refit_every": refit_every,
-            "corr_prune": corr_prune_eff,
-            "subsample": subsample_validated,
-            "random_state": random_state,
-            "cat_encoding": cat_encoding,
-            "loo_smoothing": loo_smoothing_float,
-            "loo_clip_min": loo_clip_min_float,
-            "loo_clip_max": loo_clip_max_float,
-        },
+        auto_k=auto_k,
+        extra=extra_metadata,
     )
     return FilterSelectionResult(
-        selected_features=path.selected_features,
-        selected_indices=path.selected_original,
+        selected_features=selected_features,
+        selected_indices=selected_original,
         selector_metadata=metadata,
         ranking_=ranking,
         diagnostics_=diagnostics,

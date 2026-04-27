@@ -369,10 +369,13 @@ from sift import select_cefsplus_binary
 selected = select_cefsplus_binary(
     X,
     y_binary,
-    k=20,
+    k=20,                 # or "auto"
     loss="logloss",
     top_m=None,
     corr_prune=0.95,
+    time=None,
+    groups=None,
+    auto_k_config=None,
     sample_weight=None,
     class_weight=None,
     ridge=1e-4,
@@ -396,6 +399,10 @@ Important options:
   weights.
 - `loss="brier"`: compatibility mode that delegates to `select_cefsplus` with
   the binary target cast to float.
+- `k="auto"`: supports the same `AutoKConfig` workflow as other filter selectors.
+  For `loss="logloss"`, `k_method="evaluate"` scores prefixes with a downstream
+  logistic model, and `k_method="elbow"` applies elbow detection to the cumulative
+  binary score-test gains. For `loss="brier"`, auto-k delegates to regular CEFS+.
 - `ridge`: stabilizes the selected-feature logistic fit and candidate score-test
   information. The default score includes the same ridge term in each candidate
   denominator.
@@ -508,7 +515,8 @@ selected = select_mrmr(
   downstream model.
 - `k_method="elbow"` chooses where objective gains flatten out. It requires an
   objective path and is currently supported by Gaussian/cache-backed filter
-  paths such as CEFS+ and Gaussian mRMR. Classic MRMR/JMI/JMIM auto-k paths use
+  paths such as CEFS+ and Gaussian mRMR, plus binary CEFS+ log-loss paths using
+  cumulative score-test gains. Classic MRMR/JMI/JMIM auto-k paths use
   `k_method="evaluate"`; requesting elbow there raises.
 - `auto_k_mode="prefix_only"` is the current public semantic. Selectors build
   one supervised feature path on the rows available to the selector, then
@@ -1545,7 +1553,8 @@ CatBoost:
 
 - Use `top_m` for wide datasets. Most classic/Gaussian filter selectors default
   `top_m` to `max(5*k, 250)`. `select_cefsplus_binary` leaves `top_m=None` as
-  "all finite candidates"; set `top_m` explicitly for wide binary screens.
+  "all finite candidates"; for `k="auto"` it builds the binary path to
+  `AutoKConfig.max_k`. Set `top_m` explicitly for wide binary screens.
 - Use `subsample` for large row counts. Most filter selectors default to a
   `50_000` row cap; `select_cefsplus_binary` defaults to `subsample=None`.
 - Build a `FeatureCache` once when running multiple Gaussian/cache selectors or

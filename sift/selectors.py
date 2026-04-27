@@ -220,6 +220,10 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     def _categorical_sample_weight(self, y, sample_weight):
         return sample_weight
 
+    def _nested_eval_sample_weight(self, y, sample_weight):
+        y_arr = np.asarray(y).reshape(-1)
+        return ensure_weights(sample_weight, len(y_arr), normalize=True)
+
     def _would_fit_supervised_categoricals(self, X) -> bool:
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding not in _SUPERVISED_CLASS_ENCODINGS or not isinstance(X, pd.DataFrame):
@@ -593,7 +597,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         k_grid = _build_k_grid(min_k, max_k)
         task = self._task()
         metric = _resolve_metric(config.metric, task)
-        w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
+        fit_w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
+        eval_w_arr = self._nested_eval_sample_weight(y, sample_weight)
         splits = self._nested_splits(X, y_arr, groups, time, config)
 
         all_scores = {k: [] for k in k_grid}
@@ -608,13 +613,13 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             X_train_path = fold_selector.fit_transform(
                 train_X,
                 y_arr[train_idx],
-                sample_weight=w_arr[train_idx],
+                sample_weight=fit_w_arr[train_idx],
                 **(fit_params or {}),
             )
 
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
-            w_train = _split_weights(w_arr, train_idx, "train")
-            w_val = _split_weights(w_arr, val_idx, "validation")
+            w_train = _split_weights(eval_w_arr, train_idx, "train")
+            w_val = _split_weights(eval_w_arr, val_idx, "validation")
             split_scores = self._evaluate_nested_prefixes(
                 X_train_path,
                 X_val_path,
@@ -928,7 +933,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
 
     def __init__(
         self,
-        k: int = 75,
+        k: int | str = 75,
         *,
         loss: str = "logloss",
         top_m: int | None = None,
@@ -945,6 +950,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         subsample: int | None = None,
         random_state: int = 0,
         verbose: bool = True,
+        auto_k_config=None,
     ):
         self.k = k
         self.loss = loss
@@ -962,20 +968,28 @@ class CEFSPlusBinarySelector(_BaseSelector):
         self.subsample = subsample
         self.random_state = random_state
         self.verbose = verbose
+        self.auto_k_config = auto_k_config
 
         self._selector_fn = select_cefsplus_binary
 
     def _task(self) -> str:
         return "classification"
 
-    def _supports_auto_k(self) -> bool:
-        return False
-
     def _categorical_target(self, y):
         y01, _, _ = _validate_binary_target(y)
         return y01
 
     def _categorical_sample_weight(self, y, sample_weight):
+        y01, raw_y, _ = _validate_binary_target(y)
+        weights, _ = _resolve_binary_weights(
+            y01,
+            raw_y,
+            sample_weight=sample_weight,
+            class_weight=self.class_weight,
+        )
+        return weights
+
+    def _nested_eval_sample_weight(self, y, sample_weight):
         y01, raw_y, _ = _validate_binary_target(y)
         weights, _ = _resolve_binary_weights(
             y01,
@@ -1020,11 +1034,15 @@ class CEFSPlusBinarySelector(_BaseSelector):
     ):
         if cache is not None:
             raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
-        if auto_k_config is not None:
-            raise ValueError("CEFSPlusBinarySelector does not support auto_k_config.")
 
         call_params = dict(self._selector_params())
         call_params["sample_weight"] = sample_weight
+        if groups is not None:
+            call_params["groups"] = groups
+        if time is not None:
+            call_params["time"] = time
+        if auto_k_config is not None:
+            call_params["auto_k_config"] = auto_k_config
         if fit_params:
             blocked = sorted(_BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES.intersection(fit_params))
             if blocked:

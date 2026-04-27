@@ -344,3 +344,39 @@ def test_select_k_auto_cat_encoding_requires_category_encoders():
             cat_features=["id"],
             cat_encoding="target",
         )
+
+
+def test_select_k_auto_loo_logit_uses_builtin_binary_encoder():
+    rng = np.random.default_rng(33)
+    n = 120
+    team = np.where(np.arange(n) % 3 == 0, "a", "b")
+    y = (team == "a").astype(int)
+    X = pd.DataFrame({"team": team, "noise": rng.normal(size=n)})
+    sample_weight = np.ones(n)
+    sample_weight[::5] = 2.0
+    cfg = AutoKConfig(
+        strategy="time_holdout",
+        metric="logloss",
+        val_frac=0.25,
+        min_k=1,
+        max_k=2,
+    )
+
+    best_k, selected, diag = select_k_auto(
+        X=X,
+        y=y,
+        feature_path=["team", "noise"],
+        config=cfg,
+        time=np.arange(n),
+        task="classification",
+        cat_features=["team"],
+        cat_encoding="loo_logit",
+        sample_weight=sample_weight,
+        loo_smoothing=7.0,
+        loo_clip_min=1e-3,
+        loo_clip_max=1.0 - 1e-3,
+    )
+
+    assert best_k in {1, 2}
+    assert selected[0] == "team"
+    assert np.isfinite(diag["score"]).all()

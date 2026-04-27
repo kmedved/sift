@@ -565,6 +565,153 @@ def test_dataframe_numpy_result_metadata_and_selector_transform():
     assert list(selector.transform(X).columns) == selector.selected_features_
 
 
+def test_binary_auto_k_time_holdout_return_result_metadata():
+    X, y = _classification_frame(seed=130, n=180, p=6)
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        metric="logloss",
+        min_k=1,
+        max_k=5,
+        val_frac=0.25,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        time=np.arange(len(y)),
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert isinstance(result, FilterSelectionResult)
+    assert 1 <= len(result.selected_features) <= 5
+    assert [X.columns[i] for i in result.selected_indices] == result.selected_features
+    assert result.selector_metadata["auto_k"] is True
+    assert result.selector_metadata["k_requested"] == "auto"
+    assert result.selector_metadata["k_method"] == "evaluate"
+    assert result.selector_metadata["auto_k_strategy"] == "time_holdout"
+    assert result.selector_metadata["k"] == len(result.selected_features)
+    assert not result.diagnostics_["auto_k_diagnostics"].empty
+
+
+def test_binary_auto_k_group_cv():
+    X, y = _classification_frame(seed=131, n=180, p=6)
+    groups = np.repeat(np.arange(6), 30)
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="group_cv",
+        metric="logloss",
+        min_k=1,
+        max_k=4,
+        n_splits=3,
+    )
+
+    selected = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        groups=groups,
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+    )
+
+    assert 1 <= len(selected) <= 4
+
+
+def test_binary_auto_k_elbow_uses_score_test_objective():
+    X, y = _classification_frame(seed=132, n=180, p=6)
+    cfg = AutoKConfig(
+        k_method="elbow",
+        min_k=1,
+        max_k=5,
+        elbow_min_rel_gain=0.01,
+        elbow_patience=2,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    objective = np.asarray(result.diagnostics_["auto_k_objective"])
+    assert 1 <= len(result.selected_features) <= 5
+    assert result.selector_metadata["k_method"] == "elbow"
+    assert len(objective) >= len(result.selected_features)
+    assert np.all(np.diff(objective) >= -1e-12)
+
+
+def test_binary_brier_auto_k_delegates_to_cefsplus():
+    X, y = _classification_frame(seed=133, n=180, p=6)
+    cfg = AutoKConfig(k_method="elbow", min_k=1, max_k=5)
+    expected = select_cefsplus(
+        X,
+        y.astype(float),
+        k="auto",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        loss="brier",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert result.selected_features == expected
+    assert result.selector_metadata["selector"] == "cefsplus_binary"
+    assert result.selector_metadata["delegate_selector"] == "cefsplus"
+    assert result.selector_metadata["loss"] == "brier"
+    assert result.selector_metadata["auto_k"] is True
+
+
+def test_binary_weighted_class_weighted_auto_k_metadata():
+    X, y = _classification_frame(seed=134, n=180, p=6)
+    sample_weight = np.ones(len(y))
+    sample_weight[:20] = 3.0
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        metric="logloss",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        time=np.arange(len(y)),
+        auto_k_config=cfg,
+        sample_weight=sample_weight,
+        class_weight="balanced",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert 1 <= len(result.selected_features) <= 4
+    assert result.selector_metadata["weighted"] is True
+    assert result.selector_metadata["class_weight"] == "balanced"
+    assert result.selector_metadata["class_weight_scope"] == "pre_subsample"
+
+
 def test_binary_selector_class_duplicate_columns_transform_selected_position():
     rng = np.random.default_rng(120)
     n = 140
@@ -661,26 +808,107 @@ def test_binary_selector_class_rejects_preprocessing_fit_time_overrides():
         selector.fit(X, y, class_weight="balanced")
 
 
-def test_binary_selector_class_rejects_unsupported_auto_k_and_cache_cleanly():
+def test_binary_selector_class_auto_k_and_cache_behavior():
     X, y = _classification_frame(seed=122)
-    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", max_k=3)
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
 
-    with pytest.raises(ValueError, match="k='auto' is not supported"):
-        CEFSPlusBinarySelector(k="auto", verbose=False).fit(
-            X,
-            y,
-            time=np.arange(len(y)),
-        )
+    selector = CEFSPlusBinarySelector(k="auto", auto_k_config=cfg, verbose=False).fit(
+        X,
+        y,
+        time=np.arange(len(y)),
+    )
+    assert 1 <= len(selector.selected_features_) <= 3
 
-    with pytest.raises(ValueError, match="does not support auto_k_config"):
-        CEFSPlusBinarySelector(k=2, verbose=False).fit(
-            X,
-            y,
-            auto_k_config=cfg,
-        )
+    fixed_selector = CEFSPlusBinarySelector(k=2, verbose=False).fit(
+        X,
+        y,
+        auto_k_config=cfg,
+        time=np.arange(len(y)),
+    )
+    assert len(fixed_selector.selected_features_) == 2
 
     with pytest.raises(ValueError, match="does not support prebuilt caches"):
         CEFSPlusBinarySelector(k=2, verbose=False).fit(X, y, cache=object())
+
+
+def test_binary_selector_class_nested_auto_k():
+    X, y = _classification_frame(seed=135, n=180, p=6)
+    cfg = AutoKConfig(
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        metric="logloss",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    selector = CEFSPlusBinarySelector(k="auto", auto_k_config=cfg, verbose=False).fit(
+        X,
+        y,
+        time=np.arange(len(y)),
+    )
+
+    assert 1 <= selector.k_ <= 4
+    assert len(selector.selected_features_) == selector.k_
+    assert selector.nested_auto_k_diagnostics_["mode"] == "nested"
+    assert not selector.nested_auto_k_diagnostics_["scores"].empty
+
+
+def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weights(monkeypatch):
+    rng = np.random.default_rng(136)
+    n = 180
+    y = (np.arange(n) % 6 == 0).astype(int)
+    X = pd.DataFrame(
+        {
+            "signal": y + rng.normal(scale=0.25, size=n),
+            "noise": rng.normal(size=n),
+            "trend": np.linspace(-1.0, 1.0, n),
+        }
+    )
+    cfg = AutoKConfig(
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        metric="logloss",
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+    captured_weights = []
+    original = CEFSPlusBinarySelector._evaluate_nested_prefixes
+
+    def spy_eval(self, X_train_path, X_val_path, y_train, y_val, w_train, w_val, **kwargs):
+        captured_weights.append(
+            (
+                np.asarray(y_train),
+                np.asarray(w_train),
+                np.asarray(y_val),
+                np.asarray(w_val),
+            )
+        )
+        return original(
+            self,
+            X_train_path,
+            X_val_path,
+            y_train,
+            y_val,
+            w_train,
+            w_val,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(CEFSPlusBinarySelector, "_evaluate_nested_prefixes", spy_eval)
+
+    CEFSPlusBinarySelector(
+        k="auto",
+        class_weight="balanced",
+        auto_k_config=cfg,
+        verbose=False,
+    ).fit(X, y, time=np.arange(n))
+
+    assert captured_weights
+    y_train, w_train, y_val, w_val = captured_weights[0]
+    assert w_train[y_train == 1].mean() > w_train[y_train == 0].mean()
+    assert w_val[y_val == 1].mean() > w_val[y_val == 0].mean()
 
 
 def test_top_m_uses_binary_univariate_screen():
