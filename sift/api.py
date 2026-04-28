@@ -29,12 +29,16 @@ from sift.selection.auto_k import (
     resolve_auto_k_config,
     select_k_auto,
     select_k_elbow,
+    select_k_penalized_objective,
 )
 from sift.selection.cefsplus import select_cached
 from sift.selection.cefsplus_binary import (
+    fit_logistic_ridge,
     make_diagnostics as _binary_cefsplus_diagnostics,
+    predict_logistic,
     select_binary_logistic_path,
     validate_corr_prune as _validate_binary_corr_prune,
+    weighted_standardize,
 )
 from sift.selection.loops import MrmrBackend, jmi_select, mrmr_select, resolve_mrmr_backend
 from sift.selection.result import FilterSelectionResult
@@ -47,6 +51,28 @@ def _resolve_auto_k_config(
 ) -> AutoKConfig:
     """Resolve auto-k config, inferring strategy from available data."""
     return resolve_auto_k_config(auto_k_config, time, groups)
+
+
+def _reject_unsupported_auto_k_method(
+    *,
+    selector_name: str,
+    estimator: str,
+    auto_k_config: AutoKConfig,
+) -> None:
+    """Fail before preprocessing for auto-k methods unsupported by this route."""
+    if estimator == "gaussian":
+        if auto_k_config.k_method == "penalized_objective":
+            raise ValueError(
+                "k_method='penalized_objective' is supported only for CEFS+ paths. "
+                f"Use k_method='evaluate' for Gaussian {selector_name}."
+            )
+        return
+
+    if auto_k_config.k_method != "evaluate":
+        raise ValueError(
+            "classic MRMR/JMI/JMIM auto-k supports only k_method='evaluate'. "
+            "Use CEFS+ for k_method='elbow' or k_method='penalized_objective'."
+        )
 
 
 def _validate_groups_time(
@@ -152,6 +178,55 @@ def _build_selector_metadata(
     if extra:
         metadata.update(extra)
     return metadata
+
+
+def _auto_k_summary(
+    config: AutoKConfig,
+    *,
+    selected_k: int,
+    path_length: int,
+    effective_max_k: int,
+    effective_min_k: Optional[int] = None,
+    diagnostics: Optional[pd.DataFrame] = None,
+    extra: Optional[dict] = None,
+) -> dict:
+    """Build compact auto-k summary diagnostics shared by result objects."""
+    if effective_min_k is None:
+        effective_min_k = max(1, min(int(config.min_k), int(effective_max_k)))
+    selected_at_effective_max = bool(selected_k == effective_max_k)
+    selected_at_config_max = bool(selected_k == int(config.max_k))
+    summary = {
+        "method": config.k_method,
+        "selection_rule": config.selection_rule,
+        "selected_k": int(selected_k),
+        "min_k": int(config.min_k),
+        "max_k": int(config.max_k),
+        "effective_min_k": int(effective_min_k),
+        "effective_max_k": int(effective_max_k),
+        "path_length": int(path_length),
+        "selected_at_min_k": bool(selected_k == int(effective_min_k)),
+        "selected_at_effective_max_k": selected_at_effective_max,
+        "selected_at_config_max_k": selected_at_config_max,
+        "path_exhausted_before_max_k": bool(effective_max_k < int(config.max_k)),
+    }
+    if diagnostics is not None and not diagnostics.empty:
+        if "best_k" in diagnostics:
+            summary["best_k"] = int(diagnostics["best_k"].iloc[0])
+        if "best_score" in diagnostics:
+            summary["best_score"] = float(diagnostics["best_score"].iloc[0])
+        if "selection_rule_effective" in diagnostics:
+            summary["selection_rule_effective"] = diagnostics[
+                "selection_rule_effective"
+            ].iloc[0]
+        if "one_se_unavailable" in diagnostics:
+            summary["one_se_unavailable"] = bool(diagnostics["one_se_unavailable"].iloc[0])
+        if "objective_nonmonotone_steps" in diagnostics:
+            summary["objective_nonmonotone_steps"] = int(
+                diagnostics["objective_nonmonotone_steps"].iloc[0]
+            )
+    if extra:
+        summary.update(extra)
+    return summary
 
 
 def _safe_name_indices(
@@ -363,6 +438,47 @@ def _encode_categoricals_for_binary_selector(
     )
 
 
+def _binary_loglik_from_prob(y: np.ndarray, w: np.ndarray, p: np.ndarray) -> float:
+    p = np.clip(np.asarray(p, dtype=np.float64), 1e-12, 1.0 - 1e-12)
+    return float(np.sum(w * (y * np.log(p) + (1.0 - y) * np.log1p(-p))))
+
+
+def _binary_refit_loglik_gains(
+    X_sub: np.ndarray,
+    y_sub: np.ndarray,
+    w_sub: np.ndarray,
+    selected_original: list[int],
+    *,
+    ridge: float,
+) -> tuple[np.ndarray, int]:
+    """Compute unpenalized weighted log-likelihood gains along a binary path."""
+    if not selected_original:
+        return np.empty(0, dtype=np.float64), 0
+    X_selected = np.asarray(X_sub[:, selected_original], dtype=np.float64)
+    Z_selected, valid_mask, _, _ = weighted_standardize(X_selected, w_sub)
+    gains = np.full(len(selected_original), -np.inf, dtype=np.float64)
+    failures = 0
+    if not bool(np.all(valid_mask)):
+        failures += int(np.sum(~valid_mask))
+
+    p0 = np.clip(float(np.sum(w_sub * y_sub) / np.sum(w_sub)), 1e-12, 1.0 - 1e-12)
+    ll0 = _binary_loglik_from_prob(y_sub, w_sub, np.full(len(y_sub), p0, dtype=np.float64))
+    max_prefix = min(Z_selected.shape[1], len(selected_original))
+    for k in range(1, max_prefix + 1):
+        try:
+            beta = fit_logistic_ridge(
+                Z_selected[:, :k],
+                y_sub,
+                w_sub,
+                ridge=ridge,
+            )
+            p = predict_logistic(Z_selected[:, :k], beta)
+            gains[k - 1] = _binary_loglik_from_prob(y_sub, w_sub, p) - ll0
+        except (np.linalg.LinAlgError, FloatingPointError, ValueError):
+            failures += 1
+    return gains, failures
+
+
 def _auto_k_gaussian(
     *,
     cache: FeatureCache,
@@ -381,10 +497,25 @@ def _auto_k_gaussian(
     corr_prune: float | None | Literal["auto"] = "auto",
     verbose: bool = True,
     return_indices: bool = False,
+    return_details: bool = False,
 ) -> List[str] | Tuple[List[str], List[int]]:
     """Shared auto-k logic for gaussian estimators."""
-    if auto_k_config.k_method == "elbow":
+    want_indices = return_indices or return_details
+
+    def _finish(selected, selected_idx, path, diag, summary):
+        if return_details:
+            return selected, selected_idx, diag, summary
         if return_indices:
+            return selected, selected_idx
+        return selected
+
+    if auto_k_config.k_method == "penalized_objective":
+        if method != "cefsplus":
+            raise ValueError(
+                "k_method='penalized_objective' is supported only for CEFS+ paths. "
+                "Use k_method='evaluate' for Gaussian MRMR/JMI/JMIM."
+            )
+        if want_indices:
             path, path_indices, objective = select_cached(
                 cache,
                 y,
@@ -407,26 +538,84 @@ def _auto_k_gaussian(
                 return_objective=True,
             )
             path_indices = []
-        elbow_k, _ = select_k_elbow(
+        best_k, auto_diag = select_k_penalized_objective(
+            objective,
+            auto_k_config,
+            objective_scale="n_eff",
+            n_samples=len(cache.sample_weight),
+            sample_weight=cache.sample_weight,
+            min_k=auto_k_config.min_k,
+            max_k=len(path),
+        )
+        selected_count = min(best_k, len(path))
+        if verbose:
+            print(f"  Penalized objective selected k={selected_count}")
+        selected = path[:selected_count]
+        summary = _auto_k_summary(
+            auto_k_config,
+            selected_k=selected_count,
+            path_length=len(path),
+            effective_max_k=min(int(auto_k_config.max_k), len(path)),
+            diagnostics=auto_diag,
+            extra={
+                "objective_penalty": auto_k_config.objective_penalty,
+                "objective_scale": "gaussian_2mi",
+                "proxy_only_objective": True,
+            },
+        )
+        return _finish(selected, path_indices[:selected_count], path, auto_diag, summary)
+
+    if auto_k_config.k_method == "elbow":
+        if want_indices:
+            path, path_indices, objective = select_cached(
+                cache,
+                y,
+                max_k,
+                method=method,
+                top_m=top_m,
+                corr_prune=corr_prune,
+                return_objective=True,
+                return_indices=True,
+            )
+            path_indices = list(path_indices)
+        else:
+            path, objective = select_cached(
+                cache,
+                y,
+                max_k,
+                method=method,
+                top_m=top_m,
+                corr_prune=corr_prune,
+                return_objective=True,
+            )
+            path_indices = []
+        elbow_k, auto_diag = select_k_elbow(
             objective,
             min_k=auto_k_config.min_k,
             max_k=len(path),
             min_rel_gain=auto_k_config.elbow_min_rel_gain,
             patience=auto_k_config.elbow_patience,
         )
+        selected_count = min(elbow_k, len(path))
         if verbose:
-            print(f"  Elbow selected k={elbow_k}")
-        selected = path[:elbow_k]
-        if return_indices:
-            return selected, path_indices[:elbow_k]
-        return selected
+            print(f"  Elbow selected k={selected_count}")
+        selected = path[:selected_count]
+        summary = _auto_k_summary(
+            auto_k_config,
+            selected_k=selected_count,
+            path_length=len(path),
+            effective_max_k=min(int(auto_k_config.max_k), len(path)),
+            diagnostics=auto_diag,
+            extra={"proxy_only_objective": True},
+        )
+        return _finish(selected, path_indices[:selected_count], path, auto_diag, summary)
 
     if auto_k_config.strategy == "time_holdout" and time is None:
         raise ValueError("auto-k evaluate with strategy='time_holdout' requires time parameter")
     if auto_k_config.strategy == "group_cv" and groups is None:
         raise ValueError("auto-k evaluate with strategy='group_cv' requires groups parameter")
 
-    if return_indices:
+    if want_indices:
         path, path_indices = select_cached(
             cache,
             y,
@@ -447,7 +636,7 @@ def _auto_k_gaussian(
             corr_prune=corr_prune,
         )
         path_indices = []
-    best_k, selected, _ = select_k_auto(
+    best_k, selected, auto_diag = select_k_auto(
         eval_X,
         eval_y,
         path,
@@ -461,9 +650,15 @@ def _auto_k_gaussian(
     )
     if verbose:
         print(f"  CV/holdout selected k={best_k}")
-    if return_indices:
-        return selected, path_indices[:len(selected)]
-    return selected
+    summary = _auto_k_summary(
+        auto_k_config,
+        selected_k=len(selected),
+        path_length=len(path),
+        effective_max_k=min(int(auto_k_config.max_k), len(path)),
+        diagnostics=auto_diag,
+        extra={"proxy_only_objective": False},
+    )
+    return _finish(selected, path_indices[:len(selected)], path, auto_diag, summary)
 
 
 def _auto_k_classic(
@@ -483,11 +678,10 @@ def _auto_k_classic(
     return_indices: bool = False,
 ) -> List[str] | Tuple[List[str], List[int]]:
     """Shared auto-k evaluation for classic estimators."""
-    if auto_k_config.k_method == "elbow":
+    if auto_k_config.k_method != "evaluate":
         raise ValueError(
-            "k_method='elbow' is not supported for classic MRMR/JMI/JMIM "
-            "auto-k paths. Use k_method='evaluate' with time/groups, or use a "
-            "Gaussian/cache-backed path that exposes an objective path."
+            "classic MRMR/JMI/JMIM auto-k supports only k_method='evaluate'. "
+            "Use CEFS+ for k_method='elbow' or k_method='penalized_objective'."
         )
 
     path = [feature_names[i] for i in path_idx]
@@ -661,6 +855,11 @@ def select_mrmr(
 
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        _reject_unsupported_auto_k_method(
+            selector_name="MRMR",
+            estimator=estimator,
+            auto_k_config=auto_k_config,
+        )
         cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
@@ -1150,6 +1349,11 @@ def select_jmi(
 
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        _reject_unsupported_auto_k_method(
+            selector_name="JMI",
+            estimator=estimator,
+            auto_k_config=auto_k_config,
+        )
         cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
@@ -1504,6 +1708,11 @@ def select_jmim(
 
     if k == "auto":
         auto_k_config = _resolve_auto_k_config(auto_k_config, time, groups)
+        _reject_unsupported_auto_k_method(
+            selector_name="JMIM",
+            estimator=estimator,
+            auto_k_config=auto_k_config,
+        )
         cat_features = _resolve_cat_features(X, cat_features)
 
         max_k = auto_k_config.max_k
@@ -1933,7 +2142,12 @@ def select_cefsplus(
             cache = build_cache(X, sample_weight=sample_weight, subsample=subsample, random_state=random_state)
 
         if verbose:
-            mode = "elbow" if auto_k_config.k_method == "elbow" else f"evaluate/{auto_k_config.strategy}"
+            if auto_k_config.k_method == "elbow":
+                mode = "elbow"
+            elif auto_k_config.k_method == "penalized_objective":
+                mode = f"penalized_objective/{auto_k_config.objective_penalty}"
+            else:
+                mode = f"evaluate/{auto_k_config.strategy}/{auto_k_config.selection_rule}"
             print(
                 f"CEFS+ auto-k ({mode}): building path to {max_k} features "
                 f"(top_m={top_m_eff}, corr_prune={corr_prune})"
@@ -1944,7 +2158,7 @@ def select_cefsplus(
         )
 
         if return_result:
-            selected_features, selected_indices = _auto_k_gaussian(
+            selected_features, selected_indices, auto_diag, auto_summary = _auto_k_gaussian(
                 cache=cache,
                 y=y,
                 method="cefsplus",
@@ -1961,6 +2175,7 @@ def select_cefsplus(
                 corr_prune=corr_prune,
                 verbose=verbose,
                 return_indices=True,
+                return_details=True,
             )
         else:
             selected_features = _auto_k_gaussian(
@@ -1981,6 +2196,8 @@ def select_cefsplus(
                 verbose=verbose,
             )
             selected_indices = None
+            auto_diag = None
+            auto_summary = None
 
         if return_result:
             if selected_indices is None:
@@ -1990,10 +2207,10 @@ def select_cefsplus(
                     else [f"x{i}" for i in range(n_features_input)],
                     selected_features,
                 )
-            return _to_filter_result(
-                selected_features,
-                selected_indices,
-                _build_selector_metadata(
+            return FilterSelectionResult(
+                selected_features=selected_features,
+                selected_indices=selected_indices,
+                selector_metadata=_build_selector_metadata(
                     "cefsplus",
                     k=len(selected_features),
                     k_requested="auto",
@@ -2004,9 +2221,16 @@ def select_cefsplus(
                         "auto_k_mode": auto_k_config.auto_k_mode,
                         "k_method": auto_k_config.k_method,
                         "auto_k_strategy": auto_k_config.strategy,
+                        "selection_rule": auto_k_config.selection_rule,
+                        "objective_penalty": auto_k_config.objective_penalty
+                        if auto_k_config.k_method == "penalized_objective"
+                        else None,
                     },
                 ),
-                return_result,
+                diagnostics_={
+                    "auto_k": auto_summary,
+                    "auto_k_diagnostics": auto_diag,
+                },
             )
 
         return selected_features
@@ -2230,11 +2454,15 @@ def select_cefsplus_binary(
     if verbose:
         weighted_label = "weighted " if weighted else ""
         if auto_k:
-            mode = (
-                "elbow"
-                if auto_k_config.k_method == "elbow"
-                else f"evaluate/{auto_k_config.strategy}"
-            )
+            if auto_k_config.k_method == "elbow":
+                mode = "elbow"
+            elif auto_k_config.k_method == "penalized_objective":
+                mode = (
+                    f"penalized_objective/{auto_k_config.objective_penalty}/"
+                    f"{auto_k_config.binary_objective_mode}"
+                )
+            else:
+                mode = f"evaluate/{auto_k_config.strategy}/{auto_k_config.selection_rule}"
             print(
                 f"CEFS+ binary {weighted_label}logloss auto-k ({mode}): "
                 f"building path to {path_k} features "
@@ -2260,6 +2488,7 @@ def select_cefsplus_binary(
 
     auto_diag = None
     auto_objective = None
+    auto_summary = None
     if auto_k:
         if auto_k_config.k_method == "elbow":
             auto_objective = np.cumsum(np.asarray(path.path_scores, dtype=np.float64))
@@ -2274,6 +2503,87 @@ def select_cefsplus_binary(
             selected_features = path.selected_features[:selected_count]
             if verbose:
                 print(f"  Elbow selected k={selected_count}")
+            auto_summary = _auto_k_summary(
+                auto_k_config,
+                selected_k=selected_count,
+                path_length=len(path.selected_features),
+                effective_max_k=min(int(auto_k_config.max_k), len(path.selected_features)),
+                diagnostics=auto_diag,
+                extra={
+                    "proxy_only_objective": True,
+                    "objective_scale": "binary_score_test_gain",
+                    "score_test_objective_approximation": True,
+                },
+            )
+        elif auto_k_config.k_method == "penalized_objective":
+            if auto_k_config.binary_objective_mode == "score_test":
+                auto_objective = np.cumsum(np.asarray(path.path_scores, dtype=np.float64))
+                binary_refit_failures = 0
+                score_test_ic_approximation = True
+            else:
+                auto_objective, binary_refit_failures = _binary_refit_loglik_gains(
+                    X_sub.astype(np.float64, copy=False),
+                    y_sub.astype(np.float64, copy=False),
+                    w_sub.astype(np.float64, copy=False),
+                    path.selected_original,
+                    ridge=ridge_float,
+                )
+                score_test_ic_approximation = False
+            best_k, auto_diag = select_k_penalized_objective(
+                auto_objective,
+                auto_k_config,
+                objective_scale=2.0,
+                n_samples=len(y_sub),
+                sample_weight=w_sub,
+                min_k=auto_k_config.min_k,
+                max_k=len(path.selected_features),
+            )
+            selected_count = min(best_k, len(path.selected_features))
+            selected_features = path.selected_features[:selected_count]
+            ic_likelihood_type = (
+                "weighted_pseudo_likelihood" if weighted else "bernoulli_log_likelihood"
+            )
+            if auto_diag is not None and not auto_diag.empty:
+                auto_diag["binary_objective_mode"] = auto_k_config.binary_objective_mode
+                auto_diag["binary_objective_fit"] = (
+                    "score_test_approximation"
+                    if score_test_ic_approximation
+                    else "ridge_fit_unpenalized_loglik_score"
+                )
+                auto_diag["score_test_ic_approximation"] = score_test_ic_approximation
+                auto_diag["ic_likelihood_type"] = ic_likelihood_type
+                auto_diag["binary_refit_failures"] = binary_refit_failures
+                auto_diag["refit_every_warning"] = bool(
+                    score_test_ic_approximation and refit_every > 1
+                )
+            if verbose:
+                print(f"  Penalized objective selected k={selected_count}")
+            auto_summary = _auto_k_summary(
+                auto_k_config,
+                selected_k=selected_count,
+                path_length=len(path.selected_features),
+                effective_max_k=min(int(auto_k_config.max_k), len(path.selected_features)),
+                diagnostics=auto_diag,
+                extra={
+                    "proxy_only_objective": True,
+                    "objective_penalty": auto_k_config.objective_penalty,
+                    "objective_scale": "binary_loglik_gain",
+                    "binary_objective_mode": auto_k_config.binary_objective_mode,
+                    "binary_objective_fit": (
+                        "score_test_approximation"
+                        if score_test_ic_approximation
+                        else "ridge_fit_unpenalized_loglik_score"
+                    ),
+                    "score_test_ic_approximation": score_test_ic_approximation,
+                    "ic_likelihood_type": ic_likelihood_type,
+                    "binary_refit_failures": binary_refit_failures,
+                    "warnings": [
+                        "refit_every > 1 makes cumulative score-test gains more approximate"
+                    ]
+                    if score_test_ic_approximation and refit_every > 1
+                    else [],
+                },
+            )
         else:
             eval_X = (
                 X
@@ -2307,6 +2617,14 @@ def select_cefsplus_binary(
             selected_count = len(selected_features)
             if verbose:
                 print(f"  CV/holdout selected k={best_k}")
+            auto_summary = _auto_k_summary(
+                auto_k_config,
+                selected_k=selected_count,
+                path_length=len(path.selected_features),
+                effective_max_k=min(int(auto_k_config.max_k), len(path.selected_features)),
+                diagnostics=auto_diag,
+                extra={"proxy_only_objective": False},
+            )
         selected_original = path.selected_original[:selected_count]
         selected_scores = path.path_scores[:selected_count]
     else:
@@ -2328,6 +2646,7 @@ def select_cefsplus_binary(
         }
     )
     if auto_k:
+        diagnostics["auto_k"] = auto_summary
         diagnostics["auto_k_diagnostics"] = auto_diag
         if auto_objective is not None:
             diagnostics["auto_k_objective"] = auto_objective.tolist()
@@ -2363,6 +2682,13 @@ def select_cefsplus_binary(
                 "auto_k_mode": auto_k_config.auto_k_mode,
                 "k_method": auto_k_config.k_method,
                 "auto_k_strategy": auto_k_config.strategy,
+                "selection_rule": auto_k_config.selection_rule,
+                "objective_penalty": auto_k_config.objective_penalty
+                if auto_k_config.k_method == "penalized_objective"
+                else None,
+                "binary_objective_mode": auto_k_config.binary_objective_mode
+                if auto_k_config.k_method == "penalized_objective"
+                else None,
             }
         )
     metadata = _build_selector_metadata(

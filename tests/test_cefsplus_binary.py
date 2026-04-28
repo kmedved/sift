@@ -680,6 +680,124 @@ def test_binary_brier_auto_k_delegates_to_cefsplus():
     assert result.selector_metadata["auto_k"] is True
 
 
+def test_binary_brier_penalized_objective_delegates_to_cefsplus():
+    X, y = _classification_frame(seed=136, n=160, p=6)
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=5)
+    expected = select_cefsplus(
+        X,
+        y.astype(float),
+        k="auto",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        loss="brier",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert result.selected_features == expected
+    assert result.selector_metadata["delegate_selector"] == "cefsplus"
+    assert result.selector_metadata["k_method"] == "penalized_objective"
+    assert result.diagnostics_["auto_k"]["objective_scale"] == "gaussian_2mi"
+
+
+@pytest.mark.parametrize("binary_objective_mode", ["refit", "score_test"])
+def test_binary_auto_k_penalized_objective_modes(binary_objective_mode):
+    X, y = _classification_frame(seed=137, n=180, p=6)
+    cfg = AutoKConfig(
+        k_method="penalized_objective",
+        binary_objective_mode=binary_objective_mode,
+        min_k=1,
+        max_k=5,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    diag = result.diagnostics_["auto_k_diagnostics"]
+    assert 1 <= len(result.selected_features) <= 5
+    assert result.selector_metadata["k_method"] == "penalized_objective"
+    assert result.selector_metadata["binary_objective_mode"] == binary_objective_mode
+    assert result.diagnostics_["auto_k"]["binary_objective_mode"] == binary_objective_mode
+    assert diag["penalized_score"].notna().all()
+    assert set(diag["binary_objective_mode"]) == {binary_objective_mode}
+
+
+def test_binary_class_weighted_penalized_objective_reports_pseudo_likelihood():
+    X, y = _classification_frame(seed=138, n=180, p=6)
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=4)
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        class_weight="balanced",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert result.selector_metadata["weighted"] is True
+    assert result.diagnostics_["auto_k"]["ic_likelihood_type"] == "weighted_pseudo_likelihood"
+    assert (
+        result.diagnostics_["auto_k_diagnostics"]["ic_likelihood_type"].iloc[0]
+        == "weighted_pseudo_likelihood"
+    )
+
+
+def test_binary_penalized_objective_boundary_flags_distinguish_effective_path():
+    rng = np.random.default_rng(139)
+    n = 120
+    X = pd.DataFrame(
+        {
+            "signal": rng.normal(size=n),
+            "dup": np.ones(n),
+        }
+    )
+    y = (X["signal"].to_numpy() > 0.0).astype(int)
+    cfg = AutoKConfig(
+        k_method="penalized_objective",
+        objective_penalty="custom",
+        objective_penalty_weight=0.0,
+        binary_objective_mode="score_test",
+        min_k=1,
+        max_k=5,
+    )
+
+    result = select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    summary = result.diagnostics_["auto_k"]
+    assert summary["path_length"] == 1
+    assert summary["effective_max_k"] == 1
+    assert summary["selected_at_effective_max_k"] is True
+    assert summary["selected_at_config_max_k"] is False
+    assert summary["path_exhausted_before_max_k"] is True
+
+
 def test_binary_weighted_class_weighted_auto_k_metadata():
     X, y = _classification_frame(seed=134, n=180, p=6)
     sample_weight = np.ones(len(y))
@@ -852,6 +970,31 @@ def test_binary_selector_class_nested_auto_k():
     assert len(selector.selected_features_) == selector.k_
     assert selector.nested_auto_k_diagnostics_["mode"] == "nested"
     assert not selector.nested_auto_k_diagnostics_["scores"].empty
+
+
+def test_binary_selector_class_nested_auto_k_plateau_rule():
+    X, y = _classification_frame(seed=140, n=180, p=6)
+    cfg = AutoKConfig(
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        metric="logloss",
+        selection_rule="plateau",
+        score_rel_tol=0.05,
+        plateau_prefer="smallest",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    selector = CEFSPlusBinarySelector(k="auto", auto_k_config=cfg, verbose=False).fit(
+        X,
+        y,
+        time=np.arange(len(y)),
+    )
+
+    assert 1 <= selector.k_ <= 4
+    assert selector.nested_auto_k_diagnostics_["selection_rule"] == "plateau"
+    assert "in_selected_plateau" in selector.nested_auto_k_diagnostics_["scores"].columns
 
 
 def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weights(monkeypatch):

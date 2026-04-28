@@ -240,6 +240,73 @@ def test_selector_nested_auto_k_time_holdout():
     assert not selector.nested_auto_k_diagnostics_["scores"].empty
 
 
+def test_cefsplus_selector_nested_auto_k_plateau_rule():
+    rng = np.random.default_rng(45)
+    X = pd.DataFrame(rng.normal(size=(160, 5)), columns=[f"f{i}" for i in range(5)])
+    y = X["f0"] * 1.5 + X["f1"] * 0.25 + rng.normal(size=160) * 0.1
+    cfg = AutoKConfig(
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        metric="rmse",
+        selection_rule="plateau",
+        score_rel_tol=0.05,
+        plateau_prefer="smallest",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    selector = CEFSPlusSelector(k="auto", auto_k_config=cfg, verbose=False).fit(
+        X,
+        y,
+        time=np.arange(len(X)),
+    )
+
+    assert 1 <= selector.k_ <= 4
+    assert selector.nested_auto_k_diagnostics_["selection_rule"] == "plateau"
+    scores = selector.nested_auto_k_diagnostics_["scores"]
+    assert "score_se" in scores.columns
+    assert "in_selected_plateau" in scores.columns
+
+
+def test_cefsplus_selector_nested_auto_k_distinguishes_best_and_selected(monkeypatch):
+    rng = np.random.default_rng(145)
+    X = pd.DataFrame(rng.normal(size=(160, 5)), columns=[f"f{i}" for i in range(5)])
+    y = X["f0"] * 1.5 + rng.normal(size=160) * 0.1
+    cfg = AutoKConfig(
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        metric="rmse",
+        selection_rule="plateau",
+        score_rel_tol=0.06,
+        plateau_prefer="smallest",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    def fake_evaluate_prefixes(self, *args, k_grid, **kwargs):
+        scores = {1: 0.95, 3: 0.90, 4: 1.20}
+        return {k: scores[k] for k in k_grid}
+
+    monkeypatch.setattr(
+        CEFSPlusSelector,
+        "_evaluate_nested_prefixes",
+        fake_evaluate_prefixes,
+    )
+
+    selector = CEFSPlusSelector(k="auto", auto_k_config=cfg, verbose=False).fit(
+        X,
+        y,
+        time=np.arange(len(X)),
+    )
+
+    diagnostics = selector.nested_auto_k_diagnostics_
+    assert diagnostics["best_k"] == 3
+    assert diagnostics["selected_k"] == 1
+    assert selector.k_ == 1
+
+
 def test_selector_nested_auto_k_allows_supervised_class_encoder():
     pytest.importorskip("category_encoders")
 
@@ -553,12 +620,13 @@ def test_selector_nested_auto_k_rejects_cache():
         selector.fit(X, y, time=np.arange(len(X)))
 
 
-def test_selector_nested_auto_k_rejects_elbow_method():
+@pytest.mark.parametrize("k_method", ["elbow", "penalized_objective"])
+def test_selector_nested_auto_k_rejects_non_evaluate_method(k_method):
     rng = np.random.default_rng(7)
     X = pd.DataFrame(rng.normal(size=(80, 4)), columns=list("abcd"))
     y = X["a"] + rng.normal(size=80) * 0.1
     cfg = AutoKConfig(
-        k_method="elbow",
+        k_method=k_method,
         auto_k_mode="nested",
         strategy="time_holdout",
         min_k=1,

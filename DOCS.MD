@@ -91,6 +91,7 @@ from sift import (
     evaluate_feature_path,
     select_k_auto,
     select_k_elbow,
+    select_k_penalized_objective,
     compute_objective_for_path,
     BorutaSelector,
     BorutaResult,
@@ -138,6 +139,7 @@ Sample weights:
 
 - `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
   `select_cefsplus_binary`, `select_boruta`, `select_k_auto`,
+  `select_k_penalized_objective`,
   `StabilitySelector.fit`, `stability_regression`, `stability_classif`, and
   `permutation_importance` accept sample weights.
 - `select_cefsplus_binary` also accepts `class_weight=None`, `"balanced"`, or a
@@ -402,7 +404,10 @@ Important options:
 - `k="auto"`: supports the same `AutoKConfig` workflow as other filter selectors.
   For `loss="logloss"`, `k_method="evaluate"` scores prefixes with a downstream
   logistic model, and `k_method="elbow"` applies elbow detection to the cumulative
-  binary score-test gains. For `loss="brier"`, auto-k delegates to regular CEFS+.
+  binary score-test gains. `k_method="penalized_objective"` applies BIC/AIC/HQC
+  style penalties to a binary log-likelihood-gain path, using refit prefixes by
+  default or cumulative score-test gains when `binary_objective_mode="score_test"`.
+  For `loss="brier"`, auto-k delegates to regular CEFS+.
 - `ridge`: stabilizes the selected-feature logistic fit and candidate score-test
   information. The default score includes the same ridge term in each candidate
   denominator.
@@ -489,7 +494,8 @@ The filter selectors accept `k="auto"`:
 from sift import AutoKConfig, select_mrmr
 
 config = AutoKConfig(
-    k_method="evaluate",      # "evaluate" or "elbow"
+    k_method="evaluate",      # "evaluate", "elbow", or "penalized_objective"
+    selection_rule="best",    # "best", "one_se", "plateau", or "tolerance"
     auto_k_mode="prefix_only", # "prefix_only" or selector-class "nested"
     strategy="time_holdout",  # "time_holdout" or "group_cv"
     metric="rmse",            # "auto", "rmse", "mae", "logloss", "error"
@@ -512,12 +518,21 @@ selected = select_mrmr(
 `AutoKConfig` fields:
 
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
-  downstream model.
+  downstream model. `selection_rule="best"` preserves the historical argmin
+  behavior. `selection_rule="plateau"` and `"tolerance"` require
+  `score_abs_tol` or `score_rel_tol` and pick a practically tied prefix;
+  `selection_rule="one_se"` uses split-level standard errors when at least two
+  finite split scores are available.
 - `k_method="elbow"` chooses where objective gains flatten out. It requires an
   objective path and is currently supported by Gaussian/cache-backed filter
   paths such as CEFS+ and Gaussian mRMR, plus binary CEFS+ log-loss paths using
   cumulative score-test gains. Classic MRMR/JMI/JMIM auto-k paths use
   `k_method="evaluate"`; requesting elbow there raises.
+- `k_method="penalized_objective"` chooses from a CEFS+ proxy objective without
+  validation context. Gaussian CEFS+ uses `n_eff * O_k - penalty * k`, where
+  `O_k` is the log-det Gaussian MI proxy. Binary CEFS+ log-loss uses
+  `2 * G_k - penalty * k`, where `G_k` is a prefix log-likelihood gain. This is
+  proxy-objective IC selection, not downstream-performance optimization.
 - `auto_k_mode="prefix_only"` is the current public semantic. Selectors build
   one supervised feature path on the rows available to the selector, then
   evaluate prefixes of that fixed path. For `k_method="evaluate"`, the scores
@@ -529,8 +544,9 @@ selected = select_mrmr(
   transforms validation rows with train-fitted preprocessing, evaluates prefix
   lengths, and refits the final selector on all rows passed to `fit` using the
   chosen `k`. Nested mode currently supports `k_method="evaluate"` only;
-  `k_method="elbow"` raises instead of being silently ignored. Function-style
-  selectors still reject nested mode and keep the prefix-only contract.
+  `k_method="elbow"` and `k_method="penalized_objective"` raise instead of
+  being silently ignored. Function-style selectors still reject nested mode and
+  keep the prefix-only contract.
 - Selector classes reject `k_method="evaluate"`, `auto_k_mode="prefix_only"`,
   and explicit supervised categorical encoding together, because that would
   evaluate already target-encoded validation rows. Use nested mode or
@@ -542,12 +558,39 @@ selected = select_mrmr(
 - `metric="auto"` resolves to RMSE for regression and log loss for
   classification.
 - `min_k`, `max_k`, `val_frac`, `n_splits`, `random_state`,
-  `elbow_min_rel_gain`, and `elbow_patience` control the search.
+  `elbow_min_rel_gain`, `elbow_patience`, `objective_penalty`,
+  `objective_n_eff`, and `binary_objective_mode` control the search.
+
+Recommended patterns:
+
+```python
+# Split-aware predictive selection.
+AutoKConfig(
+    k_method="evaluate",
+    selection_rule="plateau",
+    score_rel_tol=0.001,
+    plateau_prefer="smallest",
+    max_k=300,
+)
+
+# No validation split: CEFS+ proxy-objective IC.
+AutoKConfig(
+    k_method="penalized_objective",
+    objective_penalty="bic",
+    max_k=300,
+)
+```
 
 Advanced helpers:
 
 ```python
-from sift import select_k_auto, select_k_elbow, compute_objective_for_path
+from sift import (
+    AutoKConfig,
+    compute_objective_for_path,
+    select_k_auto,
+    select_k_elbow,
+    select_k_penalized_objective,
+)
 
 best_k, best_features, diagnostics = select_k_auto(
     X,
@@ -558,6 +601,8 @@ best_k, best_features, diagnostics = select_k_auto(
     task="classification",
 )
 
+objective_path = compute_objective_for_path(cache, y, selected_path)
+
 best_k, elbow_diagnostics = select_k_elbow(
     objective_path,
     min_k=5,
@@ -566,7 +611,12 @@ best_k, elbow_diagnostics = select_k_elbow(
     patience=3,
 )
 
-objective_path = compute_objective_for_path(cache, y, selected_path)
+best_k, ic_diagnostics = select_k_penalized_objective(
+    objective_path,
+    config=AutoKConfig(k_method="penalized_objective"),
+    objective_scale="n_eff",
+    n_samples=len(y),
+)
 ```
 
 ### Explicit feature-path evaluation

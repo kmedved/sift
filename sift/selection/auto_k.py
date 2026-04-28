@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib.util
 from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,7 @@ class AutoKConfig:
     the prefix-only contract.
     """
 
-    k_method: Literal["evaluate", "elbow"] = "evaluate"
+    k_method: Literal["evaluate", "elbow", "penalized_objective"] = "evaluate"
     strategy: Literal["time_holdout", "group_cv"] = "time_holdout"
     metric: Literal["rmse", "mae", "logloss", "error", "auto"] = "auto"
     max_k: int = 100
@@ -47,11 +48,31 @@ class AutoKConfig:
     elbow_min_rel_gain: float = 0.02
     elbow_patience: int = 3
     auto_k_mode: Literal["prefix_only", "nested"] = "prefix_only"
+    selection_rule: Literal["best", "one_se", "plateau", "tolerance"] = "best"
+    one_se_multiplier: float = 1.0
+    score_abs_tol: float | None = None
+    score_rel_tol: float | None = None
+    plateau_prefer: Literal["smallest", "center", "best", "largest"] = "smallest"
+    plateau_min_points: int = 2
+    objective_penalty: Literal["bic", "mdl", "aic", "hqc", "custom"] = "bic"
+    objective_penalty_weight: float | None = None
+    objective_n_eff: float | None = None
+    binary_objective_mode: Literal["refit", "score_test"] = "refit"
 
 
-_VALID_K_METHODS = frozenset({"evaluate", "elbow"})
+_VALID_K_METHODS = frozenset({"evaluate", "elbow", "penalized_objective"})
 _VALID_STRATEGIES = frozenset({"time_holdout", "group_cv"})
-_POSITIVE_INT_FIELDS = ("min_k", "max_k", "n_splits", "elbow_patience")
+_VALID_SELECTION_RULES = frozenset({"best", "one_se", "plateau", "tolerance"})
+_VALID_PLATEAU_PREFERS = frozenset({"smallest", "center", "best", "largest"})
+_VALID_OBJECTIVE_PENALTIES = frozenset({"bic", "mdl", "aic", "hqc", "custom"})
+_VALID_BINARY_OBJECTIVE_MODES = frozenset({"refit", "score_test"})
+_POSITIVE_INT_FIELDS = (
+    "min_k",
+    "max_k",
+    "n_splits",
+    "elbow_patience",
+    "plateau_min_points",
+)
 _REAL_TYPES = (int, float, np.integer, np.floating)
 
 
@@ -99,6 +120,82 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
     ):
         raise ValueError("AutoKConfig.elbow_min_rel_gain must be finite and non-negative")
 
+    if config.selection_rule not in _VALID_SELECTION_RULES:
+        raise ValueError(
+            "AutoKConfig.selection_rule must be one of "
+            f"{sorted(_VALID_SELECTION_RULES)}; got {config.selection_rule!r}"
+        )
+    if config.plateau_prefer not in _VALID_PLATEAU_PREFERS:
+        raise ValueError(
+            "AutoKConfig.plateau_prefer must be one of "
+            f"{sorted(_VALID_PLATEAU_PREFERS)}; got {config.plateau_prefer!r}"
+        )
+    if (
+        not _is_real_number(config.one_se_multiplier)
+        or not np.isfinite(config.one_se_multiplier)
+        or float(config.one_se_multiplier) <= 0.0
+    ):
+        raise ValueError("AutoKConfig.one_se_multiplier must be positive and finite")
+    for name in ("score_abs_tol", "score_rel_tol"):
+        value = getattr(config, name)
+        if value is not None and (
+            not _is_real_number(value) or not np.isfinite(value) or float(value) < 0.0
+        ):
+            raise ValueError(f"AutoKConfig.{name} must be None or finite and non-negative")
+    if (
+        config.k_method == "evaluate"
+        and config.selection_rule in {"plateau", "tolerance"}
+        and config.score_abs_tol is None
+        and config.score_rel_tol is None
+    ):
+        raise ValueError(
+            "selection_rule='plateau' or 'tolerance' requires score_abs_tol or score_rel_tol"
+        )
+
+    if (
+        config.objective_penalty not in _VALID_OBJECTIVE_PENALTIES
+    ):
+        raise ValueError(
+            "AutoKConfig.objective_penalty must be one of "
+            f"{sorted(_VALID_OBJECTIVE_PENALTIES)}; got {config.objective_penalty!r}"
+        )
+    if config.objective_penalty == "custom":
+        if config.objective_penalty_weight is None:
+            raise ValueError(
+                "AutoKConfig.objective_penalty_weight is required when "
+                "objective_penalty='custom'"
+            )
+        if (
+            not _is_real_number(config.objective_penalty_weight)
+            or not np.isfinite(config.objective_penalty_weight)
+            or float(config.objective_penalty_weight) < 0.0
+        ):
+            raise ValueError(
+                "AutoKConfig.objective_penalty_weight must be finite and non-negative"
+            )
+    elif config.objective_penalty_weight is not None:
+        raise ValueError(
+            "AutoKConfig.objective_penalty_weight is only valid when "
+            "objective_penalty='custom'"
+        )
+
+    if config.objective_n_eff is not None and (
+        not _is_real_number(config.objective_n_eff)
+        or not np.isfinite(config.objective_n_eff)
+        or float(config.objective_n_eff) <= 1.0
+    ):
+        raise ValueError("AutoKConfig.objective_n_eff must be None or finite and > 1")
+    if config.objective_penalty == "hqc" and (
+        config.objective_n_eff is not None and float(config.objective_n_eff) <= np.e
+    ):
+        raise ValueError("AutoKConfig.objective_n_eff must be > e for HQC")
+
+    if config.binary_objective_mode not in _VALID_BINARY_OBJECTIVE_MODES:
+        raise ValueError(
+            "AutoKConfig.binary_objective_mode must be one of "
+            f"{sorted(_VALID_BINARY_OBJECTIVE_MODES)}; got {config.binary_objective_mode!r}"
+        )
+
 
 def _ensure_supported_auto_k_mode(
     config: AutoKConfig,
@@ -145,7 +242,8 @@ def resolve_auto_k_config(
         _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
         return config
     raise ValueError(
-        "k='auto' requires time, groups, or auto_k_config with k_method='elbow'"
+        "k='auto' requires time, groups, or auto_k_config with "
+        "k_method='elbow' or k_method='penalized_objective'"
     )
 
 
@@ -237,6 +335,160 @@ def _time_holdout_split(
     return order[:cut], order[cut:]
 
 
+def _build_score_curve_diagnostics(
+    k_grid: List[int],
+    split_scores: dict[int, list[float]],
+) -> pd.DataFrame:
+    """Summarize split-level prefix scores while preserving the old score column."""
+    rows = []
+    for k in k_grid:
+        values = np.asarray(split_scores.get(k, []), dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        score_mean = float(np.mean(values)) if values.size else float("inf")
+        score_std = float(np.std(finite, ddof=1)) if finite.size >= 2 else float("nan")
+        score_se = score_std / float(np.sqrt(finite.size)) if finite.size >= 2 else float("nan")
+        rows.append(
+            {
+                "k": int(k),
+                "score": score_mean,
+                "score_mean": score_mean,
+                "score_std": score_std,
+                "score_se": score_se,
+                "n_splits": int(values.size),
+                "n_finite": int(finite.size),
+                "split_scores": tuple(float(v) for v in values.tolist()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _score_curve_tolerance(best_score: float, config: AutoKConfig) -> float:
+    tol = 0.0
+    if config.score_abs_tol is not None:
+        tol = max(tol, float(config.score_abs_tol))
+    if config.score_rel_tol is not None:
+        tol = max(tol, abs(best_score) * float(config.score_rel_tol))
+    return tol
+
+
+def choose_k_from_score_curve(
+    diagnostics: pd.DataFrame,
+    config: AutoKConfig,
+    *,
+    lower_is_better: bool = True,
+) -> Tuple[int, pd.DataFrame]:
+    """Choose k from an evaluated score curve according to AutoKConfig."""
+    validate_auto_k_config(config)
+    diag = diagnostics.copy()
+    if "k" not in diag.columns:
+        raise ValueError("score-curve diagnostics must include a 'k' column")
+    diag["k"] = diag["k"].astype(int)
+    diag = diag[
+        (diag["k"] >= int(config.min_k)) & (diag["k"] <= int(config.max_k))
+    ].copy()
+    diag = diag.sort_values("k", kind="mergesort").reset_index(drop=True)
+    if diag.empty:
+        return 0, diag
+    if "score_mean" not in diag.columns:
+        diag["score_mean"] = diag["score"]
+    diag["score"] = diag["score_mean"]
+
+    finite = diag[np.isfinite(diag["score_mean"])].copy()
+    fallback_k = int(diag["k"].max())
+    if finite.empty:
+        diag["best_k"] = fallback_k
+        diag["best_score"] = np.inf if lower_is_better else -np.inf
+        diag["within_tolerance"] = False
+        diag["in_selected_plateau"] = False
+        diag["selected"] = diag["k"] == fallback_k
+        diag["selection_rule"] = config.selection_rule
+        diag["selection_rule_effective"] = config.selection_rule
+        diag["one_se_unavailable"] = config.selection_rule == "one_se"
+        return fallback_k, diag
+
+    ascending = [lower_is_better, True]
+    best_rows = finite.sort_values(["score_mean", "k"], ascending=ascending, kind="mergesort")
+    best_row = best_rows.iloc[0]
+    best_k = int(best_row["k"])
+    best_score = float(best_row["score_mean"])
+    rule = config.selection_rule
+    effective_rule = rule
+    one_se_unavailable = False
+
+    diag["best_k"] = best_k
+    diag["best_score"] = best_score
+    diag["within_tolerance"] = False
+    diag["in_selected_plateau"] = False
+    diag["selection_rule"] = rule
+
+    selected_k = best_k
+    if rule == "best":
+        diag["within_tolerance"] = diag["k"] == best_k
+    elif rule == "one_se":
+        best_se = float(best_row.get("score_se", np.nan))
+        if not np.isfinite(best_se):
+            warnings.warn(
+                "selection_rule='one_se' requires at least two finite split scores; "
+                "falling back to selection_rule='best'.",
+                UserWarning,
+                stacklevel=2,
+            )
+            effective_rule = "best"
+            one_se_unavailable = True
+            diag["within_tolerance"] = diag["k"] == best_k
+        else:
+            tol = float(config.one_se_multiplier) * best_se
+            if lower_is_better:
+                diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
+            else:
+                diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
+            eligible = diag[diag["within_tolerance"] & np.isfinite(diag["score_mean"])]
+            selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
+    elif rule in {"tolerance", "plateau"}:
+        tol = _score_curve_tolerance(best_score, config)
+        if lower_is_better:
+            diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
+        else:
+            diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
+        diag.loc[~np.isfinite(diag["score_mean"]), "within_tolerance"] = False
+        if rule == "tolerance":
+            eligible = diag[diag["within_tolerance"]]
+            selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
+        else:
+            eligible_mask = diag["within_tolerance"].to_numpy(dtype=bool)
+            best_positions = np.flatnonzero(diag["k"].to_numpy(dtype=int) == best_k)
+            if best_positions.size:
+                pos = int(best_positions[0])
+                start = pos
+                while start > 0 and eligible_mask[start - 1]:
+                    start -= 1
+                end = pos
+                while end + 1 < len(eligible_mask) and eligible_mask[end + 1]:
+                    end += 1
+                plateau_ks = diag.iloc[start : end + 1]["k"].astype(int).tolist()
+                diag.iloc[start : end + 1, diag.columns.get_loc("in_selected_plateau")] = True
+            else:
+                plateau_ks = [best_k]
+
+            if len(plateau_ks) < int(config.plateau_min_points):
+                selected_k = best_k
+            elif config.plateau_prefer == "smallest":
+                selected_k = int(plateau_ks[0])
+            elif config.plateau_prefer == "largest":
+                selected_k = int(plateau_ks[-1])
+            elif config.plateau_prefer == "center":
+                selected_k = int(plateau_ks[len(plateau_ks) // 2])
+            else:
+                selected_k = best_k
+    else:
+        raise ValueError(f"Unknown selection_rule: {rule!r}")
+
+    diag["selection_rule_effective"] = effective_rule
+    diag["one_se_unavailable"] = one_se_unavailable
+    diag["selected"] = diag["k"] == selected_k
+    return int(selected_k), diag
+
+
 def select_k_auto(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -258,7 +510,7 @@ def select_k_auto(
         raise ValueError(
             "select_k_auto supports only AutoKConfig(k_method='evaluate'). "
             "Use select_k_elbow(...) or a selector path that explicitly supports "
-            "elbow auto-k."
+            "objective-path auto-k."
         )
 
     if not feature_path:
@@ -403,7 +655,8 @@ def select_k_auto(
 
         train_idx, val_idx = _time_holdout_split(time, config.val_frac)
         scores = _eval_split(train_idx, val_idx)
-        diag = pd.DataFrame({"k": list(scores.keys()), "score": list(scores.values())})
+        split_scores = {k: [score] for k, score in scores.items()}
+        diag = _build_score_curve_diagnostics(k_grid, split_scores)
 
     elif config.strategy == "group_cv":
         if groups is None:
@@ -422,18 +675,15 @@ def select_k_auto(
             for k, score in fold_scores.items():
                 all_scores[k].append(score)
 
-        diag = pd.DataFrame(
-            {"k": k_grid, "score": [np.mean(all_scores[k]) for k in k_grid]}
-        )
+        diag = _build_score_curve_diagnostics(k_grid, all_scores)
 
     else:
         raise ValueError(f"Unknown strategy: {config.strategy}")
 
-    if diag.empty or not np.isfinite(diag["score"]).any():
+    if diag.empty:
         return max_k, valid_features[:max_k], diag
 
-    best_idx = diag["score"].idxmin()
-    best_k = int(diag.loc[best_idx, "k"])
+    best_k, diag = choose_k_from_score_curve(diag, config, lower_is_better=True)
 
     return best_k, valid_features[:best_k], diag
 
@@ -482,6 +732,154 @@ def select_k_elbow(
         }
     )
 
+    return best_k, diag
+
+
+def _penalty_weight(config: AutoKConfig, n_eff: float) -> float:
+    if config.objective_penalty in {"bic", "mdl"}:
+        return float(np.log(n_eff))
+    if config.objective_penalty == "aic":
+        return 2.0
+    if config.objective_penalty == "hqc":
+        if n_eff <= np.e:
+            raise ValueError("n_eff must be > e for objective_penalty='hqc'")
+        return float(2.0 * np.log(np.log(n_eff)))
+    if config.objective_penalty == "custom":
+        assert config.objective_penalty_weight is not None
+        return float(config.objective_penalty_weight)
+    raise ValueError(f"Unknown objective_penalty: {config.objective_penalty!r}")
+
+
+def _objective_weight_diagnostics(
+    sample_weight: Optional[np.ndarray],
+    n_samples: int,
+    config: AutoKConfig,
+) -> tuple[np.ndarray, float, float, float, str]:
+    w = ensure_weights(sample_weight, n_samples, normalize=True)
+    weight_sum = float(np.sum(w))
+    sum_sq = float(np.sum(w * w))
+    kish_n_eff = float(weight_sum * weight_sum / sum_sq) if sum_sq > 0.0 else float("nan")
+    if config.objective_n_eff is None:
+        n_eff = weight_sum
+        n_eff_source = "selector_weight_sum"
+    else:
+        n_eff = float(config.objective_n_eff)
+        n_eff_source = "objective_n_eff"
+    if n_eff <= 1.0 or not np.isfinite(n_eff):
+        raise ValueError("objective effective sample size must be finite and > 1")
+    if config.objective_penalty == "hqc" and n_eff <= np.e:
+        raise ValueError("n_eff must be > e for objective_penalty='hqc'")
+    return w, weight_sum, kish_n_eff, n_eff, n_eff_source
+
+
+def select_k_penalized_objective(
+    objective_path: np.ndarray,
+    config: AutoKConfig,
+    *,
+    objective_scale: float | Literal["n_eff"],
+    n_samples: int,
+    sample_weight: Optional[np.ndarray] = None,
+    min_k: Optional[int] = None,
+    max_k: Optional[int] = None,
+    df_path: Optional[np.ndarray] = None,
+) -> Tuple[int, pd.DataFrame]:
+    """Select k by maximizing a penalized CEFS+ proxy objective path."""
+    validate_auto_k_config(config)
+    if config.k_method != "penalized_objective":
+        raise ValueError(
+            "select_k_penalized_objective requires "
+            "AutoKConfig(k_method='penalized_objective')"
+        )
+
+    obj = np.asarray(objective_path, dtype=np.float64).reshape(-1)
+    path_length = int(len(obj))
+    effective_max_k = min(int(max_k if max_k is not None else config.max_k), path_length)
+    if effective_max_k <= 0:
+        return 0, pd.DataFrame()
+    min_k_eff = max(1, min(int(min_k if min_k is not None else config.min_k), effective_max_k))
+
+    _, weight_sum, kish_n_eff, n_eff, n_eff_source = _objective_weight_diagnostics(
+        sample_weight,
+        int(n_samples),
+        config,
+    )
+    penalty_weight = _penalty_weight(config, n_eff)
+    if objective_scale == "n_eff":
+        scale_value = n_eff
+        scale_label = "n_eff"
+    else:
+        scale_value = float(objective_scale)
+        scale_label = str(float(objective_scale))
+    if not np.isfinite(scale_value):
+        raise ValueError("objective_scale must be finite")
+
+    ks = np.arange(1, effective_max_k + 1, dtype=np.int64)
+    if df_path is None:
+        df = ks.astype(np.float64)
+    else:
+        df_arr = np.asarray(df_path, dtype=np.float64).reshape(-1)
+        if len(df_arr) < effective_max_k:
+            raise ValueError("df_path must be at least as long as the effective objective path")
+        df = df_arr[:effective_max_k]
+    penalty = penalty_weight * df
+    objective_used = obj[:effective_max_k]
+    penalized_score = scale_value * objective_used - penalty
+    n_finite_objective = int(np.sum(np.isfinite(objective_used)))
+    n_finite_penalized_score = int(np.sum(np.isfinite(penalized_score)))
+    valid = (ks >= min_k_eff) & np.isfinite(penalized_score)
+    all_penalized_scores_invalid = not bool(valid.any())
+    if valid.any():
+        order = np.lexsort((ks[valid], -penalized_score[valid]))
+        best_pos = np.flatnonzero(valid)[int(order[0])]
+        best_k = int(ks[best_pos])
+    else:
+        warnings.warn(
+            "All candidate penalized objective scores are non-finite; "
+            "falling back to the effective minimum k.",
+            UserWarning,
+            stacklevel=2,
+        )
+        best_k = int(min_k_eff)
+
+    delta = np.zeros(effective_max_k, dtype=np.float64)
+    delta[0] = objective_used[0]
+    if effective_max_k > 1:
+        delta[1:] = np.diff(objective_used)
+    objective_nonmonotone_steps = int(np.sum(delta[1:] < -1e-12))
+    path_exhausted_before_max_k = bool(effective_max_k < int(config.max_k))
+    selected_at_effective_max_k = bool(best_k == effective_max_k)
+    selected_at_config_max_k = bool(best_k == int(config.max_k))
+    selected_at_min_k = bool(best_k == min_k_eff)
+
+    diag = pd.DataFrame(
+        {
+            "k": ks,
+            "objective": objective_used,
+            "delta_objective": delta,
+            "df": df,
+            "penalty_weight": penalty_weight,
+            "penalty": penalty,
+            "penalized_score": penalized_score,
+            "selected": ks == best_k,
+            "n_eff": n_eff,
+            "n_eff_source": n_eff_source,
+            "weight_sum": weight_sum,
+            "kish_n_eff": kish_n_eff,
+            "objective_scale": scale_value,
+            "objective_scale_source": scale_label,
+            "objective_nonmonotone_steps": objective_nonmonotone_steps,
+            "n_finite_objective": n_finite_objective,
+            "n_finite_penalized_score": n_finite_penalized_score,
+            "all_penalized_scores_invalid": all_penalized_scores_invalid,
+            "effective_min_k": min_k_eff,
+            "effective_max_k": effective_max_k,
+            "path_length": path_length,
+            "selected_at_effective_max_k": selected_at_effective_max_k,
+            "selected_at_config_max_k": selected_at_config_max_k,
+            "path_exhausted_before_max_k": path_exhausted_before_max_k,
+            "selected_at_min_k": selected_at_min_k,
+        }
+    )
     return best_k, diag
 
 

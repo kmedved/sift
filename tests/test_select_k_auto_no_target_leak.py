@@ -6,7 +6,12 @@ import pytest
 
 import sift.api as sift_api
 from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
-from sift.selection.auto_k import AutoKConfig, select_k_auto
+from sift.selection.auto_k import (
+    AutoKConfig,
+    choose_k_from_score_curve,
+    select_k_auto,
+    select_k_penalized_objective,
+)
 
 
 NESTED_MODE_ERROR = "auto_k_mode='nested'.*not implemented"
@@ -129,6 +134,184 @@ def test_select_k_auto_evaluate_honors_sample_weight():
     assert weighted_diag.loc[weighted_diag["k"] == 2, "score"].iloc[0] < (
         weighted_diag.loc[weighted_diag["k"] == 1, "score"].iloc[0]
     )
+    assert "score_mean" in weighted_diag.columns
+    np.testing.assert_allclose(weighted_diag["score"], weighted_diag["score_mean"])
+
+
+def test_choose_k_from_score_curve_plateau_and_best_rules():
+    diag = pd.DataFrame(
+        {
+            "k": [5, 10, 25, 50, 100, 150, 200, 250, 300],
+            "score_mean": [8.15, 8.14, 8.13, 8.12, 8.13, 8.119, 8.118, 8.119, 8.122],
+            "score_std": np.nan,
+            "score_se": np.nan,
+            "n_splits": 1,
+            "n_finite": 1,
+        }
+    )
+
+    best_k, best_diag = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(selection_rule="best", min_k=5, max_k=300),
+    )
+    plateau_k, plateau_diag = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(
+            selection_rule="plateau",
+            score_rel_tol=0.001,
+            plateau_prefer="smallest",
+            min_k=5,
+            max_k=300,
+        ),
+    )
+    center_k, _ = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(
+            selection_rule="plateau",
+            score_rel_tol=0.001,
+            plateau_prefer="center",
+            min_k=5,
+            max_k=300,
+        ),
+    )
+
+    assert best_k == 200
+    assert plateau_k == 150
+    assert center_k == 250
+    np.testing.assert_allclose(best_diag["score"], best_diag["score_mean"])
+    assert plateau_diag.loc[plateau_diag["k"] == 150, "in_selected_plateau"].iloc[0]
+
+
+def test_choose_k_from_score_curve_one_se_and_ties_choose_smaller_k():
+    diag = pd.DataFrame(
+        {
+            "k": [1, 2, 3],
+            "score_mean": [0.99, 0.90, 0.90],
+            "score_std": [0.01, 0.20, 0.20],
+            "score_se": [0.005, 0.10, 0.10],
+            "n_splits": 4,
+            "n_finite": 4,
+        }
+    )
+
+    best_k, _ = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(selection_rule="best", min_k=1, max_k=3),
+    )
+    one_se_k, one_se_diag = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(selection_rule="one_se", min_k=1, max_k=3),
+    )
+
+    assert best_k == 2
+    assert one_se_k == 1
+    assert one_se_diag.loc[one_se_diag["k"] == 1, "within_tolerance"].iloc[0]
+
+
+def test_choose_k_from_score_curve_bounds_and_sorts_diagnostics():
+    diag = pd.DataFrame(
+        {
+            "k": [10, 1, 5, 3],
+            "score_mean": [0.20, 0.01, 0.30, 0.10],
+            "score_std": np.nan,
+            "score_se": np.nan,
+            "n_splits": 1,
+            "n_finite": 1,
+        }
+    )
+
+    selected_k, selected_diag = choose_k_from_score_curve(
+        diag,
+        AutoKConfig(selection_rule="best", min_k=3, max_k=8),
+    )
+
+    assert selected_k == 3
+    assert selected_diag["k"].tolist() == [3, 5]
+    assert selected_diag.loc[selected_diag["selected"], "k"].tolist() == [3]
+
+
+def test_select_k_auto_one_se_single_holdout_warns_and_falls_back_to_best():
+    X, y, time = _numeric_auto_k_data()
+    cfg = AutoKConfig(
+        selection_rule="one_se",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=4,
+        val_frac=0.25,
+    )
+
+    with pytest.warns(UserWarning, match="falling back"):
+        best_k, selected, diag = select_k_auto(X, y, list(X.columns), cfg, time=time)
+
+    assert best_k == int(diag.loc[diag["selected"], "k"].iloc[0])
+    assert len(selected) == best_k
+    assert bool(diag["one_se_unavailable"].iloc[0])
+
+
+def test_select_k_penalized_objective_bic_and_custom_ties():
+    objective = np.array([0.10, 0.18, 0.23, 0.231, 0.232])
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=5)
+
+    best_k, diag = select_k_penalized_objective(
+        objective,
+        cfg,
+        objective_scale="n_eff",
+        n_samples=100,
+    )
+    assert best_k == 3
+    assert diag.loc[diag["selected"], "k"].iloc[0] == 3
+    assert diag["n_eff_source"].iloc[0] == "selector_weight_sum"
+
+    tie_cfg = AutoKConfig(
+        k_method="penalized_objective",
+        objective_penalty="custom",
+        objective_penalty_weight=0.0,
+        min_k=1,
+        max_k=3,
+    )
+    tie_k, _ = select_k_penalized_objective(
+        np.array([1.0, 1.0, 1.0]),
+        tie_cfg,
+        objective_scale=1.0,
+        n_samples=10,
+    )
+    assert tie_k == 1
+
+
+def test_select_k_penalized_objective_all_invalid_warns_and_uses_effective_min():
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=2, max_k=5)
+
+    with pytest.warns(UserWarning, match="non-finite"):
+        selected_k, diag = select_k_penalized_objective(
+            np.array([np.nan, -np.inf, np.nan]),
+            cfg,
+            objective_scale="n_eff",
+            n_samples=25,
+        )
+
+    assert selected_k == 2
+    assert bool(diag["all_penalized_scores_invalid"].iloc[0])
+    assert diag["n_finite_penalized_score"].iloc[0] == 0
+    assert diag.loc[diag["selected"], "k"].tolist() == [2]
+
+
+def test_penalized_objective_ignores_irrelevant_plateau_tolerance_validation():
+    cfg = AutoKConfig(
+        k_method="penalized_objective",
+        selection_rule="plateau",
+        min_k=1,
+        max_k=3,
+    )
+
+    selected_k, diag = select_k_penalized_objective(
+        np.array([0.2, 0.21, 0.205]),
+        cfg,
+        objective_scale=1.0,
+        n_samples=20,
+    )
+
+    assert selected_k in {1, 2, 3}
+    assert not diag.empty
 
 
 def test_public_auto_k_passes_sample_weight_to_prefix_evaluation(monkeypatch):
@@ -219,6 +402,16 @@ def test_public_selectors_reject_nested_auto_k_mode(selector, kwargs):
         ({"min_k": 5, "max_k": 3}, "min_k"),
         ({"min_k": True}, "min_k"),
         ({"elbow_min_rel_gain": "0.02"}, "elbow_min_rel_gain"),
+        ({"selection_rule": "bad"}, "selection_rule"),
+        ({"selection_rule": "plateau"}, "score_abs_tol or score_rel_tol"),
+        ({"selection_rule": "tolerance"}, "score_abs_tol or score_rel_tol"),
+        ({"score_rel_tol": -0.1}, "score_rel_tol"),
+        ({"plateau_prefer": "bad"}, "plateau_prefer"),
+        ({"objective_penalty": "bad"}, "objective_penalty"),
+        ({"objective_penalty": "custom"}, "objective_penalty_weight"),
+        ({"objective_penalty_weight": 1.0}, "objective_penalty_weight"),
+        ({"objective_n_eff": 1.0}, "objective_n_eff"),
+        ({"binary_objective_mode": "bad"}, "binary_objective_mode"),
     ],
 )
 def test_public_selectors_validate_auto_k_config(config_kwargs, match):
@@ -255,7 +448,7 @@ def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs):
         val_frac=0.25,
     )
 
-    with pytest.raises(ValueError, match="k_method='elbow'.*classic"):
+    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
         selector(
             X,
             y,
@@ -264,6 +457,73 @@ def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs):
             auto_k_config=cfg,
             verbose=False,
             **kwargs,
+        )
+
+
+def test_public_auto_k_rejects_penalized_objective_for_non_cefsplus_routes():
+    X, y, time = _numeric_auto_k_data()
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=3)
+
+    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="classic",
+            time=time,
+            auto_k_config=cfg,
+            verbose=False,
+        )
+    with pytest.raises(ValueError, match="supported only for CEFS\\+"):
+        select_jmi(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+def test_gaussian_non_cefsplus_rejects_penalized_objective_before_cache(monkeypatch):
+    X, y, _ = _numeric_auto_k_data()
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=3)
+
+    def fail_build_cache(*args, **kwargs):
+        raise AssertionError("build_cache should not be called")
+
+    monkeypatch.setattr(sift_api, "build_cache", fail_build_cache)
+
+    with pytest.raises(ValueError, match="supported only for CEFS\\+"):
+        select_jmim(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+def test_classic_rejects_penalized_objective_before_supervised_encoding_error():
+    X, y, _ = _numeric_auto_k_data()
+    X = X.assign(cat=np.where(np.arange(len(X)) % 2 == 0, "a", "b"))
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=3)
+
+    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="classic",
+            cat_features=["cat"],
+            cat_encoding="loo",
+            auto_k_config=cfg,
+            verbose=False,
         )
 
 

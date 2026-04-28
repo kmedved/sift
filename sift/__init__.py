@@ -14,7 +14,13 @@ from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boru
 from sift.importance import permutation_importance
 from sift.sampling import SmartSamplerConfig, cross_section_config, panel_config, smart_sample
 from sift.selectors import CEFSPlusBinarySelector, CEFSPlusSelector, JMISelector, JMIMSelector, MRMRSelector
-from sift.selection.auto_k import AutoKConfig, compute_objective_for_path, select_k_auto, select_k_elbow
+from sift.selection.auto_k import (
+    AutoKConfig,
+    compute_objective_for_path,
+    select_k_auto,
+    select_k_elbow,
+    select_k_penalized_objective,
+)
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 from sift.stability import StabilitySelector, stability_classif, stability_regression
 
@@ -42,6 +48,7 @@ __all__ = [
     "evaluate_feature_path",
     "select_k_auto",
     "select_k_elbow",
+    "select_k_penalized_objective",
     "compute_objective_for_path",
     "BorutaSelector",
     "BorutaResult",

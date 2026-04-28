@@ -31,10 +31,12 @@ from sift.api import (
 )
 from sift.selection.auto_k import (
     _build_k_grid,
+    _build_score_curve_diagnostics,
     _compute_metric,
     _resolve_metric,
     _split_weights,
     _time_holdout_split,
+    choose_k_from_score_curve,
     resolve_auto_k_config,
 )
 
@@ -647,36 +649,41 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                     }
                 )
 
-        score_rows = [
-            {
-                "k": k,
-                "score": float(np.mean(scores)) if scores else np.inf,
-                "n_splits": len(scores),
-            }
-            for k, scores in all_scores.items()
-        ]
-        score_df = pd.DataFrame(score_rows)
-        finite = score_df[np.isfinite(score_df["score"])]
-        if finite.empty:
-            best_k = max_k
+        score_df = _build_score_curve_diagnostics(k_grid, all_scores)
+        if score_df.empty:
+            selected_k = max_k
+            score_best_k = None
         else:
-            finite = finite.sort_values(["score", "k"], kind="mergesort")
-            best_k = int(finite.iloc[0]["k"])
+            selected_k, score_df = choose_k_from_score_curve(
+                score_df,
+                config,
+                lower_is_better=True,
+            )
+            score_best_k = (
+                None if score_df.empty else int(score_df["best_k"].iloc[0])
+            )
 
         self.nested_auto_k_diagnostics_ = {
             "mode": "nested",
             "strategy": config.strategy,
             "metric": metric,
-            "best_k": best_k,
+            "selection_rule": config.selection_rule,
+            "selection_rule_effective": (
+                None
+                if score_df.empty
+                else str(score_df["selection_rule_effective"].iloc[0])
+            ),
+            "best_k": score_best_k,
+            "selected_k": selected_k,
             "scores": score_df,
             "folds": pd.DataFrame(fold_rows),
         }
-        self.k_ = best_k
+        self.k_ = selected_k
 
         return self._fit_selector(
             X,
             y,
-            k=best_k,
+            k=selected_k,
             sample_weight=sample_weight,
             groups=groups,
             time=time,

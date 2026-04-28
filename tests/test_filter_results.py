@@ -150,3 +150,28 @@ def test_filter_selectors_auto_k_return_result():
             assert [feature_names[i] for i in result.selected_indices] == result.selected_features
         assert result.selector_metadata["k_requested"] == "auto"
         assert result.selector_metadata["n_features"] == X.shape[1]
+
+    assert result_cefsplus.diagnostics_["auto_k"]["method"] == "elbow"
+    assert not result_cefsplus.diagnostics_["auto_k_diagnostics"].empty
+
+
+def test_cefsplus_penalized_objective_return_result_diagnostics():
+    X, y = _make_regression_data(seed=2)
+    cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=6)
+
+    result = select_cefsplus(
+        X,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert isinstance(result, FilterSelectionResult)
+    assert 1 <= len(result.selected_features) <= 6
+    assert result.selector_metadata["k_method"] == "penalized_objective"
+    assert result.selector_metadata["objective_penalty"] == "bic"
+    assert result.diagnostics_["auto_k"]["objective_penalty"] == "bic"
+    assert result.diagnostics_["auto_k"]["objective_scale"] == "gaussian_2mi"
+    assert result.diagnostics_["auto_k_diagnostics"]["penalized_score"].notna().all()
