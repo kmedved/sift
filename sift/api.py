@@ -565,6 +565,31 @@ def _prepare_xy_classic(
     return X_arr, y_arr, w, feature_names, row_idx
 
 
+def _compute_relevance(
+    X_arr: np.ndarray,
+    y_arr: np.ndarray,
+    w: np.ndarray,
+    task: Task,
+    relevance: RelevanceMethod,
+) -> np.ndarray:
+    if task == "regression":
+        rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
+    else:
+        rel_funcs = {
+            "f": rel_est.f_classif,
+            "ks": rel_est.ks_classif,
+            "rf": rel_est.rf_classif,
+        }
+
+    if relevance not in rel_funcs:
+        raise ValueError(
+            f"relevance='{relevance}' not valid for task='{task}'. "
+            f"Valid options: {sorted(rel_funcs.keys())}"
+        )
+
+    return rel_funcs[relevance](X_arr, y_arr, w)
+
+
 def select_mrmr(
     X: Union[pd.DataFrame, np.ndarray],
     y: Union[pd.Series, np.ndarray],
@@ -751,22 +776,7 @@ def select_mrmr(
             sample_weight=sample_weight,
         )
 
-        if task == "regression":
-            rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
-        else:
-            rel_funcs = {
-                "f": rel_est.f_classif,
-                "ks": rel_est.ks_classif,
-                "rf": rel_est.rf_classif,
-            }
-
-        if relevance not in rel_funcs:
-            raise ValueError(
-                f"relevance='{relevance}' not valid for task='{task}'. "
-                f"Valid options: {sorted(rel_funcs.keys())}"
-            )
-
-        rel = rel_funcs[relevance](X_arr, y_arr, w)
+        rel = _compute_relevance(X_arr, y_arr, w, task, relevance)
 
         if verbose:
             print(
@@ -1022,22 +1032,7 @@ def _mrmr_classic(
         sample_weight=sample_weight,
     )
 
-    if task == "regression":
-        rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
-    else:
-        rel_funcs = {
-            "f": rel_est.f_classif,
-            "ks": rel_est.ks_classif,
-            "rf": rel_est.rf_classif,
-        }
-
-    if relevance_method not in rel_funcs:
-        raise ValueError(
-            f"relevance='{relevance_method}' not valid for task='{task}'. "
-            f"Valid options: {sorted(rel_funcs.keys())}"
-        )
-
-    rel = rel_funcs[relevance_method](X_arr, y_arr, w)
+    rel = _compute_relevance(X_arr, y_arr, w, task, relevance_method)
 
     top_m = _default_top_m(top_m, k)
 
@@ -1264,22 +1259,7 @@ def select_jmi(
             sample_weight=sample_weight,
         )
 
-        if task == "regression":
-            rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
-        else:
-            rel_funcs = {
-                "f": rel_est.f_classif,
-                "ks": rel_est.ks_classif,
-                "rf": rel_est.rf_classif,
-            }
-
-        if relevance not in rel_funcs:
-            raise ValueError(
-                f"relevance='{relevance}' not valid for task='{task}'. "
-                f"Valid options: {sorted(rel_funcs.keys())}"
-            )
-
-        rel = rel_funcs[relevance](X_arr, y_arr, w)
+        rel = _compute_relevance(X_arr, y_arr, w, task, relevance)
 
         y_kind = "discrete" if task == "classification" else "continuous"
 
@@ -1633,22 +1613,7 @@ def select_jmim(
             sample_weight=sample_weight,
         )
 
-        if task == "regression":
-            rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
-        else:
-            rel_funcs = {
-                "f": rel_est.f_classif,
-                "ks": rel_est.ks_classif,
-                "rf": rel_est.rf_classif,
-            }
-
-        if relevance not in rel_funcs:
-            raise ValueError(
-                f"relevance='{relevance}' not valid for task='{task}'. "
-                f"Valid options: {sorted(rel_funcs.keys())}"
-            )
-
-        rel = rel_funcs[relevance](X_arr, y_arr, w)
+        rel = _compute_relevance(X_arr, y_arr, w, task, relevance)
 
         y_kind = "discrete" if task == "classification" else "continuous"
 
@@ -1880,22 +1845,7 @@ def _jmi_classic(
         sample_weight=sample_weight,
     )
 
-    if task == "regression":
-        rel_funcs = {"f": rel_est.f_regression, "rf": rel_est.rf_regression}
-    else:
-        rel_funcs = {
-            "f": rel_est.f_classif,
-            "ks": rel_est.ks_classif,
-            "rf": rel_est.rf_classif,
-        }
-
-    if relevance_method not in rel_funcs:
-        raise ValueError(
-            f"relevance='{relevance_method}' not valid for task='{task}'. "
-            f"Valid options: {sorted(rel_funcs.keys())}"
-        )
-
-    rel = rel_funcs[relevance_method](X_arr, y_arr, w)
+    rel = _compute_relevance(X_arr, y_arr, w, task, relevance_method)
 
     y_kind = "discrete" if task == "classification" else "continuous"
     aggregation = "min" if use_min else "sum"
