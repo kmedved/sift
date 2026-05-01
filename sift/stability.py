@@ -122,13 +122,18 @@ def _block_bootstrap_indices(
     """
     rng = np.random.default_rng(random_state)
 
-    unique_groups = np.unique(groups)
-    group_data = {}
-    for g in unique_groups:
-        mask = groups == g
-        idx = np.where(mask)[0]
-        order = np.argsort(time[idx])
-        group_data[g] = idx[order]
+    unique_groups, inverse_groups = np.unique(groups, return_inverse=True)
+    order = np.lexsort((time, inverse_groups))
+    sorted_inverse = inverse_groups[order]
+    if len(order) == 0:
+        group_data = {}
+    else:
+        starts = np.r_[0, np.flatnonzero(sorted_inverse[1:] != sorted_inverse[:-1]) + 1]
+        stops = np.r_[starts[1:], len(order)]
+        group_data = {
+            unique_groups[int(sorted_inverse[start])]: order[start:stop]
+            for start, stop in zip(starts, stops)
+        }
 
     classes = set(np.unique(y)) if task == "classification" and y is not None else None
 

@@ -448,6 +448,7 @@ def select_binary_logistic_path(
     work_to_original = valid_original[candidate_valid]
 
     selected: list[int] = []
+    selected_mask = np.zeros(Z_work.shape[1], dtype=bool)
     path_scores: list[float] = []
     beta: np.ndarray | None = None
     if use_block_gram and Z_work.shape[1]:
@@ -468,10 +469,7 @@ def select_binary_logistic_path(
                 failures += 1
                 break
 
-        remaining = np.array(
-            [idx for idx in range(Z_work.shape[1]) if idx not in selected],
-            dtype=np.int64,
-        )
+        remaining = np.flatnonzero(~selected_mask)
         if remaining.size == 0:
             break
         adjust_score = bool(selected)
@@ -516,6 +514,7 @@ def select_binary_logistic_path(
         best_pos = int(np.lexsort((work_to_original[remaining], -scores))[0])
         best_local = int(remaining[best_pos])
         selected.append(best_local)
+        selected_mask[best_local] = True
         path_scores.append(float(scores[best_pos]))
 
     selected_original = [int(work_to_original[i]) for i in selected]
