@@ -190,9 +190,16 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     """Sklearn-style compatibility layer for function-based selectors."""
 
     _selector_fn: Callable
+    _selector_param_names: tuple[str, ...] = ()
+
+    def _init_selector(self, selector_fn: Callable, params: dict) -> None:
+        for name, value in params.items():
+            if name != "self":
+                setattr(self, name, value)
+        self._selector_fn = selector_fn
 
     def _selector_params(self) -> dict:
-        raise NotImplementedError
+        return {name: getattr(self, name) for name in self._selector_param_names}
 
     def _clear_fit_state(self) -> None:
         for attr in (
@@ -731,6 +738,22 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
 class MRMRSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_mrmr`."""
 
+    _selector_param_names = (
+        "task",
+        "relevance",
+        "estimator",
+        "formula",
+        "top_m",
+        "cat_features",
+        "cat_encoding",
+        "allow_full_data_target_encoding",
+        "subsample",
+        "random_state",
+        "n_jobs",
+        "mrmr_backend",
+        "verbose",
+    )
+
     def __init__(
         self,
         k: int | str = 10,
@@ -751,46 +774,25 @@ class MRMRSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
     ):
-        self.k = k
-        self.task = task
-        self.relevance = relevance
-        self.estimator = estimator
-        self.formula = formula
-        self.top_m = top_m
-        self.cat_features = cat_features
-        self.cat_encoding = cat_encoding
-        self.allow_full_data_target_encoding = allow_full_data_target_encoding
-        self.subsample = subsample
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-        self.mrmr_backend = mrmr_backend
-        self.verbose = verbose
-        self.cache = cache
-        self.auto_k_config = auto_k_config
-
-        self._selector_fn = select_mrmr
-
-    def _selector_params(self) -> dict:
-        return dict(
-            task=self.task,
-            relevance=self.relevance,
-            estimator=self.estimator,
-            formula=self.formula,
-            top_m=self.top_m,
-            cat_features=self.cat_features,
-            cat_encoding=self.cat_encoding,
-            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
-            subsample=self.subsample,
-            random_state=self.random_state,
-            n_jobs=self.n_jobs,
-            mrmr_backend=self.mrmr_backend,
-            verbose=self.verbose,
-        )
+        self._init_selector(select_mrmr, locals())
 
 
 class JMISelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmi`."""
 
+    _selector_param_names = (
+        "task",
+        "estimator",
+        "relevance",
+        "top_m",
+        "cat_features",
+        "cat_encoding",
+        "allow_full_data_target_encoding",
+        "subsample",
+        "random_state",
+        "verbose",
+    )
+
     def __init__(
         self,
         k: int | str = 10,
@@ -808,40 +810,14 @@ class JMISelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
     ):
-        self.k = k
-        self.task = task
-        self.estimator = estimator
-        self.relevance = relevance
-        self.top_m = top_m
-        self.cat_features = cat_features
-        self.cat_encoding = cat_encoding
-        self.allow_full_data_target_encoding = allow_full_data_target_encoding
-        self.subsample = subsample
-        self.random_state = random_state
-        self.verbose = verbose
-        self.cache = cache
-        self.auto_k_config = auto_k_config
-
-        self._selector_fn = select_jmi
-
-    def _selector_params(self) -> dict:
-        return dict(
-            task=self.task,
-            estimator=self.estimator,
-            relevance=self.relevance,
-            top_m=self.top_m,
-            cat_features=self.cat_features,
-            cat_encoding=self.cat_encoding,
-            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
-            subsample=self.subsample,
-            random_state=self.random_state,
-            verbose=self.verbose,
-        )
+        self._init_selector(select_jmi, locals())
 
 
 class JMIMSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmim`."""
 
+    _selector_param_names = JMISelector._selector_param_names
+
     def __init__(
         self,
         k: int | str = 10,
@@ -859,39 +835,22 @@ class JMIMSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
     ):
-        self.k = k
-        self.task = task
-        self.estimator = estimator
-        self.relevance = relevance
-        self.top_m = top_m
-        self.cat_features = cat_features
-        self.cat_encoding = cat_encoding
-        self.allow_full_data_target_encoding = allow_full_data_target_encoding
-        self.subsample = subsample
-        self.random_state = random_state
-        self.verbose = verbose
-        self.cache = cache
-        self.auto_k_config = auto_k_config
-
-        self._selector_fn = select_jmim
-
-    def _selector_params(self) -> dict:
-        return dict(
-            task=self.task,
-            estimator=self.estimator,
-            relevance=self.relevance,
-            top_m=self.top_m,
-            cat_features=self.cat_features,
-            cat_encoding=self.cat_encoding,
-            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
-            subsample=self.subsample,
-            random_state=self.random_state,
-            verbose=self.verbose,
-        )
+        self._init_selector(select_jmim, locals())
 
 
 class CEFSPlusSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus`."""
+
+    _selector_param_names = (
+        "top_m",
+        "corr_prune",
+        "cat_features",
+        "cat_encoding",
+        "allow_full_data_target_encoding",
+        "subsample",
+        "random_state",
+        "verbose",
+    )
 
     def __init__(
         self,
@@ -908,35 +867,29 @@ class CEFSPlusSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
     ):
-        self.k = k
-        self.top_m = top_m
-        self.corr_prune = corr_prune
-        self.cat_features = cat_features
-        self.cat_encoding = cat_encoding
-        self.allow_full_data_target_encoding = allow_full_data_target_encoding
-        self.subsample = subsample
-        self.random_state = random_state
-        self.verbose = verbose
-        self.cache = cache
-        self.auto_k_config = auto_k_config
-
-        self._selector_fn = select_cefsplus
-
-    def _selector_params(self) -> dict:
-        return dict(
-            top_m=self.top_m,
-            corr_prune=self.corr_prune,
-            cat_features=self.cat_features,
-            cat_encoding=self.cat_encoding,
-            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
-            subsample=self.subsample,
-            random_state=self.random_state,
-            verbose=self.verbose,
-        )
+        self._init_selector(select_cefsplus, locals())
 
 
 class CEFSPlusBinarySelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`."""
+
+    _selector_param_names = (
+        "loss",
+        "top_m",
+        "corr_prune",
+        "class_weight",
+        "ridge",
+        "refit_every",
+        "cat_features",
+        "cat_encoding",
+        "loo_smoothing",
+        "loo_clip_min",
+        "loo_clip_max",
+        "allow_full_data_target_encoding",
+        "subsample",
+        "random_state",
+        "verbose",
+    )
 
     def __init__(
         self,
@@ -959,25 +912,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         verbose: bool = True,
         auto_k_config=None,
     ):
-        self.k = k
-        self.loss = loss
-        self.top_m = top_m
-        self.corr_prune = corr_prune
-        self.class_weight = class_weight
-        self.ridge = ridge
-        self.refit_every = refit_every
-        self.cat_features = cat_features
-        self.cat_encoding = cat_encoding
-        self.loo_smoothing = loo_smoothing
-        self.loo_clip_min = loo_clip_min
-        self.loo_clip_max = loo_clip_max
-        self.allow_full_data_target_encoding = allow_full_data_target_encoding
-        self.subsample = subsample
-        self.random_state = random_state
-        self.verbose = verbose
-        self.auto_k_config = auto_k_config
-
-        self._selector_fn = select_cefsplus_binary
+        self._init_selector(select_cefsplus_binary, locals())
 
     def _task(self) -> str:
         return "classification"
@@ -1005,25 +940,6 @@ class CEFSPlusBinarySelector(_BaseSelector):
             class_weight=self.class_weight,
         )
         return weights
-
-    def _selector_params(self) -> dict:
-        return dict(
-            loss=self.loss,
-            top_m=self.top_m,
-            corr_prune=self.corr_prune,
-            class_weight=self.class_weight,
-            ridge=self.ridge,
-            refit_every=self.refit_every,
-            cat_features=self.cat_features,
-            cat_encoding=self.cat_encoding,
-            loo_smoothing=self.loo_smoothing,
-            loo_clip_min=self.loo_clip_min,
-            loo_clip_max=self.loo_clip_max,
-            allow_full_data_target_encoding=self.allow_full_data_target_encoding,
-            subsample=self.subsample,
-            random_state=self.random_state,
-            verbose=self.verbose,
-        )
 
     def _fit_selector(
         self,
