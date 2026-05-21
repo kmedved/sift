@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-from numba import njit
 
+from sift._numba import njit_optional_cache
 from sift._preprocess import ensure_weights as _ensure_weights
 
 
 # Keep these kernels serial: CatBoost/OpenMP can crash when Numba's parallel
 # runtime is initialized after CatBoost has already been imported.
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     """
     Weighted F-statistic for regression.
@@ -56,7 +56,7 @@ def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     return scores
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     """Weighted F-statistic for classification (weighted ANOVA)."""
     n, p = X.shape

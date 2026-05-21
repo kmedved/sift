@@ -7,8 +7,9 @@ from typing import Literal
 
 import numpy as np
 from joblib import Parallel, delayed, effective_n_jobs
-from numba import njit
 from scipy.special import ndtri
+
+from sift._numba import njit_optional_cache
 
 RankBackend = Literal["serial", "processes"]
 
@@ -183,7 +184,7 @@ def weighted_rank_gauss_2d(
     return Z
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def weighted_correlation_matrix_numba(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
     """Numba fallback for small matrices or when BLAS is slower."""
     n, p = Z.shape
@@ -282,7 +283,7 @@ def weighted_correlation_matrix(
     raise ValueError(f"Unknown backend: {backend}")
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def weighted_corr_with_vector(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = Z.shape
     w_sum = 0.0
@@ -298,7 +299,7 @@ def weighted_corr_with_vector(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> n
     return np.clip(r, -0.999999, 0.999999)
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def gaussian_mi_from_corr(r: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """Gaussian MI approximation: I(X;Y) = -0.5 * log(1 - r²)."""
     r2 = np.clip(r * r, 0.0, 1.0 - eps)

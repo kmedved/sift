@@ -6,9 +6,9 @@ from typing import Literal, Optional
 
 import numpy as np
 from joblib import Parallel, delayed, effective_n_jobs
-from numba import njit
 from threadpoolctl import threadpool_limits
 
+from sift._numba import njit_optional_cache
 from sift._preprocess import validate_k
 
 FLOOR = 1e-6
@@ -32,7 +32,7 @@ def resolve_mrmr_backend(mrmr_backend: MrmrBackend, n_jobs: int) -> Literal["ser
 # Classic mRMR (incremental redundancy, O(p) memory)
 # =============================================================================
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def _standardize_columns_weighted(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = X.shape
     w_sum = 0.0
@@ -57,7 +57,7 @@ def _standardize_columns_weighted(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     return Z
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def _weighted_corr_with_last(Z: np.ndarray, last_idx: int, p: int, w: np.ndarray) -> np.ndarray:
     n = Z.shape[0]
     w_sum = 0.0
@@ -73,7 +73,7 @@ def _weighted_corr_with_last(Z: np.ndarray, last_idx: int, p: int, w: np.ndarray
     return corrs
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def mrmr_loop_incremental(
     Z: np.ndarray,
     relevance: np.ndarray,

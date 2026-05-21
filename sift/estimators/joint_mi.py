@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from numba import njit
 from scipy.spatial import cKDTree
 from scipy.special import digamma
 
+from sift._numba import njit_optional_cache
 
-@njit(cache=True)
+
+@njit_optional_cache(cache=True)
 def _entropy_from_counts(counts: np.ndarray) -> float:
     """Entropy from count array."""
     n = counts.sum()
@@ -117,7 +118,7 @@ def binned_joint_mi(
     return scores
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def r2_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
@@ -222,7 +223,7 @@ def r2_joint_mi(
 
 # Keep this kernel serial for the same CatBoost/OpenMP compatibility reason as
 # the relevance kernels.
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def r2_joint_mi_indexed(
     X_full: np.ndarray,
     cand_idx: np.ndarray,

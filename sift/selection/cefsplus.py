@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import List, Literal, Optional, Tuple
 
 import numpy as np
-from numba import njit
 
+from sift._numba import njit_optional_cache
 from sift.estimators.copula import (
     FeatureCache,
     build_cache,
@@ -139,7 +139,7 @@ def _gaussian_jmi_select(
     return selected[:count]
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def cefsplus_loop(
     R: np.ndarray,
     r: np.ndarray,
@@ -299,7 +299,7 @@ def cefsplus_loop(
     return selected[:count]
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def cefsplus_loop_with_objective(
     R: np.ndarray,
     r: np.ndarray,
