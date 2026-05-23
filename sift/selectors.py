@@ -8,10 +8,6 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.linear_model import LogisticRegression, Ridge, RidgeCV
-from sklearn.metrics import log_loss
-from sklearn.model_selection import GroupKFold
-from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 from sift._preprocess import (
@@ -21,24 +17,18 @@ from sift._preprocess import (
     suppress_category_encoder_pandas_warnings,
 )
 from sift.api import (
-    _resolve_binary_weights,
-    _validate_binary_target,
     select_cefsplus,
-    select_cefsplus_binary,
     select_jmim,
     select_jmi,
     select_mrmr,
 )
-from sift.selection.auto_k import (
-    _build_k_grid,
-    _build_score_curve_diagnostics,
-    _compute_metric,
-    _resolve_metric,
-    _split_weights,
-    _time_holdout_split,
-    choose_k_from_score_curve,
-    resolve_auto_k_config,
+from sift.selection.cefsplus_binary_api import select_cefsplus_binary
+from sift.selection.cefsplus_binary_common import (
+    resolve_binary_weights,
+    validate_binary_target,
 )
+from sift.selection.auto_k import resolve_auto_k_config
+from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
 _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
@@ -153,37 +143,6 @@ def _make_category_encoder(
         )
     except TypeError:
         return Encoder(cols=columns, handle_missing="return_nan")
-
-
-def _numeric_train_val(
-    X_train,
-    X_val,
-) -> tuple[np.ndarray, np.ndarray]:
-    if isinstance(X_train, pd.DataFrame):
-        Xtr = X_train.to_numpy(dtype=np.float64, copy=False)
-    else:
-        Xtr = np.asarray(X_train, dtype=np.float64)
-    if isinstance(X_val, pd.DataFrame):
-        Xva = X_val.to_numpy(dtype=np.float64, copy=False)
-    else:
-        Xva = np.asarray(X_val, dtype=np.float64)
-
-    with np.errstate(all="ignore"):
-        col_means = np.nanmean(np.where(np.isfinite(Xtr), Xtr, np.nan), axis=0)
-    col_means = np.where(np.isfinite(col_means), col_means, 0.0)
-
-    mask_tr = ~np.isfinite(Xtr)
-    if mask_tr.any():
-        Xtr = Xtr.copy()
-        Xtr[mask_tr] = col_means[np.where(mask_tr)[1]]
-
-    mask_va = ~np.isfinite(Xva)
-    if mask_va.any():
-        Xva = Xva.copy()
-        Xva[mask_va] = col_means[np.where(mask_va)[1]]
-
-    scaler = StandardScaler().fit(Xtr)
-    return scaler.transform(Xtr), scaler.transform(Xva)
 
 
 class _BaseSelector(BaseEstimator, TransformerMixin):
@@ -478,31 +437,6 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             if hasattr(self, "_fit_transform_output_"):
                 delattr(self, "_fit_transform_output_")
 
-    def _nested_splits(self, X, y_arr, groups, time, config):
-        n = len(y_arr)
-        if config.strategy == "time_holdout":
-            if time is None:
-                raise ValueError("auto_k_mode='nested' with time_holdout requires time")
-            time_arr = np.asarray(time).reshape(-1)
-            if len(time_arr) != n:
-                raise ValueError(f"time has {len(time_arr)} rows but X/y have {n}")
-            return [_time_holdout_split(time_arr, config.val_frac)]
-
-        if config.strategy == "group_cv":
-            if groups is None:
-                raise ValueError("auto_k_mode='nested' with group_cv requires groups")
-            group_arr = np.asarray(groups).reshape(-1)
-            if len(group_arr) != n:
-                raise ValueError(f"groups has {len(group_arr)} rows but X/y have {n}")
-            n_unique = len(np.unique(group_arr))
-            n_splits = min(config.n_splits, n_unique)
-            if n_splits < 2:
-                raise ValueError(f"group_cv requires at least 2 groups, got {n_unique}")
-            splitter = GroupKFold(n_splits=n_splits)
-            return list(splitter.split(X, y_arr, group_arr))
-
-        raise ValueError(f"Unknown auto_k strategy: {config.strategy}")
-
     def _clone_for_nested_path(self, k: int):
         params = self.get_params(deep=False)
         params["k"] = k
@@ -513,71 +447,6 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         if "verbose" in params:
             params["verbose"] = False
         return self.__class__(**params)
-
-    def _evaluate_nested_prefixes(
-        self,
-        X_train_path,
-        X_val_path,
-        y_train,
-        y_val,
-        w_train,
-        w_val,
-        *,
-        task: str,
-        metric: str,
-        k_grid: list[int],
-    ) -> dict[int, float]:
-        if X_train_path.shape[1] == 0:
-            return {k: np.inf for k in k_grid}
-        Xtr_s, Xva_s = _numeric_train_val(X_train_path, X_val_path)
-        scores: dict[int, float] = {}
-        alphas = np.logspace(-3, 3, 10)
-
-        for k in k_grid:
-            if k > Xtr_s.shape[1]:
-                scores[k] = np.inf
-                continue
-            try:
-                if task == "classification" and len(np.unique(y_train)) < 2:
-                    scores[k] = np.inf
-                    continue
-
-                if task == "regression":
-                    ridgecv = RidgeCV(alphas=alphas).fit(
-                        Xtr_s[:, :k],
-                        y_train,
-                        sample_weight=w_train,
-                    )
-                    model = Ridge(alpha=float(ridgecv.alpha_))
-                else:
-                    model = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
-
-                model.fit(Xtr_s[:, :k], y_train, sample_weight=w_train)
-
-                if task == "classification" and metric == "logloss":
-                    if not np.isin(np.unique(y_val), model.classes_).all():
-                        scores[k] = np.inf
-                    else:
-                        proba = model.predict_proba(Xva_s[:, :k])
-                        scores[k] = float(
-                            log_loss(
-                                y_val,
-                                proba,
-                                labels=model.classes_,
-                                sample_weight=w_val,
-                            )
-                        )
-                else:
-                    pred = model.predict(Xva_s[:, :k])
-                    scores[k] = _compute_metric(
-                        y_val,
-                        pred,
-                        metric,
-                        sample_weight=w_val,
-                    )
-            except Exception:
-                scores[k] = np.inf
-        return scores
 
     def _fit_nested_auto_k(
         self,
@@ -597,27 +466,12 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
 
         y_arr = np.asarray(y).reshape(-1)
         n_features = len(_feature_names_or_default(X))
-        if n_features < 1:
-            raise ValueError("X must contain at least one feature")
-
         config = auto_k_config
-        max_k = min(int(config.max_k), n_features)
-        min_k = max(1, min(int(config.min_k), max_k))
-        k_grid = _build_k_grid(min_k, max_k)
-        task = self._task()
-        metric = _resolve_metric(config.metric, task)
         fit_w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
         eval_w_arr = self._nested_eval_sample_weight(y, sample_weight)
-        splits = self._nested_splits(X, y_arr, groups, time, config)
 
-        all_scores = {k: [] for k in k_grid}
-        fold_rows = []
-
-        for split_id, (train_idx, val_idx) in enumerate(splits):
-            train_idx = np.asarray(train_idx, dtype=np.int64)
-            val_idx = np.asarray(val_idx, dtype=np.int64)
+        def build_fold_path(train_idx: np.ndarray, val_idx: np.ndarray, max_k: int):
             fold_selector = self._clone_for_nested_path(max_k)
-
             train_X = _slice_rows(X, train_idx)
             X_train_path = fold_selector.fit_transform(
                 train_X,
@@ -625,72 +479,31 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 sample_weight=fit_w_arr[train_idx],
                 **(fit_params or {}),
             )
-
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
-            w_train = _split_weights(eval_w_arr, train_idx, "train")
-            w_val = _split_weights(eval_w_arr, val_idx, "validation")
-            split_scores = self._evaluate_nested_prefixes(
-                X_train_path,
-                X_val_path,
-                y_arr[train_idx],
-                y_arr[val_idx],
-                w_train,
-                w_val,
-                task=task,
-                metric=metric,
-                k_grid=k_grid,
+            return NestedAutoKFold(
+                train_path=X_train_path,
+                val_path=X_val_path,
+                feature_path=list(fold_selector.selected_features_),
             )
 
-            for k, score in split_scores.items():
-                all_scores[k].append(score)
-                fold_rows.append(
-                    {
-                        "split": split_id,
-                        "k": k,
-                        "score": score,
-                        "path": tuple(
-                            fold_selector.selected_features_[
-                                : min(k, len(fold_selector.selected_features_))
-                            ]
-                        ),
-                    }
-                )
-
-        score_df = _build_score_curve_diagnostics(k_grid, all_scores)
-        if score_df.empty:
-            selected_k = max_k
-            score_best_k = None
-        else:
-            selected_k, score_df = choose_k_from_score_curve(
-                score_df,
-                config,
-                lower_is_better=True,
-            )
-            score_best_k = (
-                None if score_df.empty else int(score_df["best_k"].iloc[0])
-            )
-
-        self.nested_auto_k_diagnostics_ = {
-            "mode": "nested",
-            "strategy": config.strategy,
-            "metric": metric,
-            "selection_rule": config.selection_rule,
-            "selection_rule_effective": (
-                None
-                if score_df.empty
-                else str(score_df["selection_rule_effective"].iloc[0])
-            ),
-            "best_k": score_best_k,
-            "selected_k": selected_k,
-            "scores": score_df,
-            "folds": pd.DataFrame(fold_rows),
-        }
-        self.k_ = selected_k
+        nested = select_k_nested(
+            X,
+            y_arr,
+            n_features=n_features,
+            config=config,
+            build_fold_path=build_fold_path,
+            groups=groups,
+            time=time,
+            sample_weight=eval_w_arr,
+            task=self._task(),
+        )
+        self.nested_auto_k_diagnostics_ = nested.diagnostics
+        self.k_ = nested.selected_k
 
         return self._fit_selector(
             X,
             y,
-            k=selected_k,
+            k=nested.selected_k,
             sample_weight=sample_weight,
             groups=groups,
             time=time,
@@ -918,12 +731,12 @@ class CEFSPlusBinarySelector(_BaseSelector):
         return "classification"
 
     def _categorical_target(self, y):
-        y01, _, _ = _validate_binary_target(y)
+        y01, _, _ = validate_binary_target(y)
         return y01
 
     def _categorical_sample_weight(self, y, sample_weight):
-        y01, raw_y, _ = _validate_binary_target(y)
-        weights, _ = _resolve_binary_weights(
+        y01, raw_y, _ = validate_binary_target(y)
+        weights, _ = resolve_binary_weights(
             y01,
             raw_y,
             sample_weight=sample_weight,
@@ -932,8 +745,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
         return weights
 
     def _nested_eval_sample_weight(self, y, sample_weight):
-        y01, raw_y, _ = _validate_binary_target(y)
-        weights, _ = _resolve_binary_weights(
+        y01, raw_y, _ = validate_binary_target(y)
+        weights, _ = resolve_binary_weights(
             y01,
             raw_y,
             sample_weight=sample_weight,
@@ -988,7 +801,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
             raise ValueError(
                 "CEFSPlusBinarySelector(loss='brier', cat_encoding='loo_logit') "
                 "has no selector-class parity with the function API. Use "
-                "cat_encoding='loo' for brier compatibility or loss='logloss' "
+                "cat_encoding='loo' for Brier proxy mode or loss='logloss' "
                 "for logistic loo_logit encoding."
             )
 

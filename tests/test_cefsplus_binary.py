@@ -4,7 +4,7 @@ import pytest
 
 from sift import CEFSPlusBinarySelector, select_cefsplus, select_cefsplus_binary
 from sift._preprocess import LeaveOneOutLogitEncoder
-from sift.api import _resolve_binary_weights, _validate_binary_target
+import sift.selection.auto_k_nested as auto_k_nested_module
 import sift.selection.cefsplus_binary as cefsplus_binary_module
 from sift.selection.cefsplus_binary import (
     compute_logistic_block_gram,
@@ -12,6 +12,10 @@ from sift.selection.cefsplus_binary import (
     logistic_score_test_scores,
     logistic_score_test_scores_from_gram,
     weighted_standardize,
+)
+from sift.selection.cefsplus_binary_common import (
+    resolve_binary_weights,
+    validate_binary_target,
 )
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.result import FilterSelectionResult
@@ -239,36 +243,10 @@ def test_block_gram_uses_post_screen_candidate_matrix(monkeypatch):
     assert all(width == candidate_count for width in widths)
 
 
-def test_weighted_logloss_alias_matches_logloss_with_weights():
-    X, y = _classification_frame(seed=3)
-    w = np.linspace(0.5, 2.0, len(y))
-
-    selected_logloss = select_cefsplus_binary(
-        X,
-        y,
-        k=4,
-        loss="logloss",
-        sample_weight=w,
-        subsample=None,
-        verbose=False,
-    )
-    selected_alias = select_cefsplus_binary(
-        X,
-        y,
-        k=4,
-        loss="weighted_logloss",
-        sample_weight=w,
-        subsample=None,
-        verbose=False,
-    )
-
-    assert selected_alias == selected_logloss
-
-
-def test_weighted_logloss_requires_effective_weights():
+def test_weighted_logloss_is_rejected():
     X, y = _classification_frame(seed=4)
 
-    with pytest.raises(ValueError, match="requires sample_weight or class_weight"):
+    with pytest.raises(ValueError, match="loss must be one of 'logloss' or 'brier'"):
         select_cefsplus_binary(X, y, k=2, loss="weighted_logloss", verbose=False)
 
 
@@ -1017,9 +995,9 @@ def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weight
         val_frac=0.25,
     )
     captured_weights = []
-    original = CEFSPlusBinarySelector._evaluate_nested_prefixes
+    original = auto_k_nested_module.evaluate_numeric_prefixes
 
-    def spy_eval(self, X_train_path, X_val_path, y_train, y_val, w_train, w_val, **kwargs):
+    def spy_eval(X_train_path, X_val_path, y_train, y_val, w_train, w_val, **kwargs):
         captured_weights.append(
             (
                 np.asarray(y_train),
@@ -1029,7 +1007,6 @@ def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weight
             )
         )
         return original(
-            self,
             X_train_path,
             X_val_path,
             y_train,
@@ -1039,7 +1016,7 @@ def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weight
             **kwargs,
         )
 
-    monkeypatch.setattr(CEFSPlusBinarySelector, "_evaluate_nested_prefixes", spy_eval)
+    monkeypatch.setattr(auto_k_nested_module, "evaluate_numeric_prefixes", spy_eval)
 
     CEFSPlusBinarySelector(
         k="auto",
@@ -1134,8 +1111,8 @@ def test_brier_mode_return_result_preserves_delegate_indices_and_metadata():
 def test_weighted_brier_mode_matches_resolved_weighted_cefsplus():
     X, y = _classification_frame(seed=142)
     sample_weight = np.linspace(0.5, 3.0, len(y))
-    y01, raw_y, _ = _validate_binary_target(y)
-    weights, _ = _resolve_binary_weights(
+    y01, raw_y, _ = validate_binary_target(y)
+    weights, _ = resolve_binary_weights(
         y01,
         raw_y,
         sample_weight=sample_weight,

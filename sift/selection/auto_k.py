@@ -19,6 +19,14 @@ from sift._preprocess import (
     ensure_weights,
     suppress_category_encoder_pandas_warnings,
 )
+from sift.selection.auto_k_core import (
+    build_k_grid,
+    build_score_curve_diagnostics,
+    compute_metric,
+    resolve_metric,
+    split_weights,
+    time_holdout_split,
+)
 
 if TYPE_CHECKING:
     from sift.estimators.copula import FeatureCache
@@ -247,121 +255,6 @@ def resolve_auto_k_config(
     )
 
 
-def _build_k_grid(min_k: int, max_k: int) -> List[int]:
-    """Build sensible k grid: dense early, sparse later."""
-    if max_k <= 30:
-        grid = list(range(min_k, max_k + 1, 2))
-        if grid and grid[-1] != max_k:
-            grid.append(max_k)
-        return grid
-
-    grid = set()
-    grid.update(range(min_k, min(30, max_k) + 1, 5))
-    grid.update(
-        [40, 50, 60, 75, 100, 125, 150, 175, 200, 250, 300, 400, 500, 750, 1000]
-    )
-    grid.add(min_k)
-    grid.add(max_k)
-
-    return sorted(k for k in grid if min_k <= k <= max_k)
-
-
-def _resolve_metric(metric: str, task: str) -> str:
-    """Resolve metric, defaulting based on task."""
-    if metric == "auto":
-        return "rmse" if task == "regression" else "logloss"
-    if task == "regression":
-        valid = ("rmse", "mae")
-        if metric not in valid:
-            raise ValueError(
-                f"metric='{metric}' is invalid for task='regression'. "
-                f"Valid metrics: {valid} or 'auto'"
-            )
-    elif task == "classification":
-        valid = ("logloss", "error")
-        if metric not in valid:
-            raise ValueError(
-                f"metric='{metric}' is invalid for task='classification'. "
-                f"Valid metrics: {valid} or 'auto'"
-            )
-    else:
-        raise ValueError(f"task must be 'regression' or 'classification', got {task!r}")
-    return metric
-
-
-def _compute_metric(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    metric: str,
-    *,
-    y_proba: np.ndarray | None = None,
-    sample_weight: np.ndarray | None = None,
-) -> float:
-    """Compute error metric (lower is better)."""
-    if metric == "rmse":
-        return float(np.sqrt(np.average((y_true - y_pred) ** 2, weights=sample_weight)))
-    if metric == "mae":
-        return float(np.average(np.abs(y_true - y_pred), weights=sample_weight))
-    if metric == "error":
-        return float(np.average(y_true != y_pred, weights=sample_weight))
-    if metric == "logloss":
-        if y_proba is None:
-            return float(np.inf)
-        return float(log_loss(y_true, y_proba, sample_weight=sample_weight))
-    raise ValueError(f"Unknown metric: {metric}")
-
-
-def _split_weights(w: np.ndarray, idx: np.ndarray, label: str) -> np.ndarray:
-    """Return fold-local mean-one weights for fitting/scoring."""
-    out = np.asarray(w[idx], dtype=np.float64)
-    total = float(out.sum())
-    if not np.isfinite(total) or total <= 0.0:
-        raise ValueError(f"{label} split has zero total sample_weight")
-    mean = float(out.mean())
-    if not np.isfinite(mean) or mean <= 0.0:
-        raise ValueError(f"{label} split has invalid sample_weight mean")
-    return out / mean
-
-
-def _time_holdout_split(
-    time_vals: np.ndarray,
-    val_frac: float,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Split by time: train on past, validate on future."""
-    order = np.argsort(time_vals)
-    n = len(order)
-    cut = int(np.floor((1.0 - val_frac) * n))
-    cut = max(1, min(cut, n - 1))
-    return order[:cut], order[cut:]
-
-
-def _build_score_curve_diagnostics(
-    k_grid: List[int],
-    split_scores: dict[int, list[float]],
-) -> pd.DataFrame:
-    """Summarize split-level prefix scores while preserving the old score column."""
-    rows = []
-    for k in k_grid:
-        values = np.asarray(split_scores.get(k, []), dtype=np.float64)
-        finite = values[np.isfinite(values)]
-        score_mean = float(np.mean(values)) if values.size else float("inf")
-        score_std = float(np.std(finite, ddof=1)) if finite.size >= 2 else float("nan")
-        score_se = score_std / float(np.sqrt(finite.size)) if finite.size >= 2 else float("nan")
-        rows.append(
-            {
-                "k": int(k),
-                "score": score_mean,
-                "score_mean": score_mean,
-                "score_std": score_std,
-                "score_se": score_se,
-                "n_splits": int(values.size),
-                "n_finite": int(finite.size),
-                "split_scores": tuple(float(v) for v in values.tolist()),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def _score_curve_tolerance(best_score: float, config: AutoKConfig) -> float:
     tol = 0.0
     if config.score_abs_tol is not None:
@@ -527,11 +420,11 @@ def select_k_auto(
 
     max_k = min(max_k, len(valid_features))
     valid_features = valid_features[:max_k]
-    k_grid = _build_k_grid(min_k, max_k)
+    k_grid = build_k_grid(min_k, max_k)
 
     X_path_df = X[valid_features]
 
-    metric = _resolve_metric(config.metric, task)
+    metric = resolve_metric(config.metric, task)
     alphas = np.logspace(-3, 3, 10)
 
     def _eval_split(train_idx: np.ndarray, val_idx: np.ndarray) -> dict:
@@ -540,8 +433,8 @@ def select_k_auto(
         Xva_df = X_path_df.iloc[val_idx]
         ytr = y_arr[train_idx]
         yva = y_arr[val_idx]
-        wtr = _split_weights(w_arr, train_idx, "train")
-        wva = _split_weights(w_arr, val_idx, "validation")
+        wtr = split_weights(w_arr, train_idx, "train")
+        wva = split_weights(w_arr, val_idx, "validation")
 
         if cat_features is None:
             fold_cat = (
@@ -639,7 +532,7 @@ def select_k_auto(
                         )
                 else:
                     pred = model.predict(Xva_s[:, :k])
-                    split_scores[k] = _compute_metric(
+                    split_scores[k] = compute_metric(
                         yva,
                         pred,
                         metric,
@@ -653,10 +546,10 @@ def select_k_auto(
         if time is None:
             raise ValueError("time_holdout strategy requires time parameter")
 
-        train_idx, val_idx = _time_holdout_split(time, config.val_frac)
+        train_idx, val_idx = time_holdout_split(time, config.val_frac)
         scores = _eval_split(train_idx, val_idx)
         split_scores = {k: [score] for k, score in scores.items()}
-        diag = _build_score_curve_diagnostics(k_grid, split_scores)
+        diag = build_score_curve_diagnostics(k_grid, split_scores)
 
     elif config.strategy == "group_cv":
         if groups is None:
@@ -675,7 +568,7 @@ def select_k_auto(
             for k, score in fold_scores.items():
                 all_scores[k].append(score)
 
-        diag = _build_score_curve_diagnostics(k_grid, all_scores)
+        diag = build_score_curve_diagnostics(k_grid, all_scores)
 
     else:
         raise ValueError(f"Unknown strategy: {config.strategy}")

@@ -41,7 +41,7 @@ selected = select_cefsplus_binary(
     X,
     y_binary,
     k=20,
-    loss="weighted_logloss",
+    loss="logloss",
     class_weight="balanced",
     cat_encoding="loo_logit",
     verbose=False,
@@ -50,6 +50,7 @@ selected = select_cefsplus_binary(
 
 Use binary CEFS+ when the target is Bernoulli-like and logistic conditional
 information is a better fit than a Gaussian target approximation.
+`sample_weight` and `class_weight` are honored directly by `loss="logloss"`.
 
 ## Automatic Feature Count
 

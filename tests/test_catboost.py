@@ -8,16 +8,14 @@ catboost = pytest.importorskip("catboost")
 
 from sift.catboost import (
     catboost_select,
-    catboost_regression,
-    catboost_classif,
     CatBoostSelectionResult,
-    _resolve_higher_is_better,
     _resolve_metric_and_direction,
     _resolve_loss_function,
     _generate_feature_counts,
     _get_feature_types,
     _aggregate_feature_lists,
 )
+from sift.catboost_api import catboost_classif, catboost_regression
 from sift._preprocess import best_score_from_dict as _best_score_from_dict
 
 
@@ -25,26 +23,52 @@ class TestScoreDirection:
     """Tests for score direction handling."""
 
     def test_resolve_rmse(self):
-        metric, hib = _resolve_higher_is_better('RMSE', None, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric='RMSE',
+            higher_is_better=None,
+        )
         assert metric == 'RMSE'
         assert hib is False
 
     def test_resolve_auc(self):
-        metric, hib = _resolve_higher_is_better('AUC', None, 'classification')
+        metric, hib = _resolve_metric_and_direction(
+            task='classification',
+            y=pd.Series([0, 1]),
+            eval_metric='AUC',
+            higher_is_better=None,
+        )
         assert metric == 'AUC'
         assert hib is True
 
     def test_resolve_explicit_override(self):
-        metric, hib = _resolve_higher_is_better('RMSE', True, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric='RMSE',
+            higher_is_better=True,
+        )
+        assert metric == 'RMSE'
         assert hib is True  # Explicit override
 
     def test_resolve_default_regression(self):
-        metric, hib = _resolve_higher_is_better(None, None, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric=None,
+            higher_is_better=None,
+        )
         assert metric == 'RMSE'
         assert hib is False
 
     def test_resolve_default_classification(self):
-        metric, hib = _resolve_higher_is_better(None, None, 'classification')
+        metric, hib = _resolve_metric_and_direction(
+            task='classification',
+            y=pd.Series([0, 1, 0, 1]),
+            eval_metric=None,
+            higher_is_better=None,
+        )
         assert metric == 'Logloss'
         assert hib is False
 

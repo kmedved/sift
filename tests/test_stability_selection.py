@@ -4,7 +4,7 @@ import pytest
 
 from sift import StabilitySelector
 from sift.sampling.smart import SmartSamplerConfig
-from sift.stability import stability_select
+from sift.stability_api import stability_select
 
 
 def test_stability_selector_regression():
@@ -46,6 +46,14 @@ def test_stability_selector_classification():
     selector.fit(X, y)
 
     assert selector.n_features_selected_ > 0
+
+
+def test_plot_coef_distributions_rejects_empty_feature_list():
+    selector = StabilitySelector(verbose=False)
+    selector.coef_bootstrap_ = np.empty((1, 0), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="features must contain"):
+        selector.plot_coef_distributions(features=[])
 
 
 def test_stability_select_convenience():

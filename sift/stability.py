@@ -2,7 +2,7 @@ from dataclasses import replace
 import numbers
 import numpy as np
 import pandas as pd
-from typing import Iterator, Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union
 import warnings
 
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -21,198 +21,10 @@ from sift.sampling.smart import SmartSamplerConfig, smart_sample
 # Stability Selector
 # =============================================================================
 
-def _bootstrap_indices(
-    n: int,
-    n_bootstrap: int,
-    sample_frac: float,
-    y: np.ndarray | None = None,
-    task: str = "regression",
-    random_state: int | None = None,
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    rng = np.random.default_rng(random_state)
-    subsample_size = max(2, int(n * sample_frac))
-    subsample_size = min(subsample_size, n)
-
-    is_classification = task == "classification" and y is not None
-    if is_classification:
-        classes = np.unique(y)
-        n_classes = len(classes)
-        class_indices = {c: np.where(y == c)[0] for c in classes}
-        class_counts = np.array([len(class_indices[c]) for c in classes])
-        if subsample_size < n_classes:
-            subsample_size = n_classes
-
-        def stratified_indices(rng_local):
-            props = class_counts / class_counts.sum()
-            raw = props * subsample_size
-            counts = np.floor(raw).astype(int)
-            counts = np.maximum(counts, 1)
-            counts = np.minimum(counts, class_counts)
-
-            total = counts.sum()
-            frac = raw - np.floor(raw)
-
-            if total < subsample_size:
-                need = subsample_size - total
-                room = class_counts - counts
-                order = np.argsort(-frac)
-                for j in order:
-                    if need == 0:
-                        break
-                    if room[j] > 0:
-                        add = min(room[j], need)
-                        counts[j] += add
-                        need -= add
-            elif total > subsample_size:
-                extra = total - subsample_size
-                order = np.argsort(-counts)
-                for j in order:
-                    if extra == 0:
-                        break
-                    can_drop = counts[j] - 1
-                    if can_drop > 0:
-                        drop = min(can_drop, extra)
-                        counts[j] -= drop
-                        extra -= drop
-
-            idx_list = [
-                rng_local.choice(class_indices[c], size=counts[i], replace=False)
-                for i, c in enumerate(classes)
-                if counts[i] > 0
-            ]
-            return np.concatenate(idx_list)
-
-    for _ in range(n_bootstrap):
-        if is_classification:
-            train_idx = stratified_indices(rng)
-        else:
-            train_idx = rng.choice(n, size=subsample_size, replace=False)
-
-        in_bag = np.zeros(n, dtype=bool)
-        in_bag[train_idx] = True
-        val_idx = np.flatnonzero(~in_bag)
-        yield train_idx.astype(np.int64), val_idx.astype(np.int64)
-
-
-def _block_bootstrap_indices(
-    n: int,
-    n_bootstrap: int,
-    groups: np.ndarray,
-    time: np.ndarray,
-    block_size: int | str = "auto",
-    block_method: str = "moving",
-    y: np.ndarray | None = None,
-    task: str = "regression",
-    random_state: int | None = None,
-    min_oob: int = 10,
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """
-    Block bootstrap respecting group/time structure.
-
-    Parameters
-    ----------
-    groups : array
-        Group labels (e.g., player_id).
-    time : array
-        Time values for ordering within groups.
-    block_size : int or "auto"
-        "auto" uses sqrt(n_per_group).
-    block_method : str
-        "moving", "circular", or "stationary"
-    """
-    rng = np.random.default_rng(random_state)
-
-    unique_groups, inverse_groups = np.unique(groups, return_inverse=True)
-    order = np.lexsort((time, inverse_groups))
-    sorted_inverse = inverse_groups[order]
-    if len(order) == 0:
-        group_data = {}
-    else:
-        starts = np.r_[0, np.flatnonzero(sorted_inverse[1:] != sorted_inverse[:-1]) + 1]
-        stops = np.r_[starts[1:], len(order)]
-        group_data = {
-            unique_groups[int(sorted_inverse[start])]: order[start:stop]
-            for start, stop in zip(starts, stops)
-        }
-
-    classes = set(np.unique(y)) if task == "classification" and y is not None else None
-
-    valid = 0
-    attempts = 0
-    max_attempts = n_bootstrap * 10
-
-    while valid < n_bootstrap and attempts < max_attempts:
-        attempts += 1
-        train_idx = []
-        val_idx = []
-
-        for g, sorted_idx in group_data.items():
-            n_g = len(sorted_idx)
-            if n_g == 0:
-                continue
-
-            bs = int(np.sqrt(n_g)) if block_size == "auto" else min(block_size, n_g)
-            bs = max(1, bs)
-
-            if block_method == "moving":
-                in_bag = _moving_block_sample(sorted_idx, bs, n_g, rng)
-            elif block_method == "circular":
-                in_bag = _circular_block_sample(sorted_idx, bs, n_g, rng)
-            elif block_method == "stationary":
-                in_bag = _stationary_block_sample(sorted_idx, bs, n_g, rng)
-            else:
-                raise ValueError(f"Unknown block_method: {block_method}")
-
-            in_bag_arr = np.asarray(in_bag, dtype=np.int64)
-            oob = np.setdiff1d(sorted_idx, np.unique(in_bag_arr), assume_unique=True)
-
-            train_idx.extend(in_bag_arr.tolist())
-            val_idx.extend(oob.tolist())
-
-        train_arr = np.array(train_idx, dtype=np.int64)
-        val_arr = np.array(val_idx, dtype=np.int64)
-
-        if len(val_arr) < min_oob:
-            continue
-
-        if classes is not None:
-            if set(y[train_arr]) != classes or len(set(y[val_arr])) < 2:
-                continue
-
-        valid += 1
-        yield train_arr, val_arr
-
-    if valid < n_bootstrap:
-        warnings.warn(f"Only generated {valid}/{n_bootstrap} valid block bootstrap splits.")
-
-
-def _moving_block_sample(sorted_idx: np.ndarray, block_size: int, n: int, rng) -> list[int]:
-    n_blocks = max(1, int(np.ceil(n / block_size)))
-    result = []
-    for _ in range(n_blocks):
-        start = rng.integers(0, max(1, n - block_size + 1))
-        result.extend(sorted_idx[start:start + block_size].tolist())
-    return result
-
-
-def _circular_block_sample(sorted_idx: np.ndarray, block_size: int, n: int, rng) -> list[int]:
-    n_blocks = max(1, int(np.ceil(n / block_size)))
-    result = []
-    for _ in range(n_blocks):
-        start = rng.integers(0, n)
-        indices = [(start + i) % n for i in range(block_size)]
-        result.extend(sorted_idx[indices].tolist())
-    return result
-
-
-def _stationary_block_sample(sorted_idx: np.ndarray, mean_block_size: int, n: int, rng) -> list[int]:
-    result = []
-    p = 1.0 / max(1, mean_block_size)
-    while len(result) < n:
-        start = rng.integers(0, n)
-        length = min(rng.geometric(p), n - start)
-        result.extend(sorted_idx[start:start + length].tolist())
-    return result[:n]
+from sift.stability_sampling import (
+    _block_bootstrap_indices,
+    _bootstrap_indices,
+)
 
 
 class StabilitySelector(BaseEstimator, TransformerMixin):
@@ -538,6 +350,226 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         return self
 
+    def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """Reduce X to selected features."""
+        if isinstance(X, pd.DataFrame):
+            return X[self.selected_feature_names_].values
+        return np.asarray(X)[:, self.selected_features_]
+
+    def fit_transform(
+        self,
+        X: Union[np.ndarray, pd.DataFrame],
+        y: Union[np.ndarray, pd.Series],
+        **fit_params
+    ) -> np.ndarray:
+        """Fit and transform in one step."""
+        return self.fit(X, y, **fit_params).transform(X)
+
+    def get_feature_info(self) -> pd.DataFrame:
+        """Return feature frequencies, mean coefficient magnitude, and support."""
+        return pd.DataFrame({
+            'feature': self.feature_names_in_,
+            'frequency': self.selection_frequencies_,
+            'mean_abs_coef': self.mean_abs_coef_,
+            'selected': self.selection_frequencies_ >= self.threshold
+        }).sort_values('frequency', ascending=False).reset_index(drop=True)
+
+    def get_support(self, indices: bool = False) -> np.ndarray:
+        """Get mask or indices of selected features."""
+        if indices:
+            return self.selected_features_
+        mask = np.zeros(self.n_features_in_, dtype=bool)
+        mask[self.selected_features_] = True
+        return mask
+
+    def get_coef_stability(self) -> pd.DataFrame:
+        """Return coefficient mean, std, and CV across bootstrap runs."""
+        if not hasattr(self, 'coef_bootstrap_'):
+            raise ValueError(
+                "Coefficient matrix not available. "
+                "Set store_coefs=True when creating the selector."
+            )
+
+        coef_mean = self.coef_bootstrap_.mean(axis=0)
+        coef_std = self.coef_bootstrap_.std(axis=0)
+        coef_cv = np.where(
+            np.abs(coef_mean) > 1e-10,
+            coef_std / np.abs(coef_mean),
+            np.inf
+        )
+
+        return pd.DataFrame({
+            'feature': self.feature_names_in_,
+            'coef_mean': coef_mean,
+            'coef_std': coef_std,
+            'coef_cv': coef_cv,
+            'frequency': self.selection_frequencies_,
+            'selected': self.selection_frequencies_ >= self.threshold
+        }).sort_values('frequency', ascending=False).reset_index(drop=True)
+
+    def tune_threshold(
+        self,
+        X: Union[np.ndarray, pd.DataFrame],
+        y: Union[np.ndarray, pd.Series],
+        thresholds: List[float] = [0.4, 0.5, 0.6, 0.7, 0.8],
+        cv: int = 3,
+        scoring: Optional[str] = None
+    ) -> Tuple[float, pd.DataFrame]:
+        """Choose a threshold by CV score of a downstream linear model."""
+        from sklearn.model_selection import cross_val_score
+
+        if not hasattr(self, 'selection_frequencies_'):
+            raise ValueError("Must call fit() before tune_threshold()")
+        self._validate_runtime_params()
+
+        if not isinstance(cv, numbers.Integral) or cv <= 1:
+            raise ValueError("cv must be an integer greater than 1.")
+        if not isinstance(thresholds, (list, tuple, np.ndarray)) or len(thresholds) == 0:
+            raise ValueError("thresholds must be a non-empty sequence of floats.")
+        for thresh in thresholds:
+            if not isinstance(thresh, numbers.Real) or not (0 <= float(thresh) <= 1):
+                raise ValueError("thresholds must contain values in [0, 1].")
+
+        if isinstance(X, pd.DataFrame):
+            X = X[self.feature_names_in_].values
+        X = np.asarray(X)
+        y = np.asarray(y).ravel()
+        X_scaled = self._scaler.transform(self._impute_with_fit_stats(X, fit=False))
+        scoring = scoring or ('accuracy' if self.task == 'classification' else 'r2')
+
+        rows = []
+        for thresh in thresholds:
+            mask = self.selection_frequencies_ >= thresh
+            n_selected = int(mask.sum())
+            if n_selected == 0:
+                rows.append({
+                    'threshold': thresh,
+                    'n_features': 0,
+                    'mean_score': np.nan,
+                    'std_score': np.nan,
+                })
+                continue
+
+            model = (
+                LogisticRegression(penalty='l2', solver='lbfgs', max_iter=1000)
+                if self.task == 'classification'
+                else ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000)
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                scores = cross_val_score(
+                    model,
+                    X_scaled[:, mask],
+                    y,
+                    cv=cv,
+                    scoring=scoring,
+                )
+            rows.append({
+                'threshold': thresh,
+                'n_features': n_selected,
+                'mean_score': scores.mean(),
+                'std_score': scores.std(),
+            })
+
+        results = pd.DataFrame(rows)
+        valid = results.dropna(subset=['mean_score'])
+        best_thresh = thresholds[0] if valid.empty else valid.loc[valid['mean_score'].idxmax(), 'threshold']
+        if self.verbose:
+            print(f"Threshold tuning results (scoring={scoring}):")
+            print(results.to_string(index=False))
+            print(f"Best threshold: {best_thresh}")
+        return best_thresh, results
+
+    def set_threshold(self, threshold: float) -> 'StabilitySelector':
+        """Update threshold and recompute selected features."""
+        if not hasattr(self, 'selection_frequencies_'):
+            raise ValueError("Must call fit() before set_threshold()")
+        if not isinstance(threshold, numbers.Real) or not (0 <= float(threshold) <= 1):
+            raise ValueError("threshold must be in [0, 1].")
+
+        self.threshold = threshold
+        mask = self.selection_frequencies_ >= threshold
+        if self.max_features is not None and mask.sum() > self.max_features:
+            top_idx = np.argsort(-self.selection_frequencies_, kind="mergesort")[:self.max_features]
+            mask = np.zeros(self.n_features_in_, dtype=bool)
+            mask[top_idx] = True
+
+        selected = np.where(mask)[0]
+        order = np.argsort(-self.selection_frequencies_[selected], kind="mergesort")
+        self.selected_features_ = selected[order]
+        self.selected_feature_names_ = [self.feature_names_in_[i] for i in self.selected_features_]
+        self.n_features_selected_ = len(self.selected_features_)
+        if self.verbose:
+            print(f"Updated threshold to {threshold}: {self.n_features_selected_} features selected")
+        return self
+
+    def plot_frequencies(
+        self,
+        top_n: int = 50,
+        figsize: Optional[Tuple[float, float]] = None,
+        show_coef: bool = False
+    ):
+        """Bar plot of selection frequencies."""
+        import matplotlib.pyplot as plt
+
+        info = self.get_feature_info().head(top_n)
+        if figsize is None:
+            figsize = (10, max(6, top_n * 0.25))
+
+        fig, ax = plt.subplots(figsize=figsize)
+        if show_coef:
+            coef_norm = info['mean_abs_coef'] / (info['mean_abs_coef'].max() + 1e-10)
+            colors = plt.cm.Blues(0.3 + 0.7 * coef_norm)
+        else:
+            colors = ['steelblue' if s else 'lightgray' for s in info['selected']]
+
+        ax.barh(range(len(info)), info['frequency'], color=colors)
+        ax.set_yticks(range(len(info)))
+        ax.set_yticklabels(info['feature'])
+        ax.axvline(self.threshold, color='red', linestyle='--', label=f'threshold={self.threshold}')
+        ax.set_xlabel('Selection Frequency')
+        ax.set_xlim(0, 1)
+        ax.invert_yaxis()
+        ax.legend(loc='lower right')
+        ax.set_title(f'Stability Selection ({self.n_features_selected_} features selected)')
+        plt.tight_layout()
+        return fig, ax
+
+    def plot_coef_distributions(self, features: Optional[List[str]] = None, top_n: int = 12):
+        """Plot coefficient distributions across bootstrap runs."""
+        if not hasattr(self, 'coef_bootstrap_'):
+            raise ValueError(
+                "Coefficient matrix not available. "
+                "Set store_coefs=True when creating the selector."
+            )
+        if features is None:
+            features = self.get_feature_info()['feature'].head(top_n).tolist()
+        if len(features) == 0:
+            raise ValueError("features must contain at least one feature.")
+
+        import matplotlib.pyplot as plt
+
+        n_features = len(features)
+        ncols = min(4, n_features)
+        nrows = int(np.ceil(n_features / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2.5 * nrows))
+        axes = np.atleast_2d(axes).flatten()
+
+        for i, feat in enumerate(features):
+            ax = axes[i]
+            idx = self.feature_names_in_.index(feat)
+            coefs = self.coef_bootstrap_[:, idx]
+            ax.hist(coefs, bins=20, edgecolor='white', alpha=0.7)
+            ax.axvline(0, color='red', linestyle='--', alpha=0.5)
+            ax.set_title(f'{feat}\nfreq={self.selection_frequencies_[idx]:.2f}', fontsize=9)
+            ax.set_xlabel('Coefficient')
+
+        for j in range(i + 1, len(axes)):
+            axes[j].set_visible(False)
+
+        plt.tight_layout()
+        return fig, axes
+
     def _validate_runtime_params(self) -> None:
         """Validate estimator options before fitting or threshold tuning."""
         if self.task not in ('regression', 'classification'):
@@ -588,8 +620,6 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def _impute_with_fit_stats(self, X: np.ndarray, *, fit: bool = False) -> np.ndarray:
         """Mean-impute using fit-time statistics, optionally storing them."""
-        from sift._impute import mean_impute
-
         X_arr = np.asarray(X, dtype=np.float32)
         X_arr = np.where(np.isfinite(X_arr), X_arr, np.nan)
         if not np.isnan(X_arr).any():
@@ -603,8 +633,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 means = np.nanmean(X_arr, axis=0)
             self._impute_means_ = np.where(np.isfinite(means), means, 0.0).astype(np.float32, copy=False)
         elif not hasattr(self, "_impute_means_"):
-            # Fallback for selectors fitted before this feature existed.
-            return mean_impute(X_arr, copy=False)
+            raise ValueError("Imputation statistics are unavailable. Call fit() before transforming.")
 
         means = np.asarray(self._impute_means_, dtype=X_arr.dtype)
         mask = ~np.isfinite(X_arr)
@@ -805,538 +834,3 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
 
         return cv_model.alpha_
-
-    def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
-        """Reduce X to selected features."""
-        if isinstance(X, pd.DataFrame):
-            return X[self.selected_feature_names_].values
-        return np.asarray(X)[:, self.selected_features_]
-
-    def fit_transform(
-        self,
-        X: Union[np.ndarray, pd.DataFrame],
-        y: Union[np.ndarray, pd.Series],
-        **fit_params
-    ) -> np.ndarray:
-        """Fit and transform in one step."""
-        return self.fit(X, y, **fit_params).transform(X)
-
-    def get_feature_info(self) -> pd.DataFrame:
-        """
-        Get DataFrame with feature selection details.
-
-        Returns
-        -------
-        DataFrame with columns:
-            feature: name
-            frequency: selection frequency
-            mean_abs_coef: mean absolute coefficient across bootstraps
-            selected: whether it passed threshold
-        """
-        return pd.DataFrame({
-            'feature': self.feature_names_in_,
-            'frequency': self.selection_frequencies_,
-            'mean_abs_coef': self.mean_abs_coef_,
-            'selected': self.selection_frequencies_ >= self.threshold
-        }).sort_values('frequency', ascending=False).reset_index(drop=True)
-
-    def get_support(self, indices: bool = False) -> np.ndarray:
-        """Get mask or indices of selected features."""
-        if indices:
-            return self.selected_features_
-        mask = np.zeros(self.n_features_in_, dtype=bool)
-        mask[self.selected_features_] = True
-        return mask
-
-    def get_coef_stability(self) -> pd.DataFrame:
-        """
-        Get coefficient stability analysis.
-
-        Returns DataFrame with mean, std, and CV of coefficients
-        across bootstrap runs for each feature.
-
-        Note on coefficient semantics:
-        - Regression: signed coefficients (can be positive or negative)
-        - Binary classification: signed coefficients (positive = class 1)
-        - Multiclass classification: absolute coefficients (max abs across classes)
-
-        Requires store_coefs=True (default).
-        """
-        if not hasattr(self, 'coef_bootstrap_'):
-            raise ValueError(
-                "Coefficient matrix not available. "
-                "Set store_coefs=True when creating the selector."
-            )
-
-        coef_mean = self.coef_bootstrap_.mean(axis=0)
-        coef_std = self.coef_bootstrap_.std(axis=0)
-        coef_cv = np.where(
-            np.abs(coef_mean) > 1e-10,
-            coef_std / np.abs(coef_mean),
-            np.inf
-        )
-
-        return pd.DataFrame({
-            'feature': self.feature_names_in_,
-            'coef_mean': coef_mean,
-            'coef_std': coef_std,
-            'coef_cv': coef_cv,
-            'frequency': self.selection_frequencies_,
-            'selected': self.selection_frequencies_ >= self.threshold
-        }).sort_values('frequency', ascending=False).reset_index(drop=True)
-
-    def tune_threshold(
-        self,
-        X: Union[np.ndarray, pd.DataFrame],
-        y: Union[np.ndarray, pd.Series],
-        thresholds: List[float] = [0.4, 0.5, 0.6, 0.7, 0.8],
-        cv: int = 3,
-        scoring: Optional[str] = None
-    ) -> Tuple[float, pd.DataFrame]:
-        """
-        Find optimal threshold by cross-validating downstream model performance.
-
-        Must be called after fit(). Tests each threshold and evaluates
-        ElasticNet (regression) or LogisticRegression (classification)
-        performance on the selected feature subset.
-
-        Parameters
-        ----------
-        X : array-like or DataFrame
-            Training data (same as used in fit, or held-out).
-        y : array-like
-            Target values.
-        thresholds : list of float
-            Threshold values to test.
-        cv : int
-            Number of cross-validation folds.
-        scoring : str, optional
-            Scoring metric. Default: 'r2' for regression, 'accuracy' for classification.
-
-        Returns
-        -------
-        best_threshold : float
-            Threshold with highest CV score.
-        results : DataFrame
-            Threshold, n_features, mean_score, std_score for each threshold tested.
-        """
-        from sklearn.model_selection import cross_val_score
-
-        if not hasattr(self, 'selection_frequencies_'):
-            raise ValueError("Must call fit() before tune_threshold()")
-        self._validate_runtime_params()
-
-        if not isinstance(cv, numbers.Integral) or cv <= 1:
-            raise ValueError("cv must be an integer greater than 1.")
-
-        if not isinstance(thresholds, (list, tuple, np.ndarray)) or len(thresholds) == 0:
-            raise ValueError("thresholds must be a non-empty sequence of floats.")
-        for thresh in thresholds:
-            if not isinstance(thresh, numbers.Real) or not (0 <= float(thresh) <= 1):
-                raise ValueError("thresholds must contain values in [0, 1].")
-
-        if isinstance(X, pd.DataFrame):
-            X = X[self.feature_names_in_].values
-        X = np.asarray(X)
-        y = np.asarray(y).ravel()
-
-        X = self._impute_with_fit_stats(X, fit=False)
-
-        # Scale X
-        X_scaled = self._scaler.transform(X)
-
-        # Default scoring
-        if scoring is None:
-            scoring = 'accuracy' if self.task == 'classification' else 'r2'
-
-        results = []
-        for thresh in thresholds:
-            mask = self.selection_frequencies_ >= thresh
-            n_selected = mask.sum()
-
-            if n_selected == 0:
-                results.append({
-                    'threshold': thresh,
-                    'n_features': 0,
-                    'mean_score': np.nan,
-                    'std_score': np.nan
-                })
-                continue
-
-            X_subset = X_scaled[:, mask]
-
-            # Fit downstream model
-            if self.task == 'classification':
-                model = LogisticRegression(
-                    penalty='l2',
-                    solver='lbfgs',
-                    max_iter=1000
-                )
-            else:
-                model = ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000)
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                scores = cross_val_score(model, X_subset, y, cv=cv, scoring=scoring)
-
-            results.append({
-                'threshold': thresh,
-                'n_features': n_selected,
-                'mean_score': scores.mean(),
-                'std_score': scores.std()
-            })
-
-        results_df = pd.DataFrame(results)
-
-        # Find best (highest mean score, ignoring NaN)
-        valid = results_df.dropna(subset=['mean_score'])
-        if len(valid) == 0:
-            best_thresh = thresholds[0]
-        else:
-            best_idx = valid['mean_score'].idxmax()
-            best_thresh = valid.loc[best_idx, 'threshold']
-
-        if self.verbose:
-            print(f"Threshold tuning results (scoring={scoring}):")
-            print(results_df.to_string(index=False))
-            print(f"Best threshold: {best_thresh}")
-
-        return best_thresh, results_df
-
-    def set_threshold(self, threshold: float) -> 'StabilitySelector':
-        """
-        Update threshold and recompute selected features.
-
-        Useful after tune_threshold() to apply the optimal threshold.
-
-        Parameters
-        ----------
-        threshold : float
-            New threshold value.
-
-        Returns
-        -------
-        self
-        """
-        if not hasattr(self, 'selection_frequencies_'):
-            raise ValueError("Must call fit() before set_threshold()")
-        if not isinstance(threshold, numbers.Real) or not (0 <= float(threshold) <= 1):
-            raise ValueError("threshold must be in [0, 1].")
-
-        self.threshold = threshold
-        mask = self.selection_frequencies_ >= threshold
-
-        if self.max_features is not None and mask.sum() > self.max_features:
-            top_idx = np.argsort(-self.selection_frequencies_, kind="mergesort")[:self.max_features]
-            mask = np.zeros(self.n_features_in_, dtype=bool)
-            mask[top_idx] = True
-
-        selected = np.where(mask)[0]
-        order = np.argsort(-self.selection_frequencies_[selected], kind="mergesort")
-        self.selected_features_ = selected[order]
-        self.selected_feature_names_ = [self.feature_names_in_[i] for i in self.selected_features_]
-        self.n_features_selected_ = len(self.selected_features_)
-
-        if self.verbose:
-            print(f"Updated threshold to {threshold}: {self.n_features_selected_} features selected")
-
-        return self
-
-    def plot_frequencies(
-        self,
-        top_n: int = 50,
-        figsize: Optional[Tuple[float, float]] = None,
-        show_coef: bool = False
-    ):
-        """
-        Bar plot of selection frequencies.
-
-        Parameters
-        ----------
-        top_n : int
-            Number of top features to show.
-        figsize : tuple, optional
-            Figure size.
-        show_coef : bool
-            If True, show mean coefficient as bar color intensity.
-        """
-        import matplotlib.pyplot as plt
-
-        info = self.get_feature_info().head(top_n)
-
-        if figsize is None:
-            figsize = (10, max(6, top_n * 0.25))
-
-        fig, ax = plt.subplots(figsize=figsize)
-
-        if show_coef:
-            coef_norm = info['mean_abs_coef'] / (info['mean_abs_coef'].max() + 1e-10)
-            colors = plt.cm.Blues(0.3 + 0.7 * coef_norm)
-        else:
-            colors = ['steelblue' if s else 'lightgray' for s in info['selected']]
-
-        ax.barh(range(len(info)), info['frequency'], color=colors)
-        ax.set_yticks(range(len(info)))
-        ax.set_yticklabels(info['feature'])
-        ax.axvline(
-            self.threshold,
-            color='red',
-            linestyle='--',
-            label=f'threshold={self.threshold}'
-        )
-        ax.set_xlabel('Selection Frequency')
-        ax.set_xlim(0, 1)
-        ax.invert_yaxis()
-        ax.legend(loc='lower right')
-        ax.set_title(f'Stability Selection ({self.n_features_selected_} features selected)')
-        plt.tight_layout()
-
-        return fig, ax
-
-    def plot_coef_distributions(self, features: Optional[List[str]] = None, top_n: int = 12):
-        """
-        Plot coefficient distributions across bootstrap runs.
-
-        Parameters
-        ----------
-        features : list of str, optional
-            Specific features to plot. If None, uses top_n by frequency.
-        top_n : int
-            Number of top features if features not specified.
-
-        Requires store_coefs=True (default).
-        """
-        import matplotlib.pyplot as plt
-
-        if not hasattr(self, 'coef_bootstrap_'):
-            raise ValueError(
-                "Coefficient matrix not available. "
-                "Set store_coefs=True when creating the selector."
-            )
-
-        if features is None:
-            info = self.get_feature_info()
-            features = info['feature'].head(top_n).tolist()
-
-        n_features = len(features)
-        ncols = min(4, n_features)
-        nrows = int(np.ceil(n_features / ncols))
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2.5 * nrows))
-        axes = np.atleast_2d(axes).flatten()
-
-        for i, feat in enumerate(features):
-            ax = axes[i]
-            idx = self.feature_names_in_.index(feat)
-            coefs = self.coef_bootstrap_[:, idx]
-
-            ax.hist(coefs, bins=20, edgecolor='white', alpha=0.7)
-            ax.axvline(0, color='red', linestyle='--', alpha=0.5)
-            ax.set_title(f'{feat}\nfreq={self.selection_frequencies_[idx]:.2f}', fontsize=9)
-            ax.set_xlabel('Coefficient')
-
-        for j in range(i + 1, len(axes)):
-            axes[j].set_visible(False)
-
-        plt.tight_layout()
-        return fig, axes
-
-
-# =============================================================================
-# Convenience Functions
-# =============================================================================
-
-def stability_select(
-    X: Union[np.ndarray, pd.DataFrame],
-    y: Union[np.ndarray, pd.Series],
-    threshold: float = 0.6,
-    n_bootstrap: int = 50,
-    **kwargs
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Quick stability selection.
-
-    Returns
-    -------
-    selected_indices : ndarray
-    frequencies : ndarray
-    """
-    selector = StabilitySelector(
-        threshold=threshold,
-        n_bootstrap=n_bootstrap,
-        **kwargs
-    )
-    selector.fit(X, y)
-    return selector.selected_features_, selector.selection_frequencies_
-
-
-def stability_regression(
-    X: Union[np.ndarray, pd.DataFrame],
-    y: Union[np.ndarray, pd.Series],
-    k: int,
-    sample_weight: np.ndarray | None = None,
-    groups: np.ndarray | None = None,
-    time: np.ndarray | None = None,
-    threshold: float = 0.6,
-    n_bootstrap: int = 50,
-    block_size: int | str = "auto",
-    block_method: str = "moving",
-    alpha: Optional[float] = None,
-    l1_ratio: float = 1.0,
-    sample_frac: float = 0.5,
-    use_smart_sampler: bool = False,
-    sampler_config: Optional[SmartSamplerConfig] = None,
-    random_state: Optional[int] = None,
-    n_jobs: int = -1,
-    verbose: bool = True,
-    return_indices: Optional[bool] = None,
-) -> Union[List[str], List[int]]:
-    """
-    Stability selection for regression.
-
-    Fits Lasso/ElasticNet on bootstrap subsamples and returns features
-    selected consistently across runs.
-
-    Parameters
-    ----------
-    X : array-like or DataFrame of shape (n_samples, n_features)
-        Feature matrix.
-    y : array-like of shape (n_samples,)
-        Continuous target variable.
-    k : int
-        Maximum number of features to select.
-    threshold : float, default=0.6
-        Minimum selection frequency to keep a feature.
-    n_bootstrap : int, default=50
-        Number of bootstrap iterations.
-    alpha : float, optional
-        Regularization strength. If None, estimated via CV.
-    l1_ratio : float, default=1.0
-        ElasticNet mixing (1.0 = Lasso, <1.0 = ElasticNet).
-    sample_frac : float, default=0.5
-        Fraction of data per bootstrap sample.
-    use_smart_sampler : bool, default=False
-        Whether to apply leverage-based smart sampling.
-    sampler_config : SmartSamplerConfig, optional
-        Configuration for smart sampler.
-    random_state : int, optional
-        Random seed for reproducibility.
-    n_jobs : int, default=-1
-        Number of parallel jobs.
-    verbose : bool, default=True
-        Print progress information.
-    return_indices : bool, optional
-        If True, return feature indices. If False, return feature names.
-        If None, returns names for DataFrame inputs and indices for ndarray inputs.
-
-    Returns
-    -------
-    selected_features : list of str or list of int
-        Names or indices of selected features, depending on return_indices.
-    """
-    selector = StabilitySelector(
-        task='regression',
-        threshold=threshold,
-        n_bootstrap=n_bootstrap,
-        alpha=alpha,
-        l1_ratio=l1_ratio,
-        sample_frac=sample_frac,
-        max_features=k,
-        use_smart_sampler=use_smart_sampler,
-        sampler_config=sampler_config,
-        block_size=block_size,
-        block_method=block_method,
-        random_state=random_state,
-        n_jobs=n_jobs,
-        verbose=verbose,
-    )
-    selector.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
-    if return_indices is None:
-        return_indices = not isinstance(X, pd.DataFrame)
-    if return_indices:
-        return selector.selected_features_.tolist()
-    return selector.selected_feature_names_
-
-
-def stability_classif(
-    X: Union[np.ndarray, pd.DataFrame],
-    y: Union[np.ndarray, pd.Series],
-    k: int,
-    sample_weight: np.ndarray | None = None,
-    groups: np.ndarray | None = None,
-    time: np.ndarray | None = None,
-    threshold: float = 0.6,
-    n_bootstrap: int = 50,
-    block_size: int | str = "auto",
-    block_method: str = "moving",
-    alpha: Optional[float] = None,
-    sample_frac: float = 0.5,
-    use_smart_sampler: bool = False,
-    sampler_config: Optional[SmartSamplerConfig] = None,
-    random_state: Optional[int] = None,
-    n_jobs: int = -1,
-    verbose: bool = True,
-    return_indices: Optional[bool] = None,
-) -> Union[List[str], List[int]]:
-    """
-    Stability selection for classification.
-
-    Fits L1-regularized LogisticRegression on bootstrap subsamples and
-    returns features selected consistently across runs.
-
-    Parameters
-    ----------
-    X : array-like or DataFrame of shape (n_samples, n_features)
-        Feature matrix.
-    y : array-like of shape (n_samples,)
-        Categorical target variable.
-    k : int
-        Maximum number of features to select.
-    threshold : float, default=0.6
-        Minimum selection frequency to keep a feature.
-    n_bootstrap : int, default=50
-        Number of bootstrap iterations.
-    alpha : float, optional
-        Regularization strength. If None, estimated via CV.
-    sample_frac : float, default=0.5
-        Fraction of data per bootstrap sample.
-    use_smart_sampler : bool, default=False
-        Whether to apply leverage-based smart sampling.
-    sampler_config : SmartSamplerConfig, optional
-        Configuration for smart sampler.
-    random_state : int, optional
-        Random seed for reproducibility.
-    n_jobs : int, default=-1
-        Number of parallel jobs.
-    verbose : bool, default=True
-        Print progress information.
-    return_indices : bool, optional
-        If True, return feature indices. If False, return feature names.
-        If None, returns names for DataFrame inputs and indices for ndarray inputs.
-
-    Returns
-    -------
-    selected_features : list of str or list of int
-        Names or indices of selected features, depending on return_indices.
-    """
-    selector = StabilitySelector(
-        task='classification',
-        threshold=threshold,
-        n_bootstrap=n_bootstrap,
-        alpha=alpha,
-        sample_frac=sample_frac,
-        max_features=k,
-        use_smart_sampler=use_smart_sampler,
-        sampler_config=sampler_config,
-        block_size=block_size,
-        block_method=block_method,
-        random_state=random_state,
-        n_jobs=n_jobs,
-        verbose=verbose,
-    )
-    selector.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
-    if return_indices is None:
-        return_indices = not isinstance(X, pd.DataFrame)
-    if return_indices:
-        return selector.selected_features_.tolist()
-    return selector.selected_feature_names_

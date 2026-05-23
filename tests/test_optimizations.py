@@ -223,9 +223,9 @@ class TestAutoKElbowGaussian:
 
 class TestClassificationAutoK:
     def test_large_auto_k_grid_includes_common_prefix_cutoffs(self):
-        from sift.selection.auto_k import _build_k_grid
+        from sift.selection.auto_k_core import build_k_grid
 
-        grid = _build_k_grid(5, 400)
+        grid = build_k_grid(5, 400)
 
         assert 200 in grid
         assert 300 in grid

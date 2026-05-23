@@ -5,6 +5,7 @@ from sklearn.exceptions import NotFittedError
 
 from sift import CEFSPlusSelector, JMIMSelector, JMISelector, MRMRSelector
 import sift.selectors as selectors_mod
+import sift.selection.auto_k_nested as auto_k_nested_module
 from sift.selection.auto_k import AutoKConfig
 
 
@@ -285,13 +286,13 @@ def test_cefsplus_selector_nested_auto_k_distinguishes_best_and_selected(monkeyp
         val_frac=0.25,
     )
 
-    def fake_evaluate_prefixes(self, *args, k_grid, **kwargs):
+    def fake_evaluate_prefixes(*args, k_grid, **kwargs):
         scores = {1: 0.95, 3: 0.90, 4: 1.20}
         return {k: scores[k] for k in k_grid}
 
     monkeypatch.setattr(
-        CEFSPlusSelector,
-        "_evaluate_nested_prefixes",
+        auto_k_nested_module,
+        "evaluate_numeric_prefixes",
         fake_evaluate_prefixes,
     )
 
@@ -366,7 +367,6 @@ def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
     captured = []
 
     def capture_train_path(
-        self,
         X_train_path,
         X_val_path,
         y_train,
@@ -382,8 +382,8 @@ def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
         return {k: float(k - 1) for k in k_grid}
 
     monkeypatch.setattr(
-        selectors_mod._BaseSelector,
-        "_evaluate_nested_prefixes",
+        auto_k_nested_module,
+        "evaluate_numeric_prefixes",
         capture_train_path,
     )
 

@@ -397,9 +397,7 @@ Important options:
 - `loss="logloss"`: default Bernoulli/log-loss criterion. `sample_weight` and
   `class_weight` are honored directly. When `cat_encoding="loo_logit"` is used,
   the resolved binary weights also drive the leave-one-out category statistics.
-- `loss="weighted_logloss"`: alias for weighted log-loss; requires explicit
-  weights.
-- `loss="brier"`: compatibility mode that delegates to `select_cefsplus` with
+- `loss="brier"`: Brier proxy mode that delegates to `select_cefsplus` with
   the binary target cast to float.
 - `k="auto"`: supports the same `AutoKConfig` workflow as other filter selectors.
   For `loss="logloss"`, `k_method="evaluate"` scores prefixes with a downstream
@@ -426,8 +424,8 @@ Important options:
   the full matrix.
 - `CEFSPlusBinarySelector(loss="brier", cat_encoding="loo_logit")` rejects
   categorical inputs because selector-class pre-encoding would otherwise use
-  logit encodings while the function API maps brier compatibility mode to
-  ordinary `"loo"`. Use `cat_encoding="loo"` for brier compatibility or
+  logit encodings while the function API maps Brier proxy mode to ordinary
+  `"loo"`. Use `cat_encoding="loo"` for Brier proxy mode or
   `loss="logloss"` for logistic `loo_logit` encoding.
 - `class_weight`: class weights are resolved on the input rows before any
   optional `subsample` draw. Returned metadata records this as
@@ -741,11 +739,11 @@ selected_cls = stability_classif(
 For DataFrame inputs, wrappers return feature names by default. For ndarray
 inputs, they return integer indices unless `return_indices=False` is passed.
 
-The lower-level convenience function `sift.stability.stability_select` returns
+The lower-level convenience function `sift.stability_api.stability_select` returns
 `(selected_indices, selection_frequencies)`:
 
 ```python
-from sift.stability import stability_select
+from sift.stability_api import stability_select
 
 idx, frequencies = stability_select(
     X,

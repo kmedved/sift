@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import sift.api as sift_api
 from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
+import sift.selection.filter_api_common as filter_api_common
+import sift.selection.jmi_api as jmi_api
 from sift.selection.auto_k import (
     AutoKConfig,
     choose_k_from_score_curve,
@@ -331,7 +332,7 @@ def test_public_auto_k_passes_sample_weight_to_prefix_evaluation(monkeypatch):
         captured["sample_weight"] = np.asarray(sample_weight)
         return 1, feature_path[:1], pd.DataFrame({"k": [1], "score": [0.0]})
 
-    monkeypatch.setattr(sift_api, "select_k_auto", fake_select_k_auto)
+    monkeypatch.setattr(filter_api_common, "select_k_auto", fake_select_k_auto)
     cfg = AutoKConfig(
         strategy="time_holdout",
         min_k=1,
@@ -494,7 +495,7 @@ def test_gaussian_non_cefsplus_rejects_penalized_objective_before_cache(monkeypa
     def fail_build_cache(*args, **kwargs):
         raise AssertionError("build_cache should not be called")
 
-    monkeypatch.setattr(sift_api, "build_cache", fail_build_cache)
+    monkeypatch.setattr(jmi_api, "build_cache", fail_build_cache)
 
     with pytest.raises(ValueError, match="supported only for CEFS\\+"):
         select_jmim(

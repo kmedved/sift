@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import sift.api as sift_api
 from sift import build_cache, select_cefsplus, select_jmi, select_jmim, select_mrmr
+import sift.selection.filter_api_common as filter_api_common
 from sift.selection.auto_k import AutoKConfig
 
 
@@ -29,7 +29,7 @@ def _patch_encoder(monkeypatch):
             X_enc[col] = pd.factorize(X_enc[col])[0].astype(float)
         return X_enc
 
-    monkeypatch.setattr(sift_api, "encode_categoricals", fake_encode_categoricals)
+    monkeypatch.setattr(filter_api_common, "encode_categoricals", fake_encode_categoricals)
 
 
 FUNCTION_SELECTORS = [
