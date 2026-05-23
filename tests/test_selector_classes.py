@@ -116,6 +116,40 @@ def test_selector_fit_rejects_return_result_override(selector_cls, kwargs):
         selector.fit(X, y, return_result=True)
 
 
+@pytest.mark.parametrize(
+    "selector_cls, kwargs",
+    [
+        (MRMRSelector, dict(k=2, task="regression", verbose=False)),
+        (JMISelector, dict(k=2, task="regression", verbose=False)),
+        (JMIMSelector, dict(k=2, task="regression", verbose=False)),
+        (CEFSPlusSelector, dict(k=2, verbose=False)),
+    ],
+)
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"cat_encoding": "loo"},
+        {"cat_features": ["cat"]},
+        {"allow_full_data_target_encoding": True},
+    ],
+)
+def test_selector_fit_rejects_preprocessing_overrides(selector_cls, kwargs, override):
+    rng = np.random.default_rng(21)
+    X = pd.DataFrame(
+        {
+            "cat": np.where(np.arange(80) % 2 == 0, "a", "b"),
+            "f0": rng.normal(size=80),
+            "f1": rng.normal(size=80),
+            "f2": rng.normal(size=80),
+        }
+    )
+    y = X["f0"] + rng.normal(size=80) * 0.1
+
+    selector = selector_cls(**kwargs)
+    with pytest.raises(ValueError, match="preprocessing-affecting"):
+        selector.fit(X, y, **override)
+
+
 def test_selector_dataframe_transform_rejects_reordered_columns():
     rng = np.random.default_rng(2)
     X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])

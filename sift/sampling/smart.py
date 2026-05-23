@@ -383,7 +383,14 @@ def _compute_sampling_scores(
 def _build_anchor_mask(df: pd.DataFrame, config: SmartSamplerConfig) -> np.ndarray:
     if config.anchor_fn is None:
         return np.zeros(len(df), dtype=bool)
-    anchor_mask = config.anchor_fn(df, config.group_col, config.time_col)
+    anchor_mask = np.asarray(
+        config.anchor_fn(df, config.group_col, config.time_col),
+        dtype=bool,
+    ).reshape(-1)
+    if len(anchor_mask) != len(df):
+        raise ValueError(
+            f"anchor_fn returned {len(anchor_mask)} rows but df has {len(df)} rows"
+        )
     if config.verbose and anchor_mask.any():
         print(f"Anchors: {anchor_mask.sum():,} rows")
     return anchor_mask

@@ -56,7 +56,14 @@ _SELECTOR_FORWARD_SKIP_PARAMS = frozenset(
         "return_result",
     }
 )
-_BLOCKED_FIT_PARAM_OVERRIDES = frozenset({"return_result"})
+_BLOCKED_FIT_PARAM_OVERRIDES = frozenset(
+    {
+        "return_result",
+        "cat_features",
+        "cat_encoding",
+        "allow_full_data_target_encoding",
+    }
+)
 
 
 def _coerce_selection_indices(
@@ -295,7 +302,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             if blocked:
                 blocked_text = ", ".join(blocked)
                 raise ValueError(
-                    "selector fit-time overrides cannot change return shape: "
+                    "selector fit-time overrides cannot change return shape or "
+                    "preprocessing-affecting parameters: "
                     f"{blocked_text}"
                 )
             call_params.update(fit_params)

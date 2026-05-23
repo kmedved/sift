@@ -4,7 +4,7 @@ import pytest
 from sklearn.exceptions import NotFittedError
 
 from sift import StabilitySelector
-from sift.sampling.smart import SmartSamplerConfig
+from sift.sampling.smart import SmartSamplerConfig, smart_sample
 from sift.stability import stability_select
 
 
@@ -281,8 +281,6 @@ def test_smart_sampler_config_is_not_mutated():
 
 
 def test_smart_sample_full_fraction_keeps_all_rows_without_residual_y_check():
-    from sift.sampling.smart import smart_sample
-
     rng = np.random.default_rng(457)
     df = pd.DataFrame(
         {
@@ -304,6 +302,63 @@ def test_smart_sample_full_fraction_keeps_all_rows_without_residual_y_check():
     assert sampled.index.tolist() == list(range(len(df)))
     assert np.isfinite(sampled["sample_weight"]).all()
     np.testing.assert_allclose(sampled["sample_weight"].mean(), 1.0)
+
+
+def test_smart_sample_accepts_list_anchor_mask():
+    rng = np.random.default_rng(458)
+    df = pd.DataFrame(
+        {
+            "row_id": np.arange(30),
+            "f0": rng.normal(size=30),
+            "f1": rng.normal(size=30),
+            "y": rng.normal(size=30),
+        }
+    )
+
+    def anchor_fn(frame, _group_col, _time_col):
+        return [i < 3 for i in range(len(frame))]
+
+    sampled = smart_sample(
+        df,
+        ["f0", "f1"],
+        "y",
+        SmartSamplerConfig(
+            sample_frac=0.2,
+            anchor_fn=anchor_fn,
+            anchor_max_share=1.0,
+            residual_weight_cap=0.0,
+            random_state=6,
+            verbose=False,
+        ),
+    )
+
+    assert set(range(3)).issubset(set(sampled["row_id"]))
+
+
+def test_smart_sample_rejects_wrong_length_anchor_mask():
+    rng = np.random.default_rng(459)
+    df = pd.DataFrame(
+        {
+            "f0": rng.normal(size=20),
+            "f1": rng.normal(size=20),
+            "y": rng.normal(size=20),
+        }
+    )
+
+    def anchor_fn(_frame, _group_col, _time_col):
+        return [True, False]
+
+    with pytest.raises(ValueError, match="anchor_fn returned"):
+        smart_sample(
+            df,
+            ["f0", "f1"],
+            "y",
+            SmartSamplerConfig(
+                anchor_fn=anchor_fn,
+                residual_weight_cap=0.0,
+                verbose=False,
+            ),
+        )
 
 
 def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
