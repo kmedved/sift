@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Hashable, Iterable, List, Mapping, Optional
 
 import copy
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -244,6 +245,27 @@ def _to_estimator(
     return est
 
 
+def _fit_estimator(
+    estimator: Any,
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    w_tr: np.ndarray,
+) -> None:
+    if hasattr(estimator, "steps"):
+        final_name, final_estimator = estimator.steps[-1]
+        if "sample_weight" in inspect.signature(final_estimator.fit).parameters:
+            estimator.fit(X_tr, y_tr, **{f"{final_name}__sample_weight": w_tr})
+            return
+        estimator.fit(X_tr, y_tr)
+        return
+
+    try:
+        estimator.fit(X_tr, y_tr, sample_weight=w_tr)
+        return
+    except TypeError:
+        estimator.fit(X_tr, y_tr)
+
+
 def _fit_predict_score(
     estimator: Any,
     X_tr: np.ndarray,
@@ -255,11 +277,7 @@ def _fit_predict_score(
     scoring: Scoring,
 ) -> float:
     try:
-        try:
-            estimator.fit(X_tr, y_tr, sample_weight=w_tr)
-        except TypeError:
-            estimator.fit(X_tr, y_tr)
-
+        _fit_estimator(estimator, X_tr, y_tr, w_tr)
         y_pred = np.asarray(estimator.predict(X_va), dtype=np.float64).ravel()
         if y_pred.shape[0] != y_va.shape[0]:
             raise ValueError("estimator.predict returned wrong number of predictions")

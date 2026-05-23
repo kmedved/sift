@@ -69,6 +69,25 @@ def test_evaluate_feature_path_callable_scoring_and_weight_handling():
     ].iloc[0]
 
 
+def test_evaluate_feature_path_default_estimator_accepts_sample_weight():
+    X, y = _toy_regression_data()
+
+    result = evaluate_feature_path(
+        X,
+        y,
+        feature_path=["x0", "x1", "x2"],
+        k_grid=[1, 2, 3],
+        scoring="rmse",
+        val_frac=0.2,
+        random_state=2,
+        sample_weight=np.linspace(0.5, 2.0, len(y)),
+    )
+
+    assert result.best_k in {1, 2, 3}
+    assert np.isfinite(list(result.scores.values())).all()
+    assert result.diagnostics["n_finite"].min() == 1
+
+
 
 def test_evaluate_feature_path_with_splitter_and_estimator_factory():
     X, y = _toy_regression_data(300)
