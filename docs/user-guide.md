@@ -71,6 +71,18 @@ Function-style selectors use a prefix-only contract for auto-k: SIFT builds one
 selection path, then evaluates prefixes. Sklearn-style selector classes can use
 nested evaluation where supported.
 
+Auto-k support depends on the selector route:
+
+| Route | Supported `k_method` values |
+| --- | --- |
+| Classic mRMR/JMI/JMIM | `evaluate` |
+| Gaussian mRMR/JMI/JMIM | `evaluate`, `elbow` |
+| CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
+| Binary CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
+
+Unsupported modes fail before SIFT builds caches or feature paths, which keeps
+configuration errors cheap to catch.
+
 ## Reuse a Gaussian Cache
 
 ```python
@@ -133,3 +145,23 @@ outside SIFT. CatBoost selectors handle categorical features natively.
 Many selectors can return richer metadata through `return_result=True` or
 selector-specific diagnostics. The detailed behavior is documented in
 [DOCS.MD](../DOCS.MD).
+
+```python
+from sift import select_cefsplus_binary
+
+result = select_cefsplus_binary(
+    X,
+    y_binary,
+    k="auto",
+    auto_k_config=config,
+    return_result=True,
+    verbose=False,
+)
+
+print(result.selected_features)
+print(result.selector_metadata)
+```
+
+Sklearn-style selector classes always keep their transform contract stable; pass
+inspection options to the function-style selectors when you need full result
+objects.

@@ -64,7 +64,7 @@ return integer indices.
 | JMIM | `select_jmim` | Conservative JMI variant using a minimum joint score. |
 | CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
 | Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
-| Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow` | Choosing feature count by holdout, group CV, or objective elbow. |
+| Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` | Choosing feature count by holdout, group CV, objective elbow, or penalized objective. |
 | Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
 | Smart sampling | `smart_sample`, `SmartSamplerConfig`, sampler presets | Reducing large panel/cross-section datasets before selection. |
@@ -739,11 +739,11 @@ selected_cls = stability_classif(
 For DataFrame inputs, wrappers return feature names by default. For ndarray
 inputs, they return integer indices unless `return_indices=False` is passed.
 
-The lower-level convenience function `sift.stability_api.stability_select` returns
+The lower-level convenience function `sift.stability.stability_select` returns
 `(selected_indices, selection_frequencies)`:
 
 ```python
-from sift.stability_api import stability_select
+from sift.stability import stability_select
 
 idx, frequencies = stability_select(
     X,

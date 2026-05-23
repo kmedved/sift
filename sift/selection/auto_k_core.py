@@ -165,16 +165,28 @@ def evaluate_numeric_prefixes(
     task: Literal["regression", "classification"],
     metric: str,
     k_grid: list[int],
+    ridge_alpha_strategy: Literal["per_prefix", "full_path"] = "per_prefix",
 ) -> dict[int, float]:
     """Evaluate all prefix sizes on an already-built feature path."""
     if X_train_path.shape[1] == 0:
         return {k: np.inf for k in k_grid}
+    if ridge_alpha_strategy not in {"per_prefix", "full_path"}:
+        raise ValueError("ridge_alpha_strategy must be 'per_prefix' or 'full_path'")
 
     Xtr_s, Xva_s = numeric_train_val(X_train_path, X_val_path)
     scores: dict[int, float] = {}
     alphas = np.logspace(-3, 3, 10)
 
     from sklearn.linear_model import LogisticRegression, Ridge, RidgeCV
+
+    full_path_alpha = None
+    if task == "regression" and ridge_alpha_strategy == "full_path":
+        ridgecv = RidgeCV(alphas=alphas).fit(
+            Xtr_s,
+            y_train,
+            sample_weight=w_train,
+        )
+        full_path_alpha = float(ridgecv.alpha_)
 
     for k in k_grid:
         if k > Xtr_s.shape[1]:
@@ -186,12 +198,16 @@ def evaluate_numeric_prefixes(
                 continue
 
             if task == "regression":
-                ridgecv = RidgeCV(alphas=alphas).fit(
-                    Xtr_s[:, :k],
-                    y_train,
-                    sample_weight=w_train,
-                )
-                model = Ridge(alpha=float(ridgecv.alpha_))
+                if full_path_alpha is None:
+                    ridgecv = RidgeCV(alphas=alphas).fit(
+                        Xtr_s[:, :k],
+                        y_train,
+                        sample_weight=w_train,
+                    )
+                    alpha = float(ridgecv.alpha_)
+                else:
+                    alpha = full_path_alpha
+                model = Ridge(alpha=alpha)
             else:
                 model = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
 

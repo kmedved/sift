@@ -223,7 +223,7 @@ class TestAutoKElbowGaussian:
 
 class TestClassificationAutoK:
     def test_large_auto_k_grid_includes_common_prefix_cutoffs(self):
-        from sift.selection.auto_k_core import build_k_grid
+        from sift.selection.auto_k import build_k_grid
 
         grid = build_k_grid(5, 400)
 

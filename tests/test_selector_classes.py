@@ -97,6 +97,25 @@ def test_selector_not_fitted_raises(selector_cls, kwargs):
         selector.transform([[1, 2, 3], [4, 5, 6]])
 
 
+@pytest.mark.parametrize(
+    "selector_cls, kwargs",
+    [
+        (MRMRSelector, dict(k=2, task="regression", verbose=False)),
+        (JMISelector, dict(k=2, task="regression", verbose=False)),
+        (JMIMSelector, dict(k=2, task="regression", verbose=False)),
+        (CEFSPlusSelector, dict(k=2, verbose=False)),
+    ],
+)
+def test_selector_fit_rejects_return_result_override(selector_cls, kwargs):
+    rng = np.random.default_rng(20)
+    X = pd.DataFrame(rng.normal(size=(80, 4)), columns=[f"f{i}" for i in range(4)])
+    y = X["f0"] + rng.normal(size=80) * 0.1
+
+    selector = selector_cls(**kwargs)
+    with pytest.raises(ValueError, match="return shape"):
+        selector.fit(X, y, return_result=True)
+
+
 def test_selector_dataframe_transform_rejects_reordered_columns():
     rng = np.random.default_rng(2)
     X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])

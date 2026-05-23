@@ -11,6 +11,8 @@ from sift import (
     select_mrmr,
 )
 from sift.selection.auto_k import compute_objective_for_path
+from sift.selection.cefsplus import cefsplus_loop, cefsplus_loop_with_objective
+from sift.selection.objective import objective_from_corr_path
 
 
 def test_select_cefsplus_regression():
@@ -148,3 +150,28 @@ def test_public_gaussian_selectors_with_cache_return_k_without_corr_prune(select
     )
 
     assert len(selected) == 4
+
+
+@pytest.mark.parametrize("k", [0, 1, 4, 10])
+def test_cefsplus_loop_and_objective_loop_select_same_path(k):
+    rng = np.random.default_rng(2026)
+    X = rng.normal(size=(80, 5))
+    y = 1.5 * X[:, 0] - 0.5 * X[:, 2] + rng.normal(scale=0.2, size=80)
+    R = np.corrcoef(X, rowvar=False)
+    r = np.corrcoef(np.column_stack([X, y]), rowvar=False)[:-1, -1]
+    tie_break_rel = np.abs(r)
+
+    selected = cefsplus_loop(R, r, k, tie_break_rel)
+    selected_with_objective, objective = cefsplus_loop_with_objective(
+        R,
+        r,
+        k,
+        tie_break_rel,
+    )
+
+    np.testing.assert_array_equal(selected, selected_with_objective)
+    expected_objective = objective_from_corr_path(
+        R[np.ix_(selected, selected)],
+        r[selected],
+    )
+    np.testing.assert_allclose(objective, expected_objective)

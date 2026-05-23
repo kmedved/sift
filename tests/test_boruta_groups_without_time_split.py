@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from sklearn.ensemble import RandomForestRegressor
 
 import sift.boruta as boruta_mod

@@ -46,14 +46,14 @@ mrmr_features = select_mrmr(X, y, k=10, task="regression", verbose=False)
 cefs_features = select_cefsplus(X, y, k=10, verbose=False)
 ```
 
-For the full public API, examples, and option details, start with
-[DOCS.MD](DOCS.MD).
+For the full public API, examples, selector support matrix, and option details,
+start with [DOCS.MD](DOCS.MD).
 
 ## Documentation
 
 - [Full API manual](DOCS.MD)
 - [User guide](docs/user-guide.md)
-- [Architecture](docs/architecture.md)
+- [Architecture and module boundaries](docs/architecture.md)
 - [Development guide](docs/development.md)
 - [Release tracker](TODO.MD)
 

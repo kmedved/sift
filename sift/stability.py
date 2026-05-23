@@ -11,6 +11,7 @@ from sklearn.linear_model import (
     LogisticRegression, LogisticRegressionCV
 )
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 
 from sift._preprocess import ensure_weights
@@ -21,7 +22,7 @@ from sift.sampling.smart import SmartSamplerConfig, smart_sample
 # Stability Selector
 # =============================================================================
 
-from sift.stability_sampling import (
+from sift.sampling.stability import (
     _block_bootstrap_indices,
     _bootstrap_indices,
 )
@@ -160,6 +161,20 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         -------
         self
         """
+        X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
+            X, y, sample_weight, groups, time, feature_names
+        )
+        split_iter = self._make_stability_split_iterator(len(y), y, groups, time)
+        sel_count, sum_abs_coef, n_runs = self._run_stability_chunks(
+            X_scaled,
+            y,
+            sample_weight,
+            split_iter,
+        )
+        self._finalize_stability_selection(sel_count, sum_abs_coef, n_runs, feature_names)
+        return self
+
+    def _prepare_stability_fit(self, X, y, sample_weight, groups, time, feature_names):
         # Input validation
         self._validate_runtime_params()
         if self.use_smart_sampler and (groups is not None or time is not None):
@@ -202,11 +217,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             print(f"Stability selection ({task_str}): {self.n_bootstrap} bootstraps, "
                   f"α={self.alpha_:.4f}, threshold={self.threshold}")
 
-        alpha = self.alpha_
-        l1_ratio = self.l1_ratio
-        task = self.task
-        coef_threshold = self.coef_threshold
+        return X_scaled, y, sample_weight, feature_names, groups, time
 
+    def _make_stability_split_iterator(self, n: int, y, groups, time):
         use_block = groups is not None and time is not None
         if use_block:
             if self.verbose:
@@ -234,50 +247,38 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 random_state=self.random_state,
             )
 
+        return split_iter
+
+    def _fit_single_stability_run(self, X_scaled, y, sample_weight, train_idx, seed):
+        if self.task == 'classification':
+            model = LogisticRegression(
+                penalty='l1', solver='saga', C=1.0 / self.alpha_,
+                max_iter=3000, random_state=seed, n_jobs=1,
+            )
+        elif self.l1_ratio >= 1.0:
+            model = Lasso(alpha=self.alpha_, max_iter=3000)
+        else:
+            model = ElasticNet(alpha=self.alpha_, l1_ratio=self.l1_ratio, max_iter=3000)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(X_scaled[train_idx], y[train_idx], sample_weight=sample_weight[train_idx])
+
+        coef = model.coef_
+        if coef.ndim == 2 and coef.shape[0] == 1:
+            coef_summary = coef[0]
+            selected = np.abs(coef_summary) > self.coef_threshold
+        elif coef.ndim == 2:
+            selected = np.any(np.abs(coef) > self.coef_threshold, axis=0)
+            coef_summary = np.max(np.abs(coef), axis=0)
+        else:
+            coef_summary = coef.ravel()
+            selected = np.abs(coef_summary) > self.coef_threshold
+        return selected.astype(np.int8), coef_summary.astype(np.float32)
+
+    def _run_stability_chunks(self, X_scaled, y, sample_weight, split_iter):
+        p = X_scaled.shape[1]
         rng = np.random.default_rng(self.random_state)
-
-        def single_run(train_idx, seed):
-            idx = train_idx
-
-            if task == 'classification':
-                # C = 1/alpha for LogisticRegression
-                model = LogisticRegression(
-                    penalty='l1',
-                    solver='saga',
-                    C=1.0 / alpha,
-                    max_iter=3000,
-                    random_state=seed,  # Reproducibility
-                    n_jobs=1  # Avoid nested parallelism
-                )
-            elif l1_ratio >= 1.0:
-                model = Lasso(alpha=alpha, max_iter=3000)
-            else:
-                model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=3000)
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
-
-            coef = model.coef_
-
-            # Handle coefficient shapes
-            if coef.ndim == 2:
-                if coef.shape[0] == 1:
-                    # Binary classification: preserve sign
-                    coef_flat = coef[0]
-                    selected = np.abs(coef_flat) > coef_threshold
-                    coef_summary = coef_flat  # Signed coefficients
-                else:
-                    # True multiclass: aggregate across classes
-                    selected = np.any(np.abs(coef) > coef_threshold, axis=0)
-                    # For multiclass, take max abs (sign is ambiguous)
-                    coef_summary = np.max(np.abs(coef), axis=0)
-            else:
-                # Regression
-                selected = np.abs(coef) > coef_threshold
-                coef_summary = coef.ravel()
-
-            return selected.astype(np.int8), coef_summary.astype(np.float32)
 
         # Chunked execution to reduce peak memory. Splits are streamed instead
         # of materialized up front, which matters for large block bootstraps.
@@ -307,7 +308,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             chunk_seeds_arr = np.asarray(chunk_seeds, dtype=np.int64)
 
             chunk_results = Parallel(n_jobs=self.n_jobs, prefer=self.parallel_backend)(
-                delayed(single_run)(train_idx, seed)
+                delayed(self._fit_single_stability_run)(
+                    X_scaled,
+                    y,
+                    sample_weight,
+                    train_idx,
+                    seed,
+                )
                 for (train_idx, _), seed in zip(chunk_splits, chunk_seeds_arr)
             )
 
@@ -328,6 +335,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if self.store_coefs:
             self.coef_bootstrap_ = self.coef_bootstrap_[:bootstrap_idx]
 
+        return sel_count, sum_abs_coef, bootstrap_idx
+
+    def _finalize_stability_selection(self, sel_count, sum_abs_coef, bootstrap_idx: int, feature_names) -> None:
+        p = len(feature_names)
         self.selection_frequencies_ = (sel_count / bootstrap_idx).astype(np.float32)
         self.mean_abs_coef_ = (sum_abs_coef / bootstrap_idx).astype(np.float32)
 
@@ -352,6 +363,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """Reduce X to selected features."""
+        check_is_fitted(self, ["selected_features_", "selected_feature_names_"])
         if isinstance(X, pd.DataFrame):
             return X[self.selected_feature_names_].values
         return np.asarray(X)[:, self.selected_features_]
@@ -367,6 +379,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def get_feature_info(self) -> pd.DataFrame:
         """Return feature frequencies, mean coefficient magnitude, and support."""
+        check_is_fitted(
+            self,
+            ["feature_names_in_", "selection_frequencies_", "mean_abs_coef_"],
+        )
         return pd.DataFrame({
             'feature': self.feature_names_in_,
             'frequency': self.selection_frequencies_,
@@ -376,6 +392,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         """Get mask or indices of selected features."""
+        check_is_fitted(self, ["selected_features_", "n_features_in_"])
         if indices:
             return self.selected_features_
         mask = np.zeros(self.n_features_in_, dtype=bool)
@@ -834,3 +851,64 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
 
         return cv_model.alpha_
+
+
+def stability_select(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    threshold: float = 0.6,
+    n_bootstrap: int = 50,
+    **kwargs,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Quick stability selection returning selected indices and frequencies."""
+    selector = StabilitySelector(
+        threshold=threshold,
+        n_bootstrap=n_bootstrap,
+        **kwargs,
+    )
+    selector.fit(X, y)
+    return selector.selected_features_, selector.selection_frequencies_
+
+
+def _stability_task_features(
+    task: str,
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    k: int,
+    **kwargs,
+) -> Union[List[str], List[int]]:
+    sample_weight = kwargs.pop("sample_weight", None)
+    groups = kwargs.pop("groups", None)
+    time = kwargs.pop("time", None)
+    return_indices = kwargs.pop("return_indices", None)
+    kwargs["task"] = task
+    kwargs["max_features"] = k
+
+    selector = StabilitySelector(**kwargs)
+    selector.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
+
+    if return_indices is None:
+        return_indices = not isinstance(X, pd.DataFrame)
+    if return_indices:
+        return selector.selected_features_.tolist()
+    return selector.selected_feature_names_
+
+
+def stability_regression(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    k: int,
+    **kwargs,
+) -> Union[List[str], List[int]]:
+    """Stability selection for regression."""
+    return _stability_task_features("regression", X, y, k, **kwargs)
+
+
+def stability_classif(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: Union[np.ndarray, pd.Series],
+    k: int,
+    **kwargs,
+) -> Union[List[str], List[int]]:
+    """Stability selection for classification."""
+    return _stability_task_features("classification", X, y, k, **kwargs)

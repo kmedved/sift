@@ -6,8 +6,10 @@ import pandas as pd
 
 catboost = pytest.importorskip("catboost")
 
-from sift.catboost import (
+from sift.catboost import (  # noqa: E402
     catboost_select,
+    catboost_classif,
+    catboost_regression,
     CatBoostSelectionResult,
     _resolve_metric_and_direction,
     _resolve_loss_function,
@@ -15,8 +17,7 @@ from sift.catboost import (
     _get_feature_types,
     _aggregate_feature_lists,
 )
-from sift.catboost_api import catboost_classif, catboost_regression
-from sift._preprocess import best_score_from_dict as _best_score_from_dict
+from sift._preprocess import best_score_from_dict as _best_score_from_dict  # noqa: E402
 
 
 class TestScoreDirection:
@@ -750,7 +751,7 @@ class TestCatFeaturesParameter:
         import warnings as w
         with w.catch_warnings(record=True) as caught:
             w.simplefilter("always")
-            result = catboost_select(
+            catboost_select(
                 X, y, k=2,
                 task='regression',
                 treat_object_as_categorical=False,

@@ -9,10 +9,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression, Ridge, RidgeCV
-from sklearn.metrics import log_loss
 from sklearn.model_selection import GroupKFold
-from sklearn.preprocessing import StandardScaler
 
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
@@ -22,7 +19,7 @@ from sift._preprocess import (
 from sift.selection.auto_k_core import (
     build_k_grid,
     build_score_curve_diagnostics,
-    compute_metric,
+    evaluate_numeric_prefixes,
     resolve_metric,
     split_weights,
     time_holdout_split,
@@ -264,6 +261,98 @@ def _score_curve_tolerance(best_score: float, config: AutoKConfig) -> float:
     return tol
 
 
+def _choose_best_rule(diag, best_row, best_k, best_score, config, *, lower_is_better):
+    del best_row, best_score, config, lower_is_better
+    diag["within_tolerance"] = diag["k"] == best_k
+    return best_k, "best", False
+
+
+def _choose_one_se_rule(diag, best_row, best_k, best_score, config, *, lower_is_better):
+    best_se = float(best_row.get("score_se", np.nan))
+    if not np.isfinite(best_se):
+        warnings.warn(
+            "selection_rule='one_se' requires at least two finite split scores; "
+            "falling back to selection_rule='best'.",
+            UserWarning,
+            stacklevel=3,
+        )
+        diag["within_tolerance"] = diag["k"] == best_k
+        return best_k, "best", True
+
+    tol = float(config.one_se_multiplier) * best_se
+    if lower_is_better:
+        diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
+    else:
+        diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
+    eligible = diag[diag["within_tolerance"] & np.isfinite(diag["score_mean"])]
+    selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
+    return selected_k, "one_se", False
+
+
+def _mark_tolerance(
+    diag: pd.DataFrame,
+    best_score: float,
+    config: AutoKConfig,
+    *,
+    lower_is_better: bool,
+) -> None:
+    tol = _score_curve_tolerance(best_score, config)
+    if lower_is_better:
+        diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
+    else:
+        diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
+    diag.loc[~np.isfinite(diag["score_mean"]), "within_tolerance"] = False
+
+
+def _choose_tolerance_rule(diag, best_row, best_k, best_score, config, *, lower_is_better):
+    del best_row, best_k
+    _mark_tolerance(diag, best_score, config, lower_is_better=lower_is_better)
+    eligible = diag[diag["within_tolerance"]]
+    selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
+    return selected_k, "tolerance", False
+
+
+def _selected_plateau_ks(diag: pd.DataFrame, best_k: int) -> list[int]:
+    eligible_mask = diag["within_tolerance"].to_numpy(dtype=bool)
+    best_positions = np.flatnonzero(diag["k"].to_numpy(dtype=int) == best_k)
+    if not best_positions.size:
+        return [best_k]
+    pos = int(best_positions[0])
+    start = pos
+    while start > 0 and eligible_mask[start - 1]:
+        start -= 1
+    end = pos
+    while end + 1 < len(eligible_mask) and eligible_mask[end + 1]:
+        end += 1
+    diag.iloc[start : end + 1, diag.columns.get_loc("in_selected_plateau")] = True
+    return diag.iloc[start : end + 1]["k"].astype(int).tolist()
+
+
+def _choose_plateau_rule(diag, best_row, best_k, best_score, config, *, lower_is_better):
+    del best_row
+    _mark_tolerance(diag, best_score, config, lower_is_better=lower_is_better)
+    plateau_ks = _selected_plateau_ks(diag, best_k)
+    if len(plateau_ks) < int(config.plateau_min_points):
+        selected_k = best_k
+    elif config.plateau_prefer == "smallest":
+        selected_k = int(plateau_ks[0])
+    elif config.plateau_prefer == "largest":
+        selected_k = int(plateau_ks[-1])
+    elif config.plateau_prefer == "center":
+        selected_k = int(plateau_ks[len(plateau_ks) // 2])
+    else:
+        selected_k = best_k
+    return selected_k, "plateau", False
+
+
+_RULE_SELECTORS = {
+    "best": _choose_best_rule,
+    "one_se": _choose_one_se_rule,
+    "tolerance": _choose_tolerance_rule,
+    "plateau": _choose_plateau_rule,
+}
+
+
 def choose_k_from_score_curve(
     diagnostics: pd.DataFrame,
     config: AutoKConfig,
@@ -314,72 +403,106 @@ def choose_k_from_score_curve(
     diag["in_selected_plateau"] = False
     diag["selection_rule"] = rule
 
-    selected_k = best_k
-    if rule == "best":
-        diag["within_tolerance"] = diag["k"] == best_k
-    elif rule == "one_se":
-        best_se = float(best_row.get("score_se", np.nan))
-        if not np.isfinite(best_se):
-            warnings.warn(
-                "selection_rule='one_se' requires at least two finite split scores; "
-                "falling back to selection_rule='best'.",
-                UserWarning,
-                stacklevel=2,
-            )
-            effective_rule = "best"
-            one_se_unavailable = True
-            diag["within_tolerance"] = diag["k"] == best_k
-        else:
-            tol = float(config.one_se_multiplier) * best_se
-            if lower_is_better:
-                diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
-            else:
-                diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
-            eligible = diag[diag["within_tolerance"] & np.isfinite(diag["score_mean"])]
-            selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
-    elif rule in {"tolerance", "plateau"}:
-        tol = _score_curve_tolerance(best_score, config)
-        if lower_is_better:
-            diag["within_tolerance"] = diag["score_mean"] <= best_score + tol
-        else:
-            diag["within_tolerance"] = diag["score_mean"] >= best_score - tol
-        diag.loc[~np.isfinite(diag["score_mean"]), "within_tolerance"] = False
-        if rule == "tolerance":
-            eligible = diag[diag["within_tolerance"]]
-            selected_k = int(eligible.sort_values("k", kind="mergesort").iloc[0]["k"])
-        else:
-            eligible_mask = diag["within_tolerance"].to_numpy(dtype=bool)
-            best_positions = np.flatnonzero(diag["k"].to_numpy(dtype=int) == best_k)
-            if best_positions.size:
-                pos = int(best_positions[0])
-                start = pos
-                while start > 0 and eligible_mask[start - 1]:
-                    start -= 1
-                end = pos
-                while end + 1 < len(eligible_mask) and eligible_mask[end + 1]:
-                    end += 1
-                plateau_ks = diag.iloc[start : end + 1]["k"].astype(int).tolist()
-                diag.iloc[start : end + 1, diag.columns.get_loc("in_selected_plateau")] = True
-            else:
-                plateau_ks = [best_k]
-
-            if len(plateau_ks) < int(config.plateau_min_points):
-                selected_k = best_k
-            elif config.plateau_prefer == "smallest":
-                selected_k = int(plateau_ks[0])
-            elif config.plateau_prefer == "largest":
-                selected_k = int(plateau_ks[-1])
-            elif config.plateau_prefer == "center":
-                selected_k = int(plateau_ks[len(plateau_ks) // 2])
-            else:
-                selected_k = best_k
-    else:
+    selector = _RULE_SELECTORS.get(rule)
+    if selector is None:
         raise ValueError(f"Unknown selection_rule: {rule!r}")
+    selected_k, effective_rule, one_se_unavailable = selector(
+        diag,
+        best_row,
+        best_k,
+        best_score,
+        config,
+        lower_is_better=lower_is_better,
+    )
 
     diag["selection_rule_effective"] = effective_rule
     diag["one_se_unavailable"] = one_se_unavailable
     diag["selected"] = diag["k"] == selected_k
     return int(selected_k), diag
+
+
+def _evaluate_prefix_split(
+    *,
+    X_path_df: pd.DataFrame,
+    valid_features: List[str],
+    y_arr: np.ndarray,
+    w_arr: np.ndarray,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    task: Literal["regression", "classification"],
+    metric: str,
+    k_grid: list[int],
+    cat_features: Optional[List[str]],
+    cat_encoding: Literal["none", "target", "loo", "james_stein", "loo_logit"],
+    loo_smoothing: float,
+    loo_clip_min: float,
+    loo_clip_max: float,
+) -> dict:
+    """Evaluate all k values for one train/validation split."""
+    Xtr_df = X_path_df.iloc[train_idx]
+    Xva_df = X_path_df.iloc[val_idx]
+    ytr = y_arr[train_idx]
+    yva = y_arr[val_idx]
+    wtr = split_weights(w_arr, train_idx, "train")
+    wva = split_weights(w_arr, val_idx, "validation")
+
+    if cat_features is None:
+        fold_cat = (
+            Xtr_df.select_dtypes(include=["object", "category", "string"])
+            .columns.intersection(valid_features)
+            .tolist()
+        )
+    else:
+        fold_cat = [col for col in cat_features if col in Xtr_df.columns]
+
+    if cat_encoding == "loo_logit" and fold_cat:
+        if task != "classification":
+            raise ValueError("cat_encoding='loo_logit' requires task='classification'")
+        enc = LeaveOneOutLogitEncoder(
+            cols=fold_cat,
+            smoothing=loo_smoothing,
+            clip_min=loo_clip_min,
+            clip_max=loo_clip_max,
+        )
+        Xtr_df = enc.fit_transform(Xtr_df, ytr, sample_weight=wtr)
+        Xva_df = enc.transform(Xva_df)
+    elif cat_encoding != "none" and fold_cat:
+        if importlib.util.find_spec("category_encoders") is None:
+            raise ImportError(
+                "cat_encoding requires category_encoders. Install with: pip install category_encoders"
+            )
+        import category_encoders as ce
+
+        enc_map = {
+            "loo": ce.LeaveOneOutEncoder,
+            "target": ce.TargetEncoder,
+            "james_stein": ce.JamesSteinEncoder,
+        }
+        Encoder = enc_map[cat_encoding]
+        try:
+            enc = Encoder(
+                cols=fold_cat,
+                handle_missing="return_nan",
+                handle_unknown="value",
+            )
+        except TypeError:
+            enc = Encoder(cols=fold_cat, handle_missing="return_nan")
+        with suppress_category_encoder_pandas_warnings():
+            Xtr_df = enc.fit_transform(Xtr_df, ytr)
+            Xva_df = enc.transform(Xva_df)
+
+    return evaluate_numeric_prefixes(
+        Xtr_df,
+        Xva_df,
+        ytr,
+        yva,
+        wtr,
+        wva,
+        task=task,
+        metric=metric,
+        k_grid=k_grid,
+        ridge_alpha_strategy="full_path",
+    )
 
 
 def select_k_auto(
@@ -425,129 +548,31 @@ def select_k_auto(
     X_path_df = X[valid_features]
 
     metric = resolve_metric(config.metric, task)
-    alphas = np.logspace(-3, 3, 10)
-
-    def _eval_split(train_idx: np.ndarray, val_idx: np.ndarray) -> dict:
-        """Evaluate all k values for one train/val split."""
-        Xtr_df = X_path_df.iloc[train_idx]
-        Xva_df = X_path_df.iloc[val_idx]
-        ytr = y_arr[train_idx]
-        yva = y_arr[val_idx]
-        wtr = split_weights(w_arr, train_idx, "train")
-        wva = split_weights(w_arr, val_idx, "validation")
-
-        if cat_features is None:
-            fold_cat = (
-                Xtr_df.select_dtypes(include=["object", "category", "string"])
-                .columns.intersection(valid_features)
-                .tolist()
-            )
-        else:
-            fold_cat = [col for col in cat_features if col in Xtr_df.columns]
-
-        if cat_encoding == "loo_logit" and fold_cat:
-            if task != "classification":
-                raise ValueError("cat_encoding='loo_logit' requires task='classification'")
-            enc = LeaveOneOutLogitEncoder(
-                cols=fold_cat,
-                smoothing=loo_smoothing,
-                clip_min=loo_clip_min,
-                clip_max=loo_clip_max,
-            )
-            Xtr_df = enc.fit_transform(Xtr_df, ytr, sample_weight=wtr)
-            Xva_df = enc.transform(Xva_df)
-        elif cat_encoding != "none" and fold_cat:
-            if importlib.util.find_spec("category_encoders") is None:
-                raise ImportError(
-                    "cat_encoding requires category_encoders. Install with: pip install category_encoders"
-                )
-            import category_encoders as ce
-
-            enc_map = {
-                "loo": ce.LeaveOneOutEncoder,
-                "target": ce.TargetEncoder,
-                "james_stein": ce.JamesSteinEncoder,
-            }
-            Encoder = enc_map[cat_encoding]
-            try:
-                enc = Encoder(
-                    cols=fold_cat,
-                    handle_missing="return_nan",
-                    handle_unknown="value",
-                )
-            except TypeError:
-                enc = Encoder(cols=fold_cat, handle_missing="return_nan")
-            with suppress_category_encoder_pandas_warnings():
-                Xtr_df = enc.fit_transform(Xtr_df, ytr)
-                Xva_df = enc.transform(Xva_df)
-
-        Xtr = Xtr_df.to_numpy(dtype=np.float64, copy=False)
-        Xva = Xva_df.to_numpy(dtype=np.float64, copy=False)
-
-        col_means = np.nanmean(Xtr, axis=0)
-        col_means = np.where(np.isfinite(col_means), col_means, 0.0)
-
-        mask_tr = ~np.isfinite(Xtr)
-        if mask_tr.any():
-            Xtr = Xtr.copy()
-            Xtr[mask_tr] = col_means[np.where(mask_tr)[1]]
-
-        mask_va = ~np.isfinite(Xva)
-        if mask_va.any():
-            Xva = Xva.copy()
-            Xva[mask_va] = col_means[np.where(mask_va)[1]]
-
-        scaler = StandardScaler().fit(Xtr)
-        Xtr_s = scaler.transform(Xtr)
-        Xva_s = scaler.transform(Xva)
-
-        if task == "regression":
-            ridgecv = RidgeCV(alphas=alphas).fit(Xtr_s, ytr, sample_weight=wtr)
-            alpha = float(ridgecv.alpha_)
-            model = Ridge(alpha=alpha)
-        else:
-            model = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
-
-        split_scores = {}
-        for k in k_grid:
-            try:
-                if task == "classification" and len(np.unique(ytr)) < 2:
-                    split_scores[k] = np.inf
-                    continue
-
-                model.fit(Xtr_s[:, :k], ytr, sample_weight=wtr)
-
-                if task == "classification" and metric == "logloss":
-                    proba = model.predict_proba(Xva_s[:, :k])
-                    if not np.isin(np.unique(yva), model.classes_).all():
-                        split_scores[k] = np.inf
-                    else:
-                        split_scores[k] = float(
-                            log_loss(
-                                yva,
-                                proba,
-                                labels=model.classes_,
-                                sample_weight=wva,
-                            )
-                        )
-                else:
-                    pred = model.predict(Xva_s[:, :k])
-                    split_scores[k] = compute_metric(
-                        yva,
-                        pred,
-                        metric,
-                        sample_weight=wva,
-                    )
-            except Exception:
-                split_scores[k] = np.inf
-        return split_scores
+    eval_kwargs = {
+        "X_path_df": X_path_df,
+        "valid_features": valid_features,
+        "y_arr": y_arr,
+        "w_arr": w_arr,
+        "task": task,
+        "metric": metric,
+        "k_grid": k_grid,
+        "cat_features": cat_features,
+        "cat_encoding": cat_encoding,
+        "loo_smoothing": loo_smoothing,
+        "loo_clip_min": loo_clip_min,
+        "loo_clip_max": loo_clip_max,
+    }
 
     if config.strategy == "time_holdout":
         if time is None:
             raise ValueError("time_holdout strategy requires time parameter")
 
         train_idx, val_idx = time_holdout_split(time, config.val_frac)
-        scores = _eval_split(train_idx, val_idx)
+        scores = _evaluate_prefix_split(
+            train_idx=train_idx,
+            val_idx=val_idx,
+            **eval_kwargs,
+        )
         split_scores = {k: [score] for k, score in scores.items()}
         diag = build_score_curve_diagnostics(k_grid, split_scores)
 
@@ -564,7 +589,11 @@ def select_k_auto(
 
         all_scores = {k: [] for k in k_grid}
         for train_idx, val_idx in gkf.split(X_path_df, y_arr, groups):
-            fold_scores = _eval_split(train_idx, val_idx)
+            fold_scores = _evaluate_prefix_split(
+                train_idx=train_idx,
+                val_idx=val_idx,
+                **eval_kwargs,
+            )
             for k, score in fold_scores.items():
                 all_scores[k].append(score)
 

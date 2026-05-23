@@ -1,12 +1,15 @@
 import importlib.util
 import warnings
+import inspect
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
-import sift.selection.filter_api_common as filter_api_common
-import sift.selection.jmi_api as jmi_api
+import sift.selection.auto_k as auto_k_module
+import sift.selection.filter_api as filter_api
+import sift.selection.filter_payloads as filter_payloads
 from sift.selection.auto_k import (
     AutoKConfig,
     choose_k_from_score_curve,
@@ -332,7 +335,7 @@ def test_public_auto_k_passes_sample_weight_to_prefix_evaluation(monkeypatch):
         captured["sample_weight"] = np.asarray(sample_weight)
         return 1, feature_path[:1], pd.DataFrame({"k": [1], "score": [0.0]})
 
-    monkeypatch.setattr(filter_api_common, "select_k_auto", fake_select_k_auto)
+    monkeypatch.setattr(auto_k_module, "select_k_auto", fake_select_k_auto)
     cfg = AutoKConfig(
         strategy="time_holdout",
         min_k=1,
@@ -431,6 +434,58 @@ def test_public_selectors_validate_auto_k_config(config_kwargs, match):
         )
 
 
+def test_filter_spec_auto_k_handler_contract():
+    assert set(filter_api.MRMR_CLASSIC_SPEC.auto_k_handlers) == {"evaluate"}
+    assert set(filter_api.MRMR_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "evaluate",
+        "elbow",
+    }
+
+    for specs in (filter_api.JMI_CLASSIC_SPECS, filter_api.JMIM_CLASSIC_SPECS):
+        assert set(specs) == {"r2", "binned", "ksg"}
+        for spec in specs.values():
+            assert set(spec.auto_k_handlers) == {"evaluate"}
+
+    assert set(filter_api.JMI_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "evaluate",
+        "elbow",
+    }
+    assert set(filter_api.JMIM_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "evaluate",
+        "elbow",
+    }
+    assert set(filter_api.CEFSPLUS_SPEC.auto_k_handlers) == {
+        "evaluate",
+        "elbow",
+        "penalized_objective",
+    }
+    assert set(filter_api.CEFSPLUS_BINARY_SPEC.auto_k_handlers) == {
+        "evaluate",
+        "elbow",
+        "penalized_objective",
+    }
+
+
+def test_filter_api_selector_kwargs_match_public_signatures():
+    common = filter_api._COMMON_REQUEST_LOCAL_NAMES
+
+    def selector_kwargs(fn):
+        return tuple(
+            name
+            for name in inspect.signature(fn).parameters
+            if name not in common
+        )
+
+    assert selector_kwargs(filter_api.select_mrmr) == filter_api.MRMR_SELECTOR_KWARGS
+    assert selector_kwargs(filter_api.select_jmi) == filter_api.JMI_SELECTOR_KWARGS
+    assert selector_kwargs(filter_api.select_jmim) == filter_api.JMI_SELECTOR_KWARGS
+    assert selector_kwargs(filter_api.select_cefsplus) == filter_api.CEFSPLUS_SELECTOR_KWARGS
+    assert (
+        selector_kwargs(filter_api.select_cefsplus_binary)
+        == filter_api.CEFSPLUS_BINARY_SELECTOR_KWARGS
+    )
+
+
 @pytest.mark.parametrize(
     ("selector", "kwargs"),
     [
@@ -439,7 +494,7 @@ def test_public_selectors_validate_auto_k_config(config_kwargs, match):
         (select_jmim, {"task": "regression", "estimator": "r2"}),
     ],
 )
-def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs):
+def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs, monkeypatch):
     X, y, time = _numeric_auto_k_data()
     cfg = AutoKConfig(
         k_method="elbow",
@@ -449,7 +504,12 @@ def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs):
         val_frac=0.25,
     )
 
-    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
+    def fail_prepare(*args, **kwargs):
+        raise AssertionError("classic payload prep should not be called")
+
+    monkeypatch.setattr(filter_payloads, "_prepare_xy_classic", fail_prepare)
+
+    with pytest.raises(ValueError, match="does not support k_method='elbow'"):
         selector(
             X,
             y,
@@ -465,7 +525,7 @@ def test_public_auto_k_rejects_penalized_objective_for_non_cefsplus_routes():
     X, y, time = _numeric_auto_k_data()
     cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=3)
 
-    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
+    with pytest.raises(ValueError, match="does not support k_method='penalized_objective'"):
         select_mrmr(
             X,
             y,
@@ -476,7 +536,7 @@ def test_public_auto_k_rejects_penalized_objective_for_non_cefsplus_routes():
             auto_k_config=cfg,
             verbose=False,
         )
-    with pytest.raises(ValueError, match="supported only for CEFS\\+"):
+    with pytest.raises(ValueError, match="does not support k_method='penalized_objective'"):
         select_jmi(
             X,
             y,
@@ -495,9 +555,9 @@ def test_gaussian_non_cefsplus_rejects_penalized_objective_before_cache(monkeypa
     def fail_build_cache(*args, **kwargs):
         raise AssertionError("build_cache should not be called")
 
-    monkeypatch.setattr(jmi_api, "build_cache", fail_build_cache)
+    monkeypatch.setattr(filter_payloads, "build_cache", fail_build_cache)
 
-    with pytest.raises(ValueError, match="supported only for CEFS\\+"):
+    with pytest.raises(ValueError, match="does not support k_method='penalized_objective'"):
         select_jmim(
             X,
             y,
@@ -514,7 +574,7 @@ def test_classic_rejects_penalized_objective_before_supervised_encoding_error():
     X = X.assign(cat=np.where(np.arange(len(X)) % 2 == 0, "a", "b"))
     cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=3)
 
-    with pytest.raises(ValueError, match="classic.*k_method='evaluate'"):
+    with pytest.raises(ValueError, match="does not support k_method='penalized_objective'"):
         select_mrmr(
             X,
             y,
@@ -526,6 +586,20 @@ def test_classic_rejects_penalized_objective_before_supervised_encoding_error():
             auto_k_config=cfg,
             verbose=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("selector", "kwargs"),
+    [
+        (select_mrmr, {"task": "regression", "estimator": "not-real"}),
+        (select_jmi, {"task": "regression", "estimator": "not-real"}),
+        (select_jmim, {"task": "regression", "estimator": "not-real"}),
+    ],
+)
+def test_public_filter_selectors_reject_invalid_estimators(selector, kwargs):
+    X, y, _ = _numeric_auto_k_data()
+    with pytest.raises(ValueError, match="estimator"):
+        selector(X, y, k=2, verbose=False, **kwargs)
 
 
 def test_gaussian_auto_k_elbow_still_works_without_split_context():

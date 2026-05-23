@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from sift import build_cache, select_mrmr
-import sift.selection.mrmr_api as mrmr_api
+import sift.selection.filter_payloads as filter_payloads
 
 
 def _regression_data(n: int = 160, p: int = 12):
@@ -139,7 +139,7 @@ def test_gaussian_mrmr_prebuilt_cache_is_reused(monkeypatch):
     def fail_build_cache(*args, **kwargs):
         raise AssertionError("select_mrmr should not rebuild a supplied cache")
 
-    monkeypatch.setattr(mrmr_api, "build_cache", fail_build_cache)
+    monkeypatch.setattr(filter_payloads, "build_cache", fail_build_cache)
 
     selected = select_mrmr(
         X,

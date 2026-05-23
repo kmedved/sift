@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 from sift._numba import njit_optional_cache
-from sift._preprocess import ensure_weights as _ensure_weights
 
 
 # Keep these kernels serial: CatBoost/OpenMP can crash when Numba's parallel

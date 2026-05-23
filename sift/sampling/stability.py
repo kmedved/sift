@@ -7,6 +7,7 @@ import warnings
 
 import numpy as np
 
+
 def _bootstrap_indices(
     n: int,
     n_bootstrap: int,

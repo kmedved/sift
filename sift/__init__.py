@@ -22,19 +22,15 @@ from sift.selection.auto_k import (
     select_k_penalized_objective,
 )
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
-from sift.stability import StabilitySelector
-from sift.stability_api import stability_classif, stability_regression
+from sift.stability import StabilitySelector, stability_classif, stability_regression
 
 
 def __getattr__(name):
-    if name == "catboost_select":
+    if name in ("catboost_select", "catboost_regression", "catboost_classif"):
+        # CatBoost is optional; keep it lazy so importing sift does not require it.
         from sift import catboost
 
         return getattr(catboost, name)
-    if name in ("catboost_regression", "catboost_classif"):
-        from sift import catboost_api
-
-        return getattr(catboost_api, name)
     raise AttributeError(f"module 'sift' has no attribute '{name}'")
 
 

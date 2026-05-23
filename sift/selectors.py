@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import importlib.util
 from typing import Callable
 
@@ -17,12 +18,12 @@ from sift._preprocess import (
     suppress_category_encoder_pandas_warnings,
 )
 from sift.api import (
+    select_cefsplus_binary,
     select_cefsplus,
     select_jmim,
     select_jmi,
     select_mrmr,
 )
-from sift.selection.cefsplus_binary_api import select_cefsplus_binary
 from sift.selection.cefsplus_binary_common import (
     resolve_binary_weights,
     validate_binary_target,
@@ -42,6 +43,20 @@ _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
         "loo_clip_max",
     }
 )
+_SELECTOR_FORWARD_SKIP_PARAMS = frozenset(
+    {
+        "X",
+        "y",
+        "k",
+        "cache",
+        "groups",
+        "time",
+        "auto_k_config",
+        "sample_weight",
+        "return_result",
+    }
+)
+_BLOCKED_FIT_PARAM_OVERRIDES = frozenset({"return_result"})
 
 
 def _coerce_selection_indices(
@@ -149,7 +164,6 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     """Sklearn-style compatibility layer for function-based selectors."""
 
     _selector_fn: Callable
-    _selector_param_names: tuple[str, ...] = ()
 
     def _init_selector(self, selector_fn: Callable, params: dict) -> None:
         for name, value in params.items():
@@ -158,7 +172,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         self._selector_fn = selector_fn
 
     def _selector_params(self) -> dict:
-        return {name: getattr(self, name) for name in self._selector_param_names}
+        return {
+            name: getattr(self, name)
+            for name in inspect.signature(self._selector_fn).parameters
+            if name not in _SELECTOR_FORWARD_SKIP_PARAMS and hasattr(self, name)
+        }
 
     def _clear_fit_state(self) -> None:
         for attr in (
@@ -273,6 +291,13 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
 
         call_params["sample_weight"] = sample_weight
         if fit_params:
+            blocked = sorted(_BLOCKED_FIT_PARAM_OVERRIDES.intersection(fit_params))
+            if blocked:
+                blocked_text = ", ".join(blocked)
+                raise ValueError(
+                    "selector fit-time overrides cannot change return shape: "
+                    f"{blocked_text}"
+                )
             call_params.update(fit_params)
 
         feature_names = _feature_names_or_default(X)
@@ -551,22 +576,6 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
 class MRMRSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_mrmr`."""
 
-    _selector_param_names = (
-        "task",
-        "relevance",
-        "estimator",
-        "formula",
-        "top_m",
-        "cat_features",
-        "cat_encoding",
-        "allow_full_data_target_encoding",
-        "subsample",
-        "random_state",
-        "n_jobs",
-        "mrmr_backend",
-        "verbose",
-    )
-
     def __init__(
         self,
         k: int | str = 10,
@@ -593,19 +602,6 @@ class MRMRSelector(_BaseSelector):
 class JMISelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmi`."""
 
-    _selector_param_names = (
-        "task",
-        "estimator",
-        "relevance",
-        "top_m",
-        "cat_features",
-        "cat_encoding",
-        "allow_full_data_target_encoding",
-        "subsample",
-        "random_state",
-        "verbose",
-    )
-
     def __init__(
         self,
         k: int | str = 10,
@@ -628,8 +624,6 @@ class JMISelector(_BaseSelector):
 
 class JMIMSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmim`."""
-
-    _selector_param_names = JMISelector._selector_param_names
 
     def __init__(
         self,
@@ -654,17 +648,6 @@ class JMIMSelector(_BaseSelector):
 class CEFSPlusSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus`."""
 
-    _selector_param_names = (
-        "top_m",
-        "corr_prune",
-        "cat_features",
-        "cat_encoding",
-        "allow_full_data_target_encoding",
-        "subsample",
-        "random_state",
-        "verbose",
-    )
-
     def __init__(
         self,
         k: int | str = 75,
@@ -685,24 +668,6 @@ class CEFSPlusSelector(_BaseSelector):
 
 class CEFSPlusBinarySelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`."""
-
-    _selector_param_names = (
-        "loss",
-        "top_m",
-        "corr_prune",
-        "class_weight",
-        "ridge",
-        "refit_every",
-        "cat_features",
-        "cat_encoding",
-        "loo_smoothing",
-        "loo_clip_min",
-        "loo_clip_max",
-        "allow_full_data_target_encoding",
-        "subsample",
-        "random_state",
-        "verbose",
-    )
 
     def __init__(
         self,
@@ -780,16 +745,19 @@ class CEFSPlusBinarySelector(_BaseSelector):
         if auto_k_config is not None:
             call_params["auto_k_config"] = auto_k_config
         if fit_params:
-            blocked = sorted(_BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES.intersection(fit_params))
+            blocked = sorted(
+                _BLOCKED_FIT_PARAM_OVERRIDES.union(
+                    _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES
+                ).intersection(fit_params)
+            )
             if blocked:
                 blocked_text = ", ".join(blocked)
                 raise ValueError(
-                    "CEFSPlusBinarySelector preprocessing-affecting parameters "
-                    f"must be set on the estimator before fit, not as fit-time "
+                    "CEFSPlusBinarySelector return-shape or preprocessing-affecting "
+                    f"parameters must be set on the estimator before fit, not as fit-time "
                     f"overrides: {blocked_text}"
                 )
             call_params.update(fit_params)
-        call_params.pop("return_result", None)
 
         loss_eff = str(self.loss).lower()
         if (

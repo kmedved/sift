@@ -2,21 +2,25 @@
 
 SIFT is a single-package Python library. It exposes a compact public API from
 `sift/__init__.py`, then delegates to focused modules for preprocessing,
-selection loops, estimators, sampling, model-based importance, and benchmarks.
+filter selection, estimators, sampling, model-based importance, and benchmarks.
 
 ```mermaid
 flowchart TD
     User["Caller code"] --> PublicAPI["sift public API"]
-    PublicAPI --> FunctionAPI["sift.api function selectors"]
+    PublicAPI --> FunctionAPI["sift.api re-export layer"]
     PublicAPI --> Wrappers["sift.selectors sklearn wrappers"]
     PublicAPI --> Stability["sift.stability"]
     PublicAPI --> Importance["sift.importance and sift.boruta"]
-    FunctionAPI --> Preprocess["sift._preprocess and sift._impute"]
-    FunctionAPI --> Loops["sift.selection loops"]
-    FunctionAPI --> Cache["sift.estimators.copula FeatureCache"]
-    FunctionAPI --> Binary["sift.selection.cefsplus_binary"]
+    FunctionAPI --> FilterAPI["sift.selection.filter_api"]
+    Wrappers --> FilterAPI
+    FilterAPI --> Payloads["sift.selection.filter_payloads"]
+    Payloads --> AutoK["sift.selection.filter_auto_k"]
+    Payloads --> Loops["sift.selection loops and CEFS+ paths"]
+    Payloads --> Cache["sift.estimators.copula FeatureCache"]
+    Payloads --> Binary["sift.selection.cefsplus_binary"]
     Loops --> Estimators["sift.estimators relevance and joint_mi"]
-    Stability --> Sampling["sift.sampling.smart and anchors"]
+    AutoK --> AutoKCore["sift.selection.auto_k and auto_k_core"]
+    Stability --> Sampling["sift.sampling.smart, anchors, and stability"]
     Importance --> Permute["sift._permute"]
     Cache --> Gaussian["Gaussian mRMR, JMI, JMIM, CEFS+"]
     Binary --> BinaryPath["Binary CEFS+ logistic path"]
@@ -27,28 +31,48 @@ flowchart TD
 | Path | Responsibility |
 | --- | --- |
 | `sift/__init__.py` | Public exports and package version. |
-| `sift/api.py` | Function-style selectors, auto-k routing, result metadata, and cache-aware entry points. |
+| `sift/api.py` | Public re-export layer for function-style selectors, cache helpers, and auto-k helpers. |
 | `sift/selectors.py` | Sklearn-style estimator wrappers around the function selectors. |
 | `sift/_preprocess.py` and `sift/_impute.py` | Input validation, categorical encoding, weight validation, and numeric coercion. |
-| `sift/selection/` | Greedy selection loops, CEFS+ implementations, auto-k logic, path evaluation, and result objects. |
+| `sift/selection/filter_api.py` | Spec-driven dispatcher for function-style mRMR, JMI, JMIM, CEFS+, and binary CEFS+. |
+| `sift/selection/filter_payloads.py` | Fixed-k and auto-k payload builders, selector validation closures, and result payload construction. |
+| `sift/selection/filter_auto_k.py` | Filter-layer orchestration around evaluate, elbow, and penalized-objective auto-k paths. |
+| `sift/selection/auto_k.py` and `auto_k_core.py` | Generic k-selection mechanics, score curves, objective penalties, and prefix evaluation. |
+| `sift/selection/cefsplus.py` and `cefsplus_binary.py` | Gaussian CEFS+ log-det paths and binary logistic CEFS+ paths. |
+| `sift/selection/result.py` and `path_eval.py` | Result containers and explicit feature-path evaluation utilities. |
 | `sift/estimators/` | Relevance scores, Gaussian copula transforms, and joint mutual-information estimators. |
-| `sift/sampling/` | Smart sampling and anchor strategies for large cross-section or panel data. |
-| `sift/stability.py` | Bootstrap and block-bootstrap stability selection. |
+| `sift/sampling/` | Smart sampling, anchor strategies, and bootstrap split generators. |
+| `sift/stability.py` | Stability selection estimator and convenience wrappers. |
 | `sift/importance.py` and `sift/_permute.py` | Permutation importance and grouped/time-aware permutation strategies. |
 | `sift/boruta.py` and `sift/catboost.py` | Boruta, Boruta-Shap, and optional CatBoost-based selectors. |
 | `benchmarks/` | Promotion-oriented benchmark scripts and parity checks. |
 | `tests/` | Regression tests for public contracts, edge cases, and performance-sensitive paths. |
 
+## Filter Selector Layer
+
+Function-style filter selectors share one dispatcher contract:
+
+1. `filter_api.py` creates a `FilterRequest`, chooses a `FilterSpec`, and formats
+   either a list of selected features or a `FilterSelectionResult`.
+2. `filter_payloads.py` owns selector-specific work: classic paths, Gaussian
+   cache paths, binary CEFS+ path construction, validation, and metadata payloads.
+3. `filter_auto_k.py` owns filter-layer auto-k orchestration while `auto_k.py`
+   stays focused on generic score-curve and objective mechanics.
+
+Unsupported auto-k modes are rejected by missing handler entries in the spec
+before expensive cache, encoding, or path construction.
+
 ## Data Flow
 
 1. Public selectors validate `X`, `y`, `k`, weights, and task-specific options.
-2. Preprocessing resolves feature names, numeric arrays, optional categorical
+2. The filter dispatcher resolves the selector spec and supported auto-k mode.
+3. Preprocessing resolves feature names, numeric arrays, optional categorical
    encoders, imputation, and sample weights.
-3. Filter selectors score relevance, prefilter candidates with `top_m`, and run
+4. Filter selectors score relevance, prefilter candidates with `top_m`, and run
    a greedy path builder.
-4. Auto-k paths optionally evaluate prefixes, objective elbows, or penalized
+5. Auto-k paths optionally evaluate prefixes, objective elbows, or penalized
    objectives depending on the selector and `AutoKConfig`.
-5. Outputs are returned as feature names by default, with optional selected
+6. Outputs are returned as feature names by default, with optional selected
    indices, diagnostics, and result objects where supported.
 
 ## Optional Dependencies

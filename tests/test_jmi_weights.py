@@ -105,6 +105,25 @@ def test_ksg_jmi_allows_unweighted_selection():
     assert len(selected) <= 2
 
 
+@pytest.mark.parametrize("selector", [select_jmi, select_jmim])
+def test_ksg_public_selectors_reject_sample_weight(selector):
+    rng = np.random.default_rng(654)
+    n, p = 30, 5
+    X = rng.normal(size=(n, p))
+    y = X[:, 0] + rng.normal(size=n) * 0.1
+
+    with pytest.raises(ValueError, match="ksg.*sample_weight"):
+        selector(
+            X,
+            y,
+            k=2,
+            task="regression",
+            estimator="ksg",
+            sample_weight=np.ones(n),
+            verbose=False,
+        )
+
+
 def test_ksg_low_level_rejects_sample_weight():
     from sift.selection.loops import jmi_select
 

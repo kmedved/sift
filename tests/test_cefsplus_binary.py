@@ -6,16 +6,13 @@ from sift import CEFSPlusBinarySelector, select_cefsplus, select_cefsplus_binary
 from sift._preprocess import LeaveOneOutLogitEncoder
 import sift.selection.auto_k_nested as auto_k_nested_module
 import sift.selection.cefsplus_binary as cefsplus_binary_module
+import sift.selection.filter_payloads as filter_payloads_module
 from sift.selection.cefsplus_binary import (
     compute_logistic_block_gram,
     intercept_only_prob,
     logistic_score_test_scores,
     logistic_score_test_scores_from_gram,
     weighted_standardize,
-)
-from sift.selection.cefsplus_binary_common import (
-    resolve_binary_weights,
-    validate_binary_target,
 )
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.result import FilterSelectionResult
@@ -27,6 +24,16 @@ def _classification_frame(seed=0, n=220, p=8):
     logits = 3.0 * X["f0"].to_numpy() + 0.5 * X["f1"].to_numpy()
     y = (logits + rng.normal(scale=0.8, size=n) > 0.0).astype(int)
     return X, y
+
+
+def _balanced_binary_weights(y, sample_weight):
+    y01 = np.asarray(y, dtype=float)
+    weights = np.asarray(sample_weight, dtype=float).copy()
+    total = float(weights.sum())
+    for cls in (0.0, 1.0):
+        mask = y01 == cls
+        weights[mask] *= total / (2.0 * float(weights[mask].sum()))
+    return weights / float(weights.mean())
 
 
 def test_binary_first_step_matches_univariate_score_test():
@@ -81,6 +88,26 @@ def test_score_test_conditions_on_intercept_after_refit():
     expected = 0.5 * U * U / cond
 
     np.testing.assert_allclose(scores, expected)
+
+
+def test_binary_list_return_skips_diagnostics_construction(monkeypatch):
+    X, y = _classification_frame(seed=2026, n=90, p=5)
+
+    def fail_make_diagnostics(_path):
+        raise AssertionError("diagnostics should only be built for return_result=True")
+
+    monkeypatch.setattr(filter_payloads_module, "make_diagnostics", fail_make_diagnostics)
+
+    selected = select_cefsplus_binary(
+        X,
+        y,
+        k=2,
+        subsample=None,
+        verbose=False,
+    )
+
+    assert isinstance(selected, list)
+    assert len(selected) == 2
 
 
 def test_score_test_adjusts_stale_selected_feature_score():
@@ -716,6 +743,78 @@ def test_binary_auto_k_penalized_objective_modes(binary_objective_mode):
     assert set(diag["binary_objective_mode"]) == {binary_objective_mode}
 
 
+def test_binary_logloss_return_result_metadata_shape_all_modes():
+    X, y = _classification_frame(seed=143, n=140, p=5)
+    cases = [
+        ("fixed", 3, None, {}),
+        (
+            "evaluate",
+            "auto",
+            AutoKConfig(
+                k_method="evaluate",
+                strategy="time_holdout",
+                metric="logloss",
+                min_k=1,
+                max_k=3,
+                val_frac=0.25,
+            ),
+            {"time": np.arange(len(y))},
+        ),
+        ("elbow", "auto", AutoKConfig(k_method="elbow", min_k=1, max_k=3), {}),
+        (
+            "penalized_objective",
+            "auto",
+            AutoKConfig(
+                k_method="penalized_objective",
+                binary_objective_mode="score_test",
+                min_k=1,
+                max_k=3,
+            ),
+            {},
+        ),
+    ]
+
+    for label, k, cfg, extra_kwargs in cases:
+        result = select_cefsplus_binary(
+            X,
+            y,
+            k=k,
+            auto_k_config=cfg,
+            subsample=None,
+            verbose=False,
+            return_result=True,
+            **extra_kwargs,
+        )
+
+        metadata = result.selector_metadata
+        assert metadata["selector"] == "cefsplus_binary"
+        assert metadata["loss"] == "logloss"
+        assert metadata["k"] == len(result.selected_features)
+        assert metadata["weighted"] is False
+        assert metadata["class_weight"] is None
+        assert metadata["class_weight_scope"] is None
+        assert set(metadata["target_mapping"].values()) == {0, 1}
+        assert isinstance(metadata["ridge"], float)
+        assert isinstance(metadata["refit_every"], int)
+        assert isinstance(result.selected_indices, list)
+        assert len(result.selected_indices) == len(result.selected_features)
+        assert result.get_feature_ranking()["selector"].eq("cefsplus_binary").all()
+        assert "subsample_row_idx" in result.diagnostics_
+        if label == "fixed":
+            assert metadata["auto_k"] is False
+            continue
+        assert metadata["auto_k"] is True
+        assert metadata["k_requested"] == "auto"
+        assert metadata["k_method"] == label
+        assert metadata["auto_k_mode"] == "prefix_only"
+        assert "auto_k" in result.diagnostics_
+        assert "auto_k_diagnostics" in result.diagnostics_
+        if label in {"elbow", "penalized_objective"}:
+            assert "auto_k_objective" in result.diagnostics_
+        if label == "penalized_objective":
+            assert metadata["binary_objective_mode"] == "score_test"
+
+
 def test_binary_class_weighted_penalized_objective_reports_pseudo_likelihood():
     X, y = _classification_frame(seed=138, n=180, p=6)
     cfg = AutoKConfig(k_method="penalized_objective", min_k=1, max_k=4)
@@ -841,14 +940,12 @@ def test_binary_selector_class_ignores_irrelevant_split_metadata_for_fixed_k():
     assert len(selector.selected_features_) == 2
 
 
-def test_binary_selector_class_owns_return_result_fit_param():
+def test_binary_selector_class_rejects_return_result_fit_param():
     X, y = _classification_frame(seed=124)
 
     selector = CEFSPlusBinarySelector(k=2, verbose=False)
-    selector.fit(X, y, return_result=False)
-
-    assert len(selector.selected_features_) == 2
-    assert selector.selected_indices_.shape == (2,)
+    with pytest.raises(ValueError, match="return_result"):
+        selector.fit(X, y, return_result=False)
 
 
 @pytest.mark.parametrize("cat_encoding", ["target", "loo"])
@@ -1111,13 +1208,8 @@ def test_brier_mode_return_result_preserves_delegate_indices_and_metadata():
 def test_weighted_brier_mode_matches_resolved_weighted_cefsplus():
     X, y = _classification_frame(seed=142)
     sample_weight = np.linspace(0.5, 3.0, len(y))
-    y01, raw_y, _ = validate_binary_target(y)
-    weights, _ = resolve_binary_weights(
-        y01,
-        raw_y,
-        sample_weight=sample_weight,
-        class_weight="balanced",
-    )
+    y01 = y.astype(float)
+    weights = _balanced_binary_weights(y, sample_weight)
 
     expected = select_cefsplus(
         X,

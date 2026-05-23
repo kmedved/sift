@@ -9,7 +9,6 @@ import numpy as np
 from sift._numba import njit_optional_cache
 from sift.estimators.copula import (
     FeatureCache,
-    build_cache,
     gaussian_mi_from_corr,
     greedy_corr_prune,
     weighted_corr_with_vector,
@@ -140,22 +139,18 @@ def _gaussian_jmi_select(
 
 
 @njit_optional_cache(cache=True)
-def cefsplus_loop(
+def _cefsplus_loop_core(
     R: np.ndarray,
     r: np.ndarray,
     k: int,
     tie_break_rel: np.ndarray,
+    want_objective: bool,
     shrink: float = 1e-6,
     eps: float = 1e-12,
-) -> np.ndarray:
-    """
-    CEFS+ greedy selection via log-det updates.
-
-    Maximizes Gaussian MI proxy using efficient Schur complement updates.
-    """
+) -> Tuple[np.ndarray, np.ndarray]:
     m = len(r)
     if k <= 0 or m == 0:
-        return np.empty(0, dtype=np.int64)
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
     k = min(k, m)
 
     R_shrunk = (1.0 - shrink) * R.copy()
@@ -164,6 +159,7 @@ def cefsplus_loop(
     r_shrunk = (1.0 - shrink) * r.copy()
 
     selected = np.empty(k, dtype=np.int64)
+    objective = np.empty(k if want_objective else 0, dtype=np.float64)
     remaining = np.ones(m, dtype=np.bool_)
 
     j0 = 0
@@ -184,6 +180,8 @@ def cefsplus_loop(
     det_yS = max(1.0 - r0 * r0, eps)
     inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
     logdet_yS = np.log(det_yS)
+    if want_objective:
+        objective[0] = logdet_S - logdet_yS
 
     while count < k:
         n_rem = 0
@@ -293,10 +291,38 @@ def cefsplus_loop(
         logdet_yS += np.log(s2_best)
 
         selected[count] = j
+        if want_objective:
+            objective[count] = logdet_S - logdet_yS
         remaining[j] = False
         count += 1
 
-    return selected[:count]
+    return selected[:count], objective[:count]
+
+
+@njit_optional_cache(cache=True)
+def cefsplus_loop(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    CEFS+ greedy selection via log-det updates.
+
+    Maximizes Gaussian MI proxy using efficient Schur complement updates.
+    """
+    selected, _objective = _cefsplus_loop_core(
+        R,
+        r,
+        k,
+        tie_break_rel,
+        False,
+        shrink,
+        eps,
+    )
+    return selected
 
 
 @njit_optional_cache(cache=True)
@@ -313,154 +339,15 @@ def cefsplus_loop_with_objective(
 
     The objective at step t is: log|Σ_S| - log|Σ_{y,S}| = 2 * I(y; S)
     """
-    m = len(r)
-    if k <= 0 or m == 0:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
-    k = min(k, m)
-
-    R_shrunk = (1.0 - shrink) * R.copy()
-    for i in range(m):
-        R_shrunk[i, i] = 1.0
-    r_shrunk = (1.0 - shrink) * r.copy()
-
-    selected = np.empty(k, dtype=np.int64)
-    objective = np.empty(k, dtype=np.float64)
-    remaining = np.ones(m, dtype=np.bool_)
-
-    j0 = 0
-    best_rel = tie_break_rel[0]
-    for j in range(1, m):
-        if tie_break_rel[j] > best_rel:
-            best_rel = tie_break_rel[j]
-            j0 = j
-
-    selected[0] = j0
-    remaining[j0] = False
-    count = 1
-
-    inv_S = np.array([[1.0]], dtype=np.float64)
-    logdet_S = 0.0
-
-    r0 = r_shrunk[j0]
-    det_yS = max(1.0 - r0 * r0, eps)
-    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
-    logdet_yS = np.log(det_yS)
-
-    objective[0] = logdet_S - logdet_yS
-
-    while count < k:
-        n_rem = 0
-        for j in range(m):
-            if remaining[j]:
-                n_rem += 1
-        if n_rem == 0:
-            break
-
-        rem = np.empty(n_rem, dtype=np.int64)
-        idx = 0
-        for j in range(m):
-            if remaining[j]:
-                rem[idx] = j
-                idx += 1
-
-        s = count
-
-        B = np.empty((s, n_rem), dtype=np.float64)
-        for si in range(s):
-            for ri in range(n_rem):
-                B[si, ri] = R_shrunk[selected[si], rem[ri]]
-
-        tmp = inv_S @ B
-        t1 = np.zeros(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            for si in range(s):
-                t1[ri] += B[si, ri] * tmp[si, ri]
-
-        s1 = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            s1[ri] = max(1.0 - t1[ri], eps)
-
-        lf = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            lf[ri] = logdet_S + np.log(s1[ri])
-
-        B2 = np.empty((s + 1, n_rem), dtype=np.float64)
-        for ri in range(n_rem):
-            B2[0, ri] = r_shrunk[rem[ri]]
-        for si in range(s):
-            for ri in range(n_rem):
-                B2[si + 1, ri] = B[si, ri]
-
-        tmp2 = inv_yS @ B2
-        t2 = np.zeros(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            for si in range(s + 1):
-                t2[ri] += B2[si, ri] * tmp2[si, ri]
-
-        s2 = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            s2[ri] = max(1.0 - t2[ri], eps)
-
-        lc = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            lc[ri] = logdet_yS + np.log(s2[ri])
-
-        score = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            score[ri] = lf[ri] - lc[ri]
-
-        best_pos = 0
-        best_score = score[0]
-        for ri in range(1, n_rem):
-            if score[ri] > best_score:
-                best_score = score[ri]
-                best_pos = ri
-
-        best_rel = tie_break_rel[rem[best_pos]]
-        for ri in range(n_rem):
-            if np.abs(score[ri] - best_score) < 1e-12:
-                if tie_break_rel[rem[ri]] > best_rel:
-                    best_rel = tie_break_rel[rem[ri]]
-                    best_pos = ri
-
-        j = rem[best_pos]
-
-        b = B[:, best_pos].copy().reshape(-1, 1)
-        v = inv_S @ b
-        s1_best = s1[best_pos]
-
-        inv_S_new = np.empty((s + 1, s + 1), dtype=np.float64)
-        for i in range(s):
-            for jj in range(s):
-                inv_S_new[i, jj] = inv_S[i, jj] + v[i, 0] * v[jj, 0] / s1_best
-        for i in range(s):
-            inv_S_new[i, s] = -v[i, 0] / s1_best
-            inv_S_new[s, i] = -v[i, 0] / s1_best
-        inv_S_new[s, s] = 1.0 / s1_best
-        inv_S = inv_S_new
-        logdet_S += np.log(s1_best)
-
-        b2 = B2[:, best_pos].copy().reshape(-1, 1)
-        v2 = inv_yS @ b2
-        s2_best = s2[best_pos]
-
-        inv_yS_new = np.empty((s + 2, s + 2), dtype=np.float64)
-        for i in range(s + 1):
-            for jj in range(s + 1):
-                inv_yS_new[i, jj] = inv_yS[i, jj] + v2[i, 0] * v2[jj, 0] / s2_best
-        for i in range(s + 1):
-            inv_yS_new[i, s + 1] = -v2[i, 0] / s2_best
-            inv_yS_new[s + 1, i] = -v2[i, 0] / s2_best
-        inv_yS_new[s + 1, s + 1] = 1.0 / s2_best
-        inv_yS = inv_yS_new
-        logdet_yS += np.log(s2_best)
-
-        selected[count] = j
-        objective[count] = logdet_S - logdet_yS
-        remaining[j] = False
-        count += 1
-
-    return selected[:count], objective[:count]
+    return _cefsplus_loop_core(
+        R,
+        r,
+        k,
+        tie_break_rel,
+        True,
+        shrink,
+        eps,
+    )
 
 
 def select_cached(

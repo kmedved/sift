@@ -9,14 +9,12 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from sift._preprocess import best_score_from_dict
 from sift.catboost_common import (
     CatBoostClassifier,
     CatBoostRegressor,
     EFeaturesSelectionAlgorithm,
     EShapCalcType,
     _VALID_IMPORTANCE_TYPES,
-    _compute_feature_importance,
     _create_pool,
     _extract_score,
     _validate_choice,

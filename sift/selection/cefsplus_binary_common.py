@@ -8,11 +8,21 @@ from typing import List, Literal, Optional, Union
 import numpy as np
 import pandas as pd
 
-from sift._preprocess import encode_categoricals, ensure_weights, validate_k
-from sift.selection.api_helpers import validate_groups_time
+from sift._preprocess import (
+    encode_categoricals,
+    ensure_weights,
+    subsample_xy,
+    validate_inputs,
+    validate_k,
+)
+from sift.selection.auto_k import (
+    AutoKConfig,
+)
 from sift.selection.cefsplus_binary import (
+    BinaryCEFSPlusPath,
     fit_logistic_ridge,
     predict_logistic,
+    select_binary_logistic_path,
     validate_corr_prune,
     weighted_standardize,
 )
@@ -47,7 +57,7 @@ class BinaryProblem:
 
 @dataclass(frozen=True)
 class BinaryPathRun:
-    path: object
+    path: BinaryCEFSPlusPath
     feature_names: list[str]
     X_sub: np.ndarray
     y_sub: np.ndarray
@@ -160,7 +170,6 @@ def prepare_binary_problem(
         raise ValueError("X must be a 2D feature matrix")
     n_rows = int(x_shape[0])
     n_features_input = int(x_shape[1])
-    groups, time = validate_groups_time(groups, time, n_rows)
     y01, raw_y, target_mapping = validate_binary_target(y)
     if len(y01) != n_rows:
         raise ValueError(f"X has {n_rows} rows but y has {len(y01)}")
@@ -181,6 +190,121 @@ def prepare_binary_problem(
         target_mapping=target_mapping,
         weights=weights,
         weighted=weighted,
+    )
+
+
+def build_binary_logloss_path(
+    X,
+    problem: BinaryProblem,
+    options: BinaryOptions,
+    *,
+    auto_k_config: AutoKConfig | None,
+    cat_features: Optional[List[str]],
+    cat_encoding: str,
+    allow_full_data_target_encoding: bool,
+    random_state: int,
+    verbose: bool,
+) -> BinaryPathRun:
+    path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
+    cat_features = resolve_cat_features(X, cat_features)
+    X_encoded = encode_categoricals_for_binary_selector(
+        X,
+        problem.y01,
+        cat_features,
+        cat_encoding,
+        allow_full_data_target_encoding=allow_full_data_target_encoding,
+        loo_smoothing=options.loo_smoothing,
+        loo_clip_min=options.loo_clip_min,
+        loo_clip_max=options.loo_clip_max,
+        sample_weight=problem.weights,
+    )
+    X_arr, _, feature_names = validate_inputs(X_encoded, problem.y01, "regression")
+    X_sub, y_sub, w_sub, row_idx = subsample_xy(
+        X_arr,
+        problem.y01,
+        options.subsample,
+        random_state,
+        sample_weight=problem.weights,
+        return_idx=True,
+    )
+    check_binary_effective_weights(y_sub, w_sub)
+
+    top_m_eff = None if options.top_m is None else max(options.top_m, path_k)
+    if verbose:
+        print_binary_path_message(problem, options, auto_k_config, path_k, top_m_eff)
+
+    path = select_binary_logistic_path(
+        X_sub.astype(np.float64, copy=False),
+        y_sub.astype(np.float64, copy=False),
+        w_sub.astype(np.float64, copy=False),
+        feature_names,
+        k=path_k,
+        top_m=top_m_eff,
+        corr_prune=options.corr_prune,
+        ridge=options.ridge,
+        refit_every=options.refit_every,
+    )
+    return BinaryPathRun(
+        path=path,
+        feature_names=feature_names,
+        X_sub=X_sub,
+        y_sub=y_sub,
+        w_sub=w_sub,
+        row_idx=row_idx,
+        top_m_eff=top_m_eff,
+        cat_features=cat_features,
+    )
+
+
+def print_binary_path_message(
+    problem: BinaryProblem,
+    options: BinaryOptions,
+    auto_k_config: AutoKConfig | None,
+    path_k: int,
+    top_m_eff: int | None,
+) -> None:
+    weighted_label = "weighted " if problem.weighted else ""
+    if options.k_value != "auto":
+        print(
+            f"CEFS+ binary {weighted_label}logloss: selecting {path_k} features "
+            f"(top_m={top_m_eff}, corr_prune={options.corr_prune})"
+        )
+        return
+    assert auto_k_config is not None
+    if auto_k_config.k_method == "elbow":
+        mode = "elbow"
+    elif auto_k_config.k_method == "penalized_objective":
+        mode = (
+            f"penalized_objective/{auto_k_config.objective_penalty}/"
+            f"{auto_k_config.binary_objective_mode}"
+        )
+    else:
+        mode = f"evaluate/{auto_k_config.strategy}/{auto_k_config.selection_rule}"
+    print(
+        f"CEFS+ binary {weighted_label}logloss auto-k ({mode}): "
+        f"building path to {path_k} features "
+        f"(top_m={top_m_eff}, corr_prune={options.corr_prune})"
+    )
+
+
+def binary_selection_prefix(
+    path,
+    selected_count: int,
+    *,
+    selected_features: list[str] | None = None,
+    auto_diag: pd.DataFrame | None = None,
+    auto_objective: np.ndarray | None = None,
+    auto_summary: dict | None = None,
+) -> BinarySelection:
+    if selected_features is None:
+        selected_features = path.selected_features[:selected_count]
+    return BinarySelection(
+        selected_features=selected_features,
+        selected_original=path.selected_original[:selected_count],
+        selected_scores=path.path_scores[:selected_count],
+        auto_diag=auto_diag,
+        auto_objective=auto_objective,
+        auto_summary=auto_summary,
     )
 
 

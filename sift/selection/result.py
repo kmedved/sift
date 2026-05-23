@@ -61,3 +61,26 @@ class FilterSelectionResult:
                 "selector": self.selector_metadata.get("selector"),
             }
         )
+
+
+def build_selector_metadata(
+    selector: str,
+    *,
+    k: int | str,
+    k_requested: int | str,
+    top_m: Optional[int],
+    n_features: int,
+    auto_k: bool,
+    extra: Optional[dict] = None,
+) -> dict:
+    metadata = {
+        "selector": selector,
+        "k_requested": k_requested,
+        "k": k,
+        "top_m": top_m,
+        "n_features": int(n_features),
+        "auto_k": auto_k,
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata

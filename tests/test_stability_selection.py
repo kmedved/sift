@@ -1,10 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.exceptions import NotFittedError
 
 from sift import StabilitySelector
 from sift.sampling.smart import SmartSamplerConfig
-from sift.stability_api import stability_select
+from sift.stability import stability_select
 
 
 def test_stability_selector_regression():
@@ -153,6 +154,17 @@ def test_stability_selector_validates_sample_weight():
             selector.fit(X, y, sample_weight=weights)
 
 
+@pytest.mark.parametrize("method_name", ["transform", "get_feature_info", "get_support"])
+def test_stability_selector_public_methods_require_fit(method_name):
+    selector = StabilitySelector(verbose=False)
+
+    with pytest.raises(NotFittedError):
+        if method_name == "transform":
+            getattr(selector, method_name)(np.zeros((3, 2)))
+        else:
+            getattr(selector, method_name)()
+
+
 @pytest.mark.parametrize(
     "selector_kwargs, match",
     [
@@ -266,6 +278,32 @@ def test_smart_sampler_config_is_not_mutated():
     assert config.residual_weight_cap == 0.4
     assert config.random_state is None
     assert config.verbose is True
+
+
+def test_smart_sample_full_fraction_keeps_all_rows_without_residual_y_check():
+    from sift.sampling.smart import smart_sample
+
+    rng = np.random.default_rng(457)
+    df = pd.DataFrame(
+        {
+            "f0": rng.normal(size=24),
+            "f1": rng.normal(size=24),
+            "y": np.r_[np.nan, rng.normal(size=23)],
+        }
+    )
+    config = SmartSamplerConfig(
+        sample_frac=1.0,
+        residual_weight_cap=0.0,
+        random_state=5,
+        verbose=False,
+    )
+
+    sampled = smart_sample(df, ["f0", "f1"], "y", config)
+
+    assert len(sampled) == len(df)
+    assert sampled.index.tolist() == list(range(len(df)))
+    assert np.isfinite(sampled["sample_weight"]).all()
+    np.testing.assert_allclose(sampled["sample_weight"].mean(), 1.0)
 
 
 def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():

@@ -1,7 +1,7 @@
 """CatBoost-based feature selection orchestration and public wrappers."""
 
 from collections import defaultdict
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional
 import warnings
 
 import numpy as np
@@ -768,7 +768,32 @@ def catboost_select(
         all_scores=dict(all_scores),
     )
 
+
+def _catboost_task_features(
+    X: pd.DataFrame,
+    y: pd.Series,
+    k: int,
+    *,
+    task: Literal['regression', 'classification'],
+    **kwargs,
+) -> List[str]:
+    """Return just the selected feature names for a fixed CatBoost task."""
+    return catboost_select(X, y, k=k, task=task, **kwargs).selected_features
+
+
+def catboost_regression(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+    """CatBoost feature selection for regression."""
+    return _catboost_task_features(X, y, k, task='regression', **kwargs)
+
+
+def catboost_classif(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+    """CatBoost feature selection for classification."""
+    return _catboost_task_features(X, y, k, task='classification', **kwargs)
+
+
 __all__ = [
     'catboost_select',
+    'catboost_regression',
+    'catboost_classif',
     'CatBoostSelectionResult',
 ]

@@ -99,6 +99,29 @@ class BorutaResult:
         return df.sort_values("mean_importance", ascending=False, na_position="last")
 
 
+@dataclass(frozen=True)
+class BorutaFitData:
+    X_arr: np.ndarray
+    y_arr: np.ndarray
+    w_score: np.ndarray
+    w_fit: np.ndarray | None
+    groups: np.ndarray | None
+    time: np.ndarray | None
+    shadow_method: PermutationMethod
+    base_estimator: object
+    base_depth: int | None
+    feature_names: list[str]
+
+
+@dataclass(frozen=True)
+class BorutaLoopResult:
+    status: np.ndarray
+    hits: np.ndarray
+    n_trials: int
+    shadow_thresholds: np.ndarray
+    mean_importance: np.ndarray
+
+
 # =============================================================================
 # Main Selector Class
 # =============================================================================
@@ -368,6 +391,24 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         time : array-like of shape (n_samples,), optional
             Time values for ordering within groups.
         """
+        fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
+        loop_result = self._run_boruta_iterations(fit_data)
+        status = self._resolve_boruta_final_status(
+            loop_result.status,
+            loop_result.mean_importance,
+            loop_result.shadow_thresholds,
+        )
+        self._store_boruta_attributes(
+            fit_data.feature_names,
+            status,
+            loop_result.hits,
+            loop_result.n_trials,
+            loop_result.shadow_thresholds,
+            loop_result.mean_importance,
+        )
+        return self
+
+    def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
         if self.importance_data == "test" and self.importance == "native":
             raise ValueError(
                 "BorutaSelector(importance_data='test') is not supported with "
@@ -463,7 +504,30 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             if n_est_int < 1:
                 raise ValueError("n_estimators must be >= 1")
         base_depth = _get_estimator_depth(base_est)
+        return BorutaFitData(
+            X_arr=X_arr,
+            y_arr=y_arr,
+            w_score=w_score,
+            w_fit=w_fit,
+            groups=groups,
+            time=time,
+            shadow_method=shadow_method,
+            base_estimator=base_est,
+            base_depth=base_depth,
+            feature_names=feature_names,
+        )
 
+    def _run_boruta_iterations(self, fit_data: BorutaFitData) -> BorutaLoopResult:
+        X_arr = fit_data.X_arr
+        y_arr = fit_data.y_arr
+        w_score = fit_data.w_score
+        w_fit = fit_data.w_fit
+        groups = fit_data.groups
+        time = fit_data.time
+        shadow_method = fit_data.shadow_method
+        base_est = fit_data.base_estimator
+        base_depth = fit_data.base_depth
+        n, p = X_arr.shape
         rng = np.random.default_rng(self.random_state)
 
         status = np.zeros(p, dtype=np.int8)
@@ -612,7 +676,20 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         mean_importance = np.full(p, np.nan, dtype=np.float64)
         ok = imp_count > 0
         mean_importance[ok] = imp_sum[ok] / imp_count[ok]
+        return BorutaLoopResult(
+            status=status,
+            hits=hits,
+            n_trials=int(n_trials),
+            shadow_thresholds=shadow_thresholds_arr,
+            mean_importance=mean_importance,
+        )
 
+    def _resolve_boruta_final_status(
+        self,
+        status: np.ndarray,
+        mean_importance: np.ndarray,
+        shadow_thresholds_arr: np.ndarray,
+    ) -> np.ndarray:
         if self.resolve_tentative and (status == 0).any() and shadow_thresholds_arr.size > 0:
             med_thr = float(np.median(shadow_thresholds_arr))
             for j in np.where(status == 0)[0]:
@@ -629,7 +706,17 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 for j in acc:
                     if int(j) not in keep:
                         status[j] = -1
+        return status
 
+    def _store_boruta_attributes(
+        self,
+        feature_names,
+        status,
+        hits,
+        n_trials,
+        shadow_thresholds_arr,
+        mean_importance,
+    ) -> None:
         self.feature_names_in_ = feature_names
         self.status_ = status
         self.hits_ = hits
@@ -637,8 +724,6 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.shadow_thresholds_ = shadow_thresholds_arr
         self.mean_importance_ = mean_importance
         self.selected_features_ = [feature_names[i] for i in np.where(status == 1)[0]]
-
-        return self
 
 
     def result_(self) -> BorutaResult:
