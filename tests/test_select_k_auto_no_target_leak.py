@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
+from sift import select_cefsplus, select_cefsplus_binary, select_jmi, select_jmim, select_mrmr
 import sift.selection.auto_k as auto_k_module
 import sift.selection.filter_api as filter_api
 import sift.selection.filter_payloads as filter_payloads
@@ -27,6 +27,12 @@ def _numeric_auto_k_data():
     X = pd.DataFrame(rng.normal(size=(n, 6)), columns=[f"x{i}" for i in range(6)])
     y = X["x0"].to_numpy() + 0.25 * rng.normal(size=n)
     time = np.arange(n)
+    return X, y, time
+
+
+def _binary_auto_k_data():
+    X, y_reg, time = _numeric_auto_k_data()
+    y = (y_reg > np.median(y_reg)).astype(int)
     return X, y, time
 
 
@@ -518,6 +524,156 @@ def test_classic_public_auto_k_rejects_elbow_method(selector, kwargs, monkeypatc
             auto_k_config=cfg,
             verbose=False,
             **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "match"),
+    [
+        ("time_holdout", "requires time parameter"),
+        ("group_cv", "requires groups parameter"),
+    ],
+)
+def test_classic_evaluate_auto_k_rejects_missing_split_context_before_prep(
+    strategy,
+    match,
+    monkeypatch,
+):
+    X, y, _ = _numeric_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy=strategy,
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    def fail_prepare(*args, **kwargs):
+        raise AssertionError("classic payload prep should not be called")
+
+    monkeypatch.setattr(filter_payloads, "_prepare_xy_classic", fail_prepare)
+
+    with pytest.raises(ValueError, match=match):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="classic",
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "match"),
+    [
+        ("time_holdout", "requires time parameter"),
+        ("group_cv", "requires groups parameter"),
+    ],
+)
+def test_gaussian_evaluate_auto_k_rejects_missing_split_context_before_cache(
+    strategy,
+    match,
+    monkeypatch,
+):
+    X, y, _ = _numeric_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy=strategy,
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    def fail_cache(*args, **kwargs):
+        raise AssertionError("gaussian cache construction should not be called")
+
+    monkeypatch.setattr(filter_payloads, "_cache_for_gaussian", fail_cache)
+
+    with pytest.raises(ValueError, match=match):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "match"),
+    [
+        ("time_holdout", "requires time parameter"),
+        ("group_cv", "requires groups parameter"),
+    ],
+)
+def test_binary_logloss_evaluate_auto_k_rejects_missing_split_context_before_path(
+    strategy,
+    match,
+    monkeypatch,
+):
+    X, y, _ = _binary_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy=strategy,
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    def fail_path(*args, **kwargs):
+        raise AssertionError("binary logloss path construction should not be called")
+
+    monkeypatch.setattr(filter_payloads, "build_binary_logloss_path", fail_path)
+
+    with pytest.raises(ValueError, match=match):
+        select_cefsplus_binary(
+            X,
+            y,
+            k="auto",
+            loss="logloss",
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "match"),
+    [
+        ("time_holdout", "requires time parameter"),
+        ("group_cv", "requires groups parameter"),
+    ],
+)
+def test_binary_brier_evaluate_auto_k_rejects_missing_split_context_before_problem(
+    strategy,
+    match,
+    monkeypatch,
+):
+    X, y, _ = _binary_auto_k_data()
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy=strategy,
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    def fail_prepare_problem(*args, **kwargs):
+        raise AssertionError("binary problem preparation should not be called")
+
+    monkeypatch.setattr(filter_api, "prepare_binary_problem", fail_prepare_problem)
+
+    with pytest.raises(ValueError, match=match):
+        select_cefsplus_binary(
+            X,
+            y,
+            k="auto",
+            loss="brier",
+            auto_k_config=cfg,
+            verbose=False,
         )
 
 

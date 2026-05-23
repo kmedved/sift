@@ -434,15 +434,10 @@ def select_binary_evaluate(
     auto_k_config: AutoKConfig, cat_encoding: str, verbose: bool,
 ) -> BinarySelection:
     eval_X = X if isinstance(X, pd.DataFrame) else pd.DataFrame(np.asarray(X), columns=run.feature_names)
-    if len(run.row_idx) < problem.n_rows:
-        eval_X = eval_X.iloc[run.row_idx]
-        eval_y = problem.y01[run.row_idx]
-        eval_groups = problem.groups[run.row_idx] if problem.groups is not None else None
-        eval_time = problem.time[run.row_idx] if problem.time is not None else None
-    else:
-        eval_y = problem.y01
-        eval_groups = problem.groups
-        eval_time = problem.time
+    eval_X = eval_X.iloc[run.row_idx]
+    eval_y = problem.y01[run.row_idx]
+    eval_groups = problem.groups[run.row_idx] if problem.groups is not None else None
+    eval_time = problem.time[run.row_idx] if problem.time is not None else None
 
     _require_eval_split_context(auto_k_config, eval_groups, eval_time)
     best_k, selected_features, auto_diag = auto_k_module.select_k_auto(

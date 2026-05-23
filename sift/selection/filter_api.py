@@ -323,6 +323,7 @@ def _select_filter(
                 f"{spec.display_name} does not support k_method="
                 f"{ctx.auto_k_config.k_method!r}"
             )
+        _require_auto_k_eval_context(ctx)
     else:
         handler = spec.fixed_handler
 
@@ -402,12 +403,36 @@ def _format_payload(
     )
 
 
+def _require_auto_k_eval_context(ctx: FilterContext) -> None:
+    config = ctx.auto_k_config
+    if ctx.k != "auto" or config is None:
+        return
+    _require_evaluate_context(config, ctx.groups, ctx.time)
+
+
+def _require_evaluate_context(
+    config: AutoKConfig,
+    groups: np.ndarray | None,
+    time: np.ndarray | None,
+) -> None:
+    if config.k_method != "evaluate":
+        return
+    if config.strategy == "time_holdout" and time is None:
+        raise ValueError("auto-k evaluate with strategy='time_holdout' requires time parameter")
+    if config.strategy == "group_cv" and groups is None:
+        raise ValueError("auto-k evaluate with strategy='group_cv' requires groups parameter")
+
+
 def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectionResult:
     x_shape = request.X.shape if hasattr(request.X, "shape") else np.asarray(request.X).shape
     if len(x_shape) != 2:
         raise ValueError("X must be a 2D feature matrix")
     groups, time = _validate_groups_time(request.groups, request.time, int(x_shape[0]))
     kw = (request.selector_kwargs or {}).get
+    k_value = validate_k(request.k)
+    if k_value == "auto":
+        auto_k_config = resolve_auto_k_config(request.auto_k_config, time, groups)
+        _require_evaluate_context(auto_k_config, groups, time)
     options = validate_binary_options(
         request.k,
         loss=kw("loss"),

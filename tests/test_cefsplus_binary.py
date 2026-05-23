@@ -714,6 +714,96 @@ def test_binary_brier_penalized_objective_delegates_to_cefsplus():
     assert result.diagnostics_["auto_k"]["objective_scale"] == "gaussian_2mi"
 
 
+def test_binary_evaluate_reorders_full_length_row_idx(monkeypatch):
+    from sift.selection.cefsplus_binary import BinaryCEFSPlusPath
+    from sift.selection.cefsplus_binary_common import (
+        BinaryOptions,
+        BinaryPathRun,
+        BinaryProblem,
+    )
+    import sift.selection.filter_auto_k as filter_auto_k
+
+    X = pd.DataFrame({"f0": [10.0, 20.0, 30.0, 40.0], "f1": [1.0, 2.0, 3.0, 4.0]})
+    row_idx = np.array([2, 0, 3, 1])
+    y = np.array([0.0, 1.0, 0.0, 1.0])
+    weights = np.array([0.5, 1.0, 1.5, 1.0])
+    problem = BinaryProblem(
+        n_rows=4,
+        n_features_input=2,
+        groups=None,
+        time=np.array([10, 20, 30, 40]),
+        y01=y,
+        raw_y=y.copy(),
+        target_mapping={0.0: 0, 1.0: 1},
+        weights=weights,
+        weighted=True,
+    )
+    path = BinaryCEFSPlusPath(
+        selected_original=[0, 1],
+        selected_features=["f0", "f1"],
+        path_scores=[1.0, 0.5],
+        univariate_scores=np.array([1.0, 0.5]),
+        valid_original=[0, 1],
+        candidate_original=[0, 1],
+        dropped_features={},
+        numerical_failures=0,
+        invalid_conditional_information=0,
+        n_valid_features=2,
+        n_screened_features=2,
+        n_gram_blocks=1,
+        n_logistic_refits=1,
+    )
+    run = BinaryPathRun(
+        path=path,
+        feature_names=["f0", "f1"],
+        X_sub=X.to_numpy()[row_idx],
+        y_sub=y[row_idx],
+        w_sub=weights[row_idx],
+        row_idx=row_idx,
+        top_m_eff=None,
+        cat_features=None,
+    )
+    options = BinaryOptions(
+        k_value="auto",
+        loss="logloss",
+        top_m=None,
+        corr_prune=None,
+        subsample=None,
+        ridge=1e-4,
+        refit_every=1,
+        loo_smoothing=20.0,
+        loo_clip_min=1e-4,
+        loo_clip_max=1.0 - 1e-4,
+    )
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=2)
+    captured = {}
+
+    def fake_select_k_auto(eval_X, eval_y, feature_path, config, **kwargs):
+        captured["X"] = eval_X.copy()
+        captured["y"] = np.asarray(eval_y)
+        captured["time"] = np.asarray(kwargs["time"])
+        captured["sample_weight"] = np.asarray(kwargs["sample_weight"])
+        return 2, list(feature_path[:2]), pd.DataFrame({"k": [1, 2], "score": [1.0, 0.5]})
+
+    monkeypatch.setattr(filter_auto_k.auto_k_module, "select_k_auto", fake_select_k_auto)
+
+    selection = filter_auto_k.select_binary_evaluate(
+        X,
+        problem,
+        run,
+        options,
+        auto_k_config=cfg,
+        cat_encoding="none",
+        verbose=False,
+    )
+
+    pd.testing.assert_frame_equal(captured["X"], X.iloc[row_idx])
+    np.testing.assert_array_equal(captured["y"], y[row_idx])
+    np.testing.assert_array_equal(captured["time"], problem.time[row_idx])
+    np.testing.assert_array_equal(captured["sample_weight"], run.w_sub)
+    assert selection.selected_features == ["f0", "f1"]
+
+
 @pytest.mark.parametrize("binary_objective_mode", ["refit", "score_test"])
 def test_binary_auto_k_penalized_objective_modes(binary_objective_mode):
     X, y = _classification_frame(seed=137, n=180, p=6)
