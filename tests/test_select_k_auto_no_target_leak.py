@@ -90,6 +90,21 @@ def test_select_k_auto_rejects_elbow_method():
         select_k_auto(X, y, list(X.columns), cfg, time=time)
 
 
+def test_select_k_auto_rejects_duplicate_dataframe_labels():
+    X, y, time = _numeric_auto_k_data()
+    X = X.copy()
+    X.columns = ["dup", "dup", *list(X.columns[2:])]
+    cfg = AutoKConfig(
+        strategy="time_holdout",
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    with pytest.raises(ValueError, match="unique DataFrame column labels"):
+        select_k_auto(X, y, ["dup", "x2", "x3"], cfg, time=time)
+
+
 def test_select_k_auto_evaluate_honors_sample_weight():
     rng = np.random.default_rng(321)
     n_train = 40
@@ -675,6 +690,74 @@ def test_binary_brier_evaluate_auto_k_rejects_missing_split_context_before_probl
             auto_k_config=cfg,
             verbose=False,
         )
+
+
+@pytest.mark.parametrize("route", ["classic", "gaussian", "binary_logloss", "binary_brier"])
+def test_function_style_evaluate_auto_k_rejects_duplicate_labels_before_work(
+    route,
+    monkeypatch,
+):
+    X, y_reg, time = _numeric_auto_k_data()
+    X = X.copy()
+    X.columns = ["dup", "dup", *list(X.columns[2:])]
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=3,
+        val_frac=0.25,
+    )
+
+    def fail_work(*args, **kwargs):
+        raise AssertionError("selector work should not be called")
+
+    with pytest.raises(ValueError, match="unique DataFrame column labels"):
+        if route == "classic":
+            monkeypatch.setattr(filter_payloads, "_prepare_xy_classic", fail_work)
+            select_mrmr(
+                X,
+                y_reg,
+                k="auto",
+                task="regression",
+                estimator="classic",
+                time=time,
+                auto_k_config=cfg,
+                verbose=False,
+            )
+        elif route == "gaussian":
+            monkeypatch.setattr(filter_payloads, "_cache_for_gaussian", fail_work)
+            select_mrmr(
+                X,
+                y_reg,
+                k="auto",
+                task="regression",
+                estimator="gaussian",
+                time=time,
+                auto_k_config=cfg,
+                verbose=False,
+            )
+        elif route == "binary_logloss":
+            monkeypatch.setattr(filter_payloads, "build_binary_logloss_path", fail_work)
+            select_cefsplus_binary(
+                X,
+                (y_reg > np.median(y_reg)).astype(int),
+                k="auto",
+                loss="logloss",
+                time=time,
+                auto_k_config=cfg,
+                verbose=False,
+            )
+        else:
+            monkeypatch.setattr(filter_api, "prepare_binary_problem", fail_work)
+            select_cefsplus_binary(
+                X,
+                (y_reg > np.median(y_reg)).astype(int),
+                k="auto",
+                loss="brier",
+                time=time,
+                auto_k_config=cfg,
+                verbose=False,
+            )
 
 
 def test_public_auto_k_rejects_penalized_objective_for_non_cefsplus_routes():

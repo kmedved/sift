@@ -408,6 +408,7 @@ def _require_auto_k_eval_context(ctx: FilterContext) -> None:
     if ctx.k != "auto" or config is None:
         return
     _require_evaluate_context(config, ctx.groups, ctx.time)
+    _require_unique_evaluate_feature_names(config, ctx.request.X)
 
 
 def _require_evaluate_context(
@@ -423,6 +424,21 @@ def _require_evaluate_context(
         raise ValueError("auto-k evaluate with strategy='group_cv' requires groups parameter")
 
 
+def _require_unique_evaluate_feature_names(config: AutoKConfig, X: XInput) -> None:
+    if config.k_method != "evaluate" or not isinstance(X, pd.DataFrame):
+        return
+    if X.columns.is_unique:
+        return
+    duplicates = pd.Index(X.columns[X.columns.duplicated()]).unique().astype(str).tolist()
+    sample = duplicates[:5]
+    suffix = "..." if len(duplicates) > 5 else ""
+    raise ValueError(
+        "function-style k='auto' with k_method='evaluate' requires unique "
+        "DataFrame column labels because prefix evaluation is name-based. "
+        f"Duplicate labels: {sample}{suffix}"
+    )
+
+
 def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectionResult:
     x_shape = request.X.shape if hasattr(request.X, "shape") else np.asarray(request.X).shape
     if len(x_shape) != 2:
@@ -433,6 +449,7 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
     if k_value == "auto":
         auto_k_config = resolve_auto_k_config(request.auto_k_config, time, groups)
         _require_evaluate_context(auto_k_config, groups, time)
+        _require_unique_evaluate_feature_names(auto_k_config, request.X)
     options = validate_binary_options(
         request.k,
         loss=kw("loss"),

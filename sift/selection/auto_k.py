@@ -531,6 +531,15 @@ def select_k_auto(
 
     if not feature_path:
         return 0, [], pd.DataFrame()
+    if isinstance(X, pd.DataFrame) and not X.columns.is_unique:
+        duplicates = pd.Index(X.columns[X.columns.duplicated()]).unique().astype(str).tolist()
+        sample = duplicates[:5]
+        suffix = "..." if len(duplicates) > 5 else ""
+        raise ValueError(
+            "select_k_auto requires unique DataFrame column labels because "
+            "feature_path entries are name-based. "
+            f"Duplicate labels: {sample}{suffix}"
+        )
 
     y_arr = np.asarray(y).ravel()
     w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
