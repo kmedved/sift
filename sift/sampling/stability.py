@@ -163,7 +163,7 @@ def _block_bootstrap_indices(
             continue
 
         if classes is not None:
-            if set(y[train_arr]) != classes or len(set(y[val_arr])) < 2:
+            if set(y[train_arr]) != classes or set(y[val_arr]) != classes:
                 continue
 
         valid += 1
@@ -197,6 +197,7 @@ def _stationary_block_sample(sorted_idx: np.ndarray, mean_block_size: int, n: in
     p = 1.0 / max(1, mean_block_size)
     while len(result) < n:
         start = rng.integers(0, n)
-        length = min(rng.geometric(p), n - start)
-        result.extend(sorted_idx[start:start + length].tolist())
+        length = int(rng.geometric(p))
+        indices = [(start + i) % n for i in range(length)]
+        result.extend(sorted_idx[indices].tolist())
     return result[:n]

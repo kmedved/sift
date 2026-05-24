@@ -483,6 +483,7 @@ def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] |
         cat_features,
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
+        sample_weight=ctx.request.sample_weight,
     )
     return (
         build_cache(
@@ -525,6 +526,7 @@ def _encode_categoricals_for_selector(
     X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray],
     cat_features: Optional[list[str]], cat_encoding: CatEncoding, *,
     allow_full_data_target_encoding: bool,
+    sample_weight=None,
 ) -> Union[pd.DataFrame, np.ndarray]:
     if not cat_features or cat_encoding == "none":
         return X
@@ -543,7 +545,7 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
-    return encode_categoricals(X, y, cat_features, cat_encoding)
+    return encode_categoricals(X, y, cat_features, cat_encoding, sample_weight=sample_weight)
 
 
 def _default_top_m(top_m: Optional[int], k: int) -> int:
@@ -562,6 +564,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         cat_features,
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
+        sample_weight=ctx.request.sample_weight,
     )
     X_arr, y_arr, feature_names = validate_inputs(
         X_encoded,

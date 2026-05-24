@@ -216,7 +216,7 @@ def build_binary_logloss_path(
         loo_smoothing=options.loo_smoothing,
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,
-        sample_weight=problem.weights,
+        sample_weight=problem.weights if problem.weighted else None,
     )
     X_arr, _, feature_names = validate_inputs(X_encoded, problem.y01, "regression")
     X_sub, y_sub, w_sub, row_idx = subsample_xy(
@@ -326,14 +326,14 @@ def validate_binary_target(y) -> tuple[np.ndarray, np.ndarray, dict]:
     if len(unique) != 2:
         raise ValueError("binary CEFS+ requires exactly two target classes")
 
-    if numeric is not None and set(np.unique(numeric).tolist()) == {0.0, 1.0}:
-        y01 = numeric.astype(np.float64)
-        classes = np.array([0.0, 1.0], dtype=np.float64)
-    elif set(unique.tolist()) == {False, True}:
+    if all(isinstance(value, (bool, np.bool_)) for value in unique.tolist()):
         y01 = raw.astype(bool).astype(np.float64)
         classes = np.array([False, True], dtype=object)
+    elif numeric is not None and set(np.unique(numeric).tolist()) == {0.0, 1.0}:
+        y01 = numeric.astype(np.float64)
+        classes = np.array([0.0, 1.0], dtype=np.float64)
     else:
-        classes = unique
+        classes = np.array(sorted(unique.tolist(), key=repr), dtype=object)
         mapping = {classes[0]: 0.0, classes[1]: 1.0}
         y01 = np.array([mapping[value] for value in raw], dtype=np.float64)
 

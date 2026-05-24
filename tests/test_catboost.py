@@ -17,6 +17,7 @@ from sift.catboost import (  # noqa: E402
     _get_feature_types,
     _aggregate_feature_lists,
 )
+import sift.catboost as catboost_module  # noqa: E402
 from sift._preprocess import best_score_from_dict as _best_score_from_dict  # noqa: E402
 
 
@@ -90,6 +91,24 @@ class TestScoreDirection:
         )
         assert metric == 'Logloss'
         assert hib is False
+
+    def test_unknown_metric_requires_explicit_direction(self):
+        with pytest.raises(ValueError, match="higher_is_better"):
+            _resolve_metric_and_direction(
+                task="classification",
+                y=pd.Series([0, 1, 0, 1]),
+                eval_metric="AUC_MACRO_BOGUS",
+                higher_is_better=None,
+            )
+
+        metric, hib = _resolve_metric_and_direction(
+            task="classification",
+            y=pd.Series([0, 1, 0, 1]),
+            eval_metric="AUC_MACRO_BOGUS",
+            higher_is_better=True,
+        )
+        assert metric == "AUC_MACRO_BOGUS"
+        assert hib is True
 
     def test_multiclass_loss_function(self):
         """Test that multiclass targets use MultiClass loss."""
@@ -323,6 +342,53 @@ class TestCatBoostRegression:
         )
 
         assert len(selected) == 5
+
+    def test_prefilter_receives_fold_sample_weight(self, monkeypatch):
+        X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+        y = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+        weights = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        train_idx = np.array([0, 1, 3])
+        val_idx = np.array([2, 4])
+        captured = {}
+
+        def fake_prefilter(*args, sample_weight=None, **kwargs):
+            captured["sample_weight"] = sample_weight.copy()
+            return ["a", "b"]
+
+        def fake_select(*args, **kwargs):
+            return {1: 0.1}, {1: ["a"]}
+
+        monkeypatch.setattr(catboost_module, "_prefilter_features", fake_prefilter)
+        monkeypatch.setattr(catboost_module, "_select_features_single_split", fake_select)
+
+        catboost_module._run_catboost_split_evaluation(
+            X_work=X,
+            y=y,
+            sample_weights=weights,
+            splits=[(train_idx, val_idx)],
+            all_features=list(X.columns),
+            counts=[1],
+            task="regression",
+            model_params={},
+            cat_features_final=[],
+            text_feat=[],
+            prefilter_k=2,
+            prefilter_method="mrmr",
+            random_state=0,
+            n_jobs=1,
+            algorithm="prediction",
+            resolved_metric="RMSE",
+            resolved_hib=False,
+            train_early_stopping_rounds=3,
+            steps=1,
+            k_req=1,
+            verbose=False,
+        )
+
+        pd.testing.assert_series_equal(
+            captured["sample_weight"],
+            weights.iloc[train_idx],
+        )
 
     def test_prediction_algorithm(self):
         """Test fastest algorithm option."""

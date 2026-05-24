@@ -1418,7 +1418,8 @@ X_sub, y_sub, w_sub, row_idx = subsample_xy(
 Utility behavior:
 
 - `mean_impute`: fills non-finite feature values column-wise.
-- `infer_higher_is_better`: resolves metric direction for common metrics.
+- `infer_higher_is_better`: resolves metric direction for common metrics; unknown
+  metrics require an explicit `higher_is_better` value.
 - `best_score_from_dict`: returns the best finite score from a dictionary.
 - `to_numpy`: converts pandas, objects with `to_pandas()`, lists, and arrays to
   numpy.

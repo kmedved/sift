@@ -23,7 +23,7 @@ def _high_cardinality_data(n=80):
 
 
 def _patch_encoder(monkeypatch):
-    def fake_encode_categoricals(X, y, cat_features, method):
+    def fake_encode_categoricals(X, y, cat_features, method, **_kwargs):
         X_enc = X.copy()
         for col in cat_features:
             X_enc[col] = pd.factorize(X_enc[col])[0].astype(float)
@@ -139,6 +139,23 @@ def test_function_selector_auto_k_allows_explicit_target_encoding_opt_in(monkeyp
     )
 
     assert 0 < len(selected) <= 2
+
+
+def test_category_encoder_backed_target_encoding_rejects_sample_weight():
+    X, y = _high_cardinality_data()
+
+    with pytest.raises(ValueError, match="sample_weight.*loo_logit"):
+        select_cefsplus(
+            X,
+            y,
+            k=2,
+            cat_features=["id"],
+            cat_encoding="target",
+            allow_full_data_target_encoding=True,
+            sample_weight=np.ones(len(y)),
+            subsample=None,
+            verbose=False,
+        )
 
 
 def test_gaussian_auto_k_with_prebuilt_cache_does_not_require_encoding_opt_in():

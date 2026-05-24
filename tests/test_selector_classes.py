@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from sklearn.exceptions import NotFittedError
 
-from sift import CEFSPlusSelector, JMIMSelector, JMISelector, MRMRSelector
+from sift import CEFSPlusBinarySelector, CEFSPlusSelector, JMIMSelector, JMISelector, MRMRSelector
 import sift.selectors as selectors_mod
 import sift.selection.auto_k_nested as auto_k_nested_module
 from sift.selection.auto_k import AutoKConfig
@@ -17,6 +17,42 @@ def test_selector_classes_default_to_no_categorical_encoding():
         CEFSPlusSelector(verbose=False),
     ):
         assert selector.cat_encoding == "none"
+
+
+def test_binary_nested_auto_k_scores_with_natural_weights(monkeypatch):
+    rng = np.random.default_rng(19)
+    X = pd.DataFrame(rng.normal(size=(80, 4)), columns=[f"f{i}" for i in range(4)])
+    y = np.array([0] * 60 + [1] * 20)
+    captured = {}
+
+    class DummyNested:
+        selected_k = 2
+        diagnostics = pd.DataFrame({"k": [2], "score": [0.0]})
+
+    def fake_select_k_nested(*args, sample_weight=None, **kwargs):
+        captured["sample_weight"] = np.asarray(sample_weight, dtype=float)
+        return DummyNested()
+
+    def fake_fit_selector(self, X, y, **kwargs):
+        self.feature_names_in_ = list(X.columns)
+        self.n_features_in_ = X.shape[1]
+        self.selected_features_ = ["f0", "f1"]
+        self.selected_indices_ = np.array([0, 1])
+        self.k_ = 2
+        return self
+
+    monkeypatch.setattr(selectors_mod, "select_k_nested", fake_select_k_nested)
+    monkeypatch.setattr(CEFSPlusBinarySelector, "_fit_selector", fake_fit_selector)
+
+    selector = CEFSPlusBinarySelector(
+        k="auto",
+        class_weight="balanced",
+        auto_k_config=AutoKConfig(auto_k_mode="nested", min_k=1, max_k=3),
+        verbose=False,
+    )
+    selector.fit(X, y, sample_weight=np.ones(len(y)))
+
+    np.testing.assert_allclose(captured["sample_weight"], np.ones(len(y)))
 
 
 @pytest.mark.parametrize(

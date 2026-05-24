@@ -240,6 +240,7 @@ def _prefilter_features(
     method: str = 'cefsplus',
     cat_features: Optional[List[str]] = None,
     text_features: Optional[List[str]] = None,
+    sample_weight: Optional[pd.Series] = None,
     random_state: Optional[int] = None,
     verbose: bool = False,
     n_jobs: int = -1,
@@ -292,6 +293,7 @@ def _prefilter_features(
             X_train, y_train, k, task,
             cat_features=cat_features,
             text_features=text_features,
+            sample_weight=sample_weight,
             random_state=random_state,
             n_jobs=n_jobs,
         )
@@ -319,6 +321,7 @@ def _prefilter_features(
                 y_train,
                 k=k_numeric,
                 task="classification",
+                sample_weight=sample_weight,
                 verbose=False,
                 subsample=30_000,
                 random_state=random_state,
@@ -330,6 +333,7 @@ def _prefilter_features(
                 X_train[numeric_cols],
                 y_train,
                 k=k_numeric,
+                sample_weight=sample_weight,
                 verbose=False,
                 subsample=30_000,
                 random_state=random_state,
@@ -342,6 +346,7 @@ def _prefilter_features(
             y_train,
             k=k_numeric,
             task=task,
+            sample_weight=sample_weight,
             verbose=False,
             subsample=30_000,
             random_state=random_state,
@@ -361,6 +366,7 @@ def _catboost_importance_prefilter(
     task: str,
     cat_features: Optional[List[str]] = None,
     text_features: Optional[List[str]] = None,
+    sample_weight: Optional[pd.Series] = None,
     random_state: Optional[int] = None,
     n_jobs: int = -1,
 ) -> List[str]:
@@ -380,6 +386,7 @@ def _catboost_importance_prefilter(
     pool = Pool(
         X_train,
         label=y_train,
+        weight=sample_weight,
         cat_features=cat_features or None,
         text_features=text_features or None,
     )

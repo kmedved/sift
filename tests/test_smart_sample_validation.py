@@ -79,6 +79,19 @@ def test_smart_sample_revalidates_mutated_config_without_overrides():
         smart_sample(df, ["f0", "f1"], "y", config=config)
 
 
+def test_smart_sampler_accepts_numpy_bool_verbose():
+    df = _sample_frame()
+    config = SmartSamplerConfig(
+        sample_frac=0.4,
+        residual_weight_cap=0.0,
+        verbose=np.bool_(False),
+    )
+
+    out = smart_sample(df, ["f0", "f1"], "y", config=config)
+
+    assert len(out) > 0
+
+
 def test_smart_sample_residual_disabled_accepts_non_float_target():
     df = _sample_frame(30)
     df["label"] = np.where(df["time"] % 2 == 0, "win", "loss")

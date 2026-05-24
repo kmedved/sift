@@ -53,8 +53,10 @@ start with [DOCS.MD](DOCS.MD).
 
 - [Full API manual](DOCS.MD)
 - [User guide](docs/user-guide.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Architecture and module boundaries](docs/architecture.md)
 - [Development guide](docs/development.md)
+- [Benchmarks](benchmarks/README.md)
 - [Release tracker](TODO.MD)
 
 ## Main Components

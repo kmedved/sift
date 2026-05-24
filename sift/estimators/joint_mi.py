@@ -82,16 +82,7 @@ def binned_joint_mi(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_arr = np.asarray(y)
-        if (
-            np.issubdtype(y_arr.dtype, np.integer)
-            and y_arr.size > 0
-            and y_arr.min() >= 0
-            and y_arr.max() <= 200_000
-        ):
-            y_binned = y_arr.astype(np.int64, copy=False)
-        else:
-            y_binned = _factorize(y)
+        y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)
@@ -437,16 +428,7 @@ def binned_joint_mi_indexed(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_arr = np.asarray(y)
-        if (
-            np.issubdtype(y_arr.dtype, np.integer)
-            and y_arr.size > 0
-            and y_arr.min() >= 0
-            and y_arr.max() <= 200_000
-        ):
-            y_binned = y_arr.astype(np.int64, copy=False)
-        else:
-            y_binned = _factorize(y)
+        y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)
@@ -589,7 +571,7 @@ def ksg_joint_mi(
         tree_y = cKDTree(Y_marginal)
 
         dists, _ = tree_full.query(XY_full, k=k + 1, p=np.inf)
-        eps = np.maximum(dists[:, -1] - 1e-15, 0.0)
+        eps = np.nextafter(dists[:, -1], 0.0)
 
         n_x = _safe_count_neighbors(tree_x, X_joint, eps, n)
         n_y = _safe_count_neighbors(tree_y, Y_marginal, eps, n)
@@ -618,6 +600,21 @@ def _factorize(x: np.ndarray) -> np.ndarray:
     """Convert to integer codes."""
     _, codes = np.unique(x, return_inverse=True)
     return codes.astype(np.int32)
+
+
+def _compact_discrete_target_codes(y: np.ndarray) -> np.ndarray:
+    """Return dense non-negative target codes for discrete MI targets."""
+    y_arr = np.asarray(y)
+    if not np.issubdtype(y_arr.dtype, np.integer):
+        return _factorize(y_arr)
+
+    if y_arr.size == 0:
+        return y_arr.astype(np.int64, copy=False)
+    min_value = int(y_arr.min())
+    max_value = int(y_arr.max())
+    if min_value >= 0 and max_value < y_arr.size:
+        return y_arr.astype(np.int64, copy=False)
+    return _factorize(y_arr)
 
 
 def _entropy_from_array(x: np.ndarray) -> float:

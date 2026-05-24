@@ -68,6 +68,10 @@ def prepare_filter_eval_data(
     y_arr = np.asarray(y).ravel()
     if len(y_arr) != len(X_df):
         raise ValueError(f"X has {len(X_df)} rows but y has {len(y_arr)}")
+    if getattr(cache, "n_rows_original", len(X_df)) != len(X_df):
+        raise ValueError(
+            f"cache was built with {cache.n_rows_original} rows but X has {len(X_df)} rows"
+        )
 
     use_cache_rows = cache.row_idx is not None and len(cache.row_idx) < len(X_df)
     if sample_weight is not None:

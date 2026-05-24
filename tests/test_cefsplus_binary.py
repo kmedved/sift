@@ -14,6 +14,7 @@ from sift.selection.cefsplus_binary import (
     logistic_score_test_scores_from_gram,
     weighted_standardize,
 )
+from sift.selection.cefsplus_binary_common import validate_binary_target
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.result import FilterSelectionResult
 
@@ -34,6 +35,22 @@ def _balanced_binary_weights(y, sample_weight):
         mask = y01 == cls
         weights[mask] *= total / (2.0 * float(weights[mask].sum()))
     return weights / float(weights.mean())
+
+
+def test_validate_binary_target_string_mapping_is_order_stable():
+    y1, _, mapping1 = validate_binary_target(np.array(["yes", "no", "yes", "no"]))
+    y2, _, mapping2 = validate_binary_target(np.array(["no", "yes", "no", "yes"]))
+
+    assert mapping1 == {"'no'": 0, "'yes'": 1}
+    assert mapping2 == mapping1
+    np.testing.assert_array_equal(y1, np.array([1.0, 0.0, 1.0, 0.0]))
+    np.testing.assert_array_equal(y2, np.array([0.0, 1.0, 0.0, 1.0]))
+
+
+def test_validate_binary_target_preserves_bool_mapping_metadata():
+    _, _, mapping = validate_binary_target(np.array([True, False, True], dtype=object))
+
+    assert mapping == {"False": 0, "True": 1}
 
 
 def test_binary_first_step_matches_univariate_score_test():
@@ -1162,7 +1179,7 @@ def test_binary_selector_class_nested_auto_k_plateau_rule():
     assert "in_selected_plateau" in selector.nested_auto_k_diagnostics_["scores"].columns
 
 
-def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weights(monkeypatch):
+def test_binary_selector_nested_auto_k_class_weight_scores_with_natural_weights(monkeypatch):
     rng = np.random.default_rng(136)
     n = 180
     y = (np.arange(n) % 6 == 0).astype(int)
@@ -1214,8 +1231,8 @@ def test_binary_selector_nested_auto_k_class_weight_scores_with_effective_weight
 
     assert captured_weights
     y_train, w_train, y_val, w_val = captured_weights[0]
-    assert w_train[y_train == 1].mean() > w_train[y_train == 0].mean()
-    assert w_val[y_val == 1].mean() > w_val[y_val == 0].mean()
+    assert np.allclose(w_train[y_train == 1].mean(), w_train[y_train == 0].mean())
+    assert np.allclose(w_val[y_val == 1].mean(), w_val[y_val == 0].mean())
 
 
 def test_top_m_uses_binary_univariate_screen():

@@ -11,6 +11,7 @@ from sklearn.linear_model import (
     LogisticRegression, LogisticRegressionCV
 )
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.model_selection import GroupKFold, TimeSeriesSplit
 from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 
@@ -208,7 +209,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         # Get alpha
         if self.alpha is None:
-            self.alpha_ = self._find_alpha(X_scaled, y, sample_weight)
+            self.alpha_ = self._find_alpha(
+                X_scaled,
+                y,
+                sample_weight,
+                groups=groups,
+                time=time,
+            )
         else:
             self.alpha_ = self.alpha
 
@@ -250,6 +257,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         return split_iter
 
     def _fit_single_stability_run(self, X_scaled, y, sample_weight, train_idx, seed):
+        train_idx, train_weight = self._dedupe_train_weights(train_idx, sample_weight)
         if self.task == 'classification':
             model = LogisticRegression(
                 penalty='l1', solver='saga', C=1.0 / self.alpha_,
@@ -262,7 +270,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model.fit(X_scaled[train_idx], y[train_idx], sample_weight=sample_weight[train_idx])
+            model.fit(X_scaled[train_idx], y[train_idx], sample_weight=train_weight)
 
         coef = model.coef_
         if coef.ndim == 2 and coef.shape[0] == 1:
@@ -275,6 +283,19 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             coef_summary = coef.ravel()
             selected = np.abs(coef_summary) > self.coef_threshold
         return selected.astype(np.int8), coef_summary.astype(np.float32)
+
+    @staticmethod
+    def _dedupe_train_weights(train_idx, sample_weight):
+        train_idx = np.asarray(train_idx, dtype=np.int64)
+        unique_idx, inverse = np.unique(train_idx, return_inverse=True)
+        if len(unique_idx) == len(train_idx):
+            return train_idx, sample_weight[train_idx]
+        summed_weight = np.bincount(
+            inverse,
+            weights=np.asarray(sample_weight, dtype=np.float64)[train_idx],
+            minlength=len(unique_idx),
+        )
+        return unique_idx, summed_weight.astype(np.float32, copy=False)
 
     def _run_stability_chunks(self, X_scaled, y, sample_weight, split_iter):
         p = X_scaled.shape[1]
@@ -810,12 +831,18 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self,
         X_scaled: np.ndarray,
         y: np.ndarray,
-        sample_weight: np.ndarray
+        sample_weight: np.ndarray,
+        *,
+        groups: np.ndarray | None = None,
+        time: np.ndarray | None = None,
     ) -> float:
         """Estimate alpha via CV on subsample."""
         n = X_scaled.shape[0]
         rng = np.random.default_rng(self.random_state)
         idx = rng.choice(n, size=min(30_000, n), replace=False)
+        if groups is None and time is not None:
+            idx = idx[np.argsort(np.asarray(time)[idx], kind="mergesort")]
+        cv = self._alpha_cv(idx, y, groups, time)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -826,7 +853,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 cv_model = LogisticRegressionCV(
                     penalty='l1',
                     solver='saga',
-                    cv=3,
+                    cv=cv,
                     Cs=20,
                     max_iter=2000,
                     random_state=self.random_state,
@@ -842,15 +869,26 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                     C_best = float(C[0]) if np.ndim(C) > 0 else float(C)
                 return 1.0 / C_best
             elif self.l1_ratio >= 1.0:
-                cv_model = LassoCV(cv=3, n_alphas=30, max_iter=2000)
+                cv_model = LassoCV(cv=cv, n_alphas=30, max_iter=2000)
             else:
                 cv_model = ElasticNetCV(
-                    l1_ratio=self.l1_ratio, cv=3, n_alphas=30, max_iter=2000
+                    l1_ratio=self.l1_ratio, cv=cv, n_alphas=30, max_iter=2000
                 )
 
             cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
 
         return cv_model.alpha_
+
+    def _alpha_cv(self, idx: np.ndarray, y: np.ndarray, groups, time):
+        if groups is not None:
+            groups_sub = np.asarray(groups)[idx]
+            n_groups = len(np.unique(groups_sub))
+            if n_groups >= 2:
+                splitter = GroupKFold(n_splits=min(3, n_groups))
+                return list(splitter.split(np.zeros((len(idx), 1)), y[idx], groups_sub))
+        if time is not None and len(idx) >= 4:
+            return list(TimeSeriesSplit(n_splits=min(3, len(idx) - 1)).split(idx))
+        return 3
 
 
 def stability_select(
@@ -886,6 +924,14 @@ def _stability_task_features(
 
     selector = StabilitySelector(**kwargs)
     selector.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
+    target_k = min(int(k), len(selector.selection_frequencies_))
+    if selector.n_features_selected_ < target_k:
+        top_idx = np.argsort(-selector.selection_frequencies_, kind="mergesort")[:target_k]
+        selector.selected_features_ = top_idx
+        selector.selected_feature_names_ = [
+            selector.feature_names_in_[i] for i in selector.selected_features_
+        ]
+        selector.n_features_selected_ = len(selector.selected_features_)
 
     if return_indices is None:
         return_indices = not isinstance(X, pd.DataFrame)

@@ -4,6 +4,7 @@ import pytest
 from sklearn.exceptions import NotFittedError
 
 from sift import StabilitySelector
+import sift.stability as stability_module
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
 from sift.stability import stability_select
 
@@ -99,7 +100,7 @@ def test_stability_regression_wrapper():
     )
 
     assert isinstance(selected, list)
-    assert len(selected) <= 10
+    assert len(selected) == 10
     assert all(isinstance(f, str) for f in selected)
 
 
@@ -125,7 +126,7 @@ def test_stability_classif_wrapper():
     )
 
     assert isinstance(selected, list)
-    assert len(selected) <= 10
+    assert len(selected) == 10
     assert all(isinstance(f, str) for f in selected)
 
 
@@ -500,3 +501,74 @@ def test_stability_regression_returns_features_ordered_by_frequency():
     )
 
     assert len(selected) >= 2, "Should select at least 2 features"
+
+
+def test_stability_regression_wrapper_fills_to_requested_k_when_threshold_high():
+    from sift import stability_regression
+
+    rng = np.random.default_rng(123)
+    n, p = 160, 12
+    X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
+    y = X["f0"] + 0.2 * X["f1"] + rng.normal(size=n) * 0.8
+
+    selected = stability_regression(
+        X,
+        y,
+        k=6,
+        threshold=0.999,
+        n_bootstrap=8,
+        alpha=0.05,
+        n_jobs=1,
+        random_state=5,
+        verbose=False,
+    )
+
+    assert len(selected) == 6
+
+
+def test_stability_alpha_cv_uses_group_splits_without_group_overlap():
+    selector = StabilitySelector(alpha=None, task="regression", verbose=False)
+    idx = np.arange(12)
+    groups = np.repeat(np.arange(4), 3)
+    cv = selector._alpha_cv(idx, np.zeros(12), groups=groups, time=None)
+
+    assert isinstance(cv, list)
+    for train_idx, val_idx in cv:
+        train_groups = set(groups[train_idx].tolist())
+        val_groups = set(groups[val_idx].tolist())
+        assert train_groups.isdisjoint(val_groups)
+
+
+def test_stability_bootstrap_duplicate_rows_sum_weights(monkeypatch):
+    captured = {}
+
+    class FakeLasso:
+        def __init__(self, *, alpha, max_iter):
+            self.alpha = alpha
+            self.max_iter = max_iter
+
+        def fit(self, X, y, sample_weight):
+            captured["X"] = np.asarray(X)
+            captured["y"] = np.asarray(y)
+            captured["sample_weight"] = np.asarray(sample_weight)
+            self.coef_ = np.array([1.0, 0.0])
+            return self
+
+    monkeypatch.setattr(stability_module, "Lasso", FakeLasso)
+    selector = StabilitySelector(alpha=0.1, task="regression", verbose=False)
+    selector.alpha_ = 0.1
+    X = np.arange(8, dtype=float).reshape(4, 2)
+    y = np.arange(4, dtype=float)
+    sample_weight = np.array([1.0, 3.0, 2.0, 5.0])
+
+    selector._fit_single_stability_run(
+        X,
+        y,
+        sample_weight,
+        train_idx=np.array([2, 0, 2, 1]),
+        seed=0,
+    )
+
+    np.testing.assert_array_equal(captured["X"], X[[0, 1, 2]])
+    np.testing.assert_array_equal(captured["y"], y[[0, 1, 2]])
+    np.testing.assert_allclose(captured["sample_weight"], [1.0, 3.0, 4.0])

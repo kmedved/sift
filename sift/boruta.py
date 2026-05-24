@@ -29,9 +29,10 @@ from sift._permute import (
 )
 from sift._preprocess import (
     CatEncoding,
-    encode_categoricals,
+    LeaveOneOutLogitEncoder,
     ensure_weights,
     extract_feature_names,
+    suppress_category_encoder_pandas_warnings,
     to_numpy,
 )
 
@@ -360,6 +361,14 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         check_is_fitted(self, ["status_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            if not isinstance(X, pd.DataFrame):
+                raise ValueError(
+                    "This BorutaSelector was fitted with DataFrame categorical "
+                    "encoding; transform also requires a DataFrame."
+                )
+            with suppress_category_encoder_pandas_warnings():
+                X = self.categorical_encoder_.transform(X)
         keep_idx = self.get_support(indices=True)
         if isinstance(X, pd.DataFrame):
             cols = [self.feature_names_in_[i] for i in keep_idx]
@@ -389,8 +398,9 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         groups : array-like of shape (n_samples,), optional
             Group labels for time-series shadow permutation.
         time : array-like of shape (n_samples,), optional
-            Time values for ordering within groups.
+        Time values for ordering within groups.
         """
+        self._clear_fit_state()
         fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
         loop_result = self._run_boruta_iterations(fit_data)
         status = self._resolve_boruta_final_status(
@@ -407,6 +417,22 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             loop_result.mean_importance,
         )
         return self
+
+    def _clear_fit_state(self) -> None:
+        for attr in (
+            "categorical_encoder_",
+            "categorical_features_",
+            "_categorical_encoding_applied_",
+            "feature_names_in_",
+            "status_",
+            "hits_",
+            "n_iter_",
+            "shadow_thresholds_",
+            "mean_importance_",
+            "selected_features_",
+        ):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
         if self.importance_data == "test" and self.importance == "native":
@@ -429,6 +455,9 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         )
 
         feature_names = extract_feature_names(X)
+        self.categorical_encoder_ = None
+        self.categorical_features_ = []
+        self._categorical_encoding_applied_ = False
         if isinstance(X, pd.DataFrame):
             X = X.copy()
             cat_features = self.cat_features
@@ -446,7 +475,43 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     )
                 else:
                     y_for_encoder = y
-                X = encode_categoricals(X, y_for_encoder, cat_features, self.cat_encoding)
+                if sample_weight is not None and self.cat_encoding != "loo_logit":
+                    raise ValueError(
+                        "sample_weight with Boruta categorical encoding is only "
+                        "supported for cat_encoding='loo_logit'. category_encoders-backed "
+                        "methods ('loo', 'target', 'james_stein') do not consume sample weights."
+                    )
+                if self.cat_encoding == "loo_logit":
+                    encoder = LeaveOneOutLogitEncoder(cat_features)
+                    X = encoder.fit_transform(X, y_for_encoder, sample_weight=sample_weight)
+                else:
+                    import category_encoders as ce
+
+                    encoders = {
+                        "loo": ce.LeaveOneOutEncoder,
+                        "target": ce.TargetEncoder,
+                        "james_stein": ce.JamesSteinEncoder,
+                    }
+                    if self.cat_encoding not in encoders:
+                        raise ValueError(
+                            "cat_encoding must be one of 'none', 'target', 'loo', "
+                            "'james_stein', or 'loo_logit'. "
+                            f"Got {self.cat_encoding!r}."
+                        )
+                    Encoder = encoders[self.cat_encoding]
+                    try:
+                        encoder = Encoder(
+                            cols=cat_features,
+                            handle_missing="return_nan",
+                            handle_unknown="value",
+                        )
+                    except TypeError:
+                        encoder = Encoder(cols=cat_features, handle_missing="return_nan")
+                    with suppress_category_encoder_pandas_warnings():
+                        X = encoder.fit_transform(X, y_for_encoder)
+                self.categorical_encoder_ = encoder
+                self.categorical_features_ = list(cat_features)
+                self._categorical_encoding_applied_ = True
                 feature_names = extract_feature_names(X)
 
             non_numeric = X.select_dtypes(

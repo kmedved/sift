@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from sift.sampling.anchors import first_and_last_per_group
-from sift.sampling.smart import SmartSamplerConfig, smart_sample
+from sift.sampling.smart import SmartSamplerConfig, _cap_group_anchors, smart_sample
 
 
 def test_smart_sample_keeps_anchors():
@@ -37,3 +37,18 @@ def test_smart_sample_keeps_anchors():
     sampled_ids = set(out["row_id"])
 
     assert anchor_ids.issubset(sampled_ids)
+
+
+def test_tiny_anchor_max_share_can_keep_zero_mandatory_anchors():
+    n = 10
+    g_idx = np.arange(n)
+    anchor_mask = np.ones(n, dtype=bool)
+    base_scores = np.arange(n, dtype=float)
+    config = SmartSamplerConfig(
+        anchor_max_share=1e-9,
+        verbose=False,
+    )
+
+    kept = _cap_group_anchors(g_idx, anchor_mask, base_scores, target_g=5, config=config)
+
+    assert kept.size == 0

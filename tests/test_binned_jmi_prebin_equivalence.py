@@ -50,3 +50,32 @@ def test_quantile_bin_matrix_indexed_matches_full():
     indexed = jmi.quantile_bin_matrix_indexed(X_full, cand_idx, 7)
 
     np.testing.assert_array_equal(indexed, full)
+
+
+def test_binned_jmi_discrete_sparse_integer_labels_are_compacted():
+    rng = np.random.default_rng(2)
+    n = 120
+    selected = rng.normal(size=n)
+    candidates = rng.normal(size=(n, 3))
+    y_sparse = np.where(np.arange(n) % 3 == 0, 100, np.where(np.arange(n) % 3 == 1, 5, 0))
+    y_compact = np.unique(y_sparse, return_inverse=True)[1]
+    w = np.ones(n, dtype=np.float64)
+
+    sparse_scores = jmi.binned_joint_mi(
+        selected,
+        candidates,
+        y_sparse,
+        w,
+        n_bins=5,
+        y_kind="discrete",
+    )
+    compact_scores = jmi.binned_joint_mi(
+        selected,
+        candidates,
+        y_compact,
+        w,
+        n_bins=5,
+        y_kind="discrete",
+    )
+
+    np.testing.assert_allclose(sparse_scores, compact_scores)

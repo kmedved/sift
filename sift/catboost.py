@@ -326,6 +326,7 @@ def _run_catboost_split_evaluation(
                 method=prefilter_method,
                 cat_features=cat_features_final,
                 text_features=text_feat,
+                sample_weight=w_train,
                 random_state=random_state,
                 verbose=False,
                 n_jobs=n_jobs,

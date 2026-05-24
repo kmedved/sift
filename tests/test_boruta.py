@@ -3,8 +3,10 @@
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.exceptions import NotFittedError
 
 from sift.boruta import (
+    BorutaLoopResult,
     BorutaResult,
     BorutaSelector,
     _compute_auto_n_estimators,
@@ -233,6 +235,54 @@ class TestBorutaSelector:
 
         indices = selector.get_support(indices=True)
         assert np.array_equal(np.where(mask)[0], indices)
+
+    def test_transform_reapplies_fitted_categorical_encoder(self, monkeypatch):
+        X = pd.DataFrame(
+            {
+                "cat": pd.Series(["a", "b", "a", "b", "a", "b"], dtype="category"),
+                "num": [0.0, 1.0, 0.2, 1.2, 0.1, 1.1],
+            }
+        )
+        y = np.array([0, 1, 0, 1, 0, 1])
+
+        def fake_run(self, fit_data):
+            return BorutaLoopResult(
+                status=np.array([1, -1]),
+                hits=np.array([1, 0]),
+                n_trials=1,
+                shadow_thresholds=np.array([0.0]),
+                mean_importance=np.array([1.0, 0.0]),
+            )
+
+        monkeypatch.setattr(BorutaSelector, "_run_boruta_iterations", fake_run)
+
+        selector = BorutaSelector(
+            task="classification",
+            cat_encoding="loo_logit",
+            max_iter=1,
+            verbose=False,
+        ).fit(X, y)
+        transformed = selector.transform(X)
+
+        assert transformed.columns.tolist() == ["cat"]
+        assert pd.api.types.is_numeric_dtype(transformed["cat"])
+        with pytest.raises(ValueError, match="requires a DataFrame"):
+            selector.transform(X.to_numpy())
+
+    def test_failed_refit_clears_previous_fit_state(self, monkeypatch):
+        X = pd.DataFrame(np.random.default_rng(0).normal(size=(40, 3)), columns=list("abc"))
+        y = X["a"].to_numpy()
+        selector = BorutaSelector(max_iter=2, verbose=False).fit(X, y)
+        assert selector.selected_features_ is not None
+
+        def fail_run(self, fit_data):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(BorutaSelector, "_run_boruta_iterations", fail_run)
+        with pytest.raises(RuntimeError, match="boom"):
+            selector.fit(X, y)
+        with pytest.raises(NotFittedError):
+            selector.transform(X)
 
 
 class TestBorutaOptions:

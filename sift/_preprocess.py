@@ -56,7 +56,10 @@ def infer_higher_is_better(metric: str) -> bool:
         return True
     if metric_upper in LOWER_IS_BETTER:
         return False
-    return False
+    raise ValueError(
+        f"Cannot infer score direction for metric {metric!r}. "
+        "Pass higher_is_better=True or False explicitly."
+    )
 
 
 def best_score_from_dict(scores: dict, higher_is_better: bool) -> Tuple[int, float]:
@@ -447,6 +450,12 @@ def encode_categoricals(
             clip_max=loo_clip_max,
         )
         return encoder.fit_transform(X, y, sample_weight=sample_weight)
+    if sample_weight is not None:
+        raise ValueError(
+            "sample_weight with supervised categorical encoding is only supported "
+            "for cat_encoding='loo_logit'. category_encoders-backed methods "
+            "('loo', 'target', 'james_stein') do not consume sample weights."
+        )
     try:
         import category_encoders as ce
     except ImportError as exc:

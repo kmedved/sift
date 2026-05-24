@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sift import select_cefsplus, select_cefsplus_binary, select_jmi, select_jmim, select_mrmr
+from sift import build_cache, select_cefsplus, select_cefsplus_binary, select_jmi, select_jmim, select_mrmr
 import sift.selection.auto_k as auto_k_module
 import sift.selection.filter_api as filter_api
 import sift.selection.filter_payloads as filter_payloads
@@ -871,3 +871,24 @@ def test_select_k_auto_loo_logit_uses_builtin_binary_encoder():
     assert best_k in {1, 2}
     assert selected[0] == "team"
     assert np.isfinite(diag["score"]).all()
+
+
+def test_gaussian_auto_k_rejects_cache_built_for_different_row_count():
+    X1, y1, _ = _numeric_auto_k_data()
+    cache = build_cache(X1, subsample=40, random_state=0)
+    X2 = X1.iloc[:70].copy()
+    y2 = y1[:70]
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
+
+    with pytest.raises(ValueError, match="cache was built with"):
+        select_mrmr(
+            X2,
+            y2,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            cache=cache,
+            auto_k_config=cfg,
+            time=np.arange(len(y2)),
+            verbose=False,
+        )

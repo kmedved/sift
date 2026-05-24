@@ -1,7 +1,8 @@
 # User Guide
 
 This guide gives the practical map for choosing a SIFT workflow. For exact
-parameters and longer examples, use the full [API manual](../DOCS.MD).
+parameters and longer examples, use the full [API manual](../DOCS.MD); for
+error messages and common pitfalls see [troubleshooting](troubleshooting.md).
 
 ## Choose a Selector
 

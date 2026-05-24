@@ -93,7 +93,7 @@ def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
         raise TypeError("anchor_fn must be callable or None.")
     if config.random_state is not None and not _is_int_like(config.random_state):
         raise TypeError("random_state must be an integer or None.")
-    if not isinstance(config.verbose, bool):
+    if not isinstance(config.verbose, (bool, np.bool_)):
         raise TypeError("verbose must be a bool.")
 
 
@@ -456,7 +456,9 @@ def _cap_group_anchors(
     if config.anchor_max_share <= 0:
         return np.array([], dtype=int)
 
-    max_anchor_keep = max(1, int(np.floor(config.anchor_max_share * target_g)))
+    max_anchor_keep = int(np.floor(config.anchor_max_share * target_g))
+    if max_anchor_keep <= 0:
+        return np.array([], dtype=int)
     max_anchor_keep = min(max_anchor_keep, target_g)
     if anchor_pos.size <= max_anchor_keep:
         return anchor_pos

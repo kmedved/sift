@@ -244,6 +244,12 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             loo_clip_min=getattr(self, "loo_clip_min", 1e-4),
             loo_clip_max=getattr(self, "loo_clip_max", 1.0 - 1e-4),
         )
+        if sample_weight is not None and not isinstance(encoder, LeaveOneOutLogitEncoder):
+            raise ValueError(
+                "sample_weight with selector-class categorical encoding is only "
+                "supported for cat_encoding='loo_logit'. category_encoders-backed "
+                "methods ('loo', 'target', 'james_stein') do not consume sample weights."
+            )
         y_enc = self._categorical_target(y)
         with suppress_category_encoder_pandas_warnings():
             if isinstance(encoder, LeaveOneOutLogitEncoder):
@@ -500,7 +506,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         y_arr = np.asarray(y).reshape(-1)
         n_features = len(_feature_names_or_default(X))
         config = auto_k_config
-        fit_w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
+        fit_w_arr = (
+            ensure_weights(sample_weight, len(y_arr), normalize=True)
+            if sample_weight is not None
+            else None
+        )
         eval_w_arr = self._nested_eval_sample_weight(y, sample_weight)
 
         def build_fold_path(train_idx: np.ndarray, val_idx: np.ndarray, max_k: int):
@@ -509,7 +519,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             X_train_path = fold_selector.fit_transform(
                 train_X,
                 y_arr[train_idx],
-                sample_weight=fit_w_arr[train_idx],
+                sample_weight=fit_w_arr[train_idx] if fit_w_arr is not None else None,
                 **(fit_params or {}),
             )
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
@@ -718,14 +728,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
         return weights
 
     def _nested_eval_sample_weight(self, y, sample_weight):
-        y01, raw_y, _ = validate_binary_target(y)
-        weights, _ = resolve_binary_weights(
-            y01,
-            raw_y,
-            sample_weight=sample_weight,
-            class_weight=self.class_weight,
-        )
-        return weights
+        y_arr = np.asarray(y).reshape(-1)
+        return ensure_weights(sample_weight, len(y_arr), normalize=True)
 
     def _fit_selector(
         self,

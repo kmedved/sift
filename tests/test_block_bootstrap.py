@@ -1,6 +1,7 @@
 import numpy as np
 
 from sift.stability import StabilitySelector, _block_bootstrap_indices
+from sift.sampling.stability import _stationary_block_sample
 
 
 def test_block_bootstrap_indices_basic():
@@ -50,3 +51,16 @@ def test_stability_selector_block_bootstrap_runs():
     selector.fit(X, y, groups=groups, time=time)
 
     assert selector.n_features_selected_ > 0
+
+
+def test_stationary_block_sample_wraps_right_edge():
+    class FakeRng:
+        def integers(self, low, high=None):
+            return 4
+
+        def geometric(self, p):
+            return 3
+
+    sample = _stationary_block_sample(np.arange(5), mean_block_size=2, n=5, rng=FakeRng())
+
+    assert sample[:3] == [4, 0, 1]

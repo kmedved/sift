@@ -345,6 +345,8 @@ def _corr_prune_candidates(
 ) -> tuple[np.ndarray, set[int]]:
     if threshold is None or len(candidates) <= 1:
         return candidates, set()
+    if threshold <= 0.0:
+        raise ValueError("corr_prune threshold must be positive when provided")
     R = weighted_corr_matrix(Z[:, candidates], w)
     tie_break = candidates if tie_break_indices is None else tie_break_indices
     ordered_local = np.lexsort((tie_break, -scores[candidates]))
