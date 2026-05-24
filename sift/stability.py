@@ -162,18 +162,43 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         -------
         self
         """
-        X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
-            X, y, sample_weight, groups, time, feature_names
-        )
-        split_iter = self._make_stability_split_iterator(len(y), y, groups, time)
-        sel_count, sum_abs_coef, n_runs = self._run_stability_chunks(
-            X_scaled,
-            y,
-            sample_weight,
-            split_iter,
-        )
-        self._finalize_stability_selection(sel_count, sum_abs_coef, n_runs, feature_names)
+        self._clear_fit_state()
+        try:
+            X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
+                X, y, sample_weight, groups, time, feature_names
+            )
+            split_iter = self._make_stability_split_iterator(len(y), y, groups, time)
+            sel_count, sum_abs_coef, n_runs = self._run_stability_chunks(
+                X_scaled,
+                y,
+                sample_weight,
+                split_iter,
+            )
+            self._finalize_stability_selection(sel_count, sum_abs_coef, n_runs, feature_names)
+        except Exception:
+            self._clear_fit_state()
+            raise
         return self
+
+    def _clear_fit_state(self) -> None:
+        for attr in (
+            "_impute_means_",
+            "_label_encoder",
+            "_scaler",
+            "alpha_",
+            "classes_",
+            "coef_bootstrap_",
+            "feature_names_in_",
+            "mean_abs_coef_",
+            "n_features_in_",
+            "n_features_selected_",
+            "sampled_n_",
+            "selected_feature_names_",
+            "selected_features_",
+            "selection_frequencies_",
+        ):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     def _prepare_stability_fit(self, X, y, sample_weight, groups, time, feature_names):
         # Input validation

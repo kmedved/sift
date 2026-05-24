@@ -62,9 +62,15 @@ def auto_k_summary(
 
 def prepare_filter_eval_data(
     X, y: np.ndarray, cache, groups: Optional[np.ndarray], time: Optional[np.ndarray],
-    sample_weight: Optional[np.ndarray],
+    sample_weight: Optional[np.ndarray], feature_names: Optional[list[str]] = None,
 ) -> EvalData:
-    X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=cache.feature_names)
+    columns = feature_names if _use_fallback_feature_names(cache, feature_names) else cache.feature_names
+    if isinstance(X, pd.DataFrame):
+        X_df = X.copy() if cache.feature_names is None and feature_names is not None else X
+        if cache.feature_names is None and feature_names is not None:
+            X_df.columns = feature_names
+    else:
+        X_df = pd.DataFrame(X, columns=columns)
     y_arr = np.asarray(y).ravel()
     if len(y_arr) != len(X_df):
         raise ValueError(f"X has {len(X_df)} rows but y has {len(y_arr)}")
@@ -162,6 +168,7 @@ def select_gaussian_evaluate_path(
     groups: Optional[np.ndarray], time: Optional[np.ndarray],
     sample_weight: Optional[np.ndarray], cat_features: Optional[list[str]], cat_encoding: str,
     corr_prune: float | None | Literal["auto"] = "auto",
+    feature_names: Optional[list[str]] = None,
     verbose: bool = True,
 ) -> GaussianAutoKResult:
     _require_eval_split_context(auto_k_config, groups, time)
@@ -176,6 +183,8 @@ def select_gaussian_evaluate_path(
         want_indices=True,
         return_objective=False,
     )
+    if _use_fallback_feature_names(cache, feature_names):
+        path = [feature_names[int(i)] for i in path_indices]
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
         eval_y,
@@ -295,6 +304,18 @@ def _cached_filter_path(
         path, indices = result
         return path, list(indices), None
     return result, [], None
+
+
+def _use_fallback_feature_names(cache, feature_names: Optional[list[str]]) -> bool:
+    if feature_names is None:
+        return False
+    cache_names = getattr(cache, "feature_names", None)
+    if cache_names is None:
+        return True
+    if len(cache_names) != len(feature_names):
+        return False
+    default_names = [f"x{i}" for i in range(len(cache_names))]
+    return list(cache_names) == default_names
 
 
 def select_filter_classic_auto_k(

@@ -149,32 +149,26 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
             print(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
-        if ctx.request.return_result:
-            selected, selected_indices = select_cached(
-                cache,
-                ctx.request.y,
-                k,
-                method=method,
-                top_m=top_m,
-                corr_prune=_kw(ctx, "corr_prune", "auto"),
-                return_indices=True,
-            )
-        else:
-            selected = select_cached(
-                cache,
-                ctx.request.y,
-                k,
-                method=method,
-                top_m=top_m,
-                corr_prune=_kw(ctx, "corr_prune", "auto"),
-            )
-            selected_indices = None
-        feature_names = cache.feature_names if cache.feature_names is not None else ctx.feature_names
-        return SelectionPayload(
-            selected_features=list(selected),
-            selected_indices=list(selected_indices) if selected_indices is not None else None,
+        selected, selected_indices = select_cached(
+            cache,
+            ctx.request.y,
+            k,
+            method=method,
             top_m=top_m,
-            n_features=len(feature_names),
+            corr_prune=_kw(ctx, "corr_prune", "auto"),
+            return_indices=True,
+        )
+        selected_features, selected_indices, n_features = _gaussian_payload_selection(
+            ctx,
+            cache,
+            selected,
+            selected_indices,
+        )
+        return SelectionPayload(
+            selected_features=selected_features,
+            selected_indices=selected_indices,
+            top_m=top_m,
+            n_features=n_features,
         )
 
     return fixed_gaussian
@@ -203,6 +197,7 @@ def make_auto_gaussian(
             ctx.groups,
             ctx.time,
             ctx.request.sample_weight,
+            feature_names=ctx.feature_names,
         )
         selected, selected_indices, auto_diag, auto_summary = runner(
             cache=cache,
@@ -219,7 +214,14 @@ def make_auto_gaussian(
             cat_features=cat_features,
             cat_encoding=_kw(ctx, "cat_encoding"),
             corr_prune=_kw(ctx, "corr_prune", "auto"),
+            feature_names=ctx.feature_names,
             verbose=_kw(ctx, "verbose"),
+        )
+        selected_features, selected_indices, n_features = _gaussian_payload_selection(
+            ctx,
+            cache,
+            selected,
+            selected_indices,
         )
         diagnostics = None
         if include_diagnostics and ctx.request.return_result:
@@ -228,10 +230,10 @@ def make_auto_gaussian(
         if include_objective_penalty:
             metadata_extra["objective_penalty"] = ctx.auto_k_config.objective_penalty
         return SelectionPayload(
-            selected_features=list(selected),
-            selected_indices=list(selected_indices),
+            selected_features=selected_features,
+            selected_indices=selected_indices,
             top_m=top_m,
-            n_features=ctx.n_features_input,
+            n_features=n_features,
             metadata_extra=metadata_extra,
             diagnostics=diagnostics,
         )
@@ -293,6 +295,36 @@ def selector_gaussian_method(selector: str) -> GaussianMethod:
         return selector
 
     return gaussian_method
+
+
+def _gaussian_payload_selection(
+    ctx: "FilterContext",
+    cache: FeatureCache,
+    selected,
+    selected_indices,
+) -> tuple[list[str], list[int] | None, int]:
+    feature_names = _gaussian_feature_names(ctx, cache)
+    if _use_context_feature_names(ctx, cache):
+        indices = [int(i) for i in selected_indices]
+        return [feature_names[i] for i in indices], indices, len(feature_names)
+    indices = list(selected_indices) if selected_indices is not None else None
+    return list(selected), indices, len(feature_names)
+
+
+def _gaussian_feature_names(ctx: "FilterContext", cache: FeatureCache) -> list[str]:
+    if _use_context_feature_names(ctx, cache):
+        return ctx.feature_names
+    assert cache.feature_names is not None
+    return list(cache.feature_names)
+
+
+def _use_context_feature_names(ctx: "FilterContext", cache: FeatureCache) -> bool:
+    if cache.feature_names is None:
+        return True
+    if len(cache.feature_names) != len(ctx.feature_names):
+        return False
+    default_names = [f"x{i}" for i in range(len(cache.feature_names))]
+    return list(cache.feature_names) == default_names
 
 
 def validate_standard(ctx: "FilterContext") -> None:

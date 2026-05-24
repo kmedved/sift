@@ -3,7 +3,14 @@ import pandas as pd
 import pytest
 from sklearn.exceptions import NotFittedError
 
-from sift import CEFSPlusBinarySelector, CEFSPlusSelector, JMIMSelector, JMISelector, MRMRSelector
+from sift import (
+    CEFSPlusBinarySelector,
+    CEFSPlusSelector,
+    JMIMSelector,
+    JMISelector,
+    MRMRSelector,
+    build_cache,
+)
 import sift.selectors as selectors_mod
 import sift.selection.auto_k_nested as auto_k_nested_module
 from sift.selection.auto_k import AutoKConfig
@@ -195,6 +202,27 @@ def test_selector_dataframe_transform_rejects_reordered_columns():
 
     with pytest.raises(ValueError, match="columns"):
         selector.transform(X[list(reversed(X.columns))])
+
+
+def test_gaussian_selector_maps_unnamed_cache_indices_to_feature_names():
+    rng = np.random.default_rng(23)
+    X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])
+    y = X["f0"] + 0.3 * X["f2"] + rng.normal(size=120) * 0.05
+    cache = build_cache(X.to_numpy(), subsample=None)
+
+    selector = MRMRSelector(
+        k=2,
+        task="regression",
+        estimator="gaussian",
+        cache=cache,
+        verbose=False,
+    ).fit(X, y)
+
+    assert all(feature in X.columns for feature in selector.selected_features_)
+    assert all(isinstance(index, (int, np.integer)) for index in selector.selected_indices_)
+    transformed = selector.transform(X)
+    assert transformed.shape[1] == 2
+    assert list(transformed.columns) == selector.selected_features_
 
 
 def test_selector_set_params_updates_fit_call():

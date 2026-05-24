@@ -892,3 +892,36 @@ def test_gaussian_auto_k_rejects_cache_built_for_different_row_count():
             time=np.arange(len(y2)),
             verbose=False,
         )
+
+
+def test_gaussian_function_selector_maps_unnamed_cache_indices_to_feature_names():
+    X, y, _ = _numeric_auto_k_data()
+    cache = build_cache(X.to_numpy(), subsample=None)
+
+    selected = select_cefsplus(X, y, k=3, cache=cache, verbose=False)
+    result = select_cefsplus(X, y, k=3, cache=cache, return_result=True, verbose=False)
+
+    assert all(feature in X.columns for feature in selected)
+    assert result.selected_features == selected
+    assert all(isinstance(index, int) for index in result.selected_indices)
+
+
+def test_gaussian_auto_k_with_unnamed_cache_uses_feature_names_for_evaluation():
+    X, y, _ = _numeric_auto_k_data()
+    cache = build_cache(X.to_numpy(), subsample=None)
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
+
+    selected = select_mrmr(
+        X,
+        y,
+        k="auto",
+        task="regression",
+        estimator="gaussian",
+        cache=cache,
+        auto_k_config=cfg,
+        time=np.arange(len(y)),
+        verbose=False,
+    )
+
+    assert selected
+    assert all(feature in X.columns for feature in selected)

@@ -572,3 +572,56 @@ def test_stability_bootstrap_duplicate_rows_sum_weights(monkeypatch):
     np.testing.assert_array_equal(captured["X"], X[[0, 1, 2]])
     np.testing.assert_array_equal(captured["y"], y[[0, 1, 2]])
     np.testing.assert_allclose(captured["sample_weight"], [1.0, 3.0, 4.0])
+
+
+def test_stability_refit_without_stored_coefs_clears_old_coef_matrix():
+    rng = np.random.default_rng(50)
+    X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])
+    y = X["f0"] + rng.normal(size=120) * 0.1
+
+    selector = StabilitySelector(
+        n_bootstrap=5,
+        threshold=0.1,
+        alpha=0.05,
+        store_coefs=True,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+    assert hasattr(selector, "coef_bootstrap_")
+
+    selector.store_coefs = False
+    selector.fit(X, y)
+
+    assert not hasattr(selector, "coef_bootstrap_")
+    with pytest.raises(ValueError, match="store_coefs=True"):
+        selector.get_coef_stability()
+
+
+def test_stability_failed_refit_clears_partial_and_old_state(monkeypatch):
+    rng = np.random.default_rng(51)
+    X = pd.DataFrame(rng.normal(size=(100, 4)), columns=[f"f{i}" for i in range(4)])
+    y = X["f0"] + rng.normal(size=100) * 0.1
+    selector = StabilitySelector(
+        n_bootstrap=5,
+        threshold=0.1,
+        alpha=0.05,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+    assert hasattr(selector, "selection_frequencies_")
+
+    X_new = X.rename(columns={col: f"new_{col}" for col in X.columns})
+
+    def fail_run(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(selector, "_run_stability_chunks", fail_run)
+    with pytest.raises(RuntimeError, match="boom"):
+        selector.fit(X_new, y)
+
+    with pytest.raises(NotFittedError):
+        selector.get_feature_info()
+    with pytest.raises(NotFittedError):
+        selector.transform(X_new)
