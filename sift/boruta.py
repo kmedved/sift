@@ -23,6 +23,7 @@ from sklearn.utils.validation import check_is_fitted
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
+    build_group_info,
     permute_matrix,
     resolve_permutation_method,
 )
@@ -301,20 +302,42 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         shadow_method: PermutationMethod,
         shadow_mode: PermutationAxis,
         block_size: int | str,
+        group_info: dict | None = None,
     ) -> np.ndarray:
         """Fit estimator and compute importance."""
+        def make_shadow_group_info(
+            X_part: np.ndarray,
+            *,
+            groups_part: np.ndarray | None,
+            time_part: np.ndarray | None,
+            group_info_part: dict | None,
+        ):
+            if shadow_method not in ("within_group", "block", "circular_shift"):
+                return None
+            if group_info_part is not None:
+                return group_info_part
+            return build_group_info(groups_part, time_part, n_samples=X_part.shape[0])
+
         def make_shadow_matrix(
             X_part: np.ndarray,
             *,
             groups_part: np.ndarray | None,
             time_part: np.ndarray | None,
             seed_part: int,
+            group_info_part: dict | None = None,
         ) -> np.ndarray:
+            group_info = make_shadow_group_info(
+                X_part,
+                groups_part=groups_part,
+                time_part=time_part,
+                group_info_part=group_info_part,
+            )
             shadow = permute_matrix(
                 X_part,
                 method=shadow_method,
                 groups=groups_part,
                 time=time_part,
+                group_info=group_info,
                 block_size=block_size,
                 seed=seed_part,
                 axis=shadow_mode,
@@ -392,6 +415,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 groups_part=groups,
                 time_part=time,
                 seed_part=seed,
+                group_info_part=group_info,
             )
             _fit_estimator(est, X_ext, y, w_fit, require_sample_weight=True)
             X_imp, y_imp, w_imp = X_ext, y, w_score
@@ -669,6 +693,12 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         imp_sum = np.zeros(p, dtype=np.float64)
         imp_count = np.zeros(p, dtype=np.int32)
         shadow_thresholds = []
+        group_info = None
+        if (
+            self.importance_data != "test"
+            and shadow_method in ("within_group", "block", "circular_shift")
+        ):
+            group_info = build_group_info(groups, time, n_samples=n)
 
         if self.verbose:
             print(
@@ -714,6 +744,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 shadow_method=shadow_method,
                 shadow_mode=self.shadow_mode,
                 block_size=self.block_size,
+                group_info=group_info,
             )
 
             expected_importance_len = 2 * n_active
@@ -745,6 +776,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             tent = np.where(status == 0)[0]
             m = max(1, tent.size)
             alpha_adj = self.alpha / m
+            decision_horizon = self._earliest_decidable_trial(
+                alpha_adj,
+                max_trials=self.max_iter,
+            )
 
             decided_this_round = 0
             for j in tent:
@@ -774,7 +809,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                         )
                     )
 
-            if decided_this_round == 0:
+            if decided_this_round == 0 and n_trials >= decision_horizon:
                 no_progress_count += 1
                 if no_progress_count >= self.early_stop_rounds:
                     if self.verbose:
@@ -798,6 +833,18 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             shadow_thresholds=shadow_thresholds_arr,
             mean_importance=mean_importance,
         )
+
+    @staticmethod
+    def _earliest_decidable_trial(alpha_adj: float, *, max_trials: int) -> int:
+        """Smallest trial count where an all-hit/all-miss binomial tail can pass."""
+        if not np.isfinite(alpha_adj) or alpha_adj <= 0.0:
+            return int(max_trials) + 1
+        trial = 0
+        tail = 1.0
+        while trial <= int(max_trials) and tail >= float(alpha_adj):
+            trial += 1
+            tail *= 0.5
+        return trial
 
     def _resolve_boruta_final_status(
         self,
