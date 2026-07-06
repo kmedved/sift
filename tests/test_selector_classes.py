@@ -204,7 +204,7 @@ def test_selector_dataframe_transform_rejects_reordered_columns():
         selector.transform(X[list(reversed(X.columns))])
 
 
-def test_gaussian_selector_maps_unnamed_cache_indices_to_feature_names():
+def test_gaussian_selector_keeps_unnamed_cache_selection_positional():
     rng = np.random.default_rng(23)
     X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])
     y = X["f0"] + 0.3 * X["f2"] + rng.normal(size=120) * 0.05
@@ -218,11 +218,12 @@ def test_gaussian_selector_maps_unnamed_cache_indices_to_feature_names():
         verbose=False,
     ).fit(X, y)
 
-    assert all(feature in X.columns for feature in selector.selected_features_)
+    assert all(feature.startswith("x") for feature in selector.selected_features_)
     assert all(isinstance(index, (int, np.integer)) for index in selector.selected_indices_)
+    assert selector.selected_features_ == [f"x{i}" for i in selector.selected_indices_]
     transformed = selector.transform(X)
     assert transformed.shape[1] == 2
-    assert list(transformed.columns) == selector.selected_features_
+    assert list(transformed.columns) == [X.columns[i] for i in selector.selected_indices_]
 
 
 def test_selector_set_params_updates_fit_call():

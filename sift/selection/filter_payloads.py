@@ -303,28 +303,36 @@ def _gaussian_payload_selection(
     selected,
     selected_indices,
 ) -> tuple[list[str], list[int] | None, int]:
+    input_feature_names = list(ctx.feature_names)
+    selected_features = list(selected)
+    cache_is_synthetic = _cache_uses_synthetic_feature_names(cache)
+    if not cache_is_synthetic and len(set(input_feature_names)) == len(input_feature_names):
+        input_index = {name: idx for idx, name in enumerate(input_feature_names)}
+    else:
+        input_index = {}
+    if input_index and all(name in input_index for name in selected_features):
+        return (
+            selected_features,
+            [int(input_index[name]) for name in selected_features],
+            len(input_feature_names),
+        )
+
     feature_names = _gaussian_feature_names(ctx, cache)
-    if _use_context_feature_names(ctx, cache):
-        indices = [int(i) for i in selected_indices]
+    indices = [int(i) for i in selected_indices] if selected_indices is not None else None
+    if cache_is_synthetic and indices is not None:
         return [feature_names[i] for i in indices], indices, len(feature_names)
-    indices = list(selected_indices) if selected_indices is not None else None
-    return list(selected), indices, len(feature_names)
+    if indices is not None and list(feature_names) == input_feature_names:
+        return [feature_names[i] for i in indices], indices, len(feature_names)
+    return selected_features, None, len(input_feature_names)
 
 
 def _gaussian_feature_names(ctx: "FilterContext", cache: FeatureCache) -> list[str]:
-    if _use_context_feature_names(ctx, cache):
-        return ctx.feature_names
     assert cache.feature_names is not None
     return list(cache.feature_names)
 
 
-def _use_context_feature_names(ctx: "FilterContext", cache: FeatureCache) -> bool:
-    if cache.feature_names is None:
-        return True
-    if len(cache.feature_names) != len(ctx.feature_names):
-        return False
-    default_names = [f"x{i}" for i in range(len(cache.feature_names))]
-    return list(cache.feature_names) == default_names
+def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
+    return bool(getattr(cache, "feature_names_are_synthetic", False))
 
 
 def validate_standard(ctx: "FilterContext") -> None:

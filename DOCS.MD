@@ -88,6 +88,7 @@ from sift import (
     select_mrmr,
     AutoKConfig,
     FeaturePathEvaluationResult,
+    FilterSelectionResult,
     evaluate_feature_path,
     select_k_auto,
     select_k_elbow,
@@ -686,6 +687,14 @@ or unpruned candidates remain.
 - `row_idx`: rows used after optional subsampling.
 - `sample_weight`: normalized weights for cached rows.
 - `feature_names`: original feature names when available.
+- `feature_names_are_synthetic`: whether names were generated for unnamed
+  positional input instead of coming from a DataFrame.
+
+`FeatureCache` objects are bound to the feature matrix and naming contract used
+when they were built. If you persist or pickle caches across SIFT versions,
+rebuild or invalidate caches created before `feature_names_are_synthetic` was
+recorded; old objects cannot prove whether `x0`, `x1`, ... names were real
+DataFrame columns or generated positional names.
 
 Pass `rank_backend="processes"` with `n_jobs` to parallelize the
 rank-Gaussian column transforms during cache construction. Passing a prebuilt
@@ -1025,6 +1034,10 @@ Important options:
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
   fitting Boruta.
+  In `importance_data="test"` mode, supervised encodings are rejected to avoid
+  full-data target leakage. `cat_encoding="none"` is allowed only when the
+  categorical columns are already numeric/pre-encoded; raw object/category
+  columns still fail the numeric-input check.
 
 Shadow permutations:
 
@@ -1364,7 +1377,7 @@ Important helpers:
 ```python
 from sift.estimators import joint_mi
 
-mi = joint_mi.r2_joint_mi(x1, x2, y, weights)
+mi = joint_mi.r2_joint_mi(selected_feature, candidate_matrix, y, weights)
 bins = joint_mi.quantile_bin_matrix(X_arr, n_bins=10)
 ```
 

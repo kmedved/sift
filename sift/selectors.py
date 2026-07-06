@@ -321,20 +321,29 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             call_params["cat_encoding"] = "none"
             call_params["allow_full_data_target_encoding"] = False
 
-        selected_features = self._selector_fn(
+        result = self._selector_fn(
             X_fit,
             y,
             k=k,
+            return_result=True,
             **call_params,
         )
+        if hasattr(result, "selected_indices"):
+            selected_features = list(result.selected_features)
+            selected_indices = result.selected_indices
+        else:
+            selected_features = list(result)
+            selected_indices = None
+        if selected_indices is None:
+            selected_indices = _coerce_selection_indices(
+                feature_names,
+                selected_features,
+            ).tolist()
 
         self.feature_names_in_ = feature_names
         self.n_features_in_ = len(feature_names)
-        self.selected_features_ = list(selected_features)
-        self.selected_indices_ = _coerce_selection_indices(
-            feature_names,
-            self.selected_features_,
-        )
+        self.selected_features_ = selected_features
+        self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,

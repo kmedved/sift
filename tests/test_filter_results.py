@@ -63,6 +63,17 @@ def test_filter_selectors_return_result_has_indices_and_metadata_fixed_k():
         assert ranking["rank"].tolist() == list(range(1, len(result.selected_features) + 1))
 
 
+def test_gaussian_return_result_duplicate_names_keep_positional_indices():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(100, 3)), columns=["dup", "dup", "noise"])
+    y = X.iloc[:, 0].to_numpy() + 0.01 * rng.normal(size=len(X))
+
+    result = select_cefsplus(X, y, k=1, verbose=False, return_result=True)
+
+    assert result.selected_features == ["dup"]
+    assert result.selected_indices == [0]
+
+
 def test_filter_selectors_auto_k_return_result():
     X, y = _make_regression_data(seed=1)
     feature_names = list(X.columns)

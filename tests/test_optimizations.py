@@ -381,6 +381,24 @@ class TestObjectiveModule:
 
 
 class TestCentralizedUtilities:
+    def test_best_score_ties_prefer_smallest_numeric_key(self):
+        from sift._preprocess import best_score_from_dict
+
+        low_key, low_score = best_score_from_dict({5: 1.0, 2: 1.0}, higher_is_better=False)
+        high_key, high_score = best_score_from_dict({5: 1.0, 2: 1.0}, higher_is_better=True)
+
+        assert (low_key, low_score) == (2, 1.0)
+        assert (high_key, high_score) == (2, 1.0)
+
+    def test_best_score_ties_accept_non_numeric_keys(self):
+        from sift._preprocess import best_score_from_dict
+
+        low_key, low_score = best_score_from_dict({"b": 1.0, "a": 1.0}, higher_is_better=False)
+        high_key, high_score = best_score_from_dict({"b": 1.0, "a": 1.0}, higher_is_better=True)
+
+        assert (low_key, low_score) == ("b", 1.0)
+        assert (high_key, high_score) == ("b", 1.0)
+
     def test_ensure_weights_validation(self):
         from sift._preprocess import ensure_weights
 

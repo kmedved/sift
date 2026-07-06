@@ -23,7 +23,6 @@ from sklearn.utils.validation import check_is_fitted
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
-    build_group_info,
     permute_matrix,
     resolve_permutation_method,
 )
@@ -97,7 +96,12 @@ class BorutaResult:
                 "status": [status_map[int(s)] for s in self.status],
             }
         )
-        return df.sort_values("mean_importance", ascending=False, na_position="last")
+        return df.sort_values(
+            "mean_importance",
+            ascending=False,
+            na_position="last",
+            kind="mergesort",
+        )
 
 
 @dataclass(frozen=True)
@@ -262,6 +266,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     loss_function="RMSE",
                     verbose=False,
                     random_seed=self.random_state,
+                    allow_writing_files=False,
                 )
             loss_function = "Logloss"
             if y is not None:
@@ -275,6 +280,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 loss_function=loss_function,
                 verbose=False,
                 random_seed=self.random_state,
+                allow_writing_files=False,
             )
         except ImportError as exc:
             raise ValueError(
@@ -292,17 +298,40 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         groups: np.ndarray | None,
         time: np.ndarray | None,
         seed: int,
+        shadow_method: PermutationMethod,
+        shadow_mode: PermutationAxis,
+        block_size: int | str,
     ) -> np.ndarray:
         """Fit estimator and compute importance."""
+        def make_shadow_matrix(
+            X_part: np.ndarray,
+            *,
+            groups_part: np.ndarray | None,
+            time_part: np.ndarray | None,
+            seed_part: int,
+        ) -> np.ndarray:
+            shadow = permute_matrix(
+                X_part,
+                method=shadow_method,
+                groups=groups_part,
+                time=time_part,
+                block_size=block_size,
+                seed=seed_part,
+                axis=shadow_mode,
+            )
+            return np.concatenate([X_part, shadow], axis=1)
+
         if self.importance_data == "test":
             if groups is not None and time is not None:
                 train_idx, test_idx = _group_time_holdout_split(
                     groups, time, self.test_size
                 )
             elif groups is not None:
-                if len(np.unique(groups)) < 2:
-                    train_idx = np.arange(len(y))
-                    test_idx = train_idx
+                if len(pd.unique(groups)) < 2:
+                    raise ValueError(
+                        "BorutaSelector(importance_data='test') requires at least "
+                        "2 groups to create a held-out group split."
+                    )
                 else:
                     from sklearn.model_selection import GroupShuffleSplit
 
@@ -328,10 +357,29 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 test_idx = np.asarray(test_idx)
 
             if len(test_idx) == 0:
-                train_idx = np.arange(len(y))
-                test_idx = train_idx
+                raise ValueError(
+                    "BorutaSelector(importance_data='test') could not create a "
+                    "non-empty held-out split. Use importance_data='train' or "
+                    "provide more rows/groups."
+                )
+            if np.intersect1d(train_idx, test_idx).size:
+                raise ValueError(
+                    "BorutaSelector(importance_data='test') requires disjoint "
+                    "train and held-out rows."
+                )
 
-            X_train, X_eval = X[train_idx], X[test_idx]
+            X_train = make_shadow_matrix(
+                X[train_idx],
+                groups_part=groups[train_idx] if groups is not None else None,
+                time_part=time[train_idx] if time is not None else None,
+                seed_part=seed,
+            )
+            X_eval = make_shadow_matrix(
+                X[test_idx],
+                groups_part=groups[test_idx] if groups is not None else None,
+                time_part=time[test_idx] if time is not None else None,
+                seed_part=seed + 1,
+            )
             y_train, y_eval = y[train_idx], y[test_idx]
             w_fit_train = w_fit[train_idx] if w_fit is not None else None
             _fit_estimator(
@@ -339,8 +387,14 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             )
             X_imp, y_imp, w_imp = X_eval, y_eval, w_score[test_idx]
         else:
-            _fit_estimator(est, X, y, w_fit, require_sample_weight=True)
-            X_imp, y_imp, w_imp = X, y, w_score
+            X_ext = make_shadow_matrix(
+                X,
+                groups_part=groups,
+                time_part=time,
+                seed_part=seed,
+            )
+            _fit_estimator(est, X_ext, y, w_fit, require_sample_weight=True)
+            X_imp, y_imp, w_imp = X_ext, y, w_score
 
         if self.importance == "native":
             return _get_native_importance(est)
@@ -401,21 +455,25 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         Time values for ordering within groups.
         """
         self._clear_fit_state()
-        fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
-        loop_result = self._run_boruta_iterations(fit_data)
-        status = self._resolve_boruta_final_status(
-            loop_result.status,
-            loop_result.mean_importance,
-            loop_result.shadow_thresholds,
-        )
-        self._store_boruta_attributes(
-            fit_data.feature_names,
-            status,
-            loop_result.hits,
-            loop_result.n_trials,
-            loop_result.shadow_thresholds,
-            loop_result.mean_importance,
-        )
+        try:
+            fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
+            loop_result = self._run_boruta_iterations(fit_data)
+            status = self._resolve_boruta_final_status(
+                loop_result.status,
+                loop_result.mean_importance,
+                loop_result.shadow_thresholds,
+            )
+            self._store_boruta_attributes(
+                fit_data.feature_names,
+                status,
+                loop_result.hits,
+                loop_result.n_trials,
+                loop_result.shadow_thresholds,
+                loop_result.mean_importance,
+            )
+        except Exception:
+            self._clear_fit_state()
+            raise
         return self
 
     def _clear_fit_state(self) -> None:
@@ -469,6 +527,12 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 cat_features = [c for c in cat_features if c in X.columns]
 
             if cat_features and self.cat_encoding != "none":
+                if self.importance_data == "test":
+                    raise ValueError(
+                        "BorutaSelector(importance_data='test') cannot use supervised "
+                        "cat_encoding on the full dataset. Pre-encode categoricals "
+                        "leakage-safely or use importance_data='train'."
+                    )
                 if self.task == "classification":
                     y_for_encoder = pd.Series(
                         np.unique(y, return_inverse=True)[1], index=X.index
@@ -525,6 +589,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     "Encode categorical columns before using Boruta, or use "
                     "cat_encoding in other sift methods."
                 )
+        elif self.cat_features:
+            raise ValueError("cat_features requires X to be a pandas DataFrame")
         X_arr = to_numpy(X, dtype=np.float64)
 
         n, p = X_arr.shape
@@ -603,7 +669,6 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         imp_sum = np.zeros(p, dtype=np.float64)
         imp_count = np.zeros(p, dtype=np.int32)
         shadow_thresholds = []
-        p_trials: list[float] = []
 
         if self.verbose:
             print(
@@ -611,12 +676,6 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     p, self.importance, shadow_method, self.shadow_mode, self.max_iter
                 )
             )
-
-        group_info = (
-            build_group_info(groups, time, n_samples=n)
-            if shadow_method != "global"
-            else None
-        )
 
         for it in range(self.max_iter):
             tentative_idx = np.where(status == 0)[0]
@@ -643,30 +702,24 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 iter_n_estimators = int(self.n_estimators)
                 _set_n_estimators(est, iter_n_estimators)
 
-            shadow = permute_matrix(
-                X_active,
-                method=shadow_method,
-                group_info=group_info,
-                block_size=self.block_size,
-                seed=seed,
-                axis=self.shadow_mode,
-            )
-            X_ext = np.concatenate([X_active, shadow], axis=1)
-
             imp = self._compute_importance(
                 est,
-                X_ext,
+                X_active,
                 y_arr,
                 w_score,
                 w_fit=w_fit,
                 groups=groups,
                 time=time,
                 seed=seed,
+                shadow_method=shadow_method,
+                shadow_mode=self.shadow_mode,
+                block_size=self.block_size,
             )
 
-            if imp.shape[0] != X_ext.shape[1]:
+            expected_importance_len = 2 * n_active
+            if imp.shape[0] != expected_importance_len:
                 raise RuntimeError(
-                    f"Importance length {imp.shape[0]} != expected {X_ext.shape[1]}"
+                    f"Importance length {imp.shape[0]} != expected {expected_importance_len}"
                 )
 
             imp_active = imp[:n_active]
@@ -674,11 +727,6 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
             thr = float(np.percentile(imp_shadow, self.perc))
             shadow_thresholds.append(thr)
-            # Laplace smoothing: avoids p_null = 0 or 1
-            k = float(np.sum(imp_shadow > thr))
-            m_shadow = float(len(imp_shadow))
-            p_null = (k + 1.0) / (m_shadow + 2.0)
-            p_trials.append(p_null)
 
             for i_local in range(n_active):
                 j = active_idx[i_local]
@@ -690,7 +738,9 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
             n_trials += 1
 
-            pmf = _poisson_binom_pmf(np.asarray(p_trials, dtype=np.float64))
+            pmf = _poisson_binom_pmf(
+                np.full(n_trials, 0.5, dtype=np.float64)
+            )
 
             tent = np.where(status == 0)[0]
             m = max(1, tent.size)
@@ -766,7 +816,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         if self.max_features is not None:
             acc = np.where(status == 1)[0]
             if acc.size > self.max_features:
-                order = acc[np.argsort(-mean_importance[acc])]
+                order = acc[np.argsort(-mean_importance[acc], kind="mergesort")]
                 keep = set(order[: self.max_features].tolist())
                 for j in acc:
                     if int(j) not in keep:
@@ -896,6 +946,13 @@ def select_boruta(
             X = X.drop(columns=[time_col])
         if cat_features is not None:
             cat_features = [c for c in cat_features if c in X.columns]
+    else:
+        if group_col is not None:
+            raise ValueError("group_col requires X to be a pandas DataFrame")
+        if time_col is not None:
+            raise ValueError("time_col requires X to be a pandas DataFrame")
+        if cat_features:
+            raise ValueError("cat_features requires X to be a pandas DataFrame")
 
     sel = BorutaSelector(
         estimator=estimator,

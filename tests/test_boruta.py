@@ -13,6 +13,7 @@ from sift.boruta import (
     select_boruta,
     select_boruta_shap,
 )
+from sift.boruta_helpers import _group_time_holdout_split, _weighted_mean_abs
 
 
 class TestBorutaBasic:
@@ -58,6 +59,35 @@ class TestBorutaBasic:
 
         assert isinstance(selected, list)
         assert all(f.startswith("x") for f in selected)
+
+    def test_numpy_input_rejects_dataframe_only_options(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(40, 4))
+        y = X[:, 0] + rng.normal(size=40) * 0.1
+
+        selected = select_boruta(X, y, cat_features=[], max_iter=1, verbose=False)
+        assert isinstance(selected, list)
+
+        with pytest.raises(ValueError, match="group_col requires X"):
+            select_boruta(X, y, group_col="group", max_iter=1, verbose=False)
+        with pytest.raises(ValueError, match="time_col requires X"):
+            select_boruta(X, y, time_col="time", max_iter=1, verbose=False)
+        with pytest.raises(ValueError, match="cat_features requires X"):
+            select_boruta(X, y, cat_features=["cat"], max_iter=1, verbose=False)
+
+    def test_result_ranking_preserves_tied_importance_order(self):
+        result = BorutaResult(
+            feature_names=["b", "a", "c"],
+            status=np.array([1, 1, -1], dtype=np.int8),
+            hits=np.array([1, 1, 0], dtype=np.int32),
+            n_iter=1,
+            shadow_thresholds=np.array([0.0]),
+            mean_importance=np.array([1.0, 1.0, 0.0]),
+        )
+
+        ranking = result.get_feature_ranking()
+
+        assert ranking["feature"].tolist()[:2] == ["b", "a"]
 
     def test_classification(self):
         """Should work for classification."""
@@ -281,6 +311,15 @@ class TestBorutaSelector:
         monkeypatch.setattr(BorutaSelector, "_run_boruta_iterations", fail_run)
         with pytest.raises(RuntimeError, match="boom"):
             selector.fit(X, y)
+        for attr in (
+            "categorical_encoder_",
+            "categorical_features_",
+            "_categorical_encoding_applied_",
+            "selected_features_",
+            "status_",
+            "feature_names_in_",
+        ):
+            assert not hasattr(selector, attr)
         with pytest.raises(NotFittedError):
             selector.transform(X)
 
@@ -325,6 +364,19 @@ class TestBorutaOptions:
         )
 
         assert len(selected) <= 2
+
+    def test_max_features_cap_ties_keep_lowest_feature_index(self):
+        selector = BorutaSelector(max_features=2, verbose=False)
+        status = np.array([1, 1, 1, -1], dtype=np.int8)
+        mean_importance = np.array([0.5, 0.5, 0.5, 0.0], dtype=np.float64)
+
+        resolved = selector._resolve_boruta_final_status(
+            status,
+            mean_importance,
+            np.array([0.0], dtype=np.float64),
+        )
+
+        np.testing.assert_array_equal(resolved, np.array([1, 1, -1, -1], dtype=np.int8))
 
     def test_native_importance_data_test_raises(self):
         """Native importances cannot honestly score held-out data."""
@@ -379,9 +431,60 @@ class TestBorutaOptions:
 
         assert selector.n_iter_ < 50
 
+    def test_binomial_rejection_can_reject_zero_hit_features(self, monkeypatch):
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(120, 4)), columns=list("abcd"))
+        y = rng.normal(size=120)
+
+        def zero_importance(self, est, X, y, w_score, **kwargs):
+            del kwargs
+            return np.zeros(X.shape[1] * 2, dtype=np.float64)
+
+        monkeypatch.setattr(BorutaSelector, "_compute_importance", zero_importance)
+        selector = BorutaSelector(
+            max_iter=8,
+            alpha=0.5,
+            resolve_tentative=False,
+            early_stop_rounds=20,
+            verbose=False,
+        )
+        selector.fit(X, y)
+
+        assert np.all(selector.status_ == -1)
+
 
 class TestBorutaShap:
     """Boruta-Shap tests (requires catboost)."""
+
+    def test_weighted_mean_abs_handles_modern_shap_ndarray_shape(self):
+        values = np.array(
+            [
+                [[1.0, -3.0], [2.0, -4.0], [5.0, -7.0]],
+                [[2.0, -4.0], [4.0, -6.0], [6.0, -8.0]],
+            ]
+        )
+        weights = np.array([1.0, 3.0])
+
+        out = _weighted_mean_abs(values, weights, n_features=3)
+
+        expected_per_row = np.array([[2.0, 3.0, 6.0], [3.0, 5.0, 7.0]])
+        expected = (expected_per_row * weights[:, None]).sum(axis=0) / weights.sum()
+        np.testing.assert_allclose(out, expected)
+
+    def test_weighted_mean_abs_handles_catboost_native_shape(self):
+        values = np.array(
+            [
+                [[1.0, 2.0, 5.0], [-3.0, -4.0, -7.0]],
+                [[2.0, 4.0, 6.0], [-4.0, -6.0, -8.0]],
+            ]
+        )
+        weights = np.array([1.0, 3.0])
+
+        out = _weighted_mean_abs(values, weights, n_features=3, feature_axis=2)
+
+        expected_per_row = np.array([[2.0, 3.0, 6.0], [3.0, 5.0, 7.0]])
+        expected = (expected_per_row * weights[:, None]).sum(axis=0) / weights.sum()
+        np.testing.assert_allclose(out, expected)
 
     def test_shap_backend(self):
         """select_boruta_shap should use SHAP importance."""
@@ -437,7 +540,8 @@ class TestBorutaShap:
         )
         captured = {}
 
-        def fake_compute_importance(self, est, X, y, w_score, *, w_fit, groups, time, seed):
+        def fake_compute_importance(self, est, X, y, w_score, **kwargs):
+            del kwargs
             captured["estimator"] = est
             return np.zeros(X.shape[1], dtype=np.float64)
 
@@ -454,12 +558,18 @@ class TestBorutaShap:
 
         est = captured["estimator"]
         loss = None
+        allow_writing_files = None
         if hasattr(est, "get_params"):
-            loss = est.get_params(deep=False).get("loss_function")
+            params = est.get_params(deep=False)
+            loss = params.get("loss_function")
+            allow_writing_files = params.get("allow_writing_files")
         if loss is None and hasattr(est, "get_all_params"):
-            loss = est.get_all_params().get("loss_function")
+            params = est.get_all_params()
+            loss = params.get("loss_function")
+            allow_writing_files = params.get("allow_writing_files")
 
         assert loss == expected_loss
+        assert allow_writing_files is False
 
 
 class TestBorutaValidation:
@@ -509,6 +619,16 @@ class TestBorutaValidation:
 class TestBorutaNanHandling:
     """NaN handling tests."""
 
+    def test_group_time_holdout_keeps_nan_group_rows(self):
+        groups = np.array([1.0, 1.0, 1.0, 2.0, 2.0, 2.0, np.nan, np.nan, np.nan])
+        time = np.arange(len(groups))
+
+        train_idx, test_idx = _group_time_holdout_split(groups, time, test_size=0.34)
+
+        covered = set(train_idx.tolist()) | set(test_idx.tolist())
+        assert covered == set(range(len(groups)))
+        assert set(train_idx).isdisjoint(set(test_idx))
+
     def test_handles_nan_values(self):
         """Should impute NaN values without error."""
         rng = np.random.default_rng(0)
@@ -524,6 +644,26 @@ class TestBorutaNanHandling:
 
 class TestBorutaCategoricals:
     """Categorical encoding tests."""
+
+    @pytest.mark.parametrize("cat_encoding", ["target", "loo", "james_stein", "loo_logit"])
+    def test_importance_data_test_rejects_supervised_cat_encoding(self, cat_encoding):
+        rng = np.random.default_rng(0)
+        n = 60
+        cat = pd.Series(rng.choice(["a", "b", "c"], size=n), dtype="category")
+        X = pd.DataFrame({"cat": cat, "num": rng.normal(size=n)})
+        y = (X["num"] > 0).astype(int).to_numpy()
+
+        with pytest.raises(ValueError, match="importance_data='test'.*cat_encoding"):
+            select_boruta_shap(
+                X,
+                y,
+                task="classification",
+                importance_data="test",
+                cat_features=["cat"],
+                cat_encoding=cat_encoding,
+                max_iter=1,
+                verbose=False,
+            )
 
     def test_cat_encoding_runs(self):
         """Categorical columns should be encodable for Boruta."""

@@ -6,6 +6,7 @@ import copy
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from sklearn.base import clone
 
 from sift._permute import PermutationAxis, PermutationMethod
@@ -260,13 +261,38 @@ def _get_native_importance(estimator) -> np.ndarray:
     )
 
 
-def _weighted_mean_abs(values: np.ndarray, w: np.ndarray) -> np.ndarray:
+def _weighted_mean_abs(
+    values: np.ndarray,
+    w: np.ndarray,
+    *,
+    n_features: int | None = None,
+    feature_axis: int | None = None,
+) -> np.ndarray:
     """Weighted mean of absolute values, handling 2D and 3D SHAP arrays."""
     if values.ndim == 2:
         abs_vals = np.abs(values)
         return (abs_vals * w[:, None]).sum(axis=0) / w.sum()
     if values.ndim == 3:
-        abs_vals = np.abs(values).mean(axis=1)
+        if feature_axis is not None:
+            if feature_axis not in (1, 2):
+                raise ValueError("feature_axis must be 1 or 2 for 3D SHAP arrays")
+            if n_features is not None and values.shape[feature_axis] != n_features:
+                raise ValueError(
+                    f"Unexpected SHAP array shape {values.shape} for {n_features} features"
+                )
+            output_axis = 2 if feature_axis == 1 else 1
+            abs_vals = np.abs(values).mean(axis=output_axis)
+        elif n_features is not None:
+            if values.shape[1] == n_features:
+                abs_vals = np.abs(values).mean(axis=2)
+            elif values.shape[2] == n_features:
+                abs_vals = np.abs(values).mean(axis=1)
+            else:
+                raise ValueError(
+                    f"Unexpected SHAP array shape {values.shape} for {n_features} features"
+                )
+        else:
+            abs_vals = np.abs(values).mean(axis=1)
         return (abs_vals * w[:, None]).sum(axis=0) / w.sum()
     raise ValueError(f"Unexpected SHAP array shape: {values.shape}")
 
@@ -291,7 +317,7 @@ def _catboost_shap_importance(
     else:
         raise ValueError(f"Unexpected CatBoost SHAP shape: {shap_vals.shape}")
 
-    return _weighted_mean_abs(shap_vals, w)
+    return _weighted_mean_abs(shap_vals, w, n_features=X.shape[1], feature_axis=2)
 
 
 def _shap_importance(
@@ -345,10 +371,17 @@ def _shap_importance(
 
     if isinstance(shap_vals, list):
         arr = np.stack(shap_vals, axis=1)
+        feature_axis = 2
     else:
         arr = np.asarray(shap_vals)
+        feature_axis = None
 
-    return _weighted_mean_abs(arr, w_eval)
+    return _weighted_mean_abs(
+        arr,
+        w_eval,
+        n_features=X_eval.shape[1],
+        feature_axis=feature_axis,
+    )
 
 
 def _impute_nonfinite_inplace(X: np.ndarray) -> None:
@@ -376,8 +409,18 @@ def _group_time_holdout_split(
     train_idx = []
     test_idx = []
 
-    for g in np.unique(groups):
-        idx = np.flatnonzero(groups == g)
+    groups = np.asarray(groups).reshape(-1)
+    time = np.asarray(time).reshape(-1)
+    missing = np.asarray(pd.isna(groups), dtype=bool)
+    group_values = list(pd.unique(groups[~missing]))
+    if missing.any():
+        group_values.append(None)
+
+    for g in group_values:
+        if g is None:
+            idx = np.flatnonzero(missing)
+        else:
+            idx = np.flatnonzero((groups == g) & ~missing)
         idx = idx[np.argsort(time[idx], kind="mergesort")]
         n = len(idx)
         if n <= 1:

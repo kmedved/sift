@@ -10,7 +10,12 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold
 
 from sift._preprocess import ensure_weights
-from sift.selection.auto_k import AutoKConfig, choose_k_from_score_curve, validate_auto_k_config
+from sift.selection.auto_k import (
+    AutoKConfig,
+    choose_k_from_score_curve,
+    validate_auto_k_config,
+    with_effective_k_bounds,
+)
 from sift.selection.auto_k_core import (
     build_k_grid,
     build_score_curve_diagnostics,
@@ -141,9 +146,10 @@ def select_k_nested(
         selected_k = max_k
         score_best_k = None
     else:
+        curve_config = with_effective_k_bounds(config, min_k=min_k, max_k=max_k)
         selected_k, score_df = choose_k_from_score_curve(
             score_df,
-            config,
+            curve_config,
             lower_is_better=True,
         )
         score_best_k = None if score_df.empty else int(score_df["best_k"].iloc[0])

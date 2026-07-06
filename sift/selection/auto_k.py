@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import importlib.util
 from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 import warnings
@@ -225,6 +225,11 @@ def _ensure_supported_auto_k_mode(
         "auto_k_mode must be 'prefix_only' or 'nested'; "
         f"got {config.auto_k_mode!r}"
     )
+
+
+def with_effective_k_bounds(config: AutoKConfig, *, min_k: int, max_k: int) -> AutoKConfig:
+    """Return a config copy with k bounds clamped to an actual feature path."""
+    return replace(config, min_k=int(min_k), max_k=int(max_k))
 
 
 def resolve_auto_k_config(
@@ -551,6 +556,7 @@ def select_k_auto(
         return 0, [], pd.DataFrame()
 
     max_k = min(max_k, len(valid_features))
+    min_k = max(1, min(config.min_k, max_k))
     valid_features = valid_features[:max_k]
     k_grid = build_k_grid(min_k, max_k)
 
@@ -614,7 +620,8 @@ def select_k_auto(
     if diag.empty:
         return max_k, valid_features[:max_k], diag
 
-    best_k, diag = choose_k_from_score_curve(diag, config, lower_is_better=True)
+    curve_config = with_effective_k_bounds(config, min_k=min_k, max_k=max_k)
+    best_k, diag = choose_k_from_score_curve(diag, curve_config, lower_is_better=True)
 
     return best_k, valid_features[:best_k], diag
 

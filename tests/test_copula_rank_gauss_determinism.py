@@ -1,6 +1,6 @@
 import numpy as np
 
-from sift.estimators.copula import weighted_rank_gauss_1d
+from sift.estimators.copula import greedy_corr_prune, weighted_rank_gauss_1d
 
 
 def test_weighted_rank_gauss_determinism_with_ties():
@@ -50,3 +50,15 @@ def test_weighted_rank_gauss_binary_feature_has_two_values():
     assert len(np.unique(out[x == 0])) == 1
     assert len(np.unique(out[x == 1])) == 1
     assert len(np.unique(out)) == 2
+
+
+def test_greedy_corr_prune_ties_keep_lowest_candidate_index():
+    candidates = np.arange(50, dtype=np.int64)
+    scores = np.ones(50, dtype=np.float64)
+    Rxx = np.eye(50, dtype=np.float64)
+    Rxx[0, :] = 1.0
+    Rxx[:, 0] = 1.0
+
+    keep = greedy_corr_prune(candidates, Rxx, scores, threshold=0.95)
+
+    np.testing.assert_array_equal(keep, np.array([0], dtype=np.int64))

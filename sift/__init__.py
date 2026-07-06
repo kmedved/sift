@@ -22,6 +22,7 @@ from sift.selection.auto_k import (
     select_k_penalized_objective,
 )
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
+from sift.selection.result import FilterSelectionResult
 from sift.stability import StabilitySelector, stability_classif, stability_regression
 
 
@@ -46,6 +47,7 @@ __all__ = [
     "select_mrmr",
     "AutoKConfig",
     "FeaturePathEvaluationResult",
+    "FilterSelectionResult",
     "evaluate_feature_path",
     "select_k_auto",
     "select_k_elbow",

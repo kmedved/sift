@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
+from sift import FilterSelectionResult, select_cefsplus, select_jmi, select_jmim, select_mrmr
 
 
 @pytest.fixture
@@ -25,6 +25,10 @@ def test_mrmr_regression_returns_k(regression_data):
     X, y = regression_data
     result = select_mrmr(X, y, k=5, task="regression", verbose=False)
     assert len(result) == 5
+
+
+def test_filter_selection_result_top_level_export():
+    assert FilterSelectionResult.__name__ == "FilterSelectionResult"
 
 
 def test_mrmr_classif_returns_k(classification_data):

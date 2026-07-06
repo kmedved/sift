@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import List, Literal, Optional, Tuple
+from typing import Any, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -62,8 +62,8 @@ def infer_higher_is_better(metric: str) -> bool:
     )
 
 
-def best_score_from_dict(scores: dict, higher_is_better: bool) -> Tuple[int, float]:
-    """Return best (index, score) given a dict of scores."""
+def best_score_from_dict(scores: dict, higher_is_better: bool) -> Tuple[Any, float]:
+    """Return best (index, score), preferring the smallest numeric index on ties."""
     if not scores:
         return 0, float("nan")
 
@@ -71,10 +71,26 @@ def best_score_from_dict(scores: dict, higher_is_better: bool) -> Tuple[int, flo
     if not valid:
         return 0, float("nan")
 
+    def tie_key(key, position: int) -> tuple[int, float | int]:
+        if isinstance(key, (int, float, np.integer, np.floating)) and not isinstance(key, bool):
+            key_value = float(key)
+            if np.isfinite(key_value):
+                return 0, key_value
+        return 1, position
+
+    valid_items = list(valid.items())
+
+    def ranking_key(item):
+        position, (score_key, score) = item
+        order_group, order_value = tie_key(score_key, position)
+        if higher_is_better:
+            return score, -order_group, -order_value
+        return score, order_group, order_value
+
     if higher_is_better:
-        best = max(valid.items(), key=lambda x: x[1])
+        best = max(enumerate(valid_items), key=ranking_key)[1]
     else:
-        best = min(valid.items(), key=lambda x: x[1])
+        best = min(enumerate(valid_items), key=ranking_key)[1]
     return best[0], best[1]
 
 
