@@ -16,6 +16,7 @@ from sift.selection.auto_k import (
     select_k_auto,
     select_k_penalized_objective,
 )
+from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
 
 
 NESTED_MODE_ERROR = "auto_k_mode='nested'.*not implemented"
@@ -74,6 +75,92 @@ def test_select_k_auto_nested_mode_raises():
 
     with pytest.raises(NotImplementedError, match=NESTED_MODE_ERROR):
         select_k_auto(X, y, list(X.columns), cfg, time=time)
+
+
+def test_select_k_auto_clamps_min_k_to_path_length():
+    X, y, time = _numeric_auto_k_data()
+    X = X.iloc[:, :3]
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        min_k=10,
+        max_k=10,
+        val_frac=0.25,
+    )
+
+    best_k, selected, diag = select_k_auto(
+        X,
+        y,
+        list(X.columns),
+        cfg,
+        time=time,
+        task="regression",
+    )
+
+    assert best_k == 3
+    assert selected == list(X.columns)
+    assert diag["k"].tolist() == [3]
+    assert diag["selected"].tolist() == [True]
+
+
+def test_select_k_auto_clamps_min_k_after_filtering_missing_path_features():
+    X, y, time = _numeric_auto_k_data()
+    X = X.iloc[:, :2]
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        min_k=5,
+        max_k=5,
+        val_frac=0.25,
+    )
+
+    best_k, selected, diag = select_k_auto(
+        X,
+        y,
+        ["missing0", "x0", "missing1", "x1", "missing2"],
+        cfg,
+        time=time,
+        task="regression",
+    )
+
+    assert best_k in {1, 2}
+    assert selected == list(X.columns[:best_k])
+    assert not diag.empty
+    assert diag["k"].min() >= 1
+    assert diag["k"].max() <= 2
+
+
+def test_select_k_nested_clamps_min_k_to_feature_count():
+    X, y, time = _numeric_auto_k_data()
+    X = X.iloc[:, :3]
+    cfg = AutoKConfig(
+        k_method="evaluate",
+        strategy="time_holdout",
+        auto_k_mode="nested",
+        min_k=10,
+        max_k=10,
+        val_frac=0.25,
+    )
+
+    def build_fold_path(train_idx, val_idx, max_k):
+        return NestedAutoKFold(
+            train_path=X.iloc[train_idx, :max_k].to_numpy(),
+            val_path=X.iloc[val_idx, :max_k].to_numpy(),
+            feature_path=list(X.columns[:max_k]),
+        )
+
+    result = select_k_nested(
+        X,
+        y,
+        n_features=X.shape[1],
+        config=cfg,
+        build_fold_path=build_fold_path,
+        time=time,
+        task="regression",
+    )
+
+    assert result.selected_k == 3
+    assert result.diagnostics["scores"]["k"].tolist() == [3]
 
 
 def test_select_k_auto_rejects_elbow_method():
@@ -984,18 +1071,39 @@ def test_gaussian_function_selector_maps_unnamed_cache_indices_to_feature_names(
     selected = select_cefsplus(X, y, k=3, cache=cache, verbose=False)
     result = select_cefsplus(X, y, k=3, cache=cache, return_result=True, verbose=False)
 
-    assert all(feature in X.columns for feature in selected)
+    assert all(feature.startswith("x") for feature in selected)
     assert result.selected_features == selected
     assert all(isinstance(index, int) for index in result.selected_indices)
 
 
-def test_gaussian_auto_k_with_unnamed_cache_uses_feature_names_for_evaluation():
+def test_gaussian_auto_k_with_unnamed_cache_rejects_named_dataframe_evaluation():
     X, y, _ = _numeric_auto_k_data()
     cache = build_cache(X.to_numpy(), subsample=None)
+    X_reordered = X[list(reversed(X.columns))].copy()
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
+
+    with pytest.raises(ValueError, match="cache built from unnamed/positional features"):
+        select_mrmr(
+            X_reordered,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            cache=cache,
+            auto_k_config=cfg,
+            time=np.arange(len(y)),
+            verbose=False,
+        )
+
+
+def test_gaussian_auto_k_with_unnamed_cache_accepts_positional_ndarray_evaluation():
+    X, y, _ = _numeric_auto_k_data()
+    X_arr = X.to_numpy()
+    cache = build_cache(X_arr, subsample=None)
     cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
 
     selected = select_mrmr(
-        X,
+        X_arr,
         y,
         k="auto",
         task="regression",
@@ -1007,4 +1115,72 @@ def test_gaussian_auto_k_with_unnamed_cache_uses_feature_names_for_evaluation():
     )
 
     assert selected
-    assert all(feature in X.columns for feature in selected)
+    assert all(feature.startswith("x") for feature in selected)
+
+
+def test_gaussian_fixed_k_unnamed_cache_reordered_dataframe_stays_positional():
+    rng = np.random.default_rng(0)
+    X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
+    y = X_cache["d"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
+    cache = build_cache(X_cache.to_numpy(), subsample=None)
+    X_eval = X_cache[["d", "c", "b", "a"]].copy()
+
+    result = select_cefsplus(
+        X_eval,
+        y,
+        k=2,
+        cache=cache,
+        return_result=True,
+        verbose=False,
+    )
+
+    assert all(feature.startswith("x") for feature in result.selected_features)
+    assert result.selected_indices is not None
+    assert result.selected_features == [f"x{i}" for i in result.selected_indices]
+
+
+def test_gaussian_auto_k_return_result_indices_follow_input_column_order():
+    rng = np.random.default_rng(0)
+    X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
+    y = X_cache["d"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
+    cache = build_cache(X_cache)
+    X_eval = X_cache[["d", "c", "b", "a"]].copy()
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
+
+    result = select_cefsplus(
+        X_eval,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        cache=cache,
+        time=np.arange(len(X_eval)),
+        return_result=True,
+        verbose=False,
+    )
+
+    assert result.selected_indices is not None
+    assert [X_eval.columns[i] for i in result.selected_indices] == result.selected_features
+
+
+def test_gaussian_auto_k_named_x_columns_are_not_treated_as_synthetic():
+    rng = np.random.default_rng(1)
+    X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["x0", "x1", "x2", "x3"])
+    y = X_cache["x3"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
+    cache = build_cache(X_cache)
+    X_eval = X_cache[["x3", "x2", "x1", "x0"]].copy()
+    cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
+
+    result = select_cefsplus(
+        X_eval,
+        y,
+        k="auto",
+        auto_k_config=cfg,
+        cache=cache,
+        time=np.arange(len(X_eval)),
+        return_result=True,
+        verbose=False,
+    )
+
+    assert not cache.feature_names_are_synthetic
+    assert result.selected_indices is not None
+    assert [X_eval.columns[i] for i in result.selected_indices] == result.selected_features

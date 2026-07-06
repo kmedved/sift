@@ -91,7 +91,7 @@ def time_holdout_split(
     val_frac: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Split by time: train on past, validate on future."""
-    order = np.argsort(time_vals)
+    order = np.argsort(time_vals, kind="mergesort")
     n = len(order)
     cut = int(np.floor((1.0 - val_frac) * n))
     cut = max(1, min(cut, n - 1))

@@ -9,6 +9,19 @@ from sift.sampling.smart import SmartSamplerConfig, smart_sample
 from sift.stability import stability_select
 
 
+def test_cv_alpha_grid_kwargs_supports_old_and_new_sklearn_signatures():
+    class OldCV:
+        def __init__(self, *, n_alphas=100):
+            pass
+
+    class NewCV:
+        def __init__(self, *, alphas=100):
+            pass
+
+    assert stability_module._cv_alpha_grid_kwargs(OldCV, 30) == {"n_alphas": 30}
+    assert stability_module._cv_alpha_grid_kwargs(NewCV, 30) == {"alphas": 30}
+
+
 def test_stability_selector_regression():
     np.random.seed(42)
     n, p = 200, 20
@@ -248,6 +261,13 @@ def test_tune_threshold_reuses_fit_time_imputation(monkeypatch):
     expected_scaled = selector._scaler.transform(expected_imputed)
 
     np.testing.assert_allclose(captured["X"], expected_scaled[:, [0]])
+
+
+def test_tune_threshold_default_thresholds_are_immutable():
+    default_thresholds = StabilitySelector.tune_threshold.__defaults__[0]
+
+    assert isinstance(default_thresholds, tuple)
+    assert default_thresholds == (0.4, 0.5, 0.6, 0.7, 0.8)
 
 
 def test_smart_sampler_config_is_not_mutated():

@@ -303,6 +303,9 @@ def _run_catboost_split_evaluation(
     all_scores: Dict[int, List[float]] = defaultdict(list)
     all_features_by_k: Dict[int, List[List[str]]] = defaultdict(list)
     prefilter_features_first = None
+    model_params = dict(model_params)
+    model_params["od_type"] = "Iter"
+    model_params["od_wait"] = int(train_early_stopping_rounds)
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         if verbose:
@@ -379,7 +382,7 @@ def _run_catboost_split_evaluation(
                 w_val=w_val,
                 early_stopping_rounds=train_early_stopping_rounds,
             )
-            feats = {kk: selected_feats[:kk] for kk in fold_counts if kk <= len(selected_feats)}
+            feats = {kk: selected_feats[:kk] for kk in scores if kk <= len(selected_feats)}
         else:
             scores, feats = _select_features_single_split(
                 X_train,
@@ -425,12 +428,19 @@ def _choose_catboost_target_k(
     selection_patience: int,
     verbose: bool,
 ) -> tuple[int, int, float, Dict[int, float], Dict[int, float]]:
-    scores_mean = {kk: np.mean(v) for kk, v in all_scores.items()}
-    scores_std = {kk: np.std(v) for kk, v in all_scores.items()}
+    scores_mean = {}
+    scores_std = {}
+    for kk, values in all_scores.items():
+        arr = np.asarray(values, dtype=np.float64)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            continue
+        scores_mean[kk] = float(np.mean(finite))
+        scores_std[kk] = float(np.std(finite))
     if not scores_mean:
         raise RuntimeError("No valid scores computed. Check your data and parameters.")
 
-    sorted_counts = sorted(all_scores.keys(), reverse=True)
+    sorted_counts = sorted(scores_mean.keys(), reverse=True)
     best_k = sorted_counts[0]
     best_score = scores_mean[best_k]
     no_improve_count = 0
@@ -456,7 +466,7 @@ def _choose_catboost_target_k(
                 print(f"  Early stopping at k={kk}")
             break
 
-    max_eval_k = max(all_scores.keys()) if all_scores else 0
+    max_eval_k = max(scores_mean.keys()) if scores_mean else 0
     if k_req is not None:
         if k_req > max_eval_k:
             warnings.warn(
@@ -465,7 +475,7 @@ def _choose_catboost_target_k(
             )
             target_k = max_eval_k
         else:
-            valid_ks = [kk for kk in all_scores.keys() if kk <= k_req]
+            valid_ks = [kk for kk in scores_mean.keys() if kk <= k_req]
             target_k = max(valid_ks) if valid_ks else max_eval_k
     else:
         target_k = best_k
@@ -504,21 +514,16 @@ def _select_final_catboost_features(
     else:
         stability_scores = None
         if target_k in all_features_by_k and all_features_by_k[target_k]:
-            ordered_all, stability_scores = _aggregate_feature_lists(
+            ordered_all, _ = _aggregate_feature_lists(
                 all_features_by_k[target_k],
                 k=None,
             )
             selected_features = ordered_all[:target_k]
         else:
-            selected_features = all_features[:target_k]
-
-    if k_req is not None and len(selected_features) < target_k:
-        fill_from = prefilter_features_first or all_features
-        for f in fill_from:
-            if f not in selected_features:
-                selected_features.append(f)
-            if len(selected_features) >= target_k:
-                break
+            raise RuntimeError(
+                f"No feature list was recorded for selected k={target_k}; "
+                "cannot safely choose final CatBoost features."
+            )
 
     return selected_features, stability_scores
 
@@ -549,7 +554,10 @@ def _compute_final_catboost_importances(
     final_cat = [f for f in cat_features_final if f in selected_features]
     final_text = [f for f in text_feat if f in selected_features]
     model_cls = CatBoostClassifier if task == 'classification' else CatBoostRegressor
-    final_model = model_cls(**model_params)
+    final_params = dict(model_params)
+    final_params.pop("od_type", None)
+    final_params.pop("od_wait", None)
+    final_model = model_cls(**final_params)
     final_pool = _create_pool(X_work, y, selected_features, sample_weights, final_cat, final_text)
 
     try:

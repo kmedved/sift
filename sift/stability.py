@@ -1,4 +1,5 @@
 from dataclasses import replace
+import inspect
 import numbers
 import numpy as np
 import pandas as pd
@@ -27,6 +28,14 @@ from sift.sampling.stability import (
     _block_bootstrap_indices,
     _bootstrap_indices,
 )
+
+
+def _cv_alpha_grid_kwargs(model_cls, n_alphas: int) -> dict[str, int]:
+    """Return sklearn-version-compatible alpha-grid kwargs for CV estimators."""
+    params = inspect.signature(model_cls).parameters
+    if "n_alphas" in params:
+        return {"n_alphas": int(n_alphas)}
+    return {"alphas": int(n_alphas)}
 
 
 class StabilitySelector(BaseEstimator, TransformerMixin):
@@ -434,7 +443,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             'frequency': self.selection_frequencies_,
             'mean_abs_coef': self.mean_abs_coef_,
             'selected': self.selection_frequencies_ >= self.threshold
-        }).sort_values('frequency', ascending=False).reset_index(drop=True)
+        }).sort_values('frequency', ascending=False, kind="mergesort").reset_index(drop=True)
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         """Get mask or indices of selected features."""
@@ -474,7 +483,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self,
         X: Union[np.ndarray, pd.DataFrame],
         y: Union[np.ndarray, pd.Series],
-        thresholds: List[float] = [0.4, 0.5, 0.6, 0.7, 0.8],
+        thresholds: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7, 0.8),
         cv: int = 3,
         scoring: Optional[str] = None
     ) -> Tuple[float, pd.DataFrame]:
@@ -865,8 +874,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         n = X_scaled.shape[0]
         rng = np.random.default_rng(self.random_state)
         idx = rng.choice(n, size=min(30_000, n), replace=False)
-        if groups is None and time is not None:
-            idx = idx[np.argsort(np.asarray(time)[idx], kind="mergesort")]
+        if time is not None:
+            if groups is None:
+                idx = idx[np.argsort(np.asarray(time)[idx], kind="mergesort")]
+            else:
+                groups_sub = np.asarray(groups)[idx]
+                if len(np.unique(groups_sub)) < 2:
+                    idx = idx[np.argsort(np.asarray(time)[idx], kind="mergesort")]
         cv = self._alpha_cv(idx, y, groups, time)
 
         with warnings.catch_warnings():
@@ -894,10 +908,15 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                     C_best = float(C[0]) if np.ndim(C) > 0 else float(C)
                 return 1.0 / C_best
             elif self.l1_ratio >= 1.0:
-                cv_model = LassoCV(cv=cv, n_alphas=30, max_iter=2000)
+                cv_model = LassoCV(
+                    cv=cv, **_cv_alpha_grid_kwargs(LassoCV, 30), max_iter=2000
+                )
             else:
                 cv_model = ElasticNetCV(
-                    l1_ratio=self.l1_ratio, cv=cv, n_alphas=30, max_iter=2000
+                    l1_ratio=self.l1_ratio,
+                    cv=cv,
+                    **_cv_alpha_grid_kwargs(ElasticNetCV, 30),
+                    max_iter=2000,
                 )
 
             cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])

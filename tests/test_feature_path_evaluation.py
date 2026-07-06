@@ -69,6 +69,27 @@ def test_evaluate_feature_path_callable_scoring_and_weight_handling():
     ].iloc[0]
 
 
+def test_evaluate_feature_path_ties_prefer_smallest_k_not_grid_order():
+    X, y = _toy_regression_data()
+
+    def tied_scorer(y_true: np.ndarray, y_pred: np.ndarray, weight: np.ndarray) -> float:
+        return 1.0
+
+    result = evaluate_feature_path(
+        X,
+        y,
+        feature_path=["x0", "x1", "x2"],
+        k_grid=[3, 1, 2],
+        estimator=LinearRegression(),
+        scoring=tied_scorer,
+        val_frac=0.2,
+        random_state=2,
+    )
+
+    assert result.best_k == 1
+    assert result.features == ["x0"]
+
+
 def test_evaluate_feature_path_default_estimator_accepts_sample_weight():
     X, y = _toy_regression_data()
 

@@ -16,6 +16,8 @@ from sift.catboost import (  # noqa: E402
     _generate_feature_counts,
     _get_feature_types,
     _aggregate_feature_lists,
+    _choose_catboost_target_k,
+    _select_final_catboost_features,
 )
 import sift.catboost as catboost_module  # noqa: E402
 from sift._preprocess import best_score_from_dict as _best_score_from_dict  # noqa: E402
@@ -127,6 +129,60 @@ class TestScoreDirection:
         best_k, best_score = _best_score_from_dict(scores, higher_is_better=True)
         assert best_k == 5
         assert best_score == 0.9
+
+    def test_choose_target_k_ignores_nan_scores(self):
+        target_k, best_k, best_score, scores_mean, _ = _choose_catboost_target_k(
+            {5: [float("nan")], 3: [1.0]},
+            k_req=None,
+            resolved_hib=False,
+            tolerance=0.0,
+            selection_patience=3,
+            verbose=False,
+        )
+
+        assert target_k == 3
+        assert best_k == 3
+        assert best_score == 1.0
+        assert scores_mean == {3: 1.0}
+
+    def test_final_selection_requires_recorded_feature_list(self):
+        with pytest.raises(RuntimeError, match="No feature list was recorded"):
+            _select_final_catboost_features(
+                target_k=2,
+                k_req=None,
+                all_features_by_k={},
+                all_features=["b", "a"],
+                prefilter_features_first=None,
+                use_stability=False,
+                stability_threshold=0.6,
+            )
+
+    def test_final_selection_does_not_pad_unrecorded_features(self):
+        selected, _ = _select_final_catboost_features(
+            target_k=3,
+            k_req=3,
+            all_features_by_k={3: [["a"]]},
+            all_features=["a", "b", "c"],
+            prefilter_features_first=None,
+            use_stability=False,
+            stability_threshold=0.6,
+        )
+
+        assert selected == ["a"]
+
+    def test_final_selection_without_stability_does_not_return_stability_scores(self):
+        selected, stability_scores = _select_final_catboost_features(
+            target_k=2,
+            k_req=None,
+            all_features_by_k={2: [["a", "b"], ["a", "c"]]},
+            all_features=["a", "b", "c"],
+            prefilter_features_first=None,
+            use_stability=False,
+            stability_threshold=0.6,
+        )
+
+        assert selected == ["a", "b"]
+        assert stability_scores is None
 
 
 class TestFeatureTypes:
@@ -732,6 +788,48 @@ class TestResultMethods:
         parsimonious = result.features_within_tolerance(tolerance=0.05)
         assert len(parsimonious) == 3
         assert parsimonious == ['f0', 'f1', 'f2']
+
+    def test_features_within_tolerance_handles_negative_lower_is_better_scores(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0", "f1", "f2", "f3", "f4"],
+            best_k=5,
+            scores_by_k={5: -1.0, 3: -0.95, 2: -0.8},
+            scores_std_by_k={},
+            feature_importances=pd.Series(dtype=float),
+            features_by_k={5: ["f0", "f1", "f2", "f3", "f4"], 3: ["f0", "f1", "f2"]},
+            metric="NEG_LOSS",
+            higher_is_better=False,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.1) == ["f0", "f1", "f2"]
+
+    def test_features_within_tolerance_handles_negative_higher_is_better_scores(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0", "f1", "f2", "f3", "f4"],
+            best_k=5,
+            scores_by_k={5: -0.5, 3: -0.52, 2: -0.7},
+            scores_std_by_k={},
+            feature_importances=pd.Series(dtype=float),
+            features_by_k={5: ["f0", "f1", "f2", "f3", "f4"], 3: ["f0", "f1", "f2"]},
+            metric="NEG_R2",
+            higher_is_better=True,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.1) == ["f0", "f1", "f2"]
+
+    def test_features_within_tolerance_fallback_preserves_tied_importance_order(self):
+        result = CatBoostSelectionResult(
+            selected_features=["b", "a"],
+            best_k=2,
+            scores_by_k={2: 1.0},
+            scores_std_by_k={},
+            feature_importances=pd.Series({"b": 1.0, "a": 1.0, "c": 0.0}),
+            features_by_k={},
+            metric="AUC",
+            higher_is_better=True,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.0) == ["b", "a"]
 
     def test_score_at_k(self):
         result = CatBoostSelectionResult(

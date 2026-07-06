@@ -99,6 +99,12 @@ directly. Either:
   or
 - Encode categoricals upstream and pass numeric data.
 
+For `BorutaSelector(importance_data="test")`, supervised categorical encodings
+are rejected to avoid held-out target leakage. In that mode,
+`cat_encoding="none"` means the categorical columns must already be numeric or
+pre-encoded; raw object/category columns still raise this non-numeric-column
+error.
+
 When `BorutaSelector` is fitted with `cat_encoding != "none"`, `transform()`
 re-applies the fitted categorical encoder before selecting columns. Transforming
 new data therefore requires a DataFrame with the same categorical columns.
@@ -157,6 +163,11 @@ switch to `importance_data="train"` or pick a held-out-compatible backend
 
 A `FeatureCache` is tied to a specific `X`. Build a new cache for each X with a
 different row count, or align your X to match `cache.n_rows_original`.
+
+If you persist `FeatureCache` objects, rebuild caches created before SIFT stored
+`feature_names_are_synthetic`. Those older caches cannot prove whether `x0`,
+`x1`, ... were real DataFrame names or generated names for unnamed positional
+input, so rebuilding avoids silent feature-name ambiguity.
 
 ### `ValueError: All features were filtered out (constant or invalid). Cannot build cache.`
 

@@ -184,12 +184,13 @@ class CatBoostSelectionResult:
         top-k by importance otherwise.
         """
         best_score = (max if self.higher_is_better else min)(self.scores_by_k.values())
+        delta = abs(best_score) * float(tolerance)
 
         if self.higher_is_better:
-            threshold = best_score * (1 - tolerance)
+            threshold = best_score - delta
             valid_ks = [k for k, v in self.scores_by_k.items() if v >= threshold]
         else:
-            threshold = best_score * (1 + tolerance)
+            threshold = best_score + delta
             valid_ks = [k for k, v in self.scores_by_k.items() if v <= threshold]
 
         if not valid_ks:
@@ -203,7 +204,11 @@ class CatBoostSelectionResult:
 
         # Fallback: top min_k by importance
         if len(self.feature_importances) >= min_k:
-            return self.feature_importances.nlargest(min_k).index.tolist()
+            return (
+                self.feature_importances.sort_values(ascending=False, kind="mergesort")
+                .head(min_k)
+                .index.tolist()
+            )
 
         return self.selected_features
 
@@ -565,4 +570,7 @@ def _compute_feature_importance(
     else:
         raise ValueError(f"Unknown importance method: {method}")
 
-    return pd.Series(importance, index=feature_names).sort_values(ascending=False)
+    return pd.Series(importance, index=feature_names).sort_values(
+        ascending=False,
+        kind="mergesort",
+    )

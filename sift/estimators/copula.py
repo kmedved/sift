@@ -25,6 +25,7 @@ class FeatureCache:
     sample_weight: np.ndarray
     n_rows_original: int
     feature_names: list[str] | None = None
+    feature_names_are_synthetic: bool = False
 
 
 def build_cache(
@@ -42,6 +43,7 @@ def build_cache(
     from sift._preprocess import ensure_weights, extract_feature_names, to_numpy
 
     feature_names = extract_feature_names(X)
+    feature_names_are_synthetic = feature_names is None
     if hasattr(X, "select_dtypes"):
         non_numeric = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
         if non_numeric:
@@ -89,6 +91,7 @@ def build_cache(
         sample_weight=ws.astype(np.float32),
         n_rows_original=n,
         feature_names=feature_names,
+        feature_names_are_synthetic=feature_names_are_synthetic,
     )
 
 
@@ -316,7 +319,7 @@ def greedy_corr_prune(
     if len(candidates) == 0:
         return candidates
 
-    order = candidates[np.argsort(-scores[candidates])]
+    order = candidates[np.lexsort((candidates, -scores[candidates]))]
     keep = []
     active = np.ones(len(order), dtype=bool)
 
