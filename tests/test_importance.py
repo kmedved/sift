@@ -5,7 +5,9 @@ from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 
+import sift.scoring as scoring_module
 from sift.importance import permutation_importance
+from sift.scoring import ScoringSpec
 
 
 def test_permutation_importance_auto_with_groups_and_time():
@@ -445,6 +447,41 @@ def test_permutation_importance_neg_logloss_multiclass_ranks_signal():
     assert result.iloc[0]["feature"] == "f0"
     assert result.loc[result["feature"] == "f0", "importance_mean"].iloc[0] > 0
     assert result["baseline_score"].iloc[0] < 0.0
+
+
+def test_permutation_importance_honors_lower_is_better_scoring(monkeypatch):
+    def mse_loss(model, X, y, w):
+        pred = np.asarray(model.predict(X), dtype=np.float64)
+        return float(np.average((pred - y) ** 2, weights=w))
+
+    monkeypatch.setitem(
+        scoring_module._SCORING_REGISTRY,
+        "mse_loss_for_test",
+        ScoringSpec("mse_loss_for_test", mse_loss, higher_is_better=False),
+    )
+    rng = np.random.default_rng(15)
+    n = 120
+    X = pd.DataFrame(
+        {
+            "signal": rng.normal(size=n),
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = 2.5 * X["signal"].to_numpy()
+    model = LinearRegression().fit(X, y)
+
+    result = permutation_importance(
+        model,
+        X,
+        y,
+        scoring="mse_loss_for_test",
+        n_repeats=5,
+        n_jobs=1,
+        random_state=0,
+    )
+
+    assert result.iloc[0]["feature"] == "signal"
+    assert result.loc[result["feature"] == "signal", "importance_mean"].iloc[0] > 0
 
 
 def test_permutation_importance_rejects_plain_error_scoring():

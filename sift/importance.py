@@ -113,6 +113,7 @@ def permutation_importance(
     group_info = (
         build_group_info(groups, time, n_samples=n) if permute_method != "global" else None
     )
+    higher_is_better = _higher_is_better(scoring)
 
     if isinstance(X, pd.DataFrame):
         return _permutation_importance_dataframe(
@@ -127,6 +128,7 @@ def permutation_importance(
             group_info,
             seeds,
             baseline=_score(model, X, y, w, scoring),
+            higher_is_better=higher_is_better,
             n_jobs=n_jobs,
             parallel_backend=parallel_backend,
         )
@@ -144,6 +146,7 @@ def permutation_importance(
         group_info,
         seeds,
         baseline=_score(model, X_arr, y, w, scoring),
+        higher_is_better=higher_is_better,
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
     )
@@ -162,6 +165,7 @@ def _permutation_importance_dataframe(
     seeds: np.ndarray,
     *,
     baseline: float,
+    higher_is_better: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
 ) -> pd.DataFrame:
@@ -193,7 +197,9 @@ def _permutation_importance_dataframe(
                     score = _score(model, X_work, y, w, scoring)
                 finally:
                     X_work.iloc[:, feat_idx] = orig_col
-                drops.append(baseline - score)
+                drops.append(
+                    baseline - score if higher_is_better else score - baseline
+                )
 
             chunk_results.append((feat_idx, float(np.mean(drops)), float(np.std(drops))))
 
@@ -231,6 +237,7 @@ def _permutation_importance_array(
     seeds: np.ndarray,
     *,
     baseline: float,
+    higher_is_better: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
 ) -> pd.DataFrame:
@@ -259,7 +266,9 @@ def _permutation_importance_array(
                     score = _score(model, X_work, y, w, scoring)
                 finally:
                     X_work[:, feat_idx] = orig_col
-                drops.append(baseline - score)
+                drops.append(
+                    baseline - score if higher_is_better else score - baseline
+                )
 
             chunk_results.append((feat_idx, float(np.mean(drops)), float(np.std(drops))))
 
@@ -329,6 +338,12 @@ def _score(
         y_pred = model.predict(X)
         return float(scoring(y, y_pred, w))
     return get_scoring(scoring)(model, X, y, w)
+
+
+def _higher_is_better(scoring: str | Callable) -> bool:
+    if callable(scoring):
+        return True
+    return bool(get_scoring(scoring).higher_is_better)
 
 
 __all__ = ["permutation_importance"]

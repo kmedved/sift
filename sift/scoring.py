@@ -19,7 +19,6 @@ class ScoringSpec:
     name: str
     fn: ScoringFn
     higher_is_better: bool = True
-    requires_proba: bool = False
 
     def __call__(self, model, X: np.ndarray | None, y: np.ndarray, w: np.ndarray) -> float:
         return float(self.fn(model, X, y, w))
@@ -102,7 +101,6 @@ _SCORING_REGISTRY: dict[str, ScoringSpec] = {
         "neg_logloss",
         _neg_logloss,
         higher_is_better=True,
-        requires_proba=True,
     ),
 }
 

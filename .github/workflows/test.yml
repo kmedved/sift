@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
@@ -53,3 +55,20 @@ jobs:
           pip install -e ".[catboost,test]"
       - name: Run catboost tests
         run: pytest tests/test_catboost.py tests/test_boruta.py -q
+  test-latest-deps:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install latest pre-release dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade --pre numpy pandas scikit-learn scipy numba joblib
+          pip install -e ".[test,all]" --no-deps
+          pip install pytest category_encoders catboost
+      - name: Run tests
+        run: pytest tests/ -q

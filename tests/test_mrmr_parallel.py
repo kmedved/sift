@@ -4,6 +4,7 @@ import pytest
 
 from sift import build_cache, select_mrmr
 import sift.selection.filter_payloads as filter_payloads
+import sift.selection.loops as loops_module
 
 
 def _regression_data(n: int = 160, p: int = 12):
@@ -100,6 +101,33 @@ def test_mrmr_auto_backend_resolution_matches_public_contract():
 
     assert default_auto == serial
     assert auto_processes == explicit_processes
+
+
+def test_process_mrmr_k_one_does_not_start_process_pool(monkeypatch):
+    def fail_parallel(*args, **kwargs):
+        raise AssertionError("k=1 process mRMR should not start a process pool")
+
+    monkeypatch.setattr(loops_module, "Parallel", fail_parallel)
+    Z = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    relevance = np.array([0.1, 0.8, 0.3], dtype=np.float64)
+
+    selected = loops_module._mrmr_loop_processes(
+        Z,
+        relevance,
+        k=1,
+        use_quotient=True,
+        w=np.ones(Z.shape[0], dtype=np.float64),
+        n_jobs=2,
+    )
+
+    np.testing.assert_array_equal(selected, np.array([1], dtype=np.int64))
 
 
 def test_gaussian_mrmr_process_rank_transform_matches_serial():

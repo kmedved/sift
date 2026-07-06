@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Literal, Optional
 
 import numpy as np
@@ -195,23 +196,15 @@ def _corr_chunk_process(
 
 def _weighted_corr_with_last_processes(
     Z: np.ndarray,
-    last_idx: int,
-    w: np.ndarray,
-    n_jobs: int,
+    weighted_last: np.ndarray,
+    w_sum: float,
+    bounds: np.ndarray,
+    parallel: Parallel,
 ) -> np.ndarray:
     """Compute one redundancy update across process workers."""
-    p = Z.shape[1]
-    n_workers = max(1, min(p, effective_n_jobs(n_jobs)))
-    if n_workers <= 1:
-        weighted_last = w * Z[:, last_idx]
-        return np.abs(Z.T @ weighted_last / float(w.sum()))
-
-    bounds = np.linspace(0, p, n_workers + 1, dtype=np.int64)
-    weighted_last = w * Z[:, last_idx]
-    w_sum = float(w.sum())
-    chunks = Parallel(n_jobs=n_jobs, prefer="processes", max_nbytes="16M", batch_size=1)(
+    chunks = parallel(
         delayed(_corr_chunk_process)(Z, weighted_last, w_sum, int(bounds[i]), int(bounds[i + 1]))
-        for i in range(n_workers)
+        for i in range(len(bounds) - 1)
         if bounds[i] < bounds[i + 1]
     )
     return np.concatenate(chunks)
@@ -239,27 +232,57 @@ def _mrmr_loop_processes(
     selected[0] = best
     is_selected[best] = True
     count = 1
+    if k <= 1:
+        return selected[:count]
 
-    for t in range(1, k):
-        last = int(selected[t - 1])
-        new_red = _weighted_corr_with_last_processes(Z, last, w, n_jobs)
+    w_sum = float(w.sum())
+    n_workers = max(1, min(p, effective_n_jobs(n_jobs)))
+    bounds = np.linspace(0, p, n_workers + 1, dtype=np.int64)
 
-        mask = ~is_selected
-        red_sum[mask] += new_red[mask]
-        mean_red = red_sum / t
-        if use_quotient:
-            score = relevance / np.maximum(mean_red, FLOOR)
-        else:
-            score = relevance - mean_red
-        score[is_selected] = -np.inf
+    parallel_context = (
+        Parallel(
+            n_jobs=n_jobs,
+            prefer="processes",
+            max_nbytes="16M",
+            batch_size=1,
+        )
+        if n_workers > 1
+        else nullcontext(None)
+    )
 
-        best_idx = int(np.argmax(score))
-        if not np.isfinite(score[best_idx]):
-            break
+    def redundancy_update(last_idx: int, parallel: Parallel | None) -> np.ndarray:
+        weighted_last = w * Z[:, last_idx]
+        if parallel is None:
+            return np.abs(Z.T @ weighted_last / w_sum)
+        return _weighted_corr_with_last_processes(
+            Z,
+            weighted_last,
+            w_sum,
+            bounds,
+            parallel,
+        )
 
-        selected[t] = best_idx
-        is_selected[best_idx] = True
-        count += 1
+    with parallel_context as parallel:
+        for t in range(1, k):
+            last = int(selected[t - 1])
+            new_red = redundancy_update(last, parallel)
+
+            mask = ~is_selected
+            red_sum[mask] += new_red[mask]
+            mean_red = red_sum / t
+            if use_quotient:
+                score = relevance / np.maximum(mean_red, FLOOR)
+            else:
+                score = relevance - mean_red
+            score[is_selected] = -np.inf
+
+            best_idx = int(np.argmax(score))
+            if not np.isfinite(score[best_idx]):
+                break
+
+            selected[t] = best_idx
+            is_selected[best_idx] = True
+            count += 1
 
     return selected[:count]
 
@@ -386,15 +409,7 @@ def jmi_select(
         X_binned = jmi_est.quantile_bin_matrix(X_cand, n_bins=10)
         if y_kind == "discrete":
             y_vals = np.asarray(y_arr)
-            if (
-                np.issubdtype(y_vals.dtype, np.integer)
-                and y_vals.size > 0
-                and y_vals.min() >= 0
-                and y_vals.max() <= 200_000
-            ):
-                y_binned = y_vals.astype(np.int64, copy=False)
-            else:
-                y_binned = jmi_est._factorize(y_vals)
+            y_binned = jmi_est._factorize(y_vals)
             n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
         else:
             y_binned = jmi_est._quantile_bin(y_arr, 10)

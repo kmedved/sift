@@ -452,6 +452,124 @@ class TestBorutaOptions:
 
         assert np.all(selector.status_ == -1)
 
+    def test_early_stopping_waits_until_binomial_decision_horizon(self, monkeypatch):
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(120, 10)), columns=[f"f{i}" for i in range(10)])
+        y = rng.normal(size=120)
+
+        def strong_signal_importance(self, est, X, y, w_score, **kwargs):
+            del kwargs
+            n_active = X.shape[1]
+            real = np.zeros(n_active, dtype=np.float64)
+            real[: min(2, n_active)] = 2.0
+            shadow = np.ones(n_active, dtype=np.float64)
+            return np.concatenate([real, shadow])
+
+        monkeypatch.setattr(BorutaSelector, "_compute_importance", strong_signal_importance)
+        selector = BorutaSelector(
+            max_iter=20,
+            resolve_tentative=False,
+            verbose=False,
+        )
+        selector.fit(X, y)
+
+        assert selector.n_iter_ >= 8
+        assert selector.selected_features_ == ["f0", "f1"]
+
+    def test_compute_importance_precomputes_shadow_group_info(self, monkeypatch):
+        import sift._permute as permute_module
+        import sift.boruta as boruta_module
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(12, 3))
+        y = rng.normal(size=12)
+        groups = np.repeat([0, 1, 2], 4)
+        time = np.tile(np.arange(4), 3)
+        w = np.ones(12, dtype=np.float64)
+
+        real_build_group_info = boruta_module.build_group_info
+        calls = {"n": 0}
+
+        def counting_build_group_info(*args, **kwargs):
+            calls["n"] += 1
+            return real_build_group_info(*args, **kwargs)
+
+        def fail_fallback_build_group_info(*args, **kwargs):
+            raise AssertionError("permute_matrix should receive precomputed group_info")
+
+        monkeypatch.setattr(boruta_module, "build_group_info", counting_build_group_info)
+        monkeypatch.setattr(permute_module, "build_group_info", fail_fallback_build_group_info)
+        monkeypatch.setattr(boruta_module, "_fit_estimator", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            boruta_module,
+            "_get_native_importance",
+            lambda est: np.ones(X.shape[1] * 2, dtype=np.float64),
+        )
+
+        selector = BorutaSelector(importance="native", importance_data="train", verbose=False)
+        importance = selector._compute_importance(
+            object(),
+            X,
+            y,
+            w,
+            w_fit=None,
+            groups=groups,
+            time=time,
+            seed=0,
+            shadow_method="circular_shift",
+            shadow_mode="columns",
+            block_size="auto",
+        )
+
+        assert calls["n"] == 1
+        assert importance.shape == (X.shape[1] * 2,)
+
+    def test_train_mode_reuses_shadow_group_info_across_iterations(self, monkeypatch):
+        import sift._permute as permute_module
+        import sift.boruta as boruta_module
+
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(12, 3)), columns=list("abc"))
+        y = rng.normal(size=12)
+        groups = np.repeat([0, 1, 2], 4)
+        time = np.tile(np.arange(4), 3)
+
+        real_build_group_info = boruta_module.build_group_info
+        calls = {"n": 0}
+
+        def counting_build_group_info(*args, **kwargs):
+            calls["n"] += 1
+            return real_build_group_info(*args, **kwargs)
+
+        def fail_fallback_build_group_info(*args, **kwargs):
+            raise AssertionError("permute_matrix should receive precomputed group_info")
+
+        def fake_fit(est, X_ext, y, w_fit, **kwargs):
+            est.n_features_seen_ = X_ext.shape[1]
+
+        monkeypatch.setattr(boruta_module, "build_group_info", counting_build_group_info)
+        monkeypatch.setattr(permute_module, "build_group_info", fail_fallback_build_group_info)
+        monkeypatch.setattr(boruta_module, "_fit_estimator", fake_fit)
+        monkeypatch.setattr(
+            boruta_module,
+            "_get_native_importance",
+            lambda est: np.zeros(est.n_features_seen_, dtype=np.float64),
+        )
+
+        selector = BorutaSelector(
+            importance="native",
+            shadow_method="circular_shift",
+            max_iter=3,
+            alpha=1e-12,
+            early_stop_rounds=10,
+            resolve_tentative=False,
+            verbose=False,
+        )
+        selector.fit(X, y, groups=groups, time=time)
+
+        assert selector.n_iter_ == 3
+        assert calls["n"] == 1
+
 
 class TestBorutaShap:
     """Boruta-Shap tests (requires catboost)."""
@@ -543,7 +661,7 @@ class TestBorutaShap:
         def fake_compute_importance(self, est, X, y, w_score, **kwargs):
             del kwargs
             captured["estimator"] = est
-            return np.zeros(X.shape[1], dtype=np.float64)
+            return np.zeros(X.shape[1] * 2, dtype=np.float64)
 
         monkeypatch.setattr(BorutaSelector, "_compute_importance", fake_compute_importance)
 
