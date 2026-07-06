@@ -60,7 +60,6 @@ pip install -e ".[all]"
 # Individual extras
 pip install -e ".[catboost]"     # CatBoost-based selection
 pip install -e ".[categorical]"  # Advanced categorical encoding (category_encoders)
-pip install -e ".[polars]"       # Polars DataFrame support
 pip install -e ".[test]"         # Testing dependencies (pytest)
 ```
 
@@ -128,7 +127,7 @@ selector = StabilitySelector(
 )
 selector.fit(X, y)
 X_selected = selector.transform(X)
-print(f"Selected features: {selector.get_support()}")
+print(f"Selected feature names: {selector.selected_feature_names_}")
 ```
 
 ### CatBoost-based Selection
@@ -171,7 +170,7 @@ selected = select_mrmr(
     task="regression",           # or "classification"
     estimator="classic",         # "classic" or "gaussian" (regression only)
     formula="quotient",          # "quotient" (rel/red) or "difference" (rel-red)
-    relevance="f",               # "f" (F-stat), "ks" (KS-test), "rf" (Random Forest)
+    relevance="f",               # Regression: "f" or "rf"; classification: "f", "ks", or "rf"
     top_m=250,                   # Pre-filter to top_m by relevance
     verbose=True
 )
@@ -247,8 +246,9 @@ selector = StabilitySelector(
 selector.fit(X, y)
 
 # Get selected features
-features = selector.get_support(indices=False)  # Boolean mask
-feature_names = selector.get_support(indices=True)  # Names
+feature_mask = selector.get_support(indices=False)  # Boolean mask
+feature_indices = selector.get_support(indices=True)  # Integer indices
+feature_names = selector.selected_feature_names_  # Selected feature names
 
 # Feature information
 info = selector.get_feature_info()  # DataFrame with frequencies, ranks
@@ -377,6 +377,8 @@ selector = StabilitySelector(
     n_bootstrap=50,
     threshold=0.6,
     task="regression",
+    block_size="auto",        # Auto-determined block size
+    block_method="moving",    # "moving", "circular", or "stationary"
     random_state=42
 )
 
@@ -384,9 +386,7 @@ selector = StabilitySelector(
 selector.fit(
     X, y,
     groups=player_ids,        # Group identifier
-    time=timestamps,          # Temporal ordering
-    block_size="auto",        # Auto-determined block size
-    block_method="moving"     # "moving", "circular", or "stationary"
+    time=timestamps           # Temporal ordering
 )
 
 # CatBoost with time series CV
@@ -403,6 +403,7 @@ importance = permutation_importance(
     model, X, y,
     permute_method="circular_shift",  # Preserves temporal structure
     groups=group_ids,
+    time=timestamps,
     n_repeats=10
 )
 ```
@@ -647,7 +648,7 @@ pytest tests/test_smoke.py -v
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-Copyright (c) 2023 Samuele Mazzanti
+Copyright (c) 2023 smazzanti
 
 ## Acknowledgments
 

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sift"
+dynamic = ["version"]
+description = "Sift feature selection toolbox for mRMR, JMI/JMIM, CEFS+, stability selection, and CatBoost selectors"
+readme = "DOCS.MD"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "kmedved", email = "bibigon@gmail.com" },
+]
+dependencies = [
+  "numba>=0.59",
+  "joblib>=1.3",
+  "pandas>=2.0,<4",
+  "numpy>=1.24,<3",
+  "scikit-learn>=1.3,<2",
+  "scipy>=1.10,<2",
+]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+categorical = ["category_encoders"]
+catboost = ["catboost"]
+test = ["pytest"]
+all = [
+  "category_encoders",
+  "catboost",
+]
+
+[project.urls]
+Homepage = "https://github.com/kmedved/sift"
+
+[tool.setuptools.dynamic]
+version = { attr = "sift.__version__" }
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "docs*", "examples*"]

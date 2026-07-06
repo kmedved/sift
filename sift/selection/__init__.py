@@ -8,6 +8,7 @@ from sift.selection.auto_k import (
 )
 from sift.selection.cefsplus import select_cached
 from sift.selection.loops import jmi_select, mrmr_select
+from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 
 __all__ = [
     "AutoKConfig",
@@ -17,4 +18,6 @@ __all__ = [
     "select_cached",
     "jmi_select",
     "mrmr_select",
+    "FeaturePathEvaluationResult",
+    "evaluate_feature_path",
 ]

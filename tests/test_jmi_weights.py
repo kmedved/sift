@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from sift import select_jmi, select_jmim
 
 
@@ -83,3 +84,61 @@ def test_weight_scaling_invariance_jmi():
     )
 
     assert sel1 == sel2 == sel3
+
+
+def test_ksg_jmi_allows_unweighted_selection():
+    rng = np.random.default_rng(321)
+    n, p = 35, 5
+    X = rng.normal(size=(n, p))
+    y = X[:, 0] + rng.normal(size=n) * 0.1
+
+    selected = select_jmi(
+        X,
+        y,
+        k=2,
+        task="regression",
+        estimator="ksg",
+        top_m=4,
+        verbose=False,
+    )
+
+    assert len(selected) <= 2
+
+
+@pytest.mark.parametrize("selector", [select_jmi, select_jmim])
+def test_ksg_public_selectors_reject_sample_weight(selector):
+    rng = np.random.default_rng(654)
+    n, p = 30, 5
+    X = rng.normal(size=(n, p))
+    y = X[:, 0] + rng.normal(size=n) * 0.1
+
+    with pytest.raises(ValueError, match="ksg.*sample_weight"):
+        selector(
+            X,
+            y,
+            k=2,
+            task="regression",
+            estimator="ksg",
+            sample_weight=np.ones(n),
+            verbose=False,
+        )
+
+
+def test_ksg_low_level_rejects_sample_weight():
+    from sift.selection.loops import jmi_select
+
+    rng = np.random.default_rng(654)
+    n, p = 30, 5
+    X = rng.normal(size=(n, p)).astype(np.float32)
+    y = X[:, 0] + rng.normal(size=n).astype(np.float32) * 0.1
+    relevance = np.linspace(1.0, 0.2, p)
+
+    with pytest.raises(ValueError, match="ksg.*sample_weight"):
+        jmi_select(
+            X,
+            y,
+            k=2,
+            relevance=relevance,
+            mi_estimator="ksg",
+            sample_weight=np.ones(n),
+        )

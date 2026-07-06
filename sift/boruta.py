@@ -10,13 +10,12 @@ Design:
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
@@ -28,355 +27,32 @@ from sift._permute import (
     permute_matrix,
     resolve_permutation_method,
 )
-from sift._preprocess import CatEncoding, encode_categoricals, ensure_weights, extract_feature_names, to_numpy
-
-ImportanceBackend = Literal["native", "shap"]
-Task = Literal["regression", "classification"]
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-
-def _clone_estimator(estimator, seed: int):
-    """Clone estimator and set random state."""
-    try:
-        est = clone(estimator)
-    except Exception:
-        est = copy.deepcopy(estimator)
-
-    for param in ("random_state", "random_seed", "seed"):
-        if hasattr(est, "set_params"):
-            try:
-                est.set_params(**{param: seed})
-            except (ValueError, TypeError):
-                pass
-        elif hasattr(est, param):
-            try:
-                setattr(est, param, seed)
-            except Exception:
-                pass
-    return est
-
-
-def _fit_estimator(
-    estimator,
-    X: np.ndarray,
-    y: np.ndarray,
-    w: np.ndarray | None,
-    *,
-    require_sample_weight: bool = True,
-):
-    """
-    Fit estimator with sample_weight.
-
-    Raises TypeError if sample_weight is provided but estimator doesn't accept it
-    (when require_sample_weight=True).
-    """
-    kwargs = {}
-
-    if w is not None:
-        kwargs["sample_weight"] = w
-
-    try:
-        estimator.fit(X, y, **kwargs)
-        return
-    except TypeError as exc:
-        if "sample_weight" in str(exc) and "sample_weight" in kwargs:
-            if require_sample_weight:
-                raise TypeError(
-                    "Estimator.fit() does not accept sample_weight, "
-                    "but sample_weight was provided. Use an estimator that "
-                    "supports sample_weight or set sample_weight=None."
-                ) from exc
-            kwargs.pop("sample_weight", None)
-            estimator.fit(X, y, **kwargs)
-            return
-        raise
-
-
-# Fast-by-default auto tree heuristic
-_AUTO_N_EST_MULT = 50.0
-_AUTO_N_EST_MIN = 50
-_AUTO_N_EST_MAX = 500
-
-
-def _get_estimator_depth(estimator) -> int:
-    """
-    Extract max_depth from estimator, handling different libraries.
-
-    Returns depth or 10 as default. Treats None, -1, 0 as unbounded (returns 10).
-    """
-    for attr in ("max_depth", "depth"):
-        val = None
-        if hasattr(estimator, "get_params"):
-            try:
-                params = estimator.get_params()
-                if attr in params:
-                    val = params[attr]
-            except Exception:
-                pass
-
-        if val is None and hasattr(estimator, attr):
-            val = getattr(estimator, attr)
-
-        if val is None:
-            continue
-
-        try:
-            d = int(val)
-        except (ValueError, TypeError):
-            continue
-
-        if d <= 0:
-            continue
-        return d
-
-    return 10
-
-
-def _compute_auto_n_estimators(n_features: int, depth: int) -> int:
-    """
-    Fast heuristic for automatic n_estimators.
-
-    - Scales ~sqrt(#features) and inverse with depth.
-    - Doubles features because Boruta concatenates shadow features.
-    - Clamped for speed and to avoid invalid (0) trees.
-    """
-    n_total = max(int(n_features), 1) * 2
-    depth_i = max(int(depth), 1)
-
-    n_est = int(_AUTO_N_EST_MULT * np.sqrt(n_total) / depth_i)
-    if n_est < _AUTO_N_EST_MIN:
-        return _AUTO_N_EST_MIN
-    if n_est > _AUTO_N_EST_MAX:
-        return _AUTO_N_EST_MAX
-    return n_est
-
-
-def _set_n_estimators(estimator, n_estimators: int) -> None:
-    """
-    Set n_estimators on estimator, handling different libraries.
-
-    - sklearn: n_estimators
-    - CatBoost: iterations
-    - LightGBM: n_estimators
-    - XGBoost: n_estimators
-    """
-    param_names = ["n_estimators", "iterations", "num_iterations", "n_iter"]
-
-    if hasattr(estimator, "set_params"):
-        for param in param_names:
-            try:
-                estimator.set_params(**{param: n_estimators})
-                return
-            except (ValueError, TypeError):
-                continue
-
-    for param in param_names:
-        if hasattr(estimator, param):
-            try:
-                setattr(estimator, param, n_estimators)
-                return
-            except Exception:
-                continue
-
-
-def _get_native_importance(estimator) -> np.ndarray:
-    """Get feature importance from fitted estimator."""
-    if hasattr(estimator, "feature_importances_"):
-        return np.asarray(estimator.feature_importances_, dtype=np.float64)
-
-    if hasattr(estimator, "coef_"):
-        coef = np.asarray(estimator.coef_, dtype=np.float64)
-        if coef.ndim == 1:
-            return np.abs(coef)
-        return np.max(np.abs(coef), axis=0)
-
-    raise TypeError(
-        "Estimator must have feature_importances_ or coef_. "
-        "For Boruta, use tree-based models."
-    )
-
-
-def _weighted_mean_abs(values: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Weighted mean of absolute values, handling 2D and 3D SHAP arrays."""
-    if values.ndim == 2:
-        abs_vals = np.abs(values)
-        return (abs_vals * w[:, None]).sum(axis=0) / w.sum()
-    if values.ndim == 3:
-        abs_vals = np.abs(values).mean(axis=1)
-        return (abs_vals * w[:, None]).sum(axis=0) / w.sum()
-    raise ValueError(f"Unexpected SHAP array shape: {values.shape}")
-
-
-def _catboost_shap_importance(
-    model,
-    X: np.ndarray,
-    y: np.ndarray | None,
-    w: np.ndarray,
-) -> np.ndarray:
-    """Get SHAP importance using CatBoost's native implementation."""
-    from catboost import Pool
-
-    pool = Pool(X, label=y, weight=w)
-    shap_vals = model.get_feature_importance(pool, type="ShapValues")
-    shap_vals = np.asarray(shap_vals)
-
-    if shap_vals.ndim == 2:
-        shap_vals = shap_vals[:, :-1]
-    elif shap_vals.ndim == 3:
-        shap_vals = shap_vals[:, :, :-1]
-    else:
-        raise ValueError(f"Unexpected CatBoost SHAP shape: {shap_vals.shape}")
-
-    return _weighted_mean_abs(shap_vals, w)
-
-
-def _shap_importance(
-    estimator,
-    X: np.ndarray,
-    y: np.ndarray | None,
-    w: np.ndarray,
-    *,
-    shap_sample_size: int | None,
-    random_state: int,
-) -> np.ndarray:
-    """
-    Compute SHAP-based feature importance.
-
-    Uses CatBoost native SHAP if available, otherwise falls back to shap package.
-    """
-    if "catboost" in str(type(estimator)).lower():
-        if shap_sample_size is not None and shap_sample_size < X.shape[0]:
-            rng = np.random.default_rng(random_state)
-            idx = rng.choice(X.shape[0], size=shap_sample_size, replace=False)
-            return _catboost_shap_importance(
-                estimator,
-                X[idx],
-                y[idx] if y is not None else None,
-                w[idx],
-            )
-        return _catboost_shap_importance(estimator, X, y, w)
-
-    try:
-        import shap
-    except ImportError as exc:
-        raise ImportError(
-            "SHAP backend requires either:\n"
-            "  - catboost (for native SHAP), OR\n"
-            "  - shap package (pip install shap)"
-        ) from exc
-
-    rng = np.random.default_rng(random_state)
-    n = X.shape[0]
-
-    if shap_sample_size is not None and shap_sample_size < n:
-        idx = rng.choice(n, size=shap_sample_size, replace=False)
-        X_eval = X[idx]
-        w_eval = w[idx]
-    else:
-        X_eval = X
-        w_eval = w
-
-    explainer = shap.TreeExplainer(estimator)
-    shap_vals = explainer.shap_values(X_eval)
-
-    if isinstance(shap_vals, list):
-        arr = np.stack(shap_vals, axis=1)
-    else:
-        arr = np.asarray(shap_vals)
-
-    return _weighted_mean_abs(arr, w_eval)
-
-
-def _impute_nonfinite_inplace(X: np.ndarray) -> None:
-    """Replace non-finite values (NaN, inf, -inf) with column means."""
-    mask = ~np.isfinite(X)
-    if not mask.any():
-        return
-    X[mask] = np.nan
-    col_means = np.nanmean(X, axis=0)
-    col_means = np.where(np.isnan(col_means), 0.0, col_means)
-    nan_mask = np.isnan(X)
-    X[nan_mask] = col_means[np.where(nan_mask)[1]]
-
-
-def _group_time_holdout_split(
-    groups: np.ndarray,
-    time: np.ndarray,
-    test_size: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Split data by taking the last `test_size` fraction of each group's timeline.
-
-    Returns (train_indices, test_indices).
-    """
-    train_idx = []
-    test_idx = []
-
-    for g in np.unique(groups):
-        idx = np.flatnonzero(groups == g)
-        idx = idx[np.argsort(time[idx], kind="mergesort")]
-        n = len(idx)
-        if n <= 1:
-            train_idx.append(idx)
-            continue
-        n_test = max(1, int(np.ceil(n * test_size)))
-        n_test = min(n_test, n - 1)
-        train_idx.append(idx[:-n_test])
-        test_idx.append(idx[-n_test:])
-
-    train = np.concatenate(train_idx) if train_idx else np.array([], dtype=np.int64)
-    test = np.concatenate(test_idx) if test_idx else np.array([], dtype=np.int64)
-    return train, test
-
-
-def _poisson_binom_pmf(ps: np.ndarray) -> np.ndarray:
-    """
-    Poisson-binomial PMF for sum of independent Bernoullis with probabilities ps.
-
-    Returns pmf[k] = P(S = k) for k=0..len(ps)
-    """
-    ps = np.asarray(ps, dtype=np.float64).reshape(-1)
-    pmf = np.zeros(ps.size + 1, dtype=np.float64)
-    pmf[0] = 1.0
-    for p in ps:
-        prev = pmf.copy()
-        pmf = prev * (1.0 - p)
-        pmf[1:] += prev[:-1] * p
-    return pmf
-
-
-def _tail_pvals_from_pmf(pmf: np.ndarray, h: int) -> tuple[float, float]:
-    """
-    Returns (p_hi, p_lo) where:
-      p_hi = P(S >= h)
-      p_lo = P(S <= h)
-    """
-    if h < 0:
-        return 1.0, 0.0
-    if h >= pmf.size:
-        return 0.0, 1.0
-    cdf = np.cumsum(pmf)
-    p_lo = float(cdf[h])
-    p_hi = 1.0 if h <= 0 else float(1.0 - cdf[h - 1])
-    return p_hi, p_lo
-
-
-def _time_holdout_indices(
-    time: np.ndarray,
-    test_size: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Global forward holdout when groups not provided."""
-    time = np.asarray(time).reshape(-1)
-    n = time.shape[0]
-    order = np.argsort(time, kind="mergesort")
-    n_eval = max(1, min(int(np.ceil(n * test_size)), n - 1)) if n > 1 else 0
-    if n_eval > 0:
-        return order[:-n_eval].astype(np.int64), order[-n_eval:].astype(np.int64)
-    return order.astype(np.int64), np.array([], dtype=np.int64)
+from sift._preprocess import (
+    CatEncoding,
+    LeaveOneOutLogitEncoder,
+    ensure_weights,
+    extract_feature_names,
+    suppress_category_encoder_pandas_warnings,
+    to_numpy,
+)
+
+from sift.boruta_helpers import (
+    ImportanceBackend,
+    Task,
+    _clone_estimator,
+    _compute_auto_n_estimators,
+    _fit_estimator,
+    _get_estimator_depth,
+    _get_native_importance,
+    _group_time_holdout_split,
+    _impute_nonfinite_inplace,
+    _poisson_binom_pmf,
+    _set_n_estimators,
+    _shap_importance,
+    _tail_pvals_from_pmf,
+    _time_holdout_indices,
+    _validate_boruta_options,
+)
 
 
 # =============================================================================
@@ -421,7 +97,35 @@ class BorutaResult:
                 "status": [status_map[int(s)] for s in self.status],
             }
         )
-        return df.sort_values("mean_importance", ascending=False, na_position="last")
+        return df.sort_values(
+            "mean_importance",
+            ascending=False,
+            na_position="last",
+            kind="mergesort",
+        )
+
+
+@dataclass(frozen=True)
+class BorutaFitData:
+    X_arr: np.ndarray
+    y_arr: np.ndarray
+    w_score: np.ndarray
+    w_fit: np.ndarray | None
+    groups: np.ndarray | None
+    time: np.ndarray | None
+    shadow_method: PermutationMethod
+    base_estimator: object
+    base_depth: int | None
+    feature_names: list[str]
+
+
+@dataclass(frozen=True)
+class BorutaLoopResult:
+    status: np.ndarray
+    hits: np.ndarray
+    n_trials: int
+    shadow_thresholds: np.ndarray
+    mean_importance: np.ndarray
 
 
 # =============================================================================
@@ -532,281 +236,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.random_state = random_state
         self.verbose = verbose
 
-    def fit(
-        self,
-        X,
-        y,
-        *,
-        sample_weight: np.ndarray | None = None,
-        groups: np.ndarray | None = None,
-        time: np.ndarray | None = None,
-    ):
-        """
-        Fit Boruta selector.
-
-        Parameters
-        ----------
-        X : DataFrame or ndarray of shape (n_samples, n_features)
-        y : array-like of shape (n_samples,)
-        sample_weight : array-like of shape (n_samples,), optional
-        groups : array-like of shape (n_samples,), optional
-            Group labels for time-series shadow permutation.
-        time : array-like of shape (n_samples,), optional
-            Time values for ordering within groups.
-        """
-        feature_names = extract_feature_names(X)
-        if isinstance(X, pd.DataFrame):
-            X = X.copy()
-            cat_features = self.cat_features
-            if cat_features is None:
-                cat_features = X.select_dtypes(
-                    include=["object", "category", "string"]
-                ).columns.tolist()
-
-            if cat_features and self.cat_encoding != "none":
-                if self.task == "classification":
-                    y_for_encoder = pd.Series(
-                        np.unique(y, return_inverse=True)[1], index=X.index
-                    )
-                else:
-                    y_for_encoder = y
-                X = encode_categoricals(X, y_for_encoder, cat_features, self.cat_encoding)
-                feature_names = extract_feature_names(X)
-
-            non_numeric = X.select_dtypes(
-                include=["object", "category", "string"]
-            ).columns.tolist()
-            if non_numeric:
-                sample = non_numeric[:5]
-                suffix = "..." if len(non_numeric) > 5 else ""
-                raise ValueError(
-                    f"Non-numeric columns found: {sample}{suffix}. "
-                    "Encode categorical columns before using Boruta, or use "
-                    "cat_encoding in other sift methods."
-                )
-        X_arr = to_numpy(X, dtype=np.float64)
-        y_arr = np.asarray(y).reshape(-1)
-
-        n, p = X_arr.shape
-        if feature_names is None:
-            feature_names = [f"x{i}" for i in range(p)]
-
-        if X_arr.shape[0] != y_arr.shape[0]:
-            raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
-
-        w_score = ensure_weights(sample_weight, n, normalize=True)
-        w_fit = w_score if sample_weight is not None else None
-
-        if groups is not None:
-            groups = np.asarray(groups).reshape(-1)
-            if groups.shape[0] != n:
-                raise ValueError(
-                    f"groups has {groups.shape[0]} elements but X has {n} rows"
-                )
-        if time is not None:
-            time = np.asarray(time).reshape(-1)
-            if time.shape[0] != n:
-                raise ValueError(f"time has {time.shape[0]} elements but X has {n} rows")
-
-        shadow_method = resolve_permutation_method(
-            self.shadow_method, groups=groups, time=time
-        )
-        if shadow_method in ("within_group", "block", "circular_shift") and groups is None:
-            raise ValueError(f"shadow_method='{shadow_method}' requires groups")
-        if shadow_method in ("block", "circular_shift") and time is None:
-            raise ValueError(f"shadow_method='{shadow_method}' requires time for ordering")
-
-        X_arr = X_arr.copy()
-        _impute_nonfinite_inplace(X_arr)
-
-        base_est = self._get_default_estimator()
-        if isinstance(self.n_estimators, str):
-            if self.n_estimators != "auto":
-                raise ValueError("n_estimators must be an int or 'auto'")
-        else:
-            try:
-                n_est_int = int(self.n_estimators)
-            except Exception as exc:
-                raise ValueError("n_estimators must be an int or 'auto'") from exc
-            if n_est_int < 1:
-                raise ValueError("n_estimators must be >= 1")
-        base_depth = _get_estimator_depth(base_est)
-
-        rng = np.random.default_rng(self.random_state)
-
-        status = np.zeros(p, dtype=np.int8)
-        hits = np.zeros(p, dtype=np.int32)
-        n_trials = 0
-        no_progress_count = 0
-
-        imp_sum = np.zeros(p, dtype=np.float64)
-        imp_count = np.zeros(p, dtype=np.int32)
-        shadow_thresholds = []
-        p_trials: list[float] = []
-
-        if self.verbose:
-            print(
-                "Boruta: p={} importance={} shadow={} mode={} max_iter={}".format(
-                    p, self.importance, shadow_method, self.shadow_mode, self.max_iter
-                )
-            )
-
-        group_info = None
-        if shadow_method in ("within_group", "block", "circular_shift"):
-            group_info = build_group_info(groups, time)
-
-        for it in range(self.max_iter):
-            tentative_idx = np.where(status == 0)[0]
-            if tentative_idx.size == 0:
-                if self.verbose:
-                    print(f"  iter={it + 1}: all features decided, stopping")
-                break
-
-            active_idx = np.where(status != -1)[0]
-            n_active = active_idx.size
-            X_active = X_arr[:, active_idx]
-            seed = int(rng.integers(0, 2**31 - 1))
-            est = _clone_estimator(base_est, seed=seed)
-
-            if self.n_estimators == "auto":
-                if self.estimator is None:
-                    iter_n_estimators = _compute_auto_n_estimators(
-                        n_active, base_depth
-                    )
-                    _set_n_estimators(est, iter_n_estimators)
-                else:
-                    iter_n_estimators = None
-            else:
-                iter_n_estimators = int(self.n_estimators)
-                _set_n_estimators(est, iter_n_estimators)
-
-            shadow = permute_matrix(
-                X_active,
-                method=shadow_method,
-                group_info=group_info,
-                block_size=self.block_size,
-                seed=seed,
-                axis=self.shadow_mode,
-            )
-            X_ext = np.concatenate([X_active, shadow], axis=1)
-
-            imp = self._compute_importance(
-                est,
-                X_ext,
-                y_arr,
-                w_score,
-                w_fit=w_fit,
-                groups=groups,
-                time=time,
-                seed=seed,
-            )
-
-            if imp.shape[0] != X_ext.shape[1]:
-                raise RuntimeError(
-                    f"Importance length {imp.shape[0]} != expected {X_ext.shape[1]}"
-                )
-
-            imp_active = imp[:n_active]
-            imp_shadow = imp[n_active:]
-
-            thr = float(np.percentile(imp_shadow, self.perc))
-            shadow_thresholds.append(thr)
-            # Laplace smoothing: avoids p_null = 0 or 1
-            k = float(np.sum(imp_shadow > thr))
-            m_shadow = float(len(imp_shadow))
-            p_null = (k + 1.0) / (m_shadow + 2.0)
-            p_trials.append(p_null)
-
-            for i_local in range(n_active):
-                j = active_idx[i_local]
-                if status[j] == 0:
-                    if imp_active[i_local] > thr:
-                        hits[j] += 1
-                imp_sum[j] += float(imp_active[i_local])
-                imp_count[j] += 1
-
-            n_trials += 1
-
-            pmf = _poisson_binom_pmf(np.asarray(p_trials, dtype=np.float64))
-
-            tent = np.where(status == 0)[0]
-            m = max(1, tent.size)
-            alpha_adj = self.alpha / m
-
-            decided_this_round = 0
-            for j in tent:
-                h = int(hits[j])
-                p_hi, p_lo = _tail_pvals_from_pmf(pmf, h)
-                if p_hi < alpha_adj:
-                    status[j] = 1
-                    decided_this_round += 1
-                elif p_lo < alpha_adj:
-                    status[j] = -1
-                    decided_this_round += 1
-
-            if self.verbose:
-                n_acc = int((status == 1).sum())
-                n_rej = int((status == -1).sum())
-                n_ten = int((status == 0).sum())
-                if iter_n_estimators is not None:
-                    print(
-                        "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
-                            it + 1, iter_n_estimators, thr, n_acc, n_rej, n_ten
-                        )
-                    )
-                else:
-                    print(
-                        "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
-                            it + 1, thr, n_acc, n_rej, n_ten
-                        )
-                    )
-
-            if decided_this_round == 0:
-                no_progress_count += 1
-                if no_progress_count >= self.early_stop_rounds:
-                    if self.verbose:
-                        print(
-                            "  Early stop: no decisions for {} rounds".format(
-                                no_progress_count
-                            )
-                        )
-                    break
-            else:
-                no_progress_count = 0
-
-        shadow_thresholds_arr = np.asarray(shadow_thresholds, dtype=np.float64)
-        mean_importance = np.full(p, np.nan, dtype=np.float64)
-        ok = imp_count > 0
-        mean_importance[ok] = imp_sum[ok] / imp_count[ok]
-
-        if self.resolve_tentative and (status == 0).any() and shadow_thresholds_arr.size > 0:
-            med_thr = float(np.median(shadow_thresholds_arr))
-            for j in np.where(status == 0)[0]:
-                if not np.isfinite(mean_importance[j]):
-                    status[j] = -1
-                else:
-                    status[j] = 1 if mean_importance[j] > med_thr else -1
-
-        if self.max_features is not None:
-            acc = np.where(status == 1)[0]
-            if acc.size > self.max_features:
-                order = acc[np.argsort(-mean_importance[acc])]
-                keep = set(order[: self.max_features].tolist())
-                for j in acc:
-                    if int(j) not in keep:
-                        status[j] = -1
-
-        self.feature_names_in_ = feature_names
-        self.status_ = status
-        self.hits_ = hits
-        self.n_iter_ = int(n_trials)
-        self.shadow_thresholds_ = shadow_thresholds_arr
-        self.mean_importance_ = mean_importance
-        self.selected_features_ = [feature_names[i] for i in np.where(status == 1)[0]]
-
-        return self
-
-    def _get_default_estimator(self):
+    def _get_default_estimator(self, y: np.ndarray | None = None):
         """Get default estimator based on importance backend and task."""
         if self.estimator is not None:
             return self.estimator
@@ -837,14 +267,21 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     loss_function="RMSE",
                     verbose=False,
                     random_seed=self.random_state,
+                    allow_writing_files=False,
                 )
+            loss_function = "Logloss"
+            if y is not None:
+                n_classes = np.unique(np.asarray(y).reshape(-1)).size
+                if n_classes >= 3:
+                    loss_function = "MultiClass"
             return CatBoostClassifier(
                 iterations=500,
                 depth=5,
                 learning_rate=0.05,
-                loss_function="Logloss",
+                loss_function=loss_function,
                 verbose=False,
                 random_seed=self.random_state,
+                allow_writing_files=False,
             )
         except ImportError as exc:
             raise ValueError(
@@ -862,13 +299,73 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         groups: np.ndarray | None,
         time: np.ndarray | None,
         seed: int,
+        shadow_method: PermutationMethod,
+        shadow_mode: PermutationAxis,
+        block_size: int | str,
+        group_info: dict | None = None,
     ) -> np.ndarray:
         """Fit estimator and compute importance."""
+        def make_shadow_group_info(
+            X_part: np.ndarray,
+            *,
+            groups_part: np.ndarray | None,
+            time_part: np.ndarray | None,
+            group_info_part: dict | None,
+        ):
+            if shadow_method not in ("within_group", "block", "circular_shift"):
+                return None
+            if group_info_part is not None:
+                return group_info_part
+            return build_group_info(groups_part, time_part, n_samples=X_part.shape[0])
+
+        def make_shadow_matrix(
+            X_part: np.ndarray,
+            *,
+            groups_part: np.ndarray | None,
+            time_part: np.ndarray | None,
+            seed_part: int,
+            group_info_part: dict | None = None,
+        ) -> np.ndarray:
+            group_info = make_shadow_group_info(
+                X_part,
+                groups_part=groups_part,
+                time_part=time_part,
+                group_info_part=group_info_part,
+            )
+            shadow = permute_matrix(
+                X_part,
+                method=shadow_method,
+                groups=groups_part,
+                time=time_part,
+                group_info=group_info,
+                block_size=block_size,
+                seed=seed_part,
+                axis=shadow_mode,
+            )
+            return np.concatenate([X_part, shadow], axis=1)
+
         if self.importance_data == "test":
             if groups is not None and time is not None:
                 train_idx, test_idx = _group_time_holdout_split(
                     groups, time, self.test_size
                 )
+            elif groups is not None:
+                if len(pd.unique(groups)) < 2:
+                    raise ValueError(
+                        "BorutaSelector(importance_data='test') requires at least "
+                        "2 groups to create a held-out group split."
+                    )
+                else:
+                    from sklearn.model_selection import GroupShuffleSplit
+
+                    gss = GroupShuffleSplit(
+                        n_splits=1,
+                        test_size=self.test_size,
+                        random_state=seed,
+                    )
+                    train_idx, test_idx = next(gss.split(X, y, groups))
+                    train_idx = np.asarray(train_idx)
+                    test_idx = np.asarray(test_idx)
             elif time is not None:
                 train_idx, test_idx = _time_holdout_indices(time, self.test_size)
             else:
@@ -883,10 +380,29 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 test_idx = np.asarray(test_idx)
 
             if len(test_idx) == 0:
-                train_idx = np.arange(len(y))
-                test_idx = train_idx
+                raise ValueError(
+                    "BorutaSelector(importance_data='test') could not create a "
+                    "non-empty held-out split. Use importance_data='train' or "
+                    "provide more rows/groups."
+                )
+            if np.intersect1d(train_idx, test_idx).size:
+                raise ValueError(
+                    "BorutaSelector(importance_data='test') requires disjoint "
+                    "train and held-out rows."
+                )
 
-            X_train, X_eval = X[train_idx], X[test_idx]
+            X_train = make_shadow_matrix(
+                X[train_idx],
+                groups_part=groups[train_idx] if groups is not None else None,
+                time_part=time[train_idx] if time is not None else None,
+                seed_part=seed,
+            )
+            X_eval = make_shadow_matrix(
+                X[test_idx],
+                groups_part=groups[test_idx] if groups is not None else None,
+                time_part=time[test_idx] if time is not None else None,
+                seed_part=seed + 1,
+            )
             y_train, y_eval = y[train_idx], y[test_idx]
             w_fit_train = w_fit[train_idx] if w_fit is not None else None
             _fit_estimator(
@@ -894,8 +410,15 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             )
             X_imp, y_imp, w_imp = X_eval, y_eval, w_score[test_idx]
         else:
-            _fit_estimator(est, X, y, w_fit, require_sample_weight=True)
-            X_imp, y_imp, w_imp = X, y, w_score
+            X_ext = make_shadow_matrix(
+                X,
+                groups_part=groups,
+                time_part=time,
+                seed_part=seed,
+                group_info_part=group_info,
+            )
+            _fit_estimator(est, X_ext, y, w_fit, require_sample_weight=True)
+            X_imp, y_imp, w_imp = X_ext, y, w_score
 
         if self.importance == "native":
             return _get_native_importance(est)
@@ -916,6 +439,14 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         check_is_fitted(self, ["status_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            if not isinstance(X, pd.DataFrame):
+                raise ValueError(
+                    "This BorutaSelector was fitted with DataFrame categorical "
+                    "encoding; transform also requires a DataFrame."
+                )
+            with suppress_category_encoder_pandas_warnings():
+                X = self.categorical_encoder_.transform(X)
         keep_idx = self.get_support(indices=True)
         if isinstance(X, pd.DataFrame):
             cols = [self.feature_names_in_[i] for i in keep_idx]
@@ -924,6 +455,438 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def fit_transform(self, X, y=None, **fit_params):
         return self.fit(X, y, **fit_params).transform(X)
+
+    def fit(
+        self,
+        X,
+        y,
+        *,
+        sample_weight: np.ndarray | None = None,
+        groups: np.ndarray | None = None,
+        time: np.ndarray | None = None,
+    ):
+        """
+        Fit Boruta selector.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray of shape (n_samples, n_features)
+        y : array-like of shape (n_samples,)
+        sample_weight : array-like of shape (n_samples,), optional
+        groups : array-like of shape (n_samples,), optional
+            Group labels for time-series shadow permutation.
+        time : array-like of shape (n_samples,), optional
+        Time values for ordering within groups.
+        """
+        self._clear_fit_state()
+        try:
+            fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
+            loop_result = self._run_boruta_iterations(fit_data)
+            status = self._resolve_boruta_final_status(
+                loop_result.status,
+                loop_result.mean_importance,
+                loop_result.shadow_thresholds,
+            )
+            self._store_boruta_attributes(
+                fit_data.feature_names,
+                status,
+                loop_result.hits,
+                loop_result.n_trials,
+                loop_result.shadow_thresholds,
+                loop_result.mean_importance,
+            )
+        except Exception:
+            self._clear_fit_state()
+            raise
+        return self
+
+    def _clear_fit_state(self) -> None:
+        for attr in (
+            "categorical_encoder_",
+            "categorical_features_",
+            "_categorical_encoding_applied_",
+            "feature_names_in_",
+            "status_",
+            "hits_",
+            "n_iter_",
+            "shadow_thresholds_",
+            "mean_importance_",
+            "selected_features_",
+        ):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+    def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
+        if self.importance_data == "test" and self.importance == "native":
+            raise ValueError(
+                "BorutaSelector(importance_data='test') is not supported with "
+                "importance='native' because native importances are read from "
+                "the fitted model and do not evaluate held-out rows. Use "
+                "importance='shap' or another held-out-compatible importance "
+                "backend if available."
+            )
+
+        y_arr = np.asarray(y).reshape(-1)
+        _validate_boruta_options(
+            task=self.task,
+            importance=self.importance,
+            importance_data=self.importance_data,
+            shadow_method=self.shadow_method,
+            shadow_mode=self.shadow_mode,
+            block_size=self.block_size,
+        )
+
+        feature_names = extract_feature_names(X)
+        self.categorical_encoder_ = None
+        self.categorical_features_ = []
+        self._categorical_encoding_applied_ = False
+        if isinstance(X, pd.DataFrame):
+            X = X.copy()
+            cat_features = self.cat_features
+            if cat_features is None:
+                cat_features = X.select_dtypes(
+                    include=["object", "category", "string"]
+                ).columns.tolist()
+            elif cat_features:
+                cat_features = [c for c in cat_features if c in X.columns]
+
+            if cat_features and self.cat_encoding != "none":
+                if self.importance_data == "test":
+                    raise ValueError(
+                        "BorutaSelector(importance_data='test') cannot use supervised "
+                        "cat_encoding on the full dataset. Pre-encode categoricals "
+                        "leakage-safely or use importance_data='train'."
+                    )
+                if self.task == "classification":
+                    y_for_encoder = pd.Series(
+                        np.unique(y, return_inverse=True)[1], index=X.index
+                    )
+                else:
+                    y_for_encoder = y
+                if sample_weight is not None and self.cat_encoding != "loo_logit":
+                    raise ValueError(
+                        "sample_weight with Boruta categorical encoding is only "
+                        "supported for cat_encoding='loo_logit'. category_encoders-backed "
+                        "methods ('loo', 'target', 'james_stein') do not consume sample weights."
+                    )
+                if self.cat_encoding == "loo_logit":
+                    encoder = LeaveOneOutLogitEncoder(cat_features)
+                    X = encoder.fit_transform(X, y_for_encoder, sample_weight=sample_weight)
+                else:
+                    import category_encoders as ce
+
+                    encoders = {
+                        "loo": ce.LeaveOneOutEncoder,
+                        "target": ce.TargetEncoder,
+                        "james_stein": ce.JamesSteinEncoder,
+                    }
+                    if self.cat_encoding not in encoders:
+                        raise ValueError(
+                            "cat_encoding must be one of 'none', 'target', 'loo', "
+                            "'james_stein', or 'loo_logit'. "
+                            f"Got {self.cat_encoding!r}."
+                        )
+                    Encoder = encoders[self.cat_encoding]
+                    try:
+                        encoder = Encoder(
+                            cols=cat_features,
+                            handle_missing="return_nan",
+                            handle_unknown="value",
+                        )
+                    except TypeError:
+                        encoder = Encoder(cols=cat_features, handle_missing="return_nan")
+                    with suppress_category_encoder_pandas_warnings():
+                        X = encoder.fit_transform(X, y_for_encoder)
+                self.categorical_encoder_ = encoder
+                self.categorical_features_ = list(cat_features)
+                self._categorical_encoding_applied_ = True
+                feature_names = extract_feature_names(X)
+
+            non_numeric = X.select_dtypes(
+                include=["object", "category", "string"]
+            ).columns.tolist()
+            if non_numeric:
+                sample = non_numeric[:5]
+                suffix = "..." if len(non_numeric) > 5 else ""
+                raise ValueError(
+                    f"Non-numeric columns found: {sample}{suffix}. "
+                    "Encode categorical columns before using Boruta, or use "
+                    "cat_encoding in other sift methods."
+                )
+        elif self.cat_features:
+            raise ValueError("cat_features requires X to be a pandas DataFrame")
+        X_arr = to_numpy(X, dtype=np.float64)
+
+        n, p = X_arr.shape
+        if feature_names is None:
+            feature_names = [f"x{i}" for i in range(p)]
+
+        if X_arr.shape[0] != y_arr.shape[0]:
+            raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
+
+        w_score = ensure_weights(sample_weight, n, normalize=True)
+        w_fit = w_score if sample_weight is not None else None
+
+        if groups is not None:
+            groups = np.asarray(groups).reshape(-1)
+            if groups.shape[0] != n:
+                raise ValueError(
+                    f"groups has {groups.shape[0]} elements but X has {n} rows"
+                )
+        if time is not None:
+            time = np.asarray(time).reshape(-1)
+            if time.shape[0] != n:
+                raise ValueError(f"time has {time.shape[0]} elements but X has {n} rows")
+
+        shadow_method = resolve_permutation_method(
+            self.shadow_method, groups=groups, time=time
+        )
+        if shadow_method in ("block", "circular_shift") and time is None:
+            raise ValueError(f"shadow_method='{shadow_method}' requires time")
+
+        X_arr = X_arr.copy()
+        _impute_nonfinite_inplace(X_arr)
+
+        base_est = self._get_default_estimator(y_arr)
+        if isinstance(self.n_estimators, str):
+            if self.n_estimators != "auto":
+                raise ValueError("n_estimators must be an int or 'auto'")
+        else:
+            try:
+                n_est_int = int(self.n_estimators)
+            except Exception as exc:
+                raise ValueError("n_estimators must be an int or 'auto'") from exc
+            if n_est_int < 1:
+                raise ValueError("n_estimators must be >= 1")
+        base_depth = _get_estimator_depth(base_est)
+        return BorutaFitData(
+            X_arr=X_arr,
+            y_arr=y_arr,
+            w_score=w_score,
+            w_fit=w_fit,
+            groups=groups,
+            time=time,
+            shadow_method=shadow_method,
+            base_estimator=base_est,
+            base_depth=base_depth,
+            feature_names=feature_names,
+        )
+
+    def _run_boruta_iterations(self, fit_data: BorutaFitData) -> BorutaLoopResult:
+        X_arr = fit_data.X_arr
+        y_arr = fit_data.y_arr
+        w_score = fit_data.w_score
+        w_fit = fit_data.w_fit
+        groups = fit_data.groups
+        time = fit_data.time
+        shadow_method = fit_data.shadow_method
+        base_est = fit_data.base_estimator
+        base_depth = fit_data.base_depth
+        n, p = X_arr.shape
+        rng = np.random.default_rng(self.random_state)
+
+        status = np.zeros(p, dtype=np.int8)
+        hits = np.zeros(p, dtype=np.int32)
+        n_trials = 0
+        no_progress_count = 0
+
+        imp_sum = np.zeros(p, dtype=np.float64)
+        imp_count = np.zeros(p, dtype=np.int32)
+        shadow_thresholds = []
+        group_info = None
+        if (
+            self.importance_data != "test"
+            and shadow_method in ("within_group", "block", "circular_shift")
+        ):
+            group_info = build_group_info(groups, time, n_samples=n)
+
+        if self.verbose:
+            print(
+                "Boruta: p={} importance={} shadow={} mode={} max_iter={}".format(
+                    p, self.importance, shadow_method, self.shadow_mode, self.max_iter
+                )
+            )
+
+        for it in range(self.max_iter):
+            tentative_idx = np.where(status == 0)[0]
+            if tentative_idx.size == 0:
+                if self.verbose:
+                    print(f"  iter={it + 1}: all features decided, stopping")
+                break
+
+            active_idx = np.where(status != -1)[0]
+            n_active = active_idx.size
+            X_active = X_arr[:, active_idx]
+            seed = int(rng.integers(0, 2**31 - 1))
+            est = _clone_estimator(base_est, seed=seed)
+
+            if self.n_estimators == "auto":
+                if self.estimator is None:
+                    iter_n_estimators = _compute_auto_n_estimators(
+                        n_active, base_depth
+                    )
+                    _set_n_estimators(est, iter_n_estimators)
+                else:
+                    iter_n_estimators = None
+            else:
+                iter_n_estimators = int(self.n_estimators)
+                _set_n_estimators(est, iter_n_estimators)
+
+            imp = self._compute_importance(
+                est,
+                X_active,
+                y_arr,
+                w_score,
+                w_fit=w_fit,
+                groups=groups,
+                time=time,
+                seed=seed,
+                shadow_method=shadow_method,
+                shadow_mode=self.shadow_mode,
+                block_size=self.block_size,
+                group_info=group_info,
+            )
+
+            expected_importance_len = 2 * n_active
+            if imp.shape[0] != expected_importance_len:
+                raise RuntimeError(
+                    f"Importance length {imp.shape[0]} != expected {expected_importance_len}"
+                )
+
+            imp_active = imp[:n_active]
+            imp_shadow = imp[n_active:]
+
+            thr = float(np.percentile(imp_shadow, self.perc))
+            shadow_thresholds.append(thr)
+
+            for i_local in range(n_active):
+                j = active_idx[i_local]
+                if status[j] == 0:
+                    if imp_active[i_local] > thr:
+                        hits[j] += 1
+                imp_sum[j] += float(imp_active[i_local])
+                imp_count[j] += 1
+
+            n_trials += 1
+
+            pmf = _poisson_binom_pmf(
+                np.full(n_trials, 0.5, dtype=np.float64)
+            )
+
+            tent = np.where(status == 0)[0]
+            m = max(1, tent.size)
+            alpha_adj = self.alpha / m
+            decision_horizon = self._earliest_decidable_trial(
+                alpha_adj,
+                max_trials=self.max_iter,
+            )
+
+            decided_this_round = 0
+            for j in tent:
+                h = int(hits[j])
+                p_hi, p_lo = _tail_pvals_from_pmf(pmf, h)
+                if p_hi < alpha_adj:
+                    status[j] = 1
+                    decided_this_round += 1
+                elif p_lo < alpha_adj:
+                    status[j] = -1
+                    decided_this_round += 1
+
+            if self.verbose:
+                n_acc = int((status == 1).sum())
+                n_rej = int((status == -1).sum())
+                n_ten = int((status == 0).sum())
+                if iter_n_estimators is not None:
+                    print(
+                        "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
+                            it + 1, iter_n_estimators, thr, n_acc, n_rej, n_ten
+                        )
+                    )
+                else:
+                    print(
+                        "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
+                            it + 1, thr, n_acc, n_rej, n_ten
+                        )
+                    )
+
+            if decided_this_round == 0 and n_trials >= decision_horizon:
+                no_progress_count += 1
+                if no_progress_count >= self.early_stop_rounds:
+                    if self.verbose:
+                        print(
+                            "  Early stop: no decisions for {} rounds".format(
+                                no_progress_count
+                            )
+                        )
+                    break
+            else:
+                no_progress_count = 0
+
+        shadow_thresholds_arr = np.asarray(shadow_thresholds, dtype=np.float64)
+        mean_importance = np.full(p, np.nan, dtype=np.float64)
+        ok = imp_count > 0
+        mean_importance[ok] = imp_sum[ok] / imp_count[ok]
+        return BorutaLoopResult(
+            status=status,
+            hits=hits,
+            n_trials=int(n_trials),
+            shadow_thresholds=shadow_thresholds_arr,
+            mean_importance=mean_importance,
+        )
+
+    @staticmethod
+    def _earliest_decidable_trial(alpha_adj: float, *, max_trials: int) -> int:
+        """Smallest trial count where an all-hit/all-miss binomial tail can pass."""
+        if not np.isfinite(alpha_adj) or alpha_adj <= 0.0:
+            return int(max_trials) + 1
+        trial = 0
+        tail = 1.0
+        while trial <= int(max_trials) and tail >= float(alpha_adj):
+            trial += 1
+            tail *= 0.5
+        return trial
+
+    def _resolve_boruta_final_status(
+        self,
+        status: np.ndarray,
+        mean_importance: np.ndarray,
+        shadow_thresholds_arr: np.ndarray,
+    ) -> np.ndarray:
+        if self.resolve_tentative and (status == 0).any() and shadow_thresholds_arr.size > 0:
+            med_thr = float(np.median(shadow_thresholds_arr))
+            for j in np.where(status == 0)[0]:
+                if not np.isfinite(mean_importance[j]):
+                    status[j] = -1
+                else:
+                    status[j] = 1 if mean_importance[j] > med_thr else -1
+
+        if self.max_features is not None:
+            acc = np.where(status == 1)[0]
+            if acc.size > self.max_features:
+                order = acc[np.argsort(-mean_importance[acc], kind="mergesort")]
+                keep = set(order[: self.max_features].tolist())
+                for j in acc:
+                    if int(j) not in keep:
+                        status[j] = -1
+        return status
+
+    def _store_boruta_attributes(
+        self,
+        feature_names,
+        status,
+        hits,
+        n_trials,
+        shadow_thresholds_arr,
+        mean_importance,
+    ) -> None:
+        self.feature_names_in_ = feature_names
+        self.status_ = status
+        self.hits_ = hits
+        self.n_iter_ = int(n_trials)
+        self.shadow_thresholds_ = shadow_thresholds_arr
+        self.mean_importance_ = mean_importance
+        self.selected_features_ = [feature_names[i] for i in np.where(status == 1)[0]]
+
 
     def result_(self) -> BorutaResult:
         check_is_fitted(self, ["status_"])
@@ -1028,6 +991,15 @@ def select_boruta(
                 raise ValueError("Cannot specify both time and time_col")
             time = X[time_col].values
             X = X.drop(columns=[time_col])
+        if cat_features is not None:
+            cat_features = [c for c in cat_features if c in X.columns]
+    else:
+        if group_col is not None:
+            raise ValueError("group_col requires X to be a pandas DataFrame")
+        if time_col is not None:
+            raise ValueError("time_col requires X to be a pandas DataFrame")
+        if cat_features:
+            raise ValueError("cat_features requires X to be a pandas DataFrame")
 
     sel = BorutaSelector(
         estimator=estimator,

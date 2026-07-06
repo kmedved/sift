@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+*.egg-info/
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+build/
+dist/
+catboost_info/

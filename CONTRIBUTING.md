@@ -56,7 +56,6 @@ Core dependencies:
 Optional dependencies:
 - `catboost` - For CatBoost-based selection
 - `category_encoders` - For advanced categorical encoding
-- `polars` - For Polars DataFrame support
 - `pytest` - For running tests
 
 ## Code Style
@@ -188,6 +187,7 @@ pytest tests/test_smoke.py
 pytest tests/test_smoke.py::test_mrmr_regression
 
 # Run with coverage
+pip install pytest-cov
 pytest --cov=sift --cov-report=html
 ```
 

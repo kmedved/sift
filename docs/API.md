@@ -83,7 +83,7 @@ Minimum Redundancy Maximum Relevance feature selection.
 | `time` | ndarray | None | Time values for temporal ordering |
 | `auto_k_config` | AutoKConfig | None | Configuration for automatic K selection |
 | `sample_weight` | ndarray | None | Sample weights |
-| `relevance` | str | "f" | Relevance measure: "f" (F-stat), "ks" (KS-test), "rf" (Random Forest) |
+| `relevance` | str | "f" | Relevance measure: regression supports "f" (F-stat) and "rf" (Random Forest); classification supports "f", "ks" (KS-test), and "rf" |
 | `estimator` | str | "classic" | Estimator type: "classic" or "gaussian" (regression only) |
 | `formula` | str | "quotient" | Score formula: "quotient" (rel/red) or "difference" (rel-red) |
 | `top_m` | int | None | Pre-filter to top_m features by relevance. Default: max(5*k, 250) |
@@ -157,7 +157,7 @@ JMI scores features by: `score(f) = Σ_{s ∈ S} I(f, s; y)` where I is mutual i
 | `k` | int or "auto" | required | Number of features to select |
 | `task` | str | required | "regression" or "classification" |
 | `estimator` | str | "auto" | MI estimator: "gaussian", "binned", "ksg", "r2", or "auto" |
-| `relevance` | str | "f" | Initial relevance measure |
+| `relevance` | str | "f" | Initial relevance measure: regression supports "f" and "rf"; classification supports "f", "ks", and "rf" |
 | `top_m` | int | None | Pre-filter threshold |
 
 **Returns:**
@@ -293,19 +293,21 @@ Sklearn-compatible stability selector using bootstrap resampling.
 | `l1_ratio` | float | 1.0 | L1/L2 ratio: 1.0=Lasso, <1.0=ElasticNet |
 | `task` | str | "regression" | Task type |
 | `max_features` | int | None | Maximum features to select |
+| `block_size` | int or str | "auto" | Block size for time-series/block bootstrap |
+| `block_method` | str | "moving" | Block bootstrap strategy: "moving", "circular", or "stationary" |
 | `use_smart_sampler` | bool | False | Enable leverage-based smart sampling |
 | `sampler_config` | SmartSamplerConfig | None | Smart sampler configuration |
 | `store_coefs` | bool | True | Store coefficients for analysis |
 | `random_state` | int | None | Random seed |
-| `n_jobs` | int | 1 | Parallel jobs for bootstrap |
-| `verbose` | bool | False | Print progress |
+| `n_jobs` | int | -1 | Parallel jobs for bootstrap |
+| `parallel_backend` | str | "threads" | Joblib backend preference |
+| `verbose` | bool | True | Print progress |
 
 **Methods:**
 
 ```python
 # Fit the selector
-selector.fit(X, y, sample_weight=None, groups=None, time=None,
-             block_size="auto", block_method="moving")
+selector.fit(X, y, sample_weight=None, groups=None, time=None)
 
 # Transform data to selected features
 X_selected = selector.transform(X)
@@ -315,7 +317,8 @@ X_selected = selector.fit_transform(X, y)
 
 # Get selected features
 features = selector.get_support(indices=False)  # Boolean mask
-feature_names = selector.get_support(indices=True)  # Names/indices
+feature_indices = selector.get_support(indices=True)  # Integer indices
+feature_names = selector.selected_feature_names_  # Selected feature names
 
 # Get feature information DataFrame
 info = selector.get_feature_info()
@@ -344,13 +347,18 @@ selector = StabilitySelector(threshold=0.6, n_bootstrap=50)
 selector.fit(X, y)
 
 # Get results
-selected = selector.get_support(indices=True)
+feature_indices = selector.get_support(indices=True)
+feature_names = selector.selected_feature_names_
 info = selector.get_feature_info()
 print(info.head(10))
 
 # With block bootstrap for time series
-selector = StabilitySelector(threshold=0.6, n_bootstrap=50)
-selector.fit(X, y, groups=player_ids, time=timestamps, block_method="moving")
+selector = StabilitySelector(
+    threshold=0.6,
+    n_bootstrap=50,
+    block_method="moving",
+)
+selector.fit(X, y, groups=player_ids, time=timestamps)
 
 # Tune threshold
 best = selector.tune_threshold(X, y, thresholds=[0.4, 0.5, 0.6, 0.7, 0.8])
@@ -365,17 +373,14 @@ sift.stability_regression(
     X: Union[pd.DataFrame, np.ndarray],
     y: Union[pd.Series, np.ndarray],
     k: int,
-    *,
-    n_bootstrap: int = 50,
-    threshold: float = 0.6,
-    sample_frac: float = 0.5,
-    alpha: Optional[float] = None,
-    random_state: Optional[int] = None,
-    verbose: bool = False
+    **kwargs
 ) -> List[str]
 ```
 
-Stability selection for regression (function API).
+Stability selection for regression (function API). Keyword arguments are passed to
+`StabilitySelector`, including `sample_weight`, `groups`, `time`, `block_size`,
+`block_method`, `use_smart_sampler`, `sampler_config`, `alpha`, `random_state`,
+and `verbose`.
 
 **Returns:**
 
@@ -390,17 +395,14 @@ sift.stability_classif(
     X: Union[pd.DataFrame, np.ndarray],
     y: Union[pd.Series, np.ndarray],
     k: int,
-    *,
-    n_bootstrap: int = 50,
-    threshold: float = 0.6,
-    sample_frac: float = 0.5,
-    alpha: Optional[float] = None,
-    random_state: Optional[int] = None,
-    verbose: bool = False
+    **kwargs
 ) -> List[str]
 ```
 
-Stability selection for classification (function API).
+Stability selection for classification (function API). Keyword arguments are passed to
+`StabilitySelector`, including `sample_weight`, `groups`, `time`, `block_size`,
+`block_method`, `use_smart_sampler`, `sampler_config`, `alpha`, `random_state`,
+and `verbose`.
 
 ---
 
@@ -410,12 +412,27 @@ Stability selection for classification (function API).
 
 ```python
 class sift.BorutaSelector(
-    estimator: str = "rf",
+    estimator = None,
+    *,
     n_estimators: Union[int, str] = "auto",
-    max_iter: int = 100,
+    task: Literal["regression", "classification"] = "regression",
+    importance: Literal["native", "permutation", "shap"] = "native",
+    max_iter: int = 50,
     alpha: float = 0.05,
-    random_state: Optional[int] = None,
-    verbose: bool = False
+    perc: int = 100,
+    resolve_tentative: bool = True,
+    max_features: Optional[int] = None,
+    shadow_method: str = "auto",
+    shadow_mode: str = "columns",
+    block_size: Union[int, str] = "auto",
+    cat_features: Optional[List[str]] = None,
+    cat_encoding: str = "loo",
+    importance_data: Literal["train", "test"] = "train",
+    test_size: float = 0.3,
+    shap_sample_size: Optional[int] = 2000,
+    early_stop_rounds: int = 5,
+    random_state: int = 0,
+    verbose: bool = True
 )
 ```
 
@@ -491,19 +508,36 @@ sift.catboost_select(
     task: Literal["regression", "classification"] = "regression",
     k: Optional[int] = None,
     min_features: int = 5,
-    algorithm: Literal["forward", "forward_greedy", "shap", "permutation", "prediction"] = "forward",
+    step_function: float = 0.67,
+    feature_counts: Optional[List[int]] = None,
+    selection_patience: int = 3,
+    tolerance: float = 0.01,
+    algorithm: Literal["shap", "permutation", "prediction", "forward", "forward_greedy"] = "shap",
     cv: Optional[Any] = None,
-    n_splits: int = 5,
-    eval_metric: Optional[str] = None,
-    loss_function: Optional[str] = None,
-    higher_is_better: Optional[bool] = None,
-    prefilter_k: Optional[int] = None,
+    n_splits: int = 3,
+    test_size: float = 0.25,
     group_col: Optional[str] = None,
+    sample_weight_col: Optional[str] = None,
+    prefilter_k: Optional[int] = 200,
+    prefilter_method: str = "catboost",
     use_stability: bool = False,
     n_bootstrap: int = 20,
     stability_threshold: float = 0.6,
+    n_estimators: int = 500,
+    learning_rate: Optional[float] = None,
+    max_depth: Optional[int] = 6,
+    eval_metric: Optional[str] = None,
+    loss_function: Optional[str] = None,
     catboost_params: Optional[Dict] = None,
-    random_state: int = 42,
+    steps: int = 6,
+    cat_features: Optional[List[str]] = None,
+    text_features: Optional[List[str]] = None,
+    treat_object_as_categorical: bool = True,
+    train_early_stopping_rounds: int = 20,
+    gpu: bool = False,
+    n_jobs: int = -1,
+    higher_is_better: Optional[bool] = None,
+    random_state: Optional[int] = None,
     verbose: bool = True
 ) -> CatBoostSelectionResult
 ```
@@ -519,19 +553,20 @@ Full-control CatBoost-based feature selection.
 | `task` | str | "regression" | Task type |
 | `k` | int | None | Features to select (None = search for optimal) |
 | `min_features` | int | 5 | Minimum features when searching |
-| `algorithm` | str | "forward" | Selection algorithm |
+| `algorithm` | str | "shap" | Selection algorithm |
 | `cv` | splitter | None | Custom CV splitter (TimeSeriesSplit, GroupKFold, etc.) |
-| `n_splits` | int | 5 | Number of CV splits (if cv is None) |
+| `n_splits` | int | 3 | Number of CV splits (if cv is None) |
 | `eval_metric` | str | None | Evaluation metric (auto-detected if None) |
 | `loss_function` | str | None | Loss function (auto-detected if None) |
 | `higher_is_better` | bool | None | Metric direction (auto-detected if None) |
-| `prefilter_k` | int | None | Two-stage pre-filtering (inside CV) |
+| `prefilter_k` | int | 200 | Two-stage pre-filtering (inside CV) |
 | `group_col` | str | None | Column name for group-aware operations |
+| `sample_weight_col` | str | None | Column name containing sample weights |
 | `use_stability` | bool | False | Enable stability selection |
 | `n_bootstrap` | int | 20 | Bootstrap iterations for stability |
 | `stability_threshold` | float | 0.6 | Selection frequency threshold |
 | `catboost_params` | dict | None | Additional CatBoost parameters |
-| `random_state` | int | 42 | Random seed |
+| `random_state` | int | None | Random seed |
 | `verbose` | bool | True | Print progress |
 
 **Returns:**
@@ -712,11 +747,12 @@ sift.select_cached(
     y: np.ndarray,
     k: int,
     *,
-    method: Literal["mrmr_quot", "mrmr_diff", "jmi", "jmim", "cefsplus"] = "mrmr_quot",
+    method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"] = "cefsplus",
     top_m: Optional[int] = None,
-    corr_prune: float = 0.95,
-    return_objective: bool = False
-) -> Union[List[str], Tuple[List[str], np.ndarray]]
+    corr_prune: Union[float, str, None] = "auto",
+    return_objective: bool = False,
+    return_indices: bool = False
+) -> Union[List[str], Tuple[List[str], np.ndarray], Tuple[List[str], List[int]], Tuple[List[str], List[int], np.ndarray]]
 ```
 
 Select features from a pre-built cache.
@@ -772,7 +808,7 @@ sift.select_k_auto(
     groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     task: Literal["regression", "classification"] = "regression"
-) -> Tuple[int, List[str], Dict[int, float]]
+) -> Tuple[int, List[str], pd.DataFrame]
 ```
 
 Automatically select optimal K via cross-validation or holdout.
@@ -781,7 +817,7 @@ Automatically select optimal K via cross-validation or holdout.
 
 - `best_k` (int): Optimal number of features
 - `selected` (List[str]): Selected feature names
-- `scores` (Dict[int, float]): Scores for each K tried
+- `diagnostics` (pd.DataFrame): Evaluation diagnostics for each K tried
 
 ---
 
@@ -789,21 +825,20 @@ Automatically select optimal K via cross-validation or holdout.
 
 ```python
 sift.select_k_elbow(
-    objective: np.ndarray,
-    *,
+    objective_path: np.ndarray,
     min_k: int = 5,
-    max_k: Optional[int] = None,
+    max_k: int = 100,
     min_rel_gain: float = 0.02,
     patience: int = 3
-) -> Tuple[int, float]
+) -> Tuple[int, pd.DataFrame]
 ```
 
 Select K using elbow detection on objective curve.
 
 **Returns:**
 
-- `elbow_k` (int): K at elbow point
-- `objective_at_k` (float): Objective value at elbow
+- `best_k` (int): K at elbow point
+- `diagnostics` (pd.DataFrame): Objective, gain, and relative-gain diagnostics by K
 
 ---
 
@@ -814,13 +849,20 @@ Select K using elbow detection on objective curve.
 ```python
 @dataclass
 class sift.SmartSamplerConfig:
-    feature_cols: List[str]
-    y_col: str
+    sample_frac: float = 0.1
     group_col: Optional[str] = None
     time_col: Optional[str] = None
-    sample_frac: float = 0.2
-    anchor_strategy: str = "leverage"
-    random_state: int = 42
+    min_per_group: int = 2
+    pilot_sample_size: int = 50000
+    leverage_batch_size: int = 200000
+    svd_sample_size: Optional[int] = None
+    weight_clip_quantile: float = 0.99
+    residual_weight_cap: float = 0.4
+    uniform_floor: float = 0.05
+    anchor_fn: Optional[Callable] = None
+    anchor_max_share: float = 0.4
+    random_state: Optional[int] = 42
+    verbose: bool = True
 ```
 
 Configuration for smart sampling.
@@ -834,16 +876,14 @@ sift.smart_sample(
     df: pd.DataFrame,
     feature_cols: List[str],
     y_col: str,
-    *,
-    group_col: Optional[str] = None,
-    time_col: Optional[str] = None,
-    sample_frac: float = 0.2,
-    anchor_strategy: str = "leverage",
-    random_state: int = 42
+    config: Optional[SmartSamplerConfig] = None,
+    **kwargs
 ) -> pd.DataFrame
 ```
 
-Perform leverage-based smart sampling.
+Perform leverage-based smart sampling. `**kwargs` override fields on
+`SmartSamplerConfig`, such as `group_col`, `time_col`, `sample_frac`,
+`anchor_fn`, and `random_state`.
 
 **Example:**
 
@@ -897,14 +937,18 @@ sift.permutation_importance(
     model,
     X: Union[pd.DataFrame, np.ndarray],
     y: Union[pd.Series, np.ndarray],
-    *,
-    permute_method: Literal["global", "within_group", "block", "circular_shift"] = "global",
+    sample_weight: Optional[np.ndarray] = None,
     groups: Optional[np.ndarray] = None,
-    scoring: Optional[str] = None,
+    time: Optional[np.ndarray] = None,
+    *,
+    scoring: Union[str, Callable] = "neg_mse",
     n_repeats: int = 10,
+    permute_method: Literal["auto", "global", "within_group", "block", "circular_shift"] = "auto",
+    block_size: Union[int, str] = "auto",
+    n_jobs: int = -1,
+    parallel_backend: Literal["threads", "processes"] = "threads",
     random_state: Optional[int] = None,
-    n_jobs: int = 1
-) -> Dict[str, np.ndarray]
+) -> pd.DataFrame
 ```
 
 Compute time-aware permutation importance.
@@ -916,19 +960,21 @@ Compute time-aware permutation importance.
 | `model` | estimator | required | Fitted model with predict method |
 | `X` | DataFrame or ndarray | required | Feature matrix |
 | `y` | Series or ndarray | required | Target variable |
-| `permute_method` | str | "global" | Permutation strategy |
-| `groups` | ndarray | None | Group labels (required for some methods) |
-| `scoring` | str | None | Scoring function |
+| `sample_weight` | ndarray | None | Optional sample weights |
+| `groups` | ndarray | None | Group labels for group-aware permutation |
+| `time` | ndarray | None | Time values for block and circular-shift permutation |
+| `permute_method` | str | "auto" | Permutation strategy |
+| `scoring` | str or callable | "neg_mse" | Scoring function |
 | `n_repeats` | int | 10 | Number of permutation repeats |
+| `block_size` | int or str | "auto" | Block size for block permutation |
 | `random_state` | int | None | Random seed |
-| `n_jobs` | int | 1 | Parallel jobs |
+| `n_jobs` | int | -1 | Parallel jobs |
+| `parallel_backend` | str | "threads" | Joblib backend preference |
 
 **Returns:**
 
-Dictionary with:
-- `importances_mean`: Mean importance per feature
-- `importances_std`: Standard deviation per feature
-- `importances`: Full importance matrix (n_features, n_repeats)
+`pd.DataFrame` with one row per feature and columns such as `feature`,
+`importance_mean`, `importance_std`, and per-repeat importance values.
 
 **Example:**
 
@@ -943,6 +989,7 @@ importance = permutation_importance(
     model, X_test, y_test,
     permute_method="circular_shift",
     groups=player_ids,
+    time=timestamps,
     n_repeats=10
 )
 ```

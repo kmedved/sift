@@ -6,45 +6,74 @@ import pandas as pd
 
 catboost = pytest.importorskip("catboost")
 
-from sift.catboost import (
+from sift.catboost import (  # noqa: E402
     catboost_select,
-    catboost_regression,
     catboost_classif,
+    catboost_regression,
     CatBoostSelectionResult,
-    _resolve_higher_is_better,
     _resolve_metric_and_direction,
     _resolve_loss_function,
     _generate_feature_counts,
     _get_feature_types,
     _aggregate_feature_lists,
+    _choose_catboost_target_k,
+    _select_final_catboost_features,
 )
-from sift._preprocess import best_score_from_dict as _best_score_from_dict
+import sift.catboost as catboost_module  # noqa: E402
+import sift.catboost_common as catboost_common_module  # noqa: E402
+from sift._preprocess import best_score_from_dict as _best_score_from_dict  # noqa: E402
 
 
 class TestScoreDirection:
     """Tests for score direction handling."""
 
     def test_resolve_rmse(self):
-        metric, hib = _resolve_higher_is_better('RMSE', None, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric='RMSE',
+            higher_is_better=None,
+        )
         assert metric == 'RMSE'
         assert hib is False
 
     def test_resolve_auc(self):
-        metric, hib = _resolve_higher_is_better('AUC', None, 'classification')
+        metric, hib = _resolve_metric_and_direction(
+            task='classification',
+            y=pd.Series([0, 1]),
+            eval_metric='AUC',
+            higher_is_better=None,
+        )
         assert metric == 'AUC'
         assert hib is True
 
     def test_resolve_explicit_override(self):
-        metric, hib = _resolve_higher_is_better('RMSE', True, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric='RMSE',
+            higher_is_better=True,
+        )
+        assert metric == 'RMSE'
         assert hib is True  # Explicit override
 
     def test_resolve_default_regression(self):
-        metric, hib = _resolve_higher_is_better(None, None, 'regression')
+        metric, hib = _resolve_metric_and_direction(
+            task='regression',
+            y=pd.Series([0.0, 1.0]),
+            eval_metric=None,
+            higher_is_better=None,
+        )
         assert metric == 'RMSE'
         assert hib is False
 
     def test_resolve_default_classification(self):
-        metric, hib = _resolve_higher_is_better(None, None, 'classification')
+        metric, hib = _resolve_metric_and_direction(
+            task='classification',
+            y=pd.Series([0, 1, 0, 1]),
+            eval_metric=None,
+            higher_is_better=None,
+        )
         assert metric == 'Logloss'
         assert hib is False
 
@@ -66,6 +95,24 @@ class TestScoreDirection:
         assert metric == 'Logloss'
         assert hib is False
 
+    def test_unknown_metric_requires_explicit_direction(self):
+        with pytest.raises(ValueError, match="higher_is_better"):
+            _resolve_metric_and_direction(
+                task="classification",
+                y=pd.Series([0, 1, 0, 1]),
+                eval_metric="AUC_MACRO_BOGUS",
+                higher_is_better=None,
+            )
+
+        metric, hib = _resolve_metric_and_direction(
+            task="classification",
+            y=pd.Series([0, 1, 0, 1]),
+            eval_metric="AUC_MACRO_BOGUS",
+            higher_is_better=True,
+        )
+        assert metric == "AUC_MACRO_BOGUS"
+        assert hib is True
+
     def test_multiclass_loss_function(self):
         """Test that multiclass targets use MultiClass loss."""
         y = pd.Series([0, 1, 2, 0, 1, 2])
@@ -83,6 +130,60 @@ class TestScoreDirection:
         best_k, best_score = _best_score_from_dict(scores, higher_is_better=True)
         assert best_k == 5
         assert best_score == 0.9
+
+    def test_choose_target_k_ignores_nan_scores(self):
+        target_k, best_k, best_score, scores_mean, _ = _choose_catboost_target_k(
+            {5: [float("nan")], 3: [1.0]},
+            k_req=None,
+            resolved_hib=False,
+            tolerance=0.0,
+            selection_patience=3,
+            verbose=False,
+        )
+
+        assert target_k == 3
+        assert best_k == 3
+        assert best_score == 1.0
+        assert scores_mean == {3: 1.0}
+
+    def test_final_selection_requires_recorded_feature_list(self):
+        with pytest.raises(RuntimeError, match="No feature list was recorded"):
+            _select_final_catboost_features(
+                target_k=2,
+                k_req=None,
+                all_features_by_k={},
+                all_features=["b", "a"],
+                prefilter_features_first=None,
+                use_stability=False,
+                stability_threshold=0.6,
+            )
+
+    def test_final_selection_does_not_pad_unrecorded_features(self):
+        selected, _ = _select_final_catboost_features(
+            target_k=3,
+            k_req=3,
+            all_features_by_k={3: [["a"]]},
+            all_features=["a", "b", "c"],
+            prefilter_features_first=None,
+            use_stability=False,
+            stability_threshold=0.6,
+        )
+
+        assert selected == ["a"]
+
+    def test_final_selection_without_stability_does_not_return_stability_scores(self):
+        selected, stability_scores = _select_final_catboost_features(
+            target_k=2,
+            k_req=None,
+            all_features_by_k={2: [["a", "b"], ["a", "c"]]},
+            all_features=["a", "b", "c"],
+            prefilter_features_first=None,
+            use_stability=False,
+            stability_threshold=0.6,
+        )
+
+        assert selected == ["a", "b"]
+        assert stability_scores is None
 
 
 class TestFeatureTypes:
@@ -109,6 +210,95 @@ class TestFeatureTypes:
         )
         assert 'text_col' in text_features
         assert 'text_col' not in cat_features
+
+
+class TestCatBoostInputValidation:
+    """Tests for typo-sensitive input columns."""
+
+    def test_catboost_import_does_not_break_numba_relevance(self):
+        """Importing CatBoost should not make classic filter relevance crash."""
+        from sift import select_mrmr
+
+        rng = np.random.default_rng(20260420)
+        n = 80
+        signal = rng.normal(size=n)
+        X = pd.DataFrame(
+            {
+                "signal": signal,
+                "noise_a": rng.normal(size=n),
+                "noise_b": rng.normal(size=n),
+            }
+        )
+        y = signal + 0.1 * rng.normal(size=n)
+
+        selected = select_mrmr(
+            X,
+            y,
+            k=2,
+            task="regression",
+            estimator="classic",
+            subsample=None,
+            verbose=False,
+        )
+
+        assert selected[0] == "signal"
+
+    def test_missing_group_col_raises(self):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="group_col"):
+            catboost_select(X, y, k=1, group_col="missing", verbose=False)
+
+    def test_missing_sample_weight_col_raises(self):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="sample_weight_col"):
+            catboost_select(X, y, k=1, sample_weight_col="missing", verbose=False)
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"task": "bogus"}, "task=.*invalid"),
+            ({"algorithm": "bogus"}, "algorithm=.*invalid"),
+            ({"prefilter_method": "bogus"}, "prefilter_method=.*invalid"),
+            ({"step_function": 1.0}, "step_function must be a finite float"),
+            ({"use_stability": True, "n_bootstrap": 0}, "n_bootstrap must be a positive integer"),
+        ],
+    )
+    def test_invalid_public_options_raise(self, kwargs, match):
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match=match):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                prefilter_k=None,
+                n_estimators=10,
+                n_splits=2,
+                verbose=False,
+                **kwargs,
+            )
+
+    def test_group_kfold_without_groups_raises(self):
+        from sklearn.model_selection import GroupKFold
+
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="GroupKFold requires group_col"):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                cv=GroupKFold(n_splits=2),
+                prefilter_k=None,
+                n_estimators=10,
+                verbose=False,
+            )
 
 
 class TestFeatureCounts:
@@ -209,6 +399,95 @@ class TestCatBoostRegression:
         )
 
         assert len(selected) == 5
+
+    def test_catboost_prefilter_protects_categorical_and_text_features(self, monkeypatch):
+        class FakePool:
+            def __init__(self, X, **kwargs):
+                self.X = X
+                self.kwargs = kwargs
+
+        class FakeRegressor:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def fit(self, pool):
+                self.pool = pool
+
+            def get_feature_importance(self, pool, type):
+                del pool, type
+                return np.array([10.0, 9.0, 0.1, 0.0], dtype=np.float64)
+
+        monkeypatch.setattr(catboost_common_module, "Pool", FakePool)
+        monkeypatch.setattr(catboost_common_module, "CatBoostRegressor", FakeRegressor)
+        X = pd.DataFrame(
+            {
+                "n0": [0.0, 1.0, 2.0, 3.0],
+                "n1": [1.0, 2.0, 3.0, 4.0],
+                "cat": pd.Series(["a", "b", "a", "c"], dtype="category"),
+                "txt": ["alpha", "beta", "gamma", "delta"],
+            }
+        )
+        y = pd.Series([0.0, 1.0, 0.0, 1.0])
+
+        selected = catboost_common_module._catboost_importance_prefilter(
+            X,
+            y,
+            k=1,
+            task="regression",
+            cat_features=["cat"],
+            text_features=["txt"],
+            random_state=0,
+            n_jobs=1,
+        )
+
+        assert selected == ["n0", "cat", "txt"]
+
+    def test_prefilter_receives_fold_sample_weight(self, monkeypatch):
+        X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+        y = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+        weights = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        train_idx = np.array([0, 1, 3])
+        val_idx = np.array([2, 4])
+        captured = {}
+
+        def fake_prefilter(*args, sample_weight=None, **kwargs):
+            captured["sample_weight"] = sample_weight.copy()
+            return ["a", "b"]
+
+        def fake_select(*args, **kwargs):
+            return {1: 0.1}, {1: ["a"]}
+
+        monkeypatch.setattr(catboost_module, "_prefilter_features", fake_prefilter)
+        monkeypatch.setattr(catboost_module, "_select_features_single_split", fake_select)
+
+        catboost_module._run_catboost_split_evaluation(
+            X_work=X,
+            y=y,
+            sample_weights=weights,
+            splits=[(train_idx, val_idx)],
+            all_features=list(X.columns),
+            counts=[1],
+            task="regression",
+            model_params={},
+            cat_features_final=[],
+            text_feat=[],
+            prefilter_k=2,
+            prefilter_method="mrmr",
+            random_state=0,
+            n_jobs=1,
+            algorithm="prediction",
+            resolved_metric="RMSE",
+            resolved_hib=False,
+            train_early_stopping_rounds=3,
+            steps=1,
+            k_req=1,
+            verbose=False,
+        )
+
+        pd.testing.assert_series_equal(
+            captured["sample_weight"],
+            weights.iloc[train_idx],
+        )
 
     def test_prediction_algorithm(self):
         """Test fastest algorithm option."""
@@ -371,6 +650,30 @@ class TestKGuarantee:
             )
             assert len(result.selected_features) == k, f"Expected {k} features, got {len(result.selected_features)}"
 
+    def test_k_larger_than_feature_count_caps(self):
+        """When K exceeds available features, the selector caps to n_features."""
+        np.random.seed(42)
+        n, p = 120, 4
+        X = pd.DataFrame(np.random.randn(n, p), columns=[f'f{i}' for i in range(p)])
+        y = X['f0'] + np.random.randn(n) * 0.3
+
+        import warnings as w
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            result = catboost_select(
+                X, y, k=10,
+                task='regression',
+                n_splits=2,
+                prefilter_k=None,
+                n_estimators=30,
+                verbose=False,
+                random_state=42,
+            )
+
+        assert len(result.selected_features) == p
+        assert result.best_k == p
+        assert any("exceeds max evaluated feature count" in str(item.message) for item in caught)
+
     def test_exact_k_with_stability(self):
         """K guarantee should hold even with stability selection."""
         np.random.seed(42)
@@ -529,6 +832,48 @@ class TestResultMethods:
         assert len(parsimonious) == 3
         assert parsimonious == ['f0', 'f1', 'f2']
 
+    def test_features_within_tolerance_handles_negative_lower_is_better_scores(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0", "f1", "f2", "f3", "f4"],
+            best_k=5,
+            scores_by_k={5: -1.0, 3: -0.95, 2: -0.8},
+            scores_std_by_k={},
+            feature_importances=pd.Series(dtype=float),
+            features_by_k={5: ["f0", "f1", "f2", "f3", "f4"], 3: ["f0", "f1", "f2"]},
+            metric="NEG_LOSS",
+            higher_is_better=False,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.1) == ["f0", "f1", "f2"]
+
+    def test_features_within_tolerance_handles_negative_higher_is_better_scores(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0", "f1", "f2", "f3", "f4"],
+            best_k=5,
+            scores_by_k={5: -0.5, 3: -0.52, 2: -0.7},
+            scores_std_by_k={},
+            feature_importances=pd.Series(dtype=float),
+            features_by_k={5: ["f0", "f1", "f2", "f3", "f4"], 3: ["f0", "f1", "f2"]},
+            metric="NEG_R2",
+            higher_is_better=True,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.1) == ["f0", "f1", "f2"]
+
+    def test_features_within_tolerance_fallback_preserves_tied_importance_order(self):
+        result = CatBoostSelectionResult(
+            selected_features=["b", "a"],
+            best_k=2,
+            scores_by_k={2: 1.0},
+            scores_std_by_k={},
+            feature_importances=pd.Series({"b": 1.0, "a": 1.0, "c": 0.0}),
+            features_by_k={},
+            metric="AUC",
+            higher_is_better=True,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.0) == ["b", "a"]
+
     def test_score_at_k(self):
         result = CatBoostSelectionResult(
             selected_features=['f0'],
@@ -613,7 +958,7 @@ class TestCatFeaturesParameter:
         import warnings as w
         with w.catch_warnings(record=True) as caught:
             w.simplefilter("always")
-            result = catboost_select(
+            catboost_select(
                 X, y, k=2,
                 task='regression',
                 treat_object_as_categorical=False,

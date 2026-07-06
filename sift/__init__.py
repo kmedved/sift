@@ -5,6 +5,7 @@ from sift.api import (
     build_cache,
     select_cached,
     select_cefsplus,
+    select_cefsplus_binary,
     select_jmi,
     select_jmim,
     select_mrmr,
@@ -12,12 +13,22 @@ from sift.api import (
 from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boruta_shap
 from sift.importance import permutation_importance
 from sift.sampling import SmartSamplerConfig, cross_section_config, panel_config, smart_sample
-from sift.selection.auto_k import AutoKConfig, compute_objective_for_path, select_k_auto, select_k_elbow
+from sift.selectors import CEFSPlusBinarySelector, CEFSPlusSelector, JMISelector, JMIMSelector, MRMRSelector
+from sift.selection.auto_k import (
+    AutoKConfig,
+    compute_objective_for_path,
+    select_k_auto,
+    select_k_elbow,
+    select_k_penalized_objective,
+)
+from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
+from sift.selection.result import FilterSelectionResult
 from sift.stability import StabilitySelector, stability_classif, stability_regression
 
 
 def __getattr__(name):
     if name in ("catboost_select", "catboost_regression", "catboost_classif"):
+        # CatBoost is optional; keep it lazy so importing sift does not require it.
         from sift import catboost
 
         return getattr(catboost, name)
@@ -30,17 +41,27 @@ __all__ = [
     "build_cache",
     "select_cached",
     "select_cefsplus",
+    "select_cefsplus_binary",
     "select_jmi",
     "select_jmim",
     "select_mrmr",
     "AutoKConfig",
+    "FeaturePathEvaluationResult",
+    "FilterSelectionResult",
+    "evaluate_feature_path",
     "select_k_auto",
     "select_k_elbow",
+    "select_k_penalized_objective",
     "compute_objective_for_path",
     "BorutaSelector",
     "BorutaResult",
     "select_boruta",
     "select_boruta_shap",
+    "MRMRSelector",
+    "JMISelector",
+    "JMIMSelector",
+    "CEFSPlusSelector",
+    "CEFSPlusBinarySelector",
     "permutation_importance",
     "SmartSamplerConfig",
     "smart_sample",

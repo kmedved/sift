@@ -5,23 +5,10 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from numba import njit, prange
 from scipy.spatial import cKDTree
 from scipy.special import digamma
 
-
-@njit(cache=True)
-def _entropy_from_counts(counts: np.ndarray) -> float:
-    """Entropy from count array."""
-    n = counts.sum()
-    if n == 0:
-        return 0.0
-    p = counts / n
-    ent = 0.0
-    for i in range(len(p)):
-        if p[i] > 1e-12:
-            ent -= p[i] * np.log(p[i])
-    return ent
+from sift._numba import njit_optional_cache
 
 
 def _weighted_entropy_from_codes(
@@ -81,16 +68,7 @@ def binned_joint_mi(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_arr = np.asarray(y)
-        if (
-            np.issubdtype(y_arr.dtype, np.integer)
-            and y_arr.size > 0
-            and y_arr.min() >= 0
-            and y_arr.max() <= 200_000
-        ):
-            y_binned = y_arr.astype(np.int64, copy=False)
-        else:
-            y_binned = _factorize(y)
+        y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)
@@ -117,7 +95,7 @@ def binned_joint_mi(
     return scores
 
 
-@njit(cache=True)
+@njit_optional_cache(cache=True)
 def r2_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
@@ -220,7 +198,9 @@ def r2_joint_mi(
     return scores
 
 
-@njit(cache=True, parallel=True)
+# Keep this kernel serial for the same CatBoost/OpenMP compatibility reason as
+# the relevance kernels.
+@njit_optional_cache(cache=True)
 def r2_joint_mi_indexed(
     X_full: np.ndarray,
     cand_idx: np.ndarray,
@@ -277,7 +257,7 @@ def r2_joint_mi_indexed(
 
     scores = np.empty(m, dtype=np.float64)
 
-    for ci in prange(m):
+    for ci in range(m):
         j = cand_idx[ci]
 
         f_mean = 0.0
@@ -313,6 +293,96 @@ def r2_joint_mi_indexed(
     return scores
 
 
+def _weighted_standardize_2d(
+    X: np.ndarray,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """Weighted-standardize columns with the same zero-variance convention as R2 JMI."""
+    X_arr = np.asarray(X, dtype=np.float64)
+    mean = (X_arr * w[:, None]).sum(axis=0) / w_sum
+    centered = X_arr - mean
+    var = (centered * centered * w[:, None]).sum(axis=0) / w_sum
+    std = np.where(var > 1e-12, np.sqrt(var), 1.0)
+    return centered / std
+
+
+def _weighted_standardize_1d(
+    x: np.ndarray,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """Weighted-standardize one vector with the same zero-variance convention as R2 JMI."""
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    mean = float(np.dot(w, x_arr) / w_sum)
+    centered = x_arr - mean
+    var = float(np.dot(w, centered * centered) / w_sum)
+    std = np.sqrt(var) if var > 1e-12 else 1.0
+    return centered / std
+
+
+def _prepare_r2_joint_mi_state(
+    X_full: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Precompute standardized features and feature-target correlations for R2 JMI."""
+    w_arr = np.asarray(w, dtype=np.float64).ravel()
+    w_sum = float(w_arr.sum())
+    if w_sum <= 0.0:
+        raise ValueError("w must have positive total weight")
+
+    Z = _weighted_standardize_2d(X_full, w_arr, w_sum)
+    y_s = _weighted_standardize_1d(y, w_arr, w_sum)
+    r_y = Z.T @ (w_arr * y_s) / w_sum
+    return Z, r_y, w_arr, w_sum
+
+
+def _r2_joint_mi_scores_from_correlations(
+    r_ys: float,
+    r_yf: np.ndarray,
+    r_fs: np.ndarray,
+) -> np.ndarray:
+    """Vectorized R2 JMI formula from weighted correlations."""
+    denom = 1.0 - r_fs * r_fs
+    r2 = np.empty_like(r_yf, dtype=np.float64)
+
+    near_singular = denom < 1e-8
+    r2[near_singular] = r_ys * r_ys
+
+    stable = ~near_singular
+    if np.any(stable):
+        a = r_yf[stable] - r_ys * r_fs[stable]
+        r2[stable] = r_ys * r_ys + (a * a) / denom[stable]
+
+    r2 = np.clip(r2, 0.0, 0.99999)
+    return -0.5 * np.log(1.0 - r2)
+
+
+def _r2_joint_mi_indexed_from_state(
+    Z_full: np.ndarray,
+    r_y: np.ndarray,
+    cand_idx: np.ndarray,
+    selected_idx: int,
+    w: np.ndarray,
+    w_sum: float,
+) -> np.ndarray:
+    """R2 JMI for candidate indices using precomputed standardized features."""
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    if cand_idx.size == 0:
+        return np.empty(0, dtype=np.float64)
+    if w_sum <= 0.0:
+        return np.zeros(cand_idx.size, dtype=np.float64)
+
+    selected_idx = int(selected_idx)
+    r_ys = float(r_y[selected_idx])
+    r_yf = r_y[cand_idx]
+    weighted_selected = w * Z_full[:, selected_idx]
+    r_fs_all = Z_full.T @ weighted_selected / w_sum
+    r_fs = r_fs_all[cand_idx]
+    return _r2_joint_mi_scores_from_correlations(r_ys, r_yf, r_fs)
+
+
 def binned_joint_mi_indexed(
     X_full: np.ndarray,
     cand_idx: np.ndarray,
@@ -322,7 +392,11 @@ def binned_joint_mi_indexed(
     n_bins: int = 10,
     y_kind: Literal["discrete", "continuous"] = "continuous",
 ) -> np.ndarray:
-    """Binned joint MI WITHOUT candidate-matrix copying."""
+    """Binned joint MI with streaming per-candidate binning (low-memory).
+
+    Convenience wrapper; for repeated scoring, prebin once with
+    ``quantile_bin_matrix`` + ``binned_joint_mi_indexed_prebinned``.
+    """
     X_full = np.asarray(X_full)
     if X_full.ndim != 2:
         raise ValueError("X_full must be 2D")
@@ -340,16 +414,7 @@ def binned_joint_mi_indexed(
     s_binned = _quantile_bin(selected, n_bins)
 
     if y_kind == "discrete":
-        y_arr = np.asarray(y)
-        if (
-            np.issubdtype(y_arr.dtype, np.integer)
-            and y_arr.size > 0
-            and y_arr.min() >= 0
-            and y_arr.max() <= 200_000
-        ):
-            y_binned = y_arr.astype(np.int64, copy=False)
-        else:
-            y_binned = _factorize(y)
+        y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
         y_binned = _quantile_bin(y, n_bins)
@@ -377,6 +442,91 @@ def binned_joint_mi_indexed(
     return scores
 
 
+def binned_joint_mi_indexed_prebinned(
+    X_binned: np.ndarray,
+    cand_idx: np.ndarray,
+    s_binned: np.ndarray,
+    y_binned: np.ndarray,
+    w: np.ndarray,
+    n_bins: int,
+    n_y_bins: int,
+) -> np.ndarray:
+    """Binned joint MI with prebinned candidate matrix and target."""
+    X_binned = np.asarray(X_binned)
+    if X_binned.ndim != 2:
+        raise ValueError("X_binned must be 2D")
+
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    m = cand_idx.size
+    if m == 0:
+        return np.empty(0, dtype=np.float64)
+
+    w = np.asarray(w, dtype=np.float64).ravel()
+    w_sum = float(w.sum())
+    if w_sum <= 0.0:
+        return np.zeros(m, dtype=np.float64)
+
+    s_binned = np.asarray(s_binned, dtype=np.int64).ravel()
+    y_binned = np.asarray(y_binned, dtype=np.int64).ravel()
+    if X_binned.shape[0] != s_binned.size or s_binned.size != y_binned.size:
+        raise ValueError("Row mismatch between X_binned, s_binned, y_binned")
+
+    h_y = _weighted_entropy_from_codes(y_binned, w, n_states=n_y_bins, w_sum=w_sum)
+
+    fs_states = n_bins * n_bins
+    fsy_states = fs_states * n_y_bins
+
+    scores = np.empty(m, dtype=np.float64)
+
+    for ci in range(m):
+        j = int(cand_idx[ci])
+        f_binned = X_binned[:, j]
+
+        fs_binned = f_binned * n_bins + s_binned
+        fsy_binned = fs_binned * n_y_bins + y_binned
+
+        h_fs = _weighted_entropy_from_codes(fs_binned, w, n_states=fs_states, w_sum=w_sum)
+        h_fsy = _weighted_entropy_from_codes(fsy_binned, w, n_states=fsy_states, w_sum=w_sum)
+
+        scores[ci] = max(0.0, h_fs + h_y - h_fsy)
+
+    return scores
+
+
+def quantile_bin_matrix(X: np.ndarray, n_bins: int) -> np.ndarray:
+    """Quantile-bin each column of X into integer codes."""
+    X = np.asarray(X)
+    if X.ndim != 2:
+        raise ValueError("X must be 2D")
+    n, p = X.shape
+    out = np.empty((n, p), dtype=np.int32)
+    for j in range(p):
+        out[:, j] = _quantile_bin(X[:, j], n_bins)
+    return out
+
+
+def quantile_bin_matrix_indexed(
+    X_full: np.ndarray,
+    cand_idx: np.ndarray,
+    n_bins: int,
+) -> np.ndarray:
+    """Quantile-bin candidate columns into an (n, m) int32 matrix.
+
+    WARNING: allocates O(n*m) memory; intended for smaller problems or when
+    you explicitly want prebinned matrices.
+    """
+    X_full = np.asarray(X_full)
+    if X_full.ndim != 2:
+        raise ValueError("X_full must be 2D")
+    cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
+    n = X_full.shape[0]
+    m = cand_idx.size
+    out = np.empty((n, m), dtype=np.int32)
+    for i, j in enumerate(cand_idx):
+        out[:, i] = _quantile_bin(X_full[:, int(j)], n_bins)
+    return out
+
+
 def ksg_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
@@ -393,21 +543,21 @@ def ksg_joint_mi(
 
     y_s = (y - y.mean()) / (y.std() + 1e-10)
     s_s = (selected - selected.mean()) / (selected.std() + 1e-10)
+    Y_marginal = y_s.reshape(-1, 1)
+    tree_y = cKDTree(Y_marginal)
 
     for j in range(p):
         f = candidates[:, j]
         f_s = (f - f.mean()) / (f.std() + 1e-10)
 
         X_joint = np.column_stack([f_s, s_s])
-        Y_marginal = y_s.reshape(-1, 1)
         XY_full = np.column_stack([f_s, s_s, y_s])
 
         tree_full = cKDTree(XY_full)
         tree_x = cKDTree(X_joint)
-        tree_y = cKDTree(Y_marginal)
 
         dists, _ = tree_full.query(XY_full, k=k + 1, p=np.inf)
-        eps = np.maximum(dists[:, -1] - 1e-15, 0.0)
+        eps = np.nextafter(dists[:, -1], 0.0)
 
         n_x = _safe_count_neighbors(tree_x, X_joint, eps, n)
         n_y = _safe_count_neighbors(tree_y, Y_marginal, eps, n)
@@ -427,8 +577,6 @@ def _quantile_bin(x: np.ndarray, n_bins: int) -> np.ndarray:
         return np.zeros(len(x), dtype=np.int32)
     percentiles = np.linspace(0, 100, n_bins + 1)
     bins = np.percentile(x, percentiles)
-    bins[0] -= 1e-10
-    bins[-1] += 1e-10
     return np.digitize(x, bins[1:-1]).astype(np.int32)
 
 
@@ -438,26 +586,19 @@ def _factorize(x: np.ndarray) -> np.ndarray:
     return codes.astype(np.int32)
 
 
-def _entropy_from_array(x: np.ndarray) -> float:
-    """Entropy from discrete array."""
-    _, counts = np.unique(x, return_counts=True)
-    return _entropy_from_counts(counts)
+def _compact_discrete_target_codes(y: np.ndarray) -> np.ndarray:
+    """Return dense non-negative target codes for discrete MI targets."""
+    y_arr = np.asarray(y)
+    if not np.issubdtype(y_arr.dtype, np.integer):
+        return _factorize(y_arr)
 
-
-def _weighted_entropy_from_array(x: np.ndarray, w: np.ndarray) -> float:
-    """Weighted entropy from discrete array."""
-    unique_vals = np.unique(x)
-    w_sum = w.sum()
-    if w_sum <= 0:
-        return 0.0
-
-    ent = 0.0
-    for val in unique_vals:
-        mask = x == val
-        p = w[mask].sum() / w_sum
-        if p > 1e-12:
-            ent -= p * np.log(p)
-    return ent
+    if y_arr.size == 0:
+        return y_arr.astype(np.int64, copy=False)
+    min_value = int(y_arr.min())
+    max_value = int(y_arr.max())
+    if min_value >= 0 and max_value < y_arr.size:
+        return y_arr.astype(np.int64, copy=False)
+    return _factorize(y_arr)
 
 
 def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, n: int) -> np.ndarray:

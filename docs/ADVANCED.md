@@ -37,16 +37,16 @@ from sift import StabilitySelector
 selector = StabilitySelector(
     n_bootstrap=50,
     threshold=0.6,
-    task="regression"
+    task="regression",
+    block_size="auto",          # sqrt(n_per_group) by default
+    block_method="moving"       # "moving", "circular", or "stationary"
 )
 
 # Block bootstrap preserves temporal structure
 selector.fit(
     X, y,
     groups=entity_ids,          # e.g., player_id, stock_ticker
-    time=timestamps,            # temporal ordering
-    block_size="auto",          # sqrt(n_per_group) by default
-    block_method="moving"       # "moving", "circular", or "stationary"
+    time=timestamps             # temporal ordering
 )
 ```
 
@@ -76,6 +76,8 @@ result = sift.catboost_select(
 **Custom Blocked Time Series Split:**
 
 ```python
+import numpy as np
+
 class BlockedTimeSeriesSplit:
     """Time series split with gap between train and validation."""
 
@@ -111,6 +113,7 @@ importance = permutation_importance(
     model, X_test, y_test,
     permute_method="circular_shift",  # Preserves temporal structure
     groups=entity_ids,
+    time=timestamps,
     n_repeats=10
 )
 ```
@@ -216,13 +219,16 @@ selected = select_mrmr(
 
 ```python
 # For true panel data: groups + time
-selector = StabilitySelector(n_bootstrap=50, threshold=0.6)
+selector = StabilitySelector(
+    n_bootstrap=50,
+    threshold=0.6,
+    block_size="auto",
+    block_method="moving",
+)
 selector.fit(
     X, y,
     groups=player_ids,
     time=game_dates,
-    block_size="auto",
-    block_method="moving"
 )
 ```
 
@@ -271,11 +277,12 @@ selected = select_cefsplus(X, y, k="auto", auto_k_config=config)
 4. Return features up to that point
 
 ```python
-from sift import select_k_elbow, compute_objective_for_path
+from sift import build_cache, select_k_elbow, compute_objective_for_path
 
 # Manual elbow detection
-objective = compute_objective_for_path(X, y, feature_path)
-elbow_k, objective_at_k = select_k_elbow(
+cache = build_cache(X)
+objective = compute_objective_for_path(cache, y, feature_path)
+elbow_k, diagnostics = select_k_elbow(
     objective,
     min_k=5,
     max_k=100,
@@ -333,8 +340,7 @@ sampled = smart_sample(
     y_col="target",
     group_col="user_id",
     time_col="timestamp",
-    sample_frac=0.15,
-    anchor_strategy="leverage"
+    sample_frac=0.15
 )
 ```
 
@@ -557,10 +563,11 @@ selector.fit(X, y, sample_weight=weights)
 import sift
 
 # CatBoost handles weights internally
+df = X.assign(weight=weights)
 result = sift.catboost_select(
-    X, y, k=20,
+    df, y, k=20,
     task="regression",
-    catboost_params={"sample_weight": weights}
+    sample_weight_col="weight"
 )
 ```
 
