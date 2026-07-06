@@ -20,6 +20,7 @@ from sift.catboost import (  # noqa: E402
     _select_final_catboost_features,
 )
 import sift.catboost as catboost_module  # noqa: E402
+import sift.catboost_common as catboost_common_module  # noqa: E402
 from sift._preprocess import best_score_from_dict as _best_score_from_dict  # noqa: E402
 
 
@@ -398,6 +399,48 @@ class TestCatBoostRegression:
         )
 
         assert len(selected) == 5
+
+    def test_catboost_prefilter_protects_categorical_and_text_features(self, monkeypatch):
+        class FakePool:
+            def __init__(self, X, **kwargs):
+                self.X = X
+                self.kwargs = kwargs
+
+        class FakeRegressor:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def fit(self, pool):
+                self.pool = pool
+
+            def get_feature_importance(self, pool, type):
+                del pool, type
+                return np.array([10.0, 9.0, 0.1, 0.0], dtype=np.float64)
+
+        monkeypatch.setattr(catboost_common_module, "Pool", FakePool)
+        monkeypatch.setattr(catboost_common_module, "CatBoostRegressor", FakeRegressor)
+        X = pd.DataFrame(
+            {
+                "n0": [0.0, 1.0, 2.0, 3.0],
+                "n1": [1.0, 2.0, 3.0, 4.0],
+                "cat": pd.Series(["a", "b", "a", "c"], dtype="category"),
+                "txt": ["alpha", "beta", "gamma", "delta"],
+            }
+        )
+        y = pd.Series([0.0, 1.0, 0.0, 1.0])
+
+        selected = catboost_common_module._catboost_importance_prefilter(
+            X,
+            y,
+            k=1,
+            task="regression",
+            cat_features=["cat"],
+            text_features=["txt"],
+            random_state=0,
+            n_jobs=1,
+        )
+
+        assert selected == ["n0", "cat", "txt"]
 
     def test_prefilter_receives_fold_sample_weight(self, monkeypatch):
         X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))

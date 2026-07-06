@@ -20,20 +20,15 @@ def _extract_docs_import_names(text: str) -> set[str]:
     return names
 
 
-def _read_setup_extras() -> set[str]:
-    module = ast.parse((ROOT / "setup.py").read_text(encoding="utf8"))
-    for node in module.body:
-        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
-            continue
-        call = node.value
-        if getattr(call.func, "id", None) != "setup":
-            continue
-        for keyword in call.keywords:
-            if keyword.arg != "extras_require":
-                continue
-            extras = ast.literal_eval(keyword.value)
-            return set(extras)
-    raise AssertionError("Could not find extras_require in setup.py")
+def _read_pyproject_extras() -> set[str]:
+    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf8")
+    match = re.search(
+        r"^\[project\.optional-dependencies\]\n(.*?)(?=^\[|\Z)",
+        pyproject_text,
+        re.S | re.M,
+    )
+    assert match, "Could not find project.optional-dependencies in pyproject.toml"
+    return set(re.findall(r"^([A-Za-z0-9_-]+)\s*=", match.group(1), re.M))
 
 
 def test_docs_top_level_exports_match_package_public_api():
@@ -44,9 +39,9 @@ def test_docs_top_level_exports_match_package_public_api():
     assert documented == expected
 
 
-def test_docs_install_extras_match_setup_py():
+def test_docs_install_extras_match_pyproject():
     docs_text = (ROOT / "DOCS.MD").read_text(encoding="utf8")
     docs_extras = set(re.findall(r'python -m pip install -e "?\.\[([^\]]+)\]"?', docs_text))
-    setup_extras = _read_setup_extras()
+    pyproject_extras = _read_pyproject_extras()
 
-    assert docs_extras == setup_extras
+    assert docs_extras == pyproject_extras

@@ -11,20 +11,6 @@ from scipy.special import digamma
 from sift._numba import njit_optional_cache
 
 
-@njit_optional_cache(cache=True)
-def _entropy_from_counts(counts: np.ndarray) -> float:
-    """Entropy from count array."""
-    n = counts.sum()
-    if n == 0:
-        return 0.0
-    p = counts / n
-    ent = 0.0
-    for i in range(len(p)):
-        if p[i] > 1e-12:
-            ent -= p[i] * np.log(p[i])
-    return ent
-
-
 def _weighted_entropy_from_codes(
     codes: np.ndarray,
     w: np.ndarray,
@@ -557,18 +543,18 @@ def ksg_joint_mi(
 
     y_s = (y - y.mean()) / (y.std() + 1e-10)
     s_s = (selected - selected.mean()) / (selected.std() + 1e-10)
+    Y_marginal = y_s.reshape(-1, 1)
+    tree_y = cKDTree(Y_marginal)
 
     for j in range(p):
         f = candidates[:, j]
         f_s = (f - f.mean()) / (f.std() + 1e-10)
 
         X_joint = np.column_stack([f_s, s_s])
-        Y_marginal = y_s.reshape(-1, 1)
         XY_full = np.column_stack([f_s, s_s, y_s])
 
         tree_full = cKDTree(XY_full)
         tree_x = cKDTree(X_joint)
-        tree_y = cKDTree(Y_marginal)
 
         dists, _ = tree_full.query(XY_full, k=k + 1, p=np.inf)
         eps = np.nextafter(dists[:, -1], 0.0)
@@ -591,8 +577,6 @@ def _quantile_bin(x: np.ndarray, n_bins: int) -> np.ndarray:
         return np.zeros(len(x), dtype=np.int32)
     percentiles = np.linspace(0, 100, n_bins + 1)
     bins = np.percentile(x, percentiles)
-    bins[0] -= 1e-10
-    bins[-1] += 1e-10
     return np.digitize(x, bins[1:-1]).astype(np.int32)
 
 
@@ -615,28 +599,6 @@ def _compact_discrete_target_codes(y: np.ndarray) -> np.ndarray:
     if min_value >= 0 and max_value < y_arr.size:
         return y_arr.astype(np.int64, copy=False)
     return _factorize(y_arr)
-
-
-def _entropy_from_array(x: np.ndarray) -> float:
-    """Entropy from discrete array."""
-    _, counts = np.unique(x, return_counts=True)
-    return _entropy_from_counts(counts)
-
-
-def _weighted_entropy_from_array(x: np.ndarray, w: np.ndarray) -> float:
-    """Weighted entropy from discrete array."""
-    unique_vals = np.unique(x)
-    w_sum = w.sum()
-    if w_sum <= 0:
-        return 0.0
-
-    ent = 0.0
-    for val in unique_vals:
-        mask = x == val
-        p = w[mask].sum() / w_sum
-        if p > 1e-12:
-            ent -= p * np.log(p)
-    return ent
 
 
 def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, n: int) -> np.ndarray:

@@ -425,9 +425,15 @@ def _catboost_importance_prefilter(
     feature_names = list(X_train.columns)
 
     importance_series = pd.Series(importance, index=feature_names)
-    top_k = importance_series.nlargest(k).index.tolist()
+    ranked = importance_series.sort_values(ascending=False, kind="mergesort")
+    top_k = ranked.head(k).index.tolist()
+    protected = [
+        col
+        for col in [*cat_features, *text_features]
+        if col in X_train.columns and col not in top_k
+    ]
 
-    return top_k
+    return top_k + protected
 
 
 # =============================================================================
