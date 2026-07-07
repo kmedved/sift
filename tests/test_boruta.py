@@ -651,12 +651,33 @@ class TestBorutaShap:
         self, monkeypatch, y, expected_loss
     ):
         """Default SHAP classification estimator should pick the right loss."""
-        pytest.importorskip("catboost")
+        import sys
+        import types
+
         rng = np.random.default_rng(123)
         X = pd.DataFrame(
             rng.normal(size=(y.shape[0], 4)), columns=[f"f{i}" for i in range(4)]
         )
         captured = {}
+
+        class FakeCatBoost:
+            def __init__(self, **params):
+                self._params = dict(params)
+
+            def get_params(self, deep=False):
+                return dict(self._params)
+
+            def get_all_params(self):
+                return dict(self._params)
+
+            def set_params(self, **params):
+                self._params.update(params)
+                return self
+
+        fake_catboost = types.ModuleType("catboost")
+        fake_catboost.CatBoostClassifier = FakeCatBoost
+        fake_catboost.CatBoostRegressor = FakeCatBoost
+        monkeypatch.setitem(sys.modules, "catboost", fake_catboost)
 
         def fake_compute_importance(self, est, X, y, w_score, **kwargs):
             del kwargs
