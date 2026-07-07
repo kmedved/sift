@@ -1,0 +1,22 @@
+# Release Notes
+
+## 0.7.0
+
+- Added q-calibrated Gaussian-copula knockoff selection: `select_fdr`,
+  `KnockoffSelector`, `sample_knockoffs`, feature-group thresholding, and
+  approximate plug-in validity metadata.
+- Accelerated Gaussian cache construction by vectorizing the weighted
+  rank-Gaussian transform; this benefits all Gaussian/cache selectors, not only
+  knockoffs.
+- Added tie-safe `statistic="cefsplus"` for knockoffs, with objective-gain
+  scoring and optional `min_gain_ratio` early stopping for large runs.
+- Implemented diagonal coordinate-descent `s_method="mvr"` and `"me"` optimizers
+  for the MVR and maximum-entropy knockoff objectives.
+- Weighted `build_cache(..., subsample=...)` now samples from positive-weight
+  rows. Seeded weighted caches can choose different rows than pre-release builds;
+  unweighted seeded caches preserve the old row choices.
+- Knockoff noise now uses NumPy float32 standard-normal draws. Seeded knockoff
+  samples can differ from pre-release builds for the same `random_state`.
+- Documentation and metadata consistently frame knockoff FDR control as an
+  approximate plug-in Gaussian-copula result unless the fitted feature model is
+  the true Model-X distribution.

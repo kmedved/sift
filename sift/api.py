@@ -17,6 +17,11 @@ from sift.selection.filter_api import (
     select_jmim,
     select_mrmr,
 )
+from sift.selection.knockoff_filter import (
+    KnockoffSelectionResult,
+    sample_knockoffs,
+    select_fdr,
+)
 
 __all__ = [
     "FeatureCache",
@@ -28,7 +33,10 @@ __all__ = [
     "select_cached",
     "select_cefsplus",
     "select_cefsplus_binary",
+    "select_fdr",
     "select_jmi",
     "select_jmim",
     "select_mrmr",
+    "KnockoffSelectionResult",
+    "sample_knockoffs",
 ]

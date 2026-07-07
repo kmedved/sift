@@ -157,6 +157,37 @@ rows; combining them with `importance_data="test"` would be misleading. Either
 switch to `importance_data="train"` or pick a held-out-compatible backend
 (`importance="shap"`).
 
+## Knockoff FDR
+
+### `select_fdr` selected nothing
+
+An empty knockoff result is a valid answer: no feature survived the requested
+q threshold. Reasonable next checks are to inspect `result.W`, raise `q`, use
+`offset=0` when modified-knockoff/mFDR-style control is acceptable, or run
+`n_draws > 1` for stability. Do not rerun with changing seeds until something
+selects; that invalidates the meaning of the threshold.
+
+### `Gaussian knockoff covariance was shrunk`
+
+This warning means the empirical copula correlation matrix was not numerically
+positive definite enough, so SIFT mixed it with the identity before sampling
+knockoffs. Inspect `result.selector_metadata["gamma"]` and `["lambda_min"]`.
+Large `gamma` usually means duplicated or near-duplicated features; deduplicate
+or group known feature families before interpreting power.
+
+### Knockoff selections vary across runs
+
+Single-draw knockoffs are randomized by design. Set `random_state` for
+reproducibility, or use `n_draws > 1` with `eta` to select by draw frequency.
+Derandomized results are still reported as approximate plug-in selections.
+
+### Integer multiclass target warning
+
+`select_fdr` treats `y` as a continuous numeric target. Integer labels with
+3-20 unique values look like categorical multiclass labels, so SIFT warns once.
+For multiclass discovery, create one-vs-rest targets per class, run `select_fdr`
+on each target, and combine or compare the selected feature sets.
+
 ## Cache
 
 ### `ValueError: y has N rows but cache was built from M rows`

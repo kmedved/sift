@@ -12,7 +12,8 @@ error messages and common pitfalls see [troubleshooting](troubleshooting.md).
 | Joint mutual-information ranking | `select_jmi` or `select_jmim` |
 | Gaussian-copula regression filter with objective diagnostics | `select_cefsplus` |
 | Binary logistic CEFS+ path | `select_cefsplus_binary` |
-| Sklearn pipeline compatibility | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector` |
+| q-calibrated feature set instead of fixed k | `select_fdr` or `KnockoffSelector` |
+| Sklearn pipeline compatibility | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector` |
 | Robust selection across resamples | `StabilitySelector` |
 | Large panel or cross-section subsampling | `smart_sample` |
 | Model-agnostic importance after fitting a model | `permutation_importance` |
@@ -52,6 +53,70 @@ selected = select_cefsplus_binary(
 Use binary CEFS+ when the target is Bernoulli-like and logistic conditional
 information is a better fit than a Gaussian target approximation.
 `sample_weight` and `class_weight` are honored directly by `loss="logloss"`.
+
+## FDR-Controlled Knockoffs
+
+```python
+from sift import select_fdr
+
+result = select_fdr(X, y, q=0.1, n_draws=1, verbose=False)
+selected = result.selected_features
+ranking = result.get_feature_ranking()
+```
+
+Use knockoffs when you want a q-calibrated trusted set instead of asking for a
+fixed number of features. The v1 implementation samples second-order Gaussian
+knockoffs in the rank-Gaussian copula space already used by `FeatureCache`, then
+applies the knockoff+ threshold to an antisymmetric feature statistic.
+
+Read the guarantee metadata literally:
+
+- `fdr_control="approximate_plugin"`: the default path estimates the feature
+  model from data and may shrink it for numerical stability.
+- `validity_model="gaussian_copula_plugin"`: exact Model-X FDR would require
+  that copula model to be correct.
+- `weighted_model=True`: sample weights were used as importance weights in the
+  plug-in model and statistic.
+- `gamma`, `lambda_min`, and `s_mean`: diagnose covariance shrinkage and
+  knockoff power. Large `gamma` or tiny `s_mean` usually means highly correlated
+  features; deduplicate near-copies before building the cache when power matters.
+
+`statistic="relevance"` is the fastest default and usually the most powerful
+choice for marginal signals. `statistic="cefsplus"` enables a tie-safe greedy
+CEFS+ statistic with pair-coupled screening and objective-gain W magnitudes. It
+can recover redundant signal families that a marginal statistic treats as a
+single effect, but it is still slower at large `screen_pairs`/`path_depth`, so
+use it as a redundancy-aware second opinion rather than a better default.
+`path_depth` defaults to a conservative cap of 10 screened pairs — which also
+caps the number of features CEFS+ can select at roughly 10, since only entered
+features receive positive W. If you expect more discoveries than that, raise
+`statistic_options={"path_depth": ...}` (the effective value is reported in
+`selector_metadata["path_depth"]`, and a selection count equal to it is a hint
+the cap is binding). `statistic_options={"min_gain_ratio": 1e-4}` is an opt-in
+speed knob for large CEFS+ runs.
+
+`s_method="mvr"` and `"me"` use diagonal coordinate-descent optimizers for the
+MVR and maximum-entropy knockoff objectives. They can improve power on
+correlated designs where equicorrelated knockoffs are too reconstructable. Do
+not judge them by `s_mean` alone: a correct MVR solution can have lower average
+`s` than equicorrelated while improving the objective and selections.
+
+Pass `feature_groups=[...]` to threshold group-level antisymmetric statistics
+and expand selected groups back to active member features. This is useful for
+one-hot families, lags, spline bases, or other feature families. Interpret it
+as group-discovery control, not exact feature-level FDR inside each selected
+group.
+
+`n_draws > 1` redraws knockoffs and selects features whose selection frequency
+is at least `eta`. This is useful for run-to-run stability, but it is also
+reported as approximate. An empty result is a real answer: no feature survived
+the requested q threshold. Numeric continuous and binary targets are supported;
+integer multiclass labels trigger a warning because they are otherwise treated
+as numeric. Run one-vs-rest explicitly for categorical multiclass tasks.
+
+Auto-k and knockoffs answer different questions. Auto-k asks how many features
+help prediction; knockoffs ask how many discoveries you can trust at a target
+q. It is often useful to compare both diagnostics.
 
 ## Automatic Feature Count
 

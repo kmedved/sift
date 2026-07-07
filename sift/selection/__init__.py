@@ -7,6 +7,11 @@ from sift.selection.auto_k import (
     select_k_elbow,
 )
 from sift.selection.cefsplus import select_cached
+from sift.selection.knockoff_filter import (
+    KnockoffSelectionResult,
+    knockoff_threshold,
+    select_fdr,
+)
 from sift.selection.loops import jmi_select, mrmr_select
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 
@@ -16,6 +21,9 @@ __all__ = [
     "select_k_auto",
     "select_k_elbow",
     "select_cached",
+    "select_fdr",
+    "knockoff_threshold",
+    "KnockoffSelectionResult",
     "jmi_select",
     "mrmr_select",
     "FeaturePathEvaluationResult",

@@ -23,6 +23,7 @@ SCRIPTS = [
     "bench_permutation.py",
     "bench_filters.py",
     "bench_cefsplus.py",
+    "bench_knockoffs.py",
     "bench_stability.py",
     "bench_catboost.py",
 ]
