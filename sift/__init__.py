@@ -1,11 +1,14 @@
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from sift.api import (
     FeatureCache,
     build_cache,
+    KnockoffSelectionResult,
+    sample_knockoffs,
     select_cached,
     select_cefsplus,
     select_cefsplus_binary,
+    select_fdr,
     select_jmi,
     select_jmim,
     select_mrmr,
@@ -13,7 +16,14 @@ from sift.api import (
 from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boruta_shap
 from sift.importance import permutation_importance
 from sift.sampling import SmartSamplerConfig, cross_section_config, panel_config, smart_sample
-from sift.selectors import CEFSPlusBinarySelector, CEFSPlusSelector, JMISelector, JMIMSelector, MRMRSelector
+from sift.selectors import (
+    CEFSPlusBinarySelector,
+    CEFSPlusSelector,
+    JMISelector,
+    JMIMSelector,
+    KnockoffSelector,
+    MRMRSelector,
+)
 from sift.selection.auto_k import (
     AutoKConfig,
     compute_objective_for_path,
@@ -39,9 +49,12 @@ __all__ = [
     "__version__",
     "FeatureCache",
     "build_cache",
+    "KnockoffSelectionResult",
+    "sample_knockoffs",
     "select_cached",
     "select_cefsplus",
     "select_cefsplus_binary",
+    "select_fdr",
     "select_jmi",
     "select_jmim",
     "select_mrmr",
@@ -62,6 +75,7 @@ __all__ = [
     "JMIMSelector",
     "CEFSPlusSelector",
     "CEFSPlusBinarySelector",
+    "KnockoffSelector",
     "permutation_importance",
     "SmartSamplerConfig",
     "smart_sample",

@@ -62,7 +62,13 @@ def build_cache(
 
     if subsample is not None and n > subsample:
         rng = np.random.default_rng(random_state)
-        row_idx = rng.choice(n, size=subsample, replace=False)
+        positive = np.flatnonzero(w > 0.0)
+        if positive.size == n:
+            row_idx = rng.choice(n, size=subsample, replace=False)
+        elif positive.size <= subsample:
+            row_idx = positive
+        else:
+            row_idx = rng.choice(positive, size=subsample, replace=False)
     else:
         row_idx = np.arange(n)
 
@@ -113,17 +119,18 @@ def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
     if not np.isfinite(total) or total <= 0.0:
         return np.zeros_like(x, dtype=np.float32)
 
-    ranks = np.empty_like(w_sorted, dtype=np.float64)
-    cum_weight = 0.0
-    start = 0
-    while start < m:
-        stop = start + 1
-        while stop < m and x_sorted[stop] == x_sorted[start]:
-            stop += 1
-        block_weight = float(w_sorted[start:stop].sum())
-        ranks[start:stop] = cum_weight + 0.5 * block_weight
-        cum_weight += block_weight
-        start = stop
+    block_start = np.empty(m, dtype=bool)
+    block_start[0] = True
+    block_start[1:] = x_sorted[1:] != x_sorted[:-1]
+    starts = np.flatnonzero(block_start)
+    block_weights = np.add.reduceat(w_sorted, starts)
+    cum_before = np.empty_like(block_weights, dtype=np.float64)
+    cum_before[0] = 0.0
+    if block_weights.shape[0] > 1:
+        cum_before[1:] = np.cumsum(block_weights[:-1])
+    block_ranks = cum_before + 0.5 * block_weights
+    block_lengths = np.diff(np.append(starts, m))
+    ranks = np.repeat(block_ranks, block_lengths)
 
     u = np.clip(ranks / total, 1e-6, 1 - 1e-6)
     z = ndtri(u)
@@ -287,7 +294,7 @@ def weighted_correlation_matrix(
 
 
 @njit_optional_cache(cache=True)
-def weighted_corr_with_vector(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> np.ndarray:
+def _weighted_corr_with_vector_numba(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> np.ndarray:
     n, p = Z.shape
     w_sum = 0.0
     for i in range(n):
@@ -300,6 +307,80 @@ def weighted_corr_with_vector(Z: np.ndarray, zy: np.ndarray, w: np.ndarray) -> n
             val += w[i] * Z[i, j] * zy[i]
         r[j] = val / w_sum
     return np.clip(r, -0.999999, 0.999999)
+
+
+def weighted_corr_with_vector_blas(
+    Z: np.ndarray,
+    zy: np.ndarray,
+    w: np.ndarray,
+    *,
+    batch_size: int = 50_000,
+) -> np.ndarray:
+    """Uncentered weighted Z'y moments using chunked BLAS."""
+    Z_arr = np.asarray(Z)
+    if Z_arr.ndim != 2:
+        raise ValueError("Z must be 2D")
+    n, p = Z_arr.shape
+    zy64 = np.asarray(zy, dtype=np.float64).ravel()
+    w64 = np.asarray(w, dtype=np.float64).ravel()
+    if zy64.shape[0] != n:
+        raise ValueError("zy length must match Z rows")
+    if w64.shape[0] != n:
+        raise ValueError("w length must match Z rows")
+    if not np.isfinite(w64).all():
+        raise ValueError("Non-finite weights are not allowed")
+    if np.any(w64 < 0):
+        raise ValueError("Negative weights are not allowed")
+    w_sum = float(w64.sum())
+    if w_sum <= 0.0:
+        raise ValueError("Weights must sum to > 0")
+
+    acc = np.zeros(p, dtype=np.float64)
+    wy = w64 * zy64
+    batch_size = max(1, int(batch_size))
+    for start in range(0, n, batch_size):
+        stop = min(n, start + batch_size)
+        Zb = Z_arr[start:stop]
+        if Zb.dtype != np.float64:
+            Zb = Zb.astype(np.float64, copy=False)
+        acc += Zb.T @ wy[start:stop]
+
+    r = acc / w_sum
+    np.clip(r, -0.999999, 0.999999, out=r)
+    return r.astype(np.float32)
+
+
+def weighted_corr_with_vector(
+    Z: np.ndarray,
+    zy: np.ndarray,
+    w: np.ndarray,
+    *,
+    backend: Literal["auto", "blas", "numba"] = "auto",
+    batch_size: int = 50_000,
+) -> np.ndarray:
+    """
+    Uncentered weighted correlation with one standardized vector.
+
+    This computes weighted second moments; callers rely on cache columns and
+    ``zy`` being weighted-standardized before calling.
+    """
+    Z_arr = np.asarray(Z)
+    if Z_arr.ndim != 2:
+        raise ValueError("Z must be 2D")
+    zy_arr = np.asarray(zy).ravel()
+    w_arr = np.asarray(w).ravel()
+    if zy_arr.shape[0] != Z_arr.shape[0]:
+        raise ValueError("zy length must match Z rows")
+    if w_arr.shape[0] != Z_arr.shape[0]:
+        raise ValueError("w length must match Z rows")
+    if backend == "auto":
+        n, p = Z_arr.shape
+        backend = "blas" if n * p >= 1_000_000 else "numba"
+    if backend == "blas":
+        return weighted_corr_with_vector_blas(Z_arr, zy_arr, w_arr, batch_size=batch_size)
+    if backend == "numba":
+        return _weighted_corr_with_vector_numba(Z_arr, zy_arr, w_arr)
+    raise ValueError(f"Unknown backend: {backend}")
 
 
 @njit_optional_cache(cache=True)

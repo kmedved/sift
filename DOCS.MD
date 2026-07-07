@@ -33,7 +33,7 @@ Core dependencies are `numpy`, `pandas`, `scipy`, `scikit-learn`, `joblib`, and
 ```python
 import pandas as pd
 from sklearn.datasets import make_regression
-from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus, select_cefsplus_binary
+from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus, select_cefsplus_binary, select_fdr
 
 X_arr, y = make_regression(
     n_samples=500,
@@ -49,6 +49,7 @@ jmi = select_jmi(X, y, k=10, task="regression", verbose=False)
 jmim = select_jmim(X, y, k=10, task="regression", verbose=False)
 cefs = select_cefsplus(X, y, k=10, verbose=False)
 binary_cefs = select_cefsplus_binary(X, (y > y.mean()).astype(int), k=10, verbose=False)
+knockoff = select_fdr(X, y, q=0.1, verbose=False)
 ```
 
 Most selectors return feature names for `pandas.DataFrame` inputs and synthetic
@@ -64,6 +65,7 @@ return integer indices.
 | JMIM | `select_jmim` | Conservative JMI variant using a minimum joint score. |
 | CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
 | Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
+| Knockoff FDR | `select_fdr`, `KnockoffSelector` | q-calibrated approximate Gaussian-copula knockoff selection. |
 | Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` | Choosing feature count by holdout, group CV, objective elbow, or penalized objective. |
 | Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
@@ -80,9 +82,12 @@ Top-level exports:
 from sift import (
     FeatureCache,
     build_cache,
+    KnockoffSelectionResult,
+    sample_knockoffs,
     select_cached,
     select_cefsplus,
     select_cefsplus_binary,
+    select_fdr,
     select_jmi,
     select_jmim,
     select_mrmr,
@@ -103,6 +108,7 @@ from sift import (
     JMIMSelector,
     CEFSPlusSelector,
     CEFSPlusBinarySelector,
+    KnockoffSelector,
     permutation_importance,
     SmartSamplerConfig,
     smart_sample,
@@ -119,8 +125,8 @@ from sift import (
 
 ## Data Requirements
 
-`select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, and
-`select_cefsplus_binary` accept
+`select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`,
+`select_cefsplus_binary`, and `select_fdr` accept
 `pandas.DataFrame` or `numpy.ndarray` features and `pandas.Series` or array-like
 targets.
 
@@ -133,6 +139,9 @@ Numeric requirements:
 - Regression targets must be finite numeric values.
 - Classification targets may be strings, categoricals, or numeric labels, but
   missing labels are not allowed.
+- `select_fdr` treats `y` as a continuous numeric target; integer labels with
+  3-20 unique values warn because categorical multiclass workflows should use
+  one-vs-rest targets.
 - Feature matrices may contain non-finite values; the internal preprocessing
   mean-imputes them for most numeric selectors.
 
@@ -143,6 +152,9 @@ Sample weights:
   `select_k_penalized_objective`,
   `StabilitySelector.fit`, `stability_regression`, `stability_classif`, and
   `permutation_importance` accept sample weights.
+- `select_fdr` accepts sample weights on the `X` path. The weights are used in
+  the plug-in Gaussian-copula model and statistics; this is an
+  importance-weighted approximation, not an exact weighted Model-X guarantee.
 - `select_cefsplus_binary` also accepts `class_weight=None`, `"balanced"`, or a
   class-label dictionary. Resolved sample/class weights are used by the
   logistic score test and by `cat_encoding="loo_logit"`.
@@ -364,6 +376,83 @@ Important options:
 - `top_m`: number of relevance-prefiltered candidates to keep before CEFS+.
 - `cache`: pass a `FeatureCache` to reuse the expensive transform.
 
+### `select_fdr`
+
+```python
+from sift import select_fdr
+
+result = select_fdr(
+    X,
+    y,
+    q=0.1,                    # target FDR level
+    statistic="relevance",    # "relevance" or tie-safe "cefsplus"
+    n_draws=1,                # >1 enables derandomized aggregation
+    eta=0.5,                  # selection-frequency cutoff for n_draws > 1
+    offset=1,                 # 1 = knockoff+, 0 = modified knockoff threshold
+    s_method="equi",          # "equi", "mvr", or "me"
+    feature_groups=None,      # optional group-level knockoff thresholding
+    sample_weight=None,
+    subsample=50_000,
+    random_state=0,
+    verbose=False,
+)
+
+selected = result.selected_features
+ranking = result.get_feature_ranking()
+metadata = result.selector_metadata
+```
+
+`select_fdr` is q-calibrated rather than fixed-k. It builds or reuses the
+rank-Gaussian `FeatureCache`, samples second-order Gaussian knockoffs in copula
+space, computes antisymmetric feature statistics, and applies the knockoff+
+threshold. In v1 the public guarantee is intentionally framed as approximate
+plug-in control: metadata reports `fdr_control="approximate_plugin"` and
+`validity_model="gaussian_copula_plugin"`. Exact finite-sample Model-X FDR would
+require the sampled Gaussian-copula model to be the true feature distribution
+and the statistic to be valid under swaps.
+
+Important options:
+
+- `q`: target false-discovery rate, validated in `(0, 1)`.
+- `statistic="relevance"`: marginal Gaussian-MI difference between each
+  original feature and its knockoff.
+- `statistic="cefsplus"`: tie-safe greedy CEFS+ entry-order statistic over the
+  analytic augmented covariance. It uses pair-coupled screening, disables
+  correlation pruning inside the augmented run, and scores entries by marginal
+  objective gain. It is slower than the default statistic, so use it as a
+  redundancy-aware second opinion rather than a better default.
+- `statistic_options`: for `cefsplus`, `path_depth` sets the hard greedy-path
+  cap and defaults to at most 10 screened pairs. `min_gain_ratio` optionally
+  stops once the best gain is tiny relative to the first gain. The default
+  leaves early stopping disabled.
+- `s_method`: `"equi"` is fastest; `"mvr"` and `"me"` use diagonal
+  coordinate-descent optimizers for the MVR and maximum-entropy objectives.
+  They can improve power on correlated designs; `s_mean` is diagnostic only and
+  is not the optimization objective.
+- `n_draws`: repeat knockoff sampling and aggregate by selection frequency.
+  This improves run-to-run stability but is documented as approximate.
+- `eta`: selected when `selection_frequency >= eta` for `n_draws > 1`.
+- `offset=1`: knockoff+ threshold. Use `offset=0` only when the modified
+  knockoff/mFDR-style threshold is acceptable.
+- `screen_pairs`: pair-coupled screening cap for expensive statistics.
+  The default statistic does not need screening; `cefsplus` uses it to bound
+  the augmented greedy problem.
+- `feature_groups`: optional per-feature group labels. When supplied, the
+  knockoff threshold is applied to group-level antisymmetric statistics and
+  selected groups are expanded back to their active member features. This is a
+  group-discovery mode; it should not be read as exact feature-level FDR inside
+  selected groups.
+- `cache`: pass a prebuilt `FeatureCache`; do not pass `sample_weight` with a
+  cache because weights already live in the cache.
+- `sample_knockoffs(cache, random_state=...)`: advanced helper that returns one
+  sampled knockoff matrix in cache/copula space.
+
+The result table contains one row per valid cache feature with `W`, selected
+status, selected input-column index, relevance, and per-draw `W_draw_*`
+diagnostics. When `feature_groups` is active, `diagnostics_` also includes
+per-draw `group_W_draws` and `group_thresholds`. Empty selections are valid
+results: they mean no feature survived the requested q threshold.
+
 ### `select_cefsplus_binary`
 
 ```python
@@ -461,6 +550,7 @@ Available classes:
 - `JMIMSelector`
 - `CEFSPlusSelector`
 - `CEFSPlusBinarySelector`
+- `KnockoffSelector`
 
 Each class supports `fit`, `transform`, `fit_transform`, and
 `get_support(indices=False)`. After fitting, the selectors expose:
@@ -469,6 +559,7 @@ Each class supports `fit`, `transform`, `fit_transform`, and
 - `selected_indices_`
 - `feature_names_in_`
 - `n_features_in_`
+- `result_` on `KnockoffSelector`
 
 For pandas inputs, `transform` validates that columns match the fitted columns
 and order before selecting by stored positions.
@@ -1321,11 +1412,14 @@ It computes the same cumulative Gaussian information objective used by
 
 ## Low-Level Estimators
 
-The `sift.estimators` package exposes three lazily loaded modules:
+The `sift.estimators` package exposes four lazily loaded modules:
 
 - `sift.estimators.relevance`
 - `sift.estimators.copula`
 - `sift.estimators.joint_mi`
+- `sift.estimators.knockoffs` (`fit_gaussian_knockoffs`, `sample_gaussian_knockoffs`,
+  `gaussian_knockoff_mean`, `GaussianKnockoffModel` — the advanced sampler API
+  behind `select_fdr`)
 
 ### Relevance estimators
 

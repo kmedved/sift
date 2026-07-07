@@ -46,6 +46,15 @@ mrmr_features = select_mrmr(X, y, k=10, task="regression", verbose=False)
 cefs_features = select_cefsplus(X, y, k=10, verbose=False)
 ```
 
+Run a q-calibrated knockoff selector:
+
+```python
+from sift import select_fdr
+
+result = select_fdr(X, y, q=0.1, verbose=False)
+trusted_features = result.selected_features
+```
+
 For the full public API, examples, selector support matrix, and option details,
 start with [DOCS.MD](DOCS.MD).
 
@@ -57,6 +66,7 @@ start with [DOCS.MD](DOCS.MD).
 - [Architecture and module boundaries](docs/architecture.md)
 - [Development guide](docs/development.md)
 - [Benchmarks](benchmarks/README.md)
+- [Release notes](docs/release-notes.md)
 - [Release tracker](TODO.MD)
 
 ## Main Components
@@ -64,6 +74,7 @@ start with [DOCS.MD](DOCS.MD).
 | Area | Entry points |
 | --- | --- |
 | Core filters | `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary` |
+| q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` |
 | Automatic `k` | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` |
 | Result objects and wrappers | `FilterSelectionResult`, `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector` |
 | Cache-backed Gaussian paths | `build_cache`, `select_cached`, `FeatureCache` |

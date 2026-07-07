@@ -1,6 +1,60 @@
 import numpy as np
+from scipy.special import ndtri
 
-from sift.estimators.copula import greedy_corr_prune, weighted_rank_gauss_1d
+from sift.estimators.copula import greedy_corr_prune, weighted_corr_with_vector, weighted_rank_gauss_1d
+
+
+def _weighted_rank_gauss_1d_reference(x: np.ndarray, w: np.ndarray) -> np.ndarray:
+    mask = np.isfinite(x)
+    m = mask.sum()
+    if m <= 1:
+        return np.zeros_like(x, dtype=np.float32)
+
+    x_valid = x[mask]
+    w_valid = w[mask]
+    order = np.argsort(x_valid, kind="mergesort")
+    x_sorted = x_valid[order]
+    w_sorted = w_valid[order]
+    total = float(w_sorted.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return np.zeros_like(x, dtype=np.float32)
+
+    ranks = np.empty_like(w_sorted, dtype=np.float64)
+    cum_weight = 0.0
+    start = 0
+    while start < m:
+        stop = start + 1
+        while stop < m and x_sorted[stop] == x_sorted[start]:
+            stop += 1
+        block_weight = float(w_sorted[start:stop].sum())
+        ranks[start:stop] = cum_weight + 0.5 * block_weight
+        cum_weight += block_weight
+        start = stop
+
+    u = np.clip(ranks / total, 1e-6, 1 - 1e-6)
+    z = ndtri(u)
+    z_mean = np.dot(w_sorted, z) / total
+    z_centered = z - z_mean
+    z_var = np.dot(w_sorted, z_centered**2) / total
+    z_std = np.sqrt(z_var) if z_var > 1e-12 else 1.0
+    inv_order = np.argsort(order)
+    out = np.zeros_like(x, dtype=np.float32)
+    out[mask] = (z_centered / z_std)[inv_order].astype(np.float32)
+    return out
+
+
+def test_weighted_rank_gauss_matches_scalar_reference_for_continuous_and_ties():
+    rng = np.random.default_rng(123)
+    continuous = rng.normal(size=512)
+    tied = rng.choice(np.array([-2.0, -1.0, 0.0, 1.0, 3.0]), size=512)
+    tied[::23] = np.nan
+    weights = rng.lognormal(mean=0.0, sigma=0.6, size=512)
+
+    for x in (continuous, tied):
+        np.testing.assert_array_equal(
+            weighted_rank_gauss_1d(x, weights),
+            _weighted_rank_gauss_1d_reference(x, weights),
+        )
 
 
 def test_weighted_rank_gauss_determinism_with_ties():
@@ -50,6 +104,18 @@ def test_weighted_rank_gauss_binary_feature_has_two_values():
     assert len(np.unique(out[x == 0])) == 1
     assert len(np.unique(out[x == 1])) == 1
     assert len(np.unique(out)) == 2
+
+
+def test_weighted_corr_with_vector_blas_matches_numba_backend():
+    rng = np.random.default_rng(321)
+    Z = rng.normal(size=(512, 37)).astype(np.float32)
+    zy = rng.normal(size=512).astype(np.float32)
+    w = rng.lognormal(mean=0.0, sigma=0.4, size=512).astype(np.float32)
+
+    blas = weighted_corr_with_vector(Z, zy, w, backend="blas", batch_size=127)
+    numba = weighted_corr_with_vector(Z, zy, w, backend="numba")
+
+    np.testing.assert_allclose(blas, numba, atol=1e-5)
 
 
 def test_greedy_corr_prune_ties_keep_lowest_candidate_index():

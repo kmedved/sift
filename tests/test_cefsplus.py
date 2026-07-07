@@ -56,13 +56,13 @@ def test_build_cache_handles_nonfinite():
     assert np.isfinite(cache.Z).all()
 
 
-def test_build_cache_rejects_zero_weight_subsample():
+def test_build_cache_rejects_single_positive_weight_row_as_constant():
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.normal(size=(20, 4)))
     sample_weight = np.zeros(20)
     sample_weight[0] = 1.0
 
-    with pytest.raises(ValueError, match="zero total weight"):
+    with pytest.raises(ValueError, match="All features were filtered out"):
         build_cache(X, sample_weight=sample_weight, subsample=5, random_state=0)
 
 

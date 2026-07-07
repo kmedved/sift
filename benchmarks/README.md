@@ -33,6 +33,7 @@ its `--output` JSON, and reports any rows whose `promotion_status` starts with
 | `bench_permutation.py` | Permutation importance on DataFrame and ndarray inputs, grouped/time-aware permutations. |
 | `bench_filters.py` | End-to-end function-style filter selectors with promotion JSON. |
 | `bench_cefsplus.py` | CEFS+ wall time and allocation-sensitive options. |
+| `bench_knockoffs.py` | Gaussian-copula knockoff cache/model/mean/sample/stat/threshold timing, including derandomized draws and a CEFS+ smoke case. |
 | `bench_stability.py` | Stability-selection split streaming and fit memory. |
 | `bench_catboost.py` | CatBoost split helpers and optional tiny selector smoke cases (skipped without CatBoost). |
 | `bench_utils.py` | Shared helpers and `SCHEMA_VERSION` for the emitted JSON. |
@@ -51,7 +52,25 @@ python benchmarks/bench_mrmr.py --quick --output /tmp/bench-mrmr.json
 python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 ```
+
+## Recorded Knockoff Full Run
+
+`python benchmarks/bench_knockoffs.py --full --output /tmp/bench-knockoffs-full.json`
+on 2026-07-07:
+
+| stat | n | p | draws | cache s | fit s | mean s | sample s | stat s | total s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| relevance | 2,000 | 100 | 1 | 0.020 | 0.001 | 0.000 | 0.001 | 0.002 | 0.024 |
+| relevance | 2,000 | 100 | 5 | 0.020 | 0.001 | 0.000 | 0.003 | 0.001 | 0.026 |
+| cefsplus | 2,000 | 100 | 1 | 0.020 | 0.001 | 0.000 | 0.001 | 0.001 | 0.022 |
+| relevance | 50,000 | 500 | 1 | 3.398 | 0.009 | 0.000 | 0.092 | 0.019 | 3.520 |
+| relevance | 50,000 | 500 | 11 | 3.446 | 0.009 | 0.022 | 0.908 | 0.232 | 4.633 |
+| cefsplus | 50,000 | 500 | 1 | 3.467 | 0.009 | 0.000 | 0.096 | 0.023 | 3.596 |
+| relevance | 50,000 | 2,000 | 1 | 14.980 | 0.294 | 0.000 | 0.804 | 0.067 | 16.153 |
+| relevance | 50,000 | 2,000 | 11 | 14.748 | 0.302 | 0.279 | 5.915 | 0.912 | 22.243 |
+| cefsplus | 50,000 | 2,000 | 1 | 14.752 | 0.295 | 0.000 | 0.783 | 0.136 | 15.965 |
 
 ## Output Schema
 

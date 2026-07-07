@@ -17,6 +17,9 @@ flowchart TD
     Payloads --> AutoK["sift.selection.filter_auto_k"]
     Payloads --> Loops["sift.selection loops and CEFS+ paths"]
     Payloads --> Cache["sift.estimators.copula FeatureCache"]
+    FunctionAPI --> KnockoffFilter["sift.selection.knockoff_filter"]
+    KnockoffFilter --> KnockoffModel["sift.estimators.knockoffs"]
+    KnockoffFilter --> Cache
     Payloads --> Binary["sift.selection.cefsplus_binary"]
     Loops --> Estimators["sift.estimators relevance and joint_mi"]
     AutoK --> AutoKCore["sift.selection.auto_k and auto_k_core"]
@@ -35,12 +38,13 @@ flowchart TD
 | `sift/selectors.py` | Sklearn-style estimator wrappers around the function selectors. |
 | `sift/_preprocess.py` and `sift/_impute.py` | Input validation, categorical encoding, weight validation, and numeric coercion. |
 | `sift/selection/filter_api.py` | Spec-driven dispatcher for function-style mRMR, JMI, JMIM, CEFS+, and binary CEFS+. |
+| `sift/selection/knockoff_filter.py` | q-calibrated Gaussian-copula knockoff orchestration, thresholding, result tables, and statistic registry. |
 | `sift/selection/filter_payloads.py` | Fixed-k and auto-k payload builders, selector validation closures, and result payload construction. |
 | `sift/selection/filter_auto_k.py` | Filter-layer orchestration around evaluate, elbow, and penalized-objective auto-k paths. |
 | `sift/selection/auto_k.py` and `auto_k_core.py` | Generic k-selection mechanics, score curves, objective penalties, and prefix evaluation. |
 | `sift/selection/cefsplus.py` and `cefsplus_binary.py` | Gaussian CEFS+ log-det paths and binary logistic CEFS+ paths. |
 | `sift/selection/result.py` and `path_eval.py` | Result containers and explicit feature-path evaluation utilities. |
-| `sift/estimators/` | Relevance scores, Gaussian copula transforms, and joint mutual-information estimators. |
+| `sift/estimators/` | Relevance scores, Gaussian copula transforms, Gaussian knockoff samplers, and joint mutual-information estimators. |
 | `sift/sampling/` | Smart sampling, anchor strategies, and bootstrap split generators. |
 | `sift/stability.py` | Stability selection estimator and convenience wrappers. |
 | `sift/importance.py` and `sift/_permute.py` | Permutation importance and grouped/time-aware permutation strategies. |
@@ -61,6 +65,14 @@ Function-style filter selectors share one dispatcher contract:
 
 Unsupported auto-k modes are rejected by missing handler entries in the spec
 before expensive cache, encoding, or path construction.
+
+`select_fdr` lives beside the fixed-k dispatcher rather than inside it because
+its public contract is q-based, always returns a `KnockoffSelectionResult`, and
+uses the knockoff+ threshold instead of a selected path prefix. It still depends
+on the same rank-Gaussian `FeatureCache`: `sift.estimators.knockoffs` fits the
+second-order Gaussian sampler from the cache correlation matrix, while
+`sift.selection.knockoff_filter` handles target transforms, active-feature
+masking, derandomized draws, metadata, and result ranking.
 
 ## Data Flow
 

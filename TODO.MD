@@ -26,6 +26,18 @@ This file tracks the public-release work from the Oracle/source review plus the 
   backends plus `benchmarks/bench_mrmr.py`. JMI now reuses prebinned selected
   columns for binned JMI and uses precomputed/vectorized weighted correlations
   for R2 JMI, with `benchmarks/bench_jmi.py`.
+- [x] Add q-calibrated Gaussian-copula knockoff selection.
+  Notes: `select_fdr`, `KnockoffSelector`, `sample_knockoffs`, and
+  `sift.estimators.knockoffs` implement second-order Gaussian knockoffs in
+  cache/copula space, approximate plug-in metadata, derandomized multi-draw
+  aggregation, zero-weight-variance masking, positional pandas target slicing,
+  public exports, docs, benchmarks, and sampler/filter/simulation tests.
+  Enabled paths now include vectorized rank-Gaussian cache construction,
+  float32 sampling GEMMs with deterministic mean reuse, chunked variance,
+  true diagonal MVR/ME coordinate-descent `s_method` options, `relevance`,
+  tie-safe objective-gain `cefsplus`, and optional feature-group thresholding.
+  `lcd`, mRMR, JMI, and JMIM knockoff statistic keys remain reserved until
+  their exact-tie antisymmetry is proven.
 
 ## Correctness Findings
 

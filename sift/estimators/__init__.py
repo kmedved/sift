@@ -3,7 +3,7 @@
 from importlib import import_module
 from typing import Any
 
-__all__ = ["copula", "joint_mi", "relevance"]
+__all__ = ["copula", "joint_mi", "knockoffs", "relevance"]
 
 
 def __getattr__(name: str) -> Any:

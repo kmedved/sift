@@ -18,6 +18,7 @@ from sift._preprocess import (
     suppress_category_encoder_pandas_warnings,
 )
 from sift.api import (
+    select_fdr,
     select_cefsplus_binary,
     select_cefsplus,
     select_jmim,
@@ -30,6 +31,7 @@ from sift.selection.cefsplus_binary_common import (
 )
 from sift.selection.auto_k import resolve_auto_k_config
 from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
+from sift.selection.knockoff_filter import _SUBSAMPLE_DEFAULT
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
 _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
@@ -827,10 +829,157 @@ class CEFSPlusBinarySelector(_BaseSelector):
         return self
 
 
+class KnockoffSelector(_BaseSelector):
+    """Sklearn-style wrapper for :func:`sift.select_fdr`.
+
+    ``subsample`` defaults to 50,000 rows when fitting from X. It is not valid
+    with a prebuilt cache unless left at the untouched default.
+    """
+
+    def __init__(
+        self,
+        q: float = 0.1,
+        *,
+        statistic: str = "relevance",
+        n_draws: int = 1,
+        eta: float = 0.5,
+        offset: int = 1,
+        s_method: str = "equi",
+        min_eig: float = 1e-3,
+        screen_pairs: int | None = 2000,
+        statistic_options: dict | None = None,
+        feature_groups=None,
+        cat_features: list[str] | None = None,
+        cat_encoding: str = "none",
+        allow_full_data_target_encoding: bool = False,
+        loo_smoothing: float = 20.0,
+        loo_clip_min: float = 1e-4,
+        loo_clip_max: float = 1.0 - 1e-4,
+        subsample=_SUBSAMPLE_DEFAULT,
+        random_state: int = 0,
+        n_jobs: int = 1,
+        verbose: bool = True,
+        cache=None,
+    ):
+        self._init_selector(select_fdr, locals())
+
+    def _supports_auto_k(self) -> bool:
+        return False
+
+    def _clear_fit_state(self) -> None:
+        super()._clear_fit_state()
+        if hasattr(self, "result_"):
+            delattr(self, "result_")
+
+    def _fit_impl(
+        self,
+        X,
+        y,
+        *,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        cache=None,
+        auto_k_config=None,
+        capture_training_output: bool = False,
+        **fit_params,
+    ):
+        if groups is not None:
+            raise ValueError(
+                "KnockoffSelector does not support row groups. Use feature_groups "
+                "on the estimator for grouped feature discoveries."
+            )
+        if time is not None:
+            raise ValueError("KnockoffSelector does not support time-aware fitting.")
+        if auto_k_config is not None:
+            raise ValueError("KnockoffSelector is q-based and does not support auto_k_config.")
+
+        resolved_cache = cache if cache is not None else getattr(self, "cache", None)
+        if resolved_cache is not None and sample_weight is not None:
+            raise ValueError(
+                "sample_weight cannot be passed with a prebuilt cache; the cache "
+                "already stores row weights"
+            )
+
+        self._clear_fit_state()
+        has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
+        if resolved_cache is not None and has_supervised_categoricals:
+            raise ValueError(
+                "KnockoffSelector supervised categorical encoding does not support "
+                "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
+                "cache so the selector can fit encoders on the training rows."
+            )
+
+        call_params = dict(self._selector_params())
+        if fit_params:
+            blocked = sorted(_BLOCKED_FIT_PARAM_OVERRIDES.intersection(fit_params))
+            if blocked:
+                blocked_text = ", ".join(blocked)
+                raise ValueError(
+                    "KnockoffSelector return-shape or preprocessing-affecting "
+                    f"parameters must be set on the estimator before fit, not as "
+                    f"fit-time overrides: {blocked_text}"
+                )
+            call_params.update(fit_params)
+
+        feature_names = _feature_names_or_default(X)
+        if resolved_cache is None:
+            X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+            result = self._selector_fn(
+                X_fit,
+                y,
+                sample_weight=sample_weight,
+                **call_params,
+            )
+        else:
+            if sample_weight is not None:
+                raise ValueError("sample_weight cannot be passed with a prebuilt cache")
+            cache_names = resolved_cache.feature_names
+            if cache_names is not None and not resolved_cache.feature_names_are_synthetic:
+                if list(feature_names) != list(cache_names):
+                    raise ValueError(
+                        "X columns do not match cache.feature_names (names and order must "
+                        "be identical); fit the cache from the same matrix"
+                    )
+            elif cache_names is not None and len(feature_names) != len(cache_names):
+                raise ValueError(
+                    f"X has {len(feature_names)} columns but the cache was built from "
+                    f"{len(cache_names)}"
+                )
+            X_fit = X
+            result = self._selector_fn(
+                None,
+                y,
+                cache=resolved_cache,
+                sample_weight=None,
+                **call_params,
+            )
+
+        selected_indices = result.selected_indices
+        if selected_indices is None:
+            selected_indices = _coerce_selection_indices(
+                feature_names,
+                list(result.selected_features),
+            ).tolist()
+
+        self.feature_names_in_ = feature_names
+        self.n_features_in_ = len(feature_names)
+        self.selected_features_ = list(result.selected_features)
+        self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
+        self.result_ = result
+        if capture_training_output:
+            self._fit_transform_output_ = _selected_training_output(
+                X_fit,
+                self.selected_indices_,
+            )
+        return self
+
+
 __all__ = [
     "MRMRSelector",
     "JMISelector",
     "JMIMSelector",
     "CEFSPlusSelector",
     "CEFSPlusBinarySelector",
+    "KnockoffSelector",
 ]
