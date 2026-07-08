@@ -11,7 +11,7 @@ surface. For deeper examples and option notes, see the canonical manual in
 | Fixed-k filters | `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary` |
 | q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `KnockoffSelectionResult`, `sample_knockoffs` |
 | Caching | `build_cache`, `select_cached`, `FeatureCache` |
-| Automatic k | `AutoKConfig`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` |
+| Automatic k | `AutoKConfig`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` |
 | Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector` |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` |
 | Sampling | `smart_sample`, `SmartSamplerConfig`, `panel_config`, `cross_section_config` |
@@ -310,11 +310,14 @@ selection against new numeric targets.
 ## Automatic K
 
 ```python
-from sift import AutoKConfig, select_mrmr
+from sift import AutoKConfig, select_cefsplus, select_mrmr
+
+# CEFS+ zero-config auto-k uses the measured Auto-K v2 router.
+selected = select_cefsplus(X, y, k="auto")
 
 config = AutoKConfig(
-    k_method="evaluate",      # "evaluate", "elbow", or "penalized_objective"
-    strategy="time_holdout",  # "time_holdout" or "group_cv"
+    k_method="evaluate",      # also "auto", "gaussian_cv", "perm_gap", etc.
+    strategy="time_holdout",  # "time_holdout", "group_cv", or "kfold" for fold curves
     metric="auto",
     max_k=100,
     min_k=5,
@@ -334,6 +337,34 @@ selected = select_mrmr(
 Function-style selectors use `auto_k_mode="prefix_only"`: they build one
 supervised feature path and evaluate prefixes. Selector classes also implement a
 nested mode for train-only fold paths where supported.
+
+`k_method="auto"` is the measured router. CEFS+ and binary CEFS+ use it when
+`auto_k_config` is omitted; explicit `AutoKConfig(k_method="auto")` also works
+on Gaussian mRMR/JMI/JMIM. The router records `auto_routing` in
+`diagnostics_["auto_k"]`. CEFS+ currently routes to EBIC by default, uses EBIC
+when `p_valid > n_eff_kish`, uses `perm_gap` for heavy weight skew, and uses
+`gaussian_cv/one_se` for non-CEFS+ Gaussian selectors.
+
+Important `AutoKConfig` method fields:
+
+| Field | Applies to |
+| --- | --- |
+| `alpha`, `m_mode`, `stop_patience` | `chi2_stop`, `forward_stop`, `perm_gap`, `changepoint` |
+| `perm_B`, `perm_null`, `gap_rule` | `perm_gap` |
+| `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` | `knockoff_path` |
+| `xfit_folds`, `xfit_mode` | `gaussian_cv`, `xfit_objective` |
+| `xfit_ridge` | `gaussian_cv` |
+| `ebic_gamma`, `n_eff_mode` | `penalized_objective`, `k_posterior` |
+| `posterior_level`, `posterior_pick` | `k_posterior` |
+| `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` |
+| `floor_z`, `floor_window` | `changepoint` |
+| `consensus_methods` | `consensus` |
+
+`knockoff_path` returns an approximate Gaussian-copula plug-in selected set when
+`knockoff_return="set"`. `changepoint`, `stability`, `xfit_objective`, and
+`knockoff_path` remain experimental or failed-gate for automatic sizing in the
+Auto-K v2 campaign; stability uses `stability_rule="max_one_se"` by default and returns
+`stopped_by="stability_floor"` when chance-corrected agreement is too low.
 
 ## Selector Classes
 

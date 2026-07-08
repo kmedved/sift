@@ -25,13 +25,27 @@ from sift.selection.cefsplus_binary_common import (
     validate_binary_options,
 )
 from sift.selection.filter_payloads import (
+    GAUSSIAN_AUTO,
+    GAUSSIAN_CHANGEPOINT,
+    GAUSSIAN_CHI2,
+    GAUSSIAN_CONSENSUS,
+    GAUSSIAN_CV,
     GAUSSIAN_ELBOW,
     GAUSSIAN_EVALUATE,
+    GAUSSIAN_FORWARD_STOP,
+    GAUSSIAN_KNOCKOFF,
     GAUSSIAN_PENALIZED,
+    GAUSSIAN_PERM_GAP,
+    GAUSSIAN_POSTERIOR,
+    GAUSSIAN_STABILITY,
+    GAUSSIAN_XFIT_OBJECTIVE,
     SelectionPayload,
+    binary_auto_auto_payload,
+    binary_auto_changepoint_payload,
     binary_auto_elbow_payload,
     binary_auto_evaluate_payload,
     binary_auto_penalized_payload,
+    binary_auto_posterior_payload,
     binary_fixed_payload,
     make_auto_classic,
     make_auto_gaussian,
@@ -312,9 +326,13 @@ def _select_filter(
 ) -> list[str] | FilterSelectionResult:
     ctx = _build_context(spec, request)
     if ctx.k == "auto":
+        if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
+            resolved_config = AutoKConfig(k_method="auto")
+        else:
+            resolved_config = resolve_auto_k_config(request.auto_k_config, ctx.time, ctx.groups)
         ctx = replace(
             ctx,
-            auto_k_config=resolve_auto_k_config(request.auto_k_config, ctx.time, ctx.groups),
+            auto_k_config=resolved_config,
         )
         assert ctx.auto_k_config is not None
         handler = spec.auto_k_handlers.get(ctx.auto_k_config.k_method)
@@ -588,6 +606,11 @@ def _gaussian_spec(
     cefsplus: bool = False,
 ) -> FilterSpec:
     auto_handlers = {
+        "auto": make_auto_gaussian(
+            method_func,
+            GAUSSIAN_AUTO,
+            include_diagnostics=True,
+        ),
         "evaluate": make_auto_gaussian(
             method_func,
             GAUSSIAN_EVALUATE,
@@ -598,6 +621,21 @@ def _gaussian_spec(
             GAUSSIAN_ELBOW,
             include_diagnostics=cefsplus,
         ),
+        "xfit_objective": make_auto_gaussian(
+            method_func,
+            GAUSSIAN_XFIT_OBJECTIVE,
+            include_diagnostics=True,
+        ),
+        "gaussian_cv": make_auto_gaussian(
+            method_func,
+            GAUSSIAN_CV,
+            include_diagnostics=True,
+        ),
+        "stability": make_auto_gaussian(
+            method_func,
+            GAUSSIAN_STABILITY,
+            include_diagnostics=True,
+        ),
     }
     if cefsplus:
         auto_handlers["penalized_objective"] = make_auto_gaussian(
@@ -605,6 +643,41 @@ def _gaussian_spec(
             GAUSSIAN_PENALIZED,
             include_diagnostics=True,
             include_objective_penalty=True,
+        )
+        auto_handlers["k_posterior"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_POSTERIOR,
+            include_diagnostics=True,
+        )
+        auto_handlers["chi2_stop"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_CHI2,
+            include_diagnostics=True,
+        )
+        auto_handlers["forward_stop"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_FORWARD_STOP,
+            include_diagnostics=True,
+        )
+        auto_handlers["changepoint"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_CHANGEPOINT,
+            include_diagnostics=True,
+        )
+        auto_handlers["perm_gap"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_PERM_GAP,
+            include_diagnostics=True,
+        )
+        auto_handlers["knockoff_path"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_KNOCKOFF,
+            include_diagnostics=True,
+        )
+        auto_handlers["consensus"] = make_auto_gaussian(
+            method_func,
+            GAUSSIAN_CONSENSUS,
+            include_diagnostics=True,
         )
     return FilterSpec(
         selector=selector,
@@ -685,9 +758,12 @@ CEFSPLUS_BINARY_SPEC = FilterSpec(
     estimator="binary",
     fixed_handler=binary_fixed_payload,
     auto_k_handlers={
+        "auto": binary_auto_auto_payload,
         "evaluate": binary_auto_evaluate_payload,
         "elbow": binary_auto_elbow_payload,
         "penalized_objective": binary_auto_penalized_payload,
+        "k_posterior": binary_auto_posterior_payload,
+        "changepoint": binary_auto_changepoint_payload,
     },
     metadata_extra=no_extra,
 )

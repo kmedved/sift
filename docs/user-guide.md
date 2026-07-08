@@ -123,8 +123,11 @@ q. It is often useful to compare both diagnostics.
 ```python
 from sift import AutoKConfig, select_cefsplus
 
+# Zero-config CEFS+ auto-k uses the measured Auto-K v2 router.
+selected = select_cefsplus(X, y, k="auto", verbose=False)
+
 config = AutoKConfig(
-    k_method="evaluate",
+    k_method="evaluate",  # or "auto", "gaussian_cv", "chi2_stop", etc.
     strategy="time_holdout",
     min_k=5,
     max_k=80,
@@ -142,12 +145,21 @@ Auto-k support depends on the selector route:
 | Route | Supported `k_method` values |
 | --- | --- |
 | Classic mRMR/JMI/JMIM | `evaluate` |
-| Gaussian mRMR/JMI/JMIM | `evaluate`, `elbow` |
-| CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
-| Binary CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
+| Gaussian mRMR/JMI/JMIM | `auto`, `evaluate`, `elbow`, `gaussian_cv`, `xfit_objective`, `stability` |
+| CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `chi2_stop`, `forward_stop`, `changepoint`, `perm_gap`, `knockoff_path`, `gaussian_cv`, `xfit_objective`, `stability`, `consensus` |
+| Binary CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `changepoint` |
 
 Unsupported modes fail before SIFT builds caches or feature paths, which keeps
 configuration errors cheap to catch.
+
+For a first pass with CEFS+, use `select_cefsplus(X, y, k="auto")`; it routes
+to the measured EBIC default and records `auto_routing` diagnostics in result
+objects. Use `gaussian_cv` when you specifically want fold scoring, `chi2_stop`
+or `forward_stop` when you need a calibrated no-signal stop, `perm_gap` when
+groups/time/weights make analytic nulls suspicious, and `knockoff_path` when
+you need an approximate plug-in q-calibrated returned set. `changepoint`,
+`stability`, `xfit_objective`, and `knockoff_path` remain experimental or
+failed-gate for automatic sizing.
 
 ## Reuse a Gaussian Cache
 

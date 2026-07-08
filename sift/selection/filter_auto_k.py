@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Literal, Optional
+import time as time_module
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -10,6 +13,24 @@ import pandas as pd
 from sift._preprocess import ensure_weights
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
+from sift.selection.auto_k_knockoff import select_k_knockoff_path
+from sift.selection.auto_k_resample import (
+    bootstrap_paths,
+    null_objective_paths,
+    select_k_perm_gap,
+    select_k_stability,
+)
+from sift.selection.auto_k_stop import (
+    select_k_changepoint,
+    select_k_chi2_stop,
+    select_k_forward_stop,
+)
+from sift.selection.auto_k_xfit import (
+    gaussian_cv_curves,
+    select_k_gaussian_cv,
+    select_k_xfit_objective,
+    xfit_objective_curves,
+)
 from sift.selection.cefsplus_binary_common import (
     BinaryOptions,
     BinaryPathRun,
@@ -18,6 +39,7 @@ from sift.selection.cefsplus_binary_common import (
     binary_refit_loglik_gains,
     binary_selection_prefix,
 )
+from sift.selection.panel import build_candidate_panel
 
 EvalData = tuple[pd.DataFrame, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]
 GaussianAutoKResult = tuple[list[str], list[int], pd.DataFrame, dict]
@@ -60,6 +82,17 @@ def auto_k_summary(
     return summary
 
 
+def _zero_capable_effective_min_k(
+    config: AutoKConfig,
+    *,
+    selected_k: int,
+    effective_max_k: int,
+) -> int:
+    if int(config.min_k) <= 0 or int(selected_k) == 0:
+        return 0
+    return max(1, min(int(config.min_k), int(effective_max_k)))
+
+
 def prepare_filter_eval_data(
     X, y: np.ndarray, cache, groups: Optional[np.ndarray], time: Optional[np.ndarray],
     sample_weight: Optional[np.ndarray], feature_names: Optional[list[str]] = None,
@@ -99,11 +132,111 @@ def prepare_filter_eval_data(
 
 def auto_k_mode_label(config: AutoKConfig) -> str:
     labels = {
+        "auto": "auto",
+        "chi2_stop": f"chi2_stop/alpha={config.alpha:g}",
+        "forward_stop": f"forward_stop/alpha={config.alpha:g}",
+        "perm_gap": f"perm_gap/{config.perm_null}/{config.gap_rule}",
+        "knockoff_path": f"knockoff_path/q={config.knockoff_q:g}/{config.knockoff_return}",
+        "xfit_objective": f"xfit_objective/{config.strategy}/{config.selection_rule}",
+        "gaussian_cv": f"gaussian_cv/{config.strategy}/{config.selection_rule}",
+        "k_posterior": f"k_posterior/{config.posterior_pick}",
+        "stability": f"stability/{config.stability_rule}",
+        "changepoint": "changepoint",
+        "consensus": "consensus",
         "elbow": "elbow",
         "penalized_objective": f"penalized_objective/{config.objective_penalty}",
         "evaluate": f"evaluate/{config.strategy}/{config.selection_rule}",
     }
     return labels[config.k_method]
+
+
+def _auto_route_facts(cache, *, method: str, groups, time) -> dict:
+    w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
+    weight_sum = float(np.sum(w))
+    sum_sq = float(np.sum(w * w))
+    n_eff_kish = float(weight_sum * weight_sum / sum_sq) if sum_sq > 0.0 else float("nan")
+    n_rows = int(w.size)
+    p_valid = int(len(cache.valid_cols))
+    return {
+        "selector_method": method,
+        "n_rows": n_rows,
+        "p_valid": p_valid,
+        "n_eff_kish": n_eff_kish,
+        "n_eff_over_p": float(n_eff_kish / p_valid) if p_valid > 0 else float("inf"),
+        "weight_skew_ratio": float(n_eff_kish / n_rows) if n_rows > 0 else float("nan"),
+        "has_groups": groups is not None,
+        "has_time": time is not None,
+    }
+
+
+def _auto_route_config(config: AutoKConfig, facts: dict) -> tuple[AutoKConfig, str]:
+    if facts["selector_method"] != "cefsplus":
+        strategy = config.strategy
+        if strategy == "time_holdout" and not facts["has_time"]:
+            strategy = "kfold"
+        if strategy == "group_cv" and not facts["has_groups"]:
+            strategy = "kfold"
+        return (
+            replace(
+                config,
+                k_method="gaussian_cv",
+                strategy=strategy,
+                selection_rule="one_se",
+                min_k=max(1, int(config.min_k)),
+            ),
+            "non_cefsplus_gaussian_selector",
+        )
+    if facts["p_valid"] > facts["n_eff_kish"]:
+        return (
+            replace(
+                config,
+                k_method="penalized_objective",
+                objective_penalty="ebic",
+                min_k=0,
+            ),
+            "p_valid_exceeds_kish_n_eff",
+        )
+    if facts["weight_skew_ratio"] < 0.8:
+        return (
+            replace(
+                config,
+                k_method="perm_gap",
+                min_k=0,
+                perm_null="auto",
+            ),
+            "heavy_weight_skew",
+        )
+    return (
+        replace(
+            config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        ),
+        "measured_default_ebic",
+    )
+
+
+def _run_gaussian_routed_path(routed_config: AutoKConfig, **kwargs) -> GaussianAutoKResult:
+    method = routed_config.k_method
+    kwargs = dict(kwargs)
+    kwargs["auto_k_config"] = routed_config
+    if method == "gaussian_cv":
+        return select_gaussian_cv_path(**kwargs)
+    if method == "perm_gap":
+        return select_gaussian_perm_gap_path(**kwargs)
+    if method == "penalized_objective":
+        return select_gaussian_penalized_path(**kwargs)
+    if method == "chi2_stop":
+        return select_gaussian_chi2_path(**kwargs)
+    fallback_config = replace(
+        routed_config,
+        k_method="penalized_objective",
+        objective_penalty="ebic",
+        min_k=0,
+    )
+    kwargs["auto_k_config"] = fallback_config
+    return select_gaussian_penalized_path(**kwargs)
 
 
 def _effective_max_k(config: AutoKConfig, path_length: int) -> int:
@@ -148,6 +281,7 @@ def _select_penalized_count(
     objective_scale,
     n_samples: int,
     sample_weight: Optional[np.ndarray],
+    n_candidates: int | None,
     path_length: int,
 ) -> tuple[int, pd.DataFrame]:
     best_k, diagnostics = auto_k_module.select_k_penalized_objective(
@@ -156,10 +290,67 @@ def _select_penalized_count(
         objective_scale=objective_scale,
         n_samples=n_samples,
         sample_weight=sample_weight,
+        n_candidates=n_candidates,
         min_k=config.min_k,
         max_k=path_length,
     )
     return min(best_k, path_length), diagnostics
+
+
+def _select_posterior_count(
+    objective: np.ndarray,
+    config: AutoKConfig,
+    *,
+    objective_scale,
+    n_samples: int,
+    sample_weight: Optional[np.ndarray],
+    n_candidates: int,
+    path_length: int,
+) -> tuple[int, pd.DataFrame]:
+    best_k, diagnostics = auto_k_module.select_k_posterior(
+        objective,
+        config,
+        objective_scale=objective_scale,
+        n_samples=n_samples,
+        sample_weight=sample_weight,
+        n_candidates=n_candidates,
+        min_k=config.min_k,
+        max_k=path_length,
+    )
+    return min(best_k, path_length), diagnostics
+
+
+def _objective_n_eff(config: AutoKConfig, sample_weight, n_samples: int) -> tuple[float, str]:
+    _w, _weight_sum, _kish, n_eff, n_eff_source = auto_k_module._objective_weight_diagnostics(
+        sample_weight,
+        n_samples,
+        config,
+    )
+    return float(n_eff), str(n_eff_source)
+
+
+def _gain_test_candidate_inputs(
+    cache,
+    y,
+    k: int,
+    top_m: int,
+    corr_prune,
+    method: str,
+    config: AutoKConfig,
+) -> tuple[int, np.ndarray | None]:
+    if config.m_mode == "all":
+        return len(cache.valid_cols), None
+    panel = build_candidate_panel(
+        cache,
+        y,
+        k,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        method=method,
+    )
+    if config.m_mode == "panel":
+        return len(panel.cand), None
+    return len(cache.valid_cols), np.linalg.eigvalsh(panel.R) if panel.R.size else None
 
 
 def select_gaussian_evaluate_path(
@@ -170,6 +361,7 @@ def select_gaussian_evaluate_path(
     corr_prune: float | None | Literal["auto"] = "auto",
     feature_names: Optional[list[str]] = None,
     verbose: bool = True,
+    **_unused,
 ) -> GaussianAutoKResult:
     _require_eval_split_context(auto_k_config, groups, time)
 
@@ -260,18 +452,846 @@ def select_gaussian_penalized_path(
         objective_scale="n_eff",
         n_samples=len(cache.sample_weight),
         sample_weight=cache.sample_weight,
+        n_candidates=len(cache.valid_cols),
         path_length=len(path),
     )
     _print_selected_k("Penalized objective", selected_count, verbose)
+    effective_max_k = _effective_max_k(auto_k_config, len(path))
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
         path_length=len(path),
-        effective_max_k=_effective_max_k(auto_k_config, len(path)),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
         diagnostics=auto_diag,
         extra={
             "objective_penalty": auto_k_config.objective_penalty,
             "objective_scale": "gaussian_2mi",
+            "proxy_only_objective": True,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_posterior_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    selected_count, auto_diag = _select_posterior_count(
+        objective,
+        auto_k_config,
+        objective_scale="n_eff",
+        n_samples=len(cache.sample_weight),
+        sample_weight=cache.sample_weight,
+        n_candidates=len(cache.valid_cols),
+        path_length=len(path),
+    )
+    _print_selected_k("K posterior", selected_count, verbose)
+    extra = {
+        "objective_scale": "gaussian_2mi",
+        "proxy_only_objective": True,
+    }
+    if auto_diag is not None and not auto_diag.empty:
+        for column in ("posterior_level", "hpd_lo", "hpd_hi", "p_zero", "entropy", "ebic_gamma"):
+            extra[column] = auto_diag[column].iloc[0]
+    effective_max_k = _effective_max_k(auto_k_config, len(path))
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra=extra,
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_chi2_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
+    p_candidates, panel_eigs = _gain_test_candidate_inputs(
+        cache,
+        y,
+        max_k,
+        top_m,
+        corr_prune,
+        method,
+        auto_k_config,
+    )
+    selected_count, auto_diag = select_k_chi2_stop(
+        objective,
+        auto_k_config,
+        n_eff=n_eff,
+        p_candidates=p_candidates,
+        panel_eigs=panel_eigs,
+    )
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("Chi2 stop", selected_count, verbose)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+        effective_min_k=0,
+        diagnostics=auto_diag,
+        extra={
+            "alpha": auto_k_config.alpha,
+            "m_mode": auto_k_config.m_mode,
+            "n_eff": n_eff,
+            "n_eff_source": n_eff_source,
+            "proxy_only_objective": True,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_forward_stop_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
+    p_candidates, panel_eigs = _gain_test_candidate_inputs(
+        cache,
+        y,
+        max_k,
+        top_m,
+        corr_prune,
+        method,
+        auto_k_config,
+    )
+    selected_count, auto_diag = select_k_forward_stop(
+        objective,
+        auto_k_config,
+        n_eff=n_eff,
+        p_candidates=p_candidates,
+        panel_eigs=panel_eigs,
+    )
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("ForwardStop", selected_count, verbose)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+        effective_min_k=0,
+        diagnostics=auto_diag,
+        extra={
+            "alpha": auto_k_config.alpha,
+            "m_mode": auto_k_config.m_mode,
+            "n_eff": n_eff,
+            "n_eff_source": n_eff_source,
+            "proxy_only_objective": True,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_changepoint_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
+    selected_count, auto_diag = select_k_changepoint(
+        objective,
+        auto_k_config,
+        objective_scale=n_eff,
+        n_eff=n_eff,
+        p_candidates=len(cache.valid_cols),
+    )
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("Changepoint", selected_count, verbose)
+    extra = {
+        "objective_scale": "gaussian_n_eff_gain",
+        "n_eff": n_eff,
+        "n_eff_source": n_eff_source,
+        "floor_z": auto_k_config.floor_z,
+        "proxy_only_objective": True,
+    }
+    if auto_diag is not None and not auto_diag.empty:
+        extra["floor_not_reached"] = bool(auto_diag["floor_not_reached"].iloc[0])
+    effective_max_k = int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra=extra,
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_perm_gap_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
+    source_groups: Optional[np.ndarray] = None,
+    source_time: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    del groups, time
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    nulls = null_objective_paths(
+        cache,
+        y,
+        B=int(auto_k_config.perm_B),
+        max_k=len(path),
+        null=auto_k_config.perm_null,
+        time=source_time,
+        groups=source_groups,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        random_state=int(auto_k_config.random_state),
+    )
+    selected_count, auto_diag = select_k_perm_gap(objective, nulls, auto_k_config)
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("Permutation gap", selected_count, verbose)
+    effective_max_k = int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra={
+            "perm_B": int(auto_k_config.perm_B),
+            "perm_null": auto_k_config.perm_null,
+            "gap_rule": auto_k_config.gap_rule,
+            "proxy_only_objective": True,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_xfit_objective_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, _objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=False,
+    )
+    curves = xfit_objective_curves(
+        cache,
+        y,
+        config=auto_k_config,
+        groups=groups,
+        time=time,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        method=method,
+    )
+    selected_count, auto_diag = select_k_xfit_objective(curves, auto_k_config)
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("Cross-fit objective", selected_count, verbose)
+    effective_max_k = int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0
+    stopped_by = None
+    if auto_diag is not None:
+        stopped_by = auto_diag.attrs.get("stopped_by")
+        if stopped_by is None and not auto_diag.empty and "stopped_by" in auto_diag:
+            stopped_by = auto_diag["stopped_by"].iloc[0]
+    extra = {
+        "xfit_mode": auto_k_config.xfit_mode,
+        "xfit_folds": int(auto_diag["n_splits"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+        "debias": True,
+        "proxy_only_objective": True,
+    }
+    if stopped_by:
+        extra["stopped_by"] = stopped_by
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra=extra,
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_cv_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, _objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=False,
+    )
+    curves = gaussian_cv_curves(
+        cache,
+        y,
+        config=auto_k_config,
+        groups=groups,
+        time=time,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        method=method,
+    )
+    selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
+    selected_count = min(selected_count, len(path))
+    _print_selected_k("Gaussian CV", selected_count, verbose)
+    effective_max_k = (
+        int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else len(path)
+    )
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        diagnostics=auto_diag,
+        extra={
+            "xfit_mode": auto_k_config.xfit_mode,
+            "xfit_folds": int(auto_diag["n_splits"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+            "proxy": "gaussian_linear_copula",
+            "xfit_ridge": float(auto_k_config.xfit_ridge),
+            "proxy_only_objective": False,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_knockoff_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    del method
+    selected_valid, selected_count, auto_diag = select_k_knockoff_path(
+        cache,
+        y,
+        auto_k_config,
+        top_m=top_m,
+    )
+    selected_original = np.asarray(cache.valid_cols, dtype=np.int64)[selected_valid]
+    if cache.feature_names is not None:
+        names = list(cache.feature_names)
+    else:
+        n_names = int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0
+        names = [f"x{i}" for i in range(n_names)]
+    if auto_k_config.knockoff_return == "prefix":
+        path, path_indices, _objective = _cached_filter_path(
+            cache,
+            y,
+            max_k,
+            method="cefsplus",
+            top_m=top_m,
+            corr_prune=corr_prune,
+            want_indices=True,
+            return_objective=False,
+        )
+        selected_count = min(selected_count, len(path))
+        selected = path[:selected_count]
+        selected_indices = path_indices[:selected_count]
+        path_length = len(path)
+        fdr_control = "none"
+        approximate_fdr_control = False
+    else:
+        selected = [names[int(i)] for i in selected_original]
+        selected_indices = selected_original.astype(int).tolist()
+        path_length = selected_count
+        fdr_control = "approximate_plugin"
+        approximate_fdr_control = True
+    _print_selected_k("Knockoff path", selected_count, verbose)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=path_length,
+        effective_max_k=path_length,
+        effective_min_k=0,
+        diagnostics=auto_diag,
+        extra={
+            "knockoff_q": float(auto_k_config.knockoff_q),
+            "knockoff_draws": int(auto_k_config.knockoff_draws),
+            "knockoff_s_method": auto_k_config.knockoff_s_method,
+            "knockoff_return": auto_k_config.knockoff_return,
+            "fdr_control": fdr_control,
+            "approximate_fdr_control": approximate_fdr_control,
+            "count_only": not approximate_fdr_control,
+            "corr_prune_disabled": True,
+        },
+    )
+    return selected, selected_indices, auto_diag, summary
+
+
+def select_gaussian_stability_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    path, path_indices, _objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=False,
+    )
+    boot = bootstrap_paths(
+        cache,
+        y,
+        B=int(auto_k_config.boot_B),
+        max_k=len(path),
+        boot_mode=auto_k_config.boot_mode,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        random_state=int(auto_k_config.random_state),
+        method=method,
+    )
+    selected_count, auto_diag = select_k_stability(boot, len(cache.valid_cols), auto_k_config)
+    selected_count = min(selected_count, len(path))
+    freq = np.zeros(len(cache.valid_cols), dtype=np.float64)
+    for boot_path in boot:
+        prefix = np.asarray(boot_path[:selected_count], dtype=np.int64)
+        prefix = prefix[(prefix >= 0) & (prefix < len(freq))]
+        if prefix.size:
+            freq[prefix] += 1.0
+    if boot:
+        freq /= float(len(boot))
+    freq_order = np.lexsort((np.arange(len(freq), dtype=np.int64), -freq))
+    freq_order = freq_order[freq[freq_order] > 0.0][:100]
+    top_freq = {
+        int(cache.valid_cols[int(i)]): float(freq[int(i)])
+        for i in freq_order
+    }
+    _print_selected_k("Stability", selected_count, verbose)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0,
+        ),
+        diagnostics=auto_diag,
+        extra={
+            "boot_B": int(auto_k_config.boot_B),
+            "boot_mode": auto_k_config.boot_mode,
+            "stability_rule": auto_k_config.stability_rule,
+            "stopped_by": auto_diag.attrs.get("stopped_by")
+            if auto_diag is not None
+            else None,
+            "max_phi": auto_diag.attrs.get("max_phi")
+            if auto_diag is not None
+            else None,
+            "pi_at_k_hat": top_freq,
+            "proxy_only_objective": True,
+        },
+    )
+    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+
+
+def select_gaussian_auto_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
+    source_groups: Optional[np.ndarray] = None,
+    source_time: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    **kwargs,
+) -> GaussianAutoKResult:
+    auto_k_module.validate_auto_k_config(auto_k_config)
+    if auto_k_config.k_method != "auto":
+        raise ValueError("select_gaussian_auto_path requires AutoKConfig(k_method='auto')")
+    facts = _auto_route_facts(cache, method=method, groups=groups, time=time)
+    routed_config, reason = _auto_route_config(auto_k_config, facts)
+    route = {
+        "chosen": routed_config.k_method,
+        "reason": reason,
+        "facts": facts,
+        "objective_penalty": routed_config.objective_penalty
+        if routed_config.k_method == "penalized_objective"
+        else None,
+    }
+    runner_kwargs = {
+        "cache": cache,
+        "y": y,
+        "method": method,
+        "max_k": max_k,
+        "top_m": top_m,
+        "auto_k_config": routed_config,
+        "corr_prune": corr_prune,
+        "groups": groups,
+        "time": time,
+        "source_groups": source_groups,
+        "source_time": source_time,
+        "verbose": verbose,
+        **kwargs,
+    }
+    selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+        routed_config,
+        **runner_kwargs,
+    )
+    stopped_by = summary.get("stopped_by")
+    if (
+        not selected
+        and stopped_by in {"degenerate_folds", "degenerate", "max_k"}
+        and routed_config.k_method != "penalized_objective"
+    ):
+        fallback_config = replace(
+            auto_k_config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        )
+        route["primary"] = route["chosen"]
+        route["chosen"] = "penalized_objective"
+        route["objective_penalty"] = "ebic"
+        route["fallback"] = {
+            "chosen": "penalized_objective",
+            "objective_penalty": "ebic",
+            "reason": f"primary stopped_by={stopped_by}",
+        }
+        selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+            fallback_config,
+            **{**runner_kwargs, "auto_k_config": fallback_config},
+        )
+
+    summary = dict(summary)
+    summary["method"] = "auto"
+    summary["routed_method"] = route["chosen"]
+    summary["auto_routing"] = route
+    return selected, selected_indices, auto_diag, summary
+
+
+def _consensus_method_k(
+    name: str,
+    *,
+    cache,
+    y,
+    method: str,
+    objective: np.ndarray,
+    config: AutoKConfig,
+    top_m: int,
+    corr_prune,
+    groups,
+    time,
+    source_groups,
+    source_time,
+    path_length: int,
+) -> tuple[int | None, str]:
+    lower = name.lower()
+    base = replace(config, min_k=min(int(config.min_k), int(path_length)), max_k=path_length)
+    if lower in {"ebic", "ric"}:
+        cfg = replace(
+            base,
+            k_method="penalized_objective",
+            objective_penalty=lower,
+            min_k=0,
+        )
+        k_hat, _diag = _select_penalized_count(
+            objective,
+            cfg,
+            objective_scale="n_eff",
+            n_samples=len(cache.sample_weight),
+            sample_weight=cache.sample_weight,
+            n_candidates=len(cache.valid_cols),
+            path_length=path_length,
+        )
+        return k_hat, ""
+    if lower in {"posterior", "k_posterior"}:
+        cfg = replace(base, k_method="k_posterior", min_k=0)
+        k_hat, _diag = _select_posterior_count(
+            objective,
+            cfg,
+            objective_scale="n_eff",
+            n_samples=len(cache.sample_weight),
+            sample_weight=cache.sample_weight,
+            n_candidates=len(cache.valid_cols),
+            path_length=path_length,
+        )
+        return k_hat, ""
+    if lower == "chi2_stop":
+        cfg = replace(base, k_method="chi2_stop", min_k=0)
+        n_eff, _source = _objective_n_eff(cfg, cache.sample_weight, len(cache.sample_weight))
+        k_hat, _diag = select_k_chi2_stop(objective, cfg, n_eff=n_eff, p_candidates=len(cache.valid_cols))
+        return min(k_hat, path_length), ""
+    if lower == "forward_stop":
+        cfg = replace(base, k_method="forward_stop", min_k=0)
+        n_eff, _source = _objective_n_eff(cfg, cache.sample_weight, len(cache.sample_weight))
+        k_hat, _diag = select_k_forward_stop(objective, cfg, n_eff=n_eff, p_candidates=len(cache.valid_cols))
+        return min(k_hat, path_length), ""
+    if lower == "changepoint":
+        cfg = replace(base, k_method="changepoint")
+        n_eff, _source = _objective_n_eff(cfg, cache.sample_weight, len(cache.sample_weight))
+        k_hat, _diag = select_k_changepoint(
+            objective,
+            cfg,
+            objective_scale=n_eff,
+            n_eff=n_eff,
+            p_candidates=len(cache.valid_cols),
+        )
+        return min(k_hat, path_length), ""
+    if lower == "perm_gap":
+        cfg = replace(base, k_method="perm_gap")
+        nulls = null_objective_paths(
+            cache,
+            y,
+            B=int(cfg.perm_B),
+            max_k=path_length,
+            null=cfg.perm_null,
+            time=source_time,
+            groups=source_groups,
+            top_m=top_m,
+            corr_prune=corr_prune,
+            random_state=int(cfg.random_state),
+        )
+        k_hat, _diag = select_k_perm_gap(objective, nulls, cfg)
+        return min(k_hat, path_length), ""
+    if lower in {"gaussian_cv", "xfit_objective"}:
+        strategy = config.strategy
+        if strategy == "time_holdout" and time is None:
+            strategy = "kfold"
+        if strategy == "group_cv" and groups is None:
+            strategy = "kfold"
+        cfg = replace(base, k_method=lower, strategy=strategy)
+        if lower == "gaussian_cv":
+            curves = gaussian_cv_curves(
+                cache,
+                y,
+                config=cfg,
+                groups=groups,
+                time=time,
+                top_m=top_m,
+                corr_prune=corr_prune,
+                method=method,
+            )
+            k_hat, _diag = select_k_gaussian_cv(curves, cfg)
+        else:
+            curves = xfit_objective_curves(
+                cache,
+                y,
+                config=cfg,
+                groups=groups,
+                time=time,
+                top_m=top_m,
+                corr_prune=corr_prune,
+                method=method,
+            )
+            k_hat, _diag = select_k_xfit_objective(curves, cfg)
+        return min(k_hat, path_length), f"strategy={strategy}"
+    if lower == "stability":
+        cfg = replace(base, k_method="stability")
+        boot = bootstrap_paths(
+            cache,
+            y,
+            B=int(cfg.boot_B),
+            max_k=path_length,
+            boot_mode=cfg.boot_mode,
+            top_m=top_m,
+            corr_prune=corr_prune,
+            random_state=int(cfg.random_state),
+        )
+        k_hat, _diag = select_k_stability(boot, len(cache.valid_cols), cfg)
+        return min(k_hat, path_length), ""
+    return None, "unknown_method"
+
+
+def select_gaussian_consensus_path(
+    *, cache, y: np.ndarray, method: str, max_k: int, top_m: int, auto_k_config: AutoKConfig,
+    corr_prune: float | None | Literal["auto"] = "auto",
+    groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
+    source_groups: Optional[np.ndarray] = None,
+    source_time: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    **_unused,
+) -> GaussianAutoKResult:
+    auto_k_module.validate_auto_k_config(auto_k_config)
+    path, path_indices, objective = _cached_filter_path(
+        cache,
+        y,
+        max_k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        want_indices=True,
+        return_objective=True,
+    )
+    rows = []
+    for name in auto_k_config.consensus_methods:
+        start = time_module.perf_counter()
+        note = ""
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"AutoKConfig\..*does not use it\.",
+                category=UserWarning,
+            )
+            try:
+                k_hat, note = _consensus_method_k(
+                    name,
+                    cache=cache,
+                    y=y,
+                    method=method,
+                    objective=objective,
+                    config=auto_k_config,
+                    top_m=top_m,
+                    corr_prune=corr_prune,
+                    groups=groups,
+                    time=time,
+                    source_groups=source_groups,
+                    source_time=source_time,
+                    path_length=len(path),
+                )
+            except Exception as exc:
+                raise ValueError(f"consensus submethod {name!r} failed: {exc}") from exc
+        if k_hat is None:
+            raise ValueError(f"consensus submethod {name!r} did not return a k value: {note}")
+        rows.append(
+            {
+                "method": name,
+                "k_hat": int(k_hat),
+                "runtime_s": float(time_module.perf_counter() - start),
+                "note": note,
+                "participated": True,
+            }
+        )
+    auto_diag = pd.DataFrame(rows)
+    participated = auto_diag[auto_diag["participated"]]
+    if participated.empty:
+        notes = ", ".join(
+            f"{row.method}: {row.note or 'no result'}"
+            for row in auto_diag.itertuples(index=False)
+        )
+        raise ValueError(
+            "consensus auto-k did not get a result from any configured method; "
+            f"methods={tuple(auto_k_config.consensus_methods)!r}; notes={notes}"
+        )
+    values = sorted(participated["k_hat"].astype(int).tolist())
+    selected_count = int(values[(len(values) - 1) // 2])
+    selected_count = min(selected_count, len(path))
+    min_k = max(1, int(np.nanmin(participated["k_hat"].to_numpy(dtype=float))))
+    spread = float(np.nanmax(participated["k_hat"].to_numpy(dtype=float)) / min_k)
+    if np.isfinite(spread) and spread > 2.0:
+        warnings.warn(
+            "consensus auto-k methods disagree by more than 2x; k is ill-determined.",
+            UserWarning,
+            stacklevel=2,
+        )
+    auto_diag["selected"] = auto_diag["k_hat"] == selected_count
+    _print_selected_k("Consensus", selected_count, verbose)
+    effective_max_k = len(path)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=len(path),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra={
+            "consensus_spread": spread,
+            "consensus_n_methods": int(participated.shape[0]),
             "proxy_only_objective": True,
         },
     )
@@ -411,6 +1431,7 @@ def select_binary_penalized(
         objective_scale=2.0,
         n_samples=len(run.y_sub),
         sample_weight=run.w_sub,
+        n_candidates=problem.n_features_input,
         path_length=path_length,
     )
     ic_likelihood_type = (
@@ -431,11 +1452,17 @@ def select_binary_penalized(
     warnings = []
     if score_test_ic_approximation and options.refit_every > 1:
         warnings.append("refit_every > 1 makes cumulative score-test gains more approximate")
+    effective_max_k = _effective_max_k(auto_k_config, path_length)
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
         path_length=path_length,
-        effective_max_k=_effective_max_k(auto_k_config, path_length),
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
         diagnostics=auto_diag,
         extra={
             "proxy_only_objective": True,
@@ -448,6 +1475,123 @@ def select_binary_penalized(
             "binary_refit_failures": binary_refit_failures,
             "warnings": warnings,
         },
+    )
+    return binary_selection_prefix(
+        run.path,
+        selected_count,
+        auto_diag=auto_diag,
+        auto_objective=auto_objective,
+        auto_summary=summary,
+    )
+
+
+def select_binary_posterior(
+    _X, problem: BinaryProblem, run: BinaryPathRun, options: BinaryOptions, *,
+    auto_k_config: AutoKConfig, cat_encoding: str, verbose: bool,
+) -> BinarySelection:
+    del cat_encoding
+    if auto_k_config.binary_objective_mode == "score_test":
+        auto_objective = np.cumsum(np.asarray(run.path.path_scores, dtype=np.float64))
+        binary_refit_failures = 0
+        score_test_ic_approximation = True
+    else:
+        auto_objective, binary_refit_failures = binary_refit_loglik_gains(
+            run.X_sub.astype(np.float64, copy=False),
+            run.y_sub.astype(np.float64, copy=False),
+            run.w_sub.astype(np.float64, copy=False),
+            run.path.selected_original,
+            ridge=options.ridge,
+        )
+        score_test_ic_approximation = False
+
+    path_length = len(run.path.selected_features)
+    selected_count, auto_diag = _select_posterior_count(
+        auto_objective,
+        auto_k_config,
+        objective_scale=2.0,
+        n_samples=len(run.y_sub),
+        sample_weight=run.w_sub,
+        n_candidates=problem.n_features_input,
+        path_length=path_length,
+    )
+    if auto_diag is not None and not auto_diag.empty:
+        auto_diag["binary_objective_mode"] = auto_k_config.binary_objective_mode
+        auto_diag["score_test_ic_approximation"] = score_test_ic_approximation
+        auto_diag["binary_refit_failures"] = binary_refit_failures
+    _print_selected_k("K posterior", selected_count, verbose)
+    extra = {
+        "proxy_only_objective": True,
+        "objective_scale": "binary_loglik_gain",
+        "binary_objective_mode": auto_k_config.binary_objective_mode,
+        "score_test_ic_approximation": score_test_ic_approximation,
+        "binary_refit_failures": binary_refit_failures,
+    }
+    if auto_diag is not None and not auto_diag.empty:
+        for column in ("posterior_level", "hpd_lo", "hpd_hi", "p_zero", "entropy", "ebic_gamma"):
+            extra[column] = auto_diag[column].iloc[0]
+    effective_max_k = _effective_max_k(auto_k_config, path_length)
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=path_length,
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra=extra,
+    )
+    return binary_selection_prefix(
+        run.path,
+        selected_count,
+        auto_diag=auto_diag,
+        auto_objective=auto_objective,
+        auto_summary=summary,
+    )
+
+
+def select_binary_changepoint(
+    _X, _problem: BinaryProblem, run: BinaryPathRun, _options: BinaryOptions, *,
+    auto_k_config: AutoKConfig, cat_encoding: str, verbose: bool,
+) -> BinarySelection:
+    del cat_encoding
+    auto_objective = np.cumsum(np.asarray(run.path.path_scores, dtype=np.float64))
+    path_length = len(run.path.selected_features)
+    n_eff, n_eff_source = _objective_n_eff(auto_k_config, run.w_sub, len(run.y_sub))
+    selected_count, auto_diag = select_k_changepoint(
+        auto_objective,
+        auto_k_config,
+        objective_scale=2.0,
+        n_eff=n_eff,
+        p_candidates=len(run.feature_names),
+    )
+    selected_count = min(selected_count, path_length)
+    _print_selected_k("Changepoint", selected_count, verbose)
+    extra = {
+        "proxy_only_objective": True,
+        "objective_scale": "binary_score_test_gain",
+        "score_test_objective_approximation": True,
+        "n_eff": n_eff,
+        "n_eff_source": n_eff_source,
+        "floor_z": auto_k_config.floor_z,
+    }
+    if auto_diag is not None and not auto_diag.empty:
+        extra["floor_not_reached"] = bool(auto_diag["floor_not_reached"].iloc[0])
+    effective_max_k = int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0
+    summary = auto_k_summary(
+        auto_k_config,
+        selected_k=selected_count,
+        path_length=path_length,
+        effective_max_k=effective_max_k,
+        effective_min_k=_zero_capable_effective_min_k(
+            auto_k_config,
+            selected_k=selected_count,
+            effective_max_k=effective_max_k,
+        ),
+        diagnostics=auto_diag,
+        extra=extra,
     )
     return binary_selection_prefix(
         run.path,

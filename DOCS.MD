@@ -79,7 +79,7 @@ return integer indices.
 | CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
 | Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
 | Knockoff FDR | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` | q-calibrated approximate Gaussian-copula knockoff selection and advanced sampler access. |
-| Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` | Choosing feature count by holdout, group CV, objective elbow, or penalized objective. |
+| Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` | Choosing feature count by holdout/CV, calibrated objective stops, permutation gaps, knockoffs, stability, or information criteria. |
 | Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
 | Smart sampling | `smart_sample`, `SmartSamplerConfig`, sampler presets | Reducing large panel/cross-section datasets before selection. |
@@ -111,6 +111,20 @@ from sift import (
     select_k_auto,
     select_k_elbow,
     select_k_penalized_objective,
+    select_k_posterior,
+    path_gain_pvalues,
+    select_k_changepoint,
+    select_k_chi2_stop,
+    select_k_forward_stop,
+    bootstrap_paths,
+    null_objective_paths,
+    select_k_perm_gap,
+    select_k_stability,
+    gaussian_cv_curves,
+    select_k_gaussian_cv,
+    select_k_xfit_objective,
+    select_k_knockoff_path,
+    xfit_objective_curves,
     compute_objective_for_path,
     BorutaSelector,
     BorutaResult,
@@ -591,16 +605,28 @@ by default unless `allow_full_data_target_encoding=True` is passed explicitly.
 
 ## Automatic `k` Selection
 
-The filter selectors accept `k="auto"`:
+The filter selectors accept `k="auto"`. For CEFS+ and binary CEFS+, omitting
+`auto_k_config` uses the measured Auto-K v2 router. The current zero-config
+CEFS+ route chooses EBIC, a multiplicity-aware information criterion that
+cleared the synthetic benchmark campaign with D5 null calibration and D9
+runtime gates:
+
+```python
+from sift import select_cefsplus
+
+selected = select_cefsplus(X, y, k="auto", verbose=False)
+```
+
+Pass `AutoKConfig` when you want a specific method or validation strategy:
 
 ```python
 from sift import AutoKConfig, select_mrmr
 
 config = AutoKConfig(
-    k_method="evaluate",      # "evaluate", "elbow", or "penalized_objective"
+    k_method="evaluate",      # or "auto", "gaussian_cv", "perm_gap", etc.
     selection_rule="best",    # "best", "one_se", "plateau", or "tolerance"
     auto_k_mode="prefix_only", # "prefix_only" or selector-class "nested"
-    strategy="time_holdout",  # "time_holdout" or "group_cv"
+    strategy="time_holdout",  # "time_holdout", "group_cv", or "kfold" for fold curves
     metric="rmse",            # "auto", "rmse", "mae", "logloss", "error"
     min_k=5,
     max_k=100,
@@ -620,6 +646,14 @@ selected = select_mrmr(
 
 `AutoKConfig` fields:
 
+- `k_method="auto"` delegates to the measured router. CEFS+ and binary CEFS+
+  route no-config `k="auto"` through this path automatically. The router
+  records `auto_routing` diagnostics with the chosen method, reason, and cheap
+  facts such as Kish effective sample size, candidate count, weight skew, and
+  the presence of groups/time. The shipped CEFS+ rule table uses EBIC as the
+  measured default, switches to EBIC when `p_valid > n_eff_kish`, uses
+  `perm_gap` for heavy weight skew, and sends explicit non-CEFS+ Gaussian
+  auto routes to `gaussian_cv/one_se`.
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model. `selection_rule="best"` preserves the historical argmin
   behavior. `selection_rule="plateau"` and `"tolerance"` require
@@ -636,6 +670,45 @@ selected = select_mrmr(
   `O_k` is the log-det Gaussian MI proxy. Binary CEFS+ log-loss uses
   `2 * G_k - penalty * k`, where `G_k` is a prefix log-likelihood gain. This is
   proxy-objective IC selection, not downstream-performance optimization.
+  `objective_penalty="ebic"` and `"ric"` add multiplicity-aware penalties for
+  wide screens; EBIC/RIC use Kish effective sample size by default. EBIC is the
+  measured CEFS+ default from the Auto-K v2 synthetic campaign; RIC is exposed
+  for comparison and may be more conservative.
+- CEFS+ also supports calibrated path methods: `k_method="chi2_stop"` tests
+  each greedy gain against a max-over-candidates F null, `k_method="forward_stop"`
+  applies the ordered ForwardStop accumulation rule to those p-values, and
+  `k_method="changepoint"` estimates a gain-path change point. `chi2_stop` and
+  `forward_stop` are the calibrated no-signal stops; `changepoint` is currently
+  an experimental diagnostic and should not be used as a default. These methods
+  may legitimately return `k=0` when no discovery is supported.
+- `k_method="perm_gap"` reruns CEFS+ on structure-aware permuted targets and
+  compares the real objective curve to the null envelope. Use `perm_null="auto"`
+  by default, or set `"within_group"` / `"circular_shift"` when the null must
+  preserve groups or time structure.
+- `k_method="gaussian_cv"` and `k_method="xfit_objective"` build train-fold
+  paths and score all prefix lengths in Gaussian-copula correlation space.
+  They support `strategy="time_holdout"`, `"group_cv"`, or `"kfold"` and are
+  also available on Gaussian mRMR/JMI/JMIM paths. Function-style selectors
+  currently support `xfit_mode="shared_z"`; `xfit_mode="exact"` is reserved for
+  fold-local cache rebuilding. `gaussian_cv` is the preferred fold-curve method;
+  `xfit_objective` uses a one-SE default plus a null guard but remains
+  experimental pending broader gates.
+- `k_method="k_posterior"` reports a pseudo-posterior over `k`, including HPD
+  range, `P(k=0)`, and entropy. When `min_k > 0`, HPD is computed over
+  selectable `k`, while `P(k=0)` still reports the unselectable zero-feature
+  mass. It is relative evidence along one greedy path, not full Bayesian model
+  averaging.
+- `k_method="knockoff_path"` interleaves cache-space knockoffs with originals
+  and stops from knockoff entries. The default `knockoff_return="set"` returns
+  an approximate Gaussian-copula knockoff set under the plug-in feature model;
+  `knockoff_return="prefix"` returns a same-size CEFS+ prefix and labels it as
+  count-only rather than FDR-controlled.
+- `k_method="stability"` chooses from a bootstrap stability curve and reports
+  per-feature selection frequencies in the summary. It is useful as a
+  reproducibility diagnostic; automatic sizing from the stability curve remains
+  experimental after the Auto-K v2 benchmark gates.
+- `k_method="consensus"` runs a configured subset of methods and returns the
+  lower median `k`, with a disagreement diagnostic.
 - `auto_k_mode="prefix_only"` is the current public semantic. Selectors build
   one supervised feature path on the rows available to the selector, then
   evaluate prefixes of that fixed path. For `k_method="evaluate"`, the scores
@@ -654,15 +727,57 @@ selected = select_mrmr(
   and explicit supervised categorical encoding together, because that would
   evaluate already target-encoded validation rows. Use nested mode or
   pre-encode/cross-fit categoricals outside the selector.
-- `strategy="time_holdout"` requires `time` and validates on the latest rows.
+- `strategy="time_holdout"` requires `time` and validates on the latest rows
+  for evaluate/fold-curve methods.
 - `strategy="group_cv"` requires `groups` and uses `GroupKFold`.
-- If `auto_k_config` is omitted, selectors infer `strategy="time_holdout"` when
-  `time` is supplied and `strategy="group_cv"` when only `groups` is supplied.
+- `strategy="kfold"` is available for `gaussian_cv` and `xfit_objective`.
+- If `auto_k_config` is omitted, CEFS+ and binary CEFS+ use
+  `k_method="auto"`. Other selectors keep the legacy inference:
+  `strategy="time_holdout"` when `time` is supplied and `strategy="group_cv"`
+  when only `groups` is supplied.
 - `metric="auto"` resolves to RMSE for regression and log loss for
   classification.
-- `min_k`, `max_k`, `val_frac`, `n_splits`, `random_state`,
-  `elbow_min_rel_gain`, `elbow_patience`, `objective_penalty`,
-  `objective_n_eff`, and `binary_objective_mode` control the search.
+- `min_k` may be zero for discovery/error-controlled methods. Mean-one weight
+  normalization makes `n_eff_mode="weight_sum"` equal to the row count even
+  under skewed weights; v2 inference methods use Kish effective sample size
+  when `n_eff_mode="auto"`.
+
+Important v2 knobs:
+
+| Field | Used by | Meaning |
+| --- | --- | --- |
+| `alpha`, `m_mode`, `stop_patience` | `chi2_stop`, `forward_stop`, `perm_gap`, `changepoint` | Path-test level, max-candidate correction width, and consecutive-stop patience. |
+| `perm_B`, `perm_null`, `gap_rule` | `perm_gap` | Number of null paths, structure-preserving null type, and gap decision rule. |
+| `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` | `knockoff_path` | Target q, derandomized draws, sampler construction, and set-vs-prefix return contract. |
+| `xfit_folds`, `xfit_mode` | `gaussian_cv`, `xfit_objective` | Fold count and shared-copula mode. |
+| `xfit_ridge` | `gaussian_cv` | Gaussian linear-risk ridge. |
+| `ebic_gamma`, `n_eff_mode` | `penalized_objective`, `k_posterior` | Multiplicity penalty strength and effective-sample-size source. |
+| `posterior_level`, `posterior_pick` | `k_posterior` | HPD mass and MAP-vs-smallest-HPD selection rule. |
+| `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` | Bootstrap count/mode, max-one-SE or pi-threshold sizing, and a Phi floor for chance-level agreement. |
+| `floor_z`, `floor_window` | `changepoint` | Experimental noise-floor diagnostic parameters. |
+| `consensus_methods` | `consensus` | Submethods included in the lower-median consensus. |
+
+Supported function-style routes:
+
+| Route | Supported `k_method` values |
+| --- | --- |
+| Classic mRMR/JMI/JMIM | `evaluate` |
+| Gaussian mRMR/JMI/JMIM | `auto`, `evaluate`, `elbow`, `gaussian_cv`, `xfit_objective`, `stability` |
+| CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `chi2_stop`, `forward_stop`, `changepoint`, `perm_gap`, `knockoff_path`, `gaussian_cv`, `xfit_objective`, `stability`, `consensus` |
+| Binary CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `changepoint` |
+
+Which method should I use?
+
+| Situation | Good starting point |
+| --- | --- |
+| You want the measured CEFS+ default | `select_cefsplus(X, y, k="auto")` |
+| You have enough rows and want predictive prefix size | `gaussian_cv` with `strategy="kfold"` or a real holdout |
+| You have no validation context and need an IC-style baseline | `penalized_objective` with `objective_penalty="ebic"` |
+| You need a calibrated no-signal stop | `chi2_stop` or `forward_stop` with `min_k=0` |
+| Weights, ranks, groups, or time structure make analytic nulls suspect | `perm_gap` with the appropriate `perm_null` |
+| You need an approximate plug-in q-calibrated selected set | `knockoff_path` with `knockoff_return="set"` |
+| You need to know whether the list is reproducible | `stability` diagnostics |
+| Methods disagree and you want a conservative summary | `consensus` and inspect `consensus_spread` |
 
 Recommended patterns:
 
@@ -676,10 +791,9 @@ AutoKConfig(
     max_k=300,
 )
 
-# No validation split: CEFS+ proxy-objective IC.
+# No validation split: CEFS+ measured default.
 AutoKConfig(
-    k_method="penalized_objective",
-    objective_penalty="bic",
+    k_method="auto",
     max_k=300,
 )
 ```

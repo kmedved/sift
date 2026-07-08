@@ -1,5 +1,13 @@
 # Release Notes
 
+## Unreleased
+
+- Expanded experimental auto-k selection with EBIC/RIC penalties,
+  pseudo-posterior `k` diagnostics, calibrated CEFS+ gain stops,
+  permutation-gap null envelopes, closed-form Gaussian CV curves,
+  knockoff-path stopping, bootstrap stability, changepoint diagnostics,
+  consensus diagnostics, and a synthetic auto-k harness.
+
 ## 0.7.0
 
 - Added q-calibrated Gaussian-copula knockoff selection: `select_fdr`,

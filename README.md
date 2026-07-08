@@ -82,7 +82,7 @@ start with [DOCS.MD](DOCS.MD).
 | --- | --- |
 | Core filters | `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary` |
 | q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` |
-| Automatic `k` | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` |
+| Automatic `k` | `k="auto"` for measured CEFS+ auto-routing, `AutoKConfig`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` |
 | Result objects and wrappers | `FilterSelectionResult`, `KnockoffSelectionResult`, `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector` |
 | Cache-backed Gaussian paths | `build_cache`, `select_cached`, `FeatureCache` |
 | Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif` |

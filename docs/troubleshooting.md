@@ -30,12 +30,12 @@ python -m pip install -e ".[catboost]"
 
 ## Auto-k
 
-### `ValueError: k='auto' requires time, groups, or auto_k_config with k_method='elbow' or 'penalized_objective'`
+### `ValueError: k='auto' requires time, groups, or auto_k_config with an explicit AutoKConfig`
 
 `AutoKConfig` defaults to `k_method="evaluate"` with `strategy="time_holdout"`.
 Evaluate-mode auto-k always needs a held-out split, so pass either `time=...`,
-`groups=...`, or build an `AutoKConfig` whose `k_method` does not require a
-held-out split:
+`groups=...`, or build an explicit `AutoKConfig` whose `k_method` does not
+require that context:
 
 ```python
 from sift import AutoKConfig, select_cefsplus
@@ -47,8 +47,10 @@ select_cefsplus(X, y, k="auto", auto_k_config=config)
 ### `ValueError: auto-k evaluate with strategy='time_holdout' requires time parameter`
 
 You set `AutoKConfig(strategy="time_holdout")` but did not pass `time=...`. Same
-for `strategy="group_cv"` requiring `groups=...`. Either pass the split context
-or switch to an objective-only `k_method` (`elbow` or `penalized_objective`).
+for `strategy="group_cv"` requiring `groups=...`. Either pass the split context,
+use `strategy="kfold"` for `gaussian_cv`/`xfit_objective`, or switch to a
+path-only method such as `elbow`, `penalized_objective`, `chi2_stop`,
+`changepoint`, or `perm_gap`.
 
 ### `<selector> does not support k_method=<value>`
 
@@ -57,9 +59,9 @@ Auto-k support depends on the selector route:
 | Route | Supported `k_method` |
 | --- | --- |
 | Classic mRMR/JMI/JMIM | `evaluate` |
-| Gaussian mRMR/JMI/JMIM | `evaluate`, `elbow` |
-| CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
-| Binary CEFS+ | `evaluate`, `elbow`, `penalized_objective` |
+| Gaussian mRMR/JMI/JMIM | `evaluate`, `elbow`, `gaussian_cv`, `xfit_objective`, `stability` |
+| CEFS+ | `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `chi2_stop`, `forward_stop`, `changepoint`, `perm_gap`, `knockoff_path`, `gaussian_cv`, `xfit_objective`, `stability`, `consensus` |
+| Binary CEFS+ | `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `changepoint` |
 
 Pick a supported mode or switch selectors.
 

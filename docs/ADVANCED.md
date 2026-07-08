@@ -144,13 +144,30 @@ labels from a column in `X`.
 
 ## Automatic Feature Counts
 
-SIFT exposes three auto-k modes through `AutoKConfig.k_method`:
+SIFT exposes multiple auto-k modes through `AutoKConfig.k_method`:
 
 | Method | What it does | Typical use |
 | --- | --- | --- |
+| `auto` | Uses the measured router and records routing diagnostics | Zero-config CEFS+ default |
 | `evaluate` | Scores prefixes on a holdout or group CV | Prediction-oriented k |
 | `elbow` | Stops when objective gains flatten | Fast unsupervised-ish path sizing |
-| `penalized_objective` | Applies AIC/BIC/MDL/HQC-style penalties | Parsimonious Gaussian paths |
+| `penalized_objective` | Applies AIC/BIC/MDL/HQC/EBIC/RIC-style penalties | Parsimonious Gaussian paths; EBIC is the measured CEFS+ default |
+| `chi2_stop`, `forward_stop` | Tests CEFS+ gains against a max-over-candidates null | Calibrated no-signal stops |
+| `perm_gap` | Compares CEFS+ to permutation-null objective curves | Structured/weighted null calibration |
+| `gaussian_cv`, `xfit_objective` | Scores train-fold paths in Gaussian-copula space | Cheap all-k CV curves; `xfit_objective` is experimental |
+| `k_posterior` | Reports pseudo-posterior mass over `k` | Uncertainty diagnostics |
+| `knockoff_path` | Stops from knockoff entries in a pair-aware path | Approximate plug-in q-calibrated selected sets |
+| `stability` | Uses bootstrap path reproducibility | Reproducibility diagnostics; automatic sizing is experimental |
+| `changepoint`, `consensus` | Change-point diagnostic and median-of-methods | Experimental diagnostic / disagreement summary |
+
+The zero-config CEFS+ first pass is `select_cefsplus(X, y, k="auto")`, which
+currently routes to EBIC based on the Auto-K v2 benchmark campaign. Prefer
+`gaussian_cv` when you specifically want fold-curve scoring, `chi2_stop` or
+`forward_stop` for calibrated no-signal stops, and `perm_gap` when
+groups/time/weights make analytic nulls suspicious. Inspect `changepoint`,
+`stability`, `xfit_objective`, and `knockoff_path` diagnostics before trusting
+their selected `k`; they remain experimental or failed-gate for automatic
+sizing.
 
 Selection rules for `evaluate` include:
 

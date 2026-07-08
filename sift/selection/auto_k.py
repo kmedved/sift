@@ -9,6 +9,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+from scipy.special import gammaln, logsumexp
 from sklearn.model_selection import GroupKFold
 
 from sift._preprocess import (
@@ -42,8 +43,23 @@ class AutoKConfig:
     the prefix-only contract.
     """
 
-    k_method: Literal["evaluate", "elbow", "penalized_objective"] = "evaluate"
-    strategy: Literal["time_holdout", "group_cv"] = "time_holdout"
+    k_method: Literal[
+        "evaluate",
+        "elbow",
+        "penalized_objective",
+        "chi2_stop",
+        "forward_stop",
+        "perm_gap",
+        "knockoff_path",
+        "xfit_objective",
+        "gaussian_cv",
+        "k_posterior",
+        "stability",
+        "changepoint",
+        "consensus",
+        "auto",
+    ] = "evaluate"
+    strategy: Literal["time_holdout", "group_cv", "kfold"] = "time_holdout"
     metric: Literal["rmse", "mae", "logloss", "error", "auto"] = "auto"
     max_k: int = 100
     min_k: int = 5
@@ -59,25 +75,97 @@ class AutoKConfig:
     score_rel_tol: float | None = None
     plateau_prefer: Literal["smallest", "center", "best", "largest"] = "smallest"
     plateau_min_points: int = 2
-    objective_penalty: Literal["bic", "mdl", "aic", "hqc", "custom"] = "bic"
+    objective_penalty: Literal["bic", "mdl", "aic", "hqc", "custom", "ebic", "ric"] = "bic"
     objective_penalty_weight: float | None = None
     objective_n_eff: float | None = None
     binary_objective_mode: Literal["refit", "score_test"] = "refit"
+    n_eff_mode: Literal["auto", "kish", "weight_sum"] | float = "auto"
+    alpha: float = 0.05
+    m_mode: Literal["all", "panel", "li_ji"] = "all"
+    stop_patience: int = 2
+    perm_B: int = 20
+    perm_null: Literal["auto", "permute", "circular_shift", "within_group"] = "auto"
+    gap_rule: Literal["tibshirani", "argmax", "gain_envelope"] = "tibshirani"
+    knockoff_q: float = 0.2
+    knockoff_draws: int = 1
+    knockoff_s_method: Literal["equi", "mvr", "me"] = "equi"
+    knockoff_return: Literal["set", "prefix"] = "set"
+    xfit_folds: int = 5
+    xfit_mode: Literal["shared_z", "exact"] = "shared_z"
+    xfit_ridge: float = 1e-3
+    ebic_gamma: Literal["auto"] | float = "auto"
+    posterior_level: float = 0.9
+    posterior_pick: Literal["map", "smallest_in_hpd"] = "map"
+    boot_B: int = 30
+    boot_mode: Literal["bayes", "half"] = "bayes"
+    stability_rule: Literal["max_one_se", "pi_threshold"] = "max_one_se"
+    stability_pi: float = 0.6
+    floor_z: float = 2.5
+    floor_window: float | int = 0.2
+    consensus_methods: tuple[str, ...] = ("ebic", "chi2_stop", "perm_gap", "gaussian_cv")
 
 
-_VALID_K_METHODS = frozenset({"evaluate", "elbow", "penalized_objective"})
-_VALID_STRATEGIES = frozenset({"time_holdout", "group_cv"})
+_VALID_K_METHODS = frozenset(
+    {
+        "evaluate",
+        "elbow",
+        "penalized_objective",
+        "chi2_stop",
+        "forward_stop",
+        "perm_gap",
+        "knockoff_path",
+        "xfit_objective",
+        "gaussian_cv",
+        "k_posterior",
+        "stability",
+        "changepoint",
+        "consensus",
+        "auto",
+    }
+)
+_VALID_STRATEGIES = frozenset({"time_holdout", "group_cv", "kfold"})
 _VALID_SELECTION_RULES = frozenset({"best", "one_se", "plateau", "tolerance"})
 _VALID_PLATEAU_PREFERS = frozenset({"smallest", "center", "best", "largest"})
-_VALID_OBJECTIVE_PENALTIES = frozenset({"bic", "mdl", "aic", "hqc", "custom"})
+_VALID_OBJECTIVE_PENALTIES = frozenset({"bic", "mdl", "aic", "hqc", "custom", "ebic", "ric"})
 _VALID_BINARY_OBJECTIVE_MODES = frozenset({"refit", "score_test"})
 _POSITIVE_INT_FIELDS = (
-    "min_k",
     "max_k",
     "n_splits",
     "elbow_patience",
     "plateau_min_points",
+    "stop_patience",
+    "perm_B",
+    "knockoff_draws",
+    "xfit_folds",
+    "boot_B",
 )
+_NONNEGATIVE_INT_FIELDS = ("min_k",)
+_VALID_N_EFF_MODES = frozenset({"auto", "kish", "weight_sum"})
+_VALID_M_MODES = frozenset({"all", "panel", "li_ji"})
+_VALID_PERM_NULLS = frozenset({"auto", "permute", "circular_shift", "within_group"})
+_VALID_GAP_RULES = frozenset({"tibshirani", "argmax", "gain_envelope"})
+_VALID_KNOCKOFF_S_METHODS = frozenset({"equi", "mvr", "me"})
+_VALID_KNOCKOFF_RETURNS = frozenset({"set", "prefix"})
+_VALID_XFIT_MODES = frozenset({"shared_z", "exact"})
+_VALID_POSTERIOR_PICKS = frozenset({"map", "smallest_in_hpd"})
+_VALID_BOOT_MODES = frozenset({"bayes", "half"})
+_VALID_STABILITY_RULES = frozenset({"max_one_se", "pi_threshold"})
+_VALID_CONSENSUS_METHODS = frozenset(
+    {
+        "ebic",
+        "ric",
+        "posterior",
+        "k_posterior",
+        "chi2_stop",
+        "forward_stop",
+        "changepoint",
+        "perm_gap",
+        "gaussian_cv",
+        "xfit_objective",
+        "stability",
+    }
+)
+_DEFAULT_AUTOK_CONFIG = None
 _REAL_TYPES = (int, float, np.integer, np.floating)
 
 
@@ -98,6 +186,11 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
             "AutoKConfig.strategy must be one of "
             f"{sorted(_VALID_STRATEGIES)}; got {config.strategy!r}"
         )
+    if config.k_method == "evaluate" and config.strategy == "kfold":
+        raise ValueError(
+            "AutoKConfig.strategy='kfold' is only supported by gaussian_cv and "
+            "xfit_objective; use time_holdout or group_cv for k_method='evaluate'"
+        )
 
     for name in _POSITIVE_INT_FIELDS:
         value = getattr(config, name)
@@ -107,6 +200,14 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
             or int(value) < 1
         ):
             raise ValueError(f"AutoKConfig.{name} must be a positive integer")
+    for name in _NONNEGATIVE_INT_FIELDS:
+        value = getattr(config, name)
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < 0
+        ):
+            raise ValueError(f"AutoKConfig.{name} must be a non-negative integer")
 
     if int(config.min_k) > int(config.max_k):
         raise ValueError("AutoKConfig.min_k must be <= AutoKConfig.max_k")
@@ -157,9 +258,116 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
             "selection_rule='plateau' or 'tolerance' requires score_abs_tol or score_rel_tol"
         )
 
-    if (
-        config.objective_penalty not in _VALID_OBJECTIVE_PENALTIES
+    if config.n_eff_mode not in _VALID_N_EFF_MODES and (
+        not _is_real_number(config.n_eff_mode)
+        or not np.isfinite(config.n_eff_mode)
+        or float(config.n_eff_mode) <= 1.0
     ):
+        raise ValueError(
+            "AutoKConfig.n_eff_mode must be 'auto', 'kish', 'weight_sum', or a finite float > 1"
+        )
+
+    if config.m_mode not in _VALID_M_MODES:
+        raise ValueError(
+            "AutoKConfig.m_mode must be one of "
+            f"{sorted(_VALID_M_MODES)}; got {config.m_mode!r}"
+        )
+    if config.perm_null not in _VALID_PERM_NULLS:
+        raise ValueError(
+            "AutoKConfig.perm_null must be one of "
+            f"{sorted(_VALID_PERM_NULLS)}; got {config.perm_null!r}"
+        )
+    if config.gap_rule not in _VALID_GAP_RULES:
+        raise ValueError(
+            "AutoKConfig.gap_rule must be one of "
+            f"{sorted(_VALID_GAP_RULES)}; got {config.gap_rule!r}"
+        )
+    if config.knockoff_s_method not in _VALID_KNOCKOFF_S_METHODS:
+        raise ValueError(
+            "AutoKConfig.knockoff_s_method must be one of "
+            f"{sorted(_VALID_KNOCKOFF_S_METHODS)}; got {config.knockoff_s_method!r}"
+        )
+    if config.knockoff_return not in _VALID_KNOCKOFF_RETURNS:
+        raise ValueError(
+            "AutoKConfig.knockoff_return must be one of "
+            f"{sorted(_VALID_KNOCKOFF_RETURNS)}; got {config.knockoff_return!r}"
+        )
+    if config.xfit_mode not in _VALID_XFIT_MODES:
+        raise ValueError(
+            "AutoKConfig.xfit_mode must be one of "
+            f"{sorted(_VALID_XFIT_MODES)}; got {config.xfit_mode!r}"
+        )
+    if config.posterior_pick not in _VALID_POSTERIOR_PICKS:
+        raise ValueError(
+            "AutoKConfig.posterior_pick must be one of "
+            f"{sorted(_VALID_POSTERIOR_PICKS)}; got {config.posterior_pick!r}"
+        )
+    if config.boot_mode not in _VALID_BOOT_MODES:
+        raise ValueError(
+            "AutoKConfig.boot_mode must be one of "
+            f"{sorted(_VALID_BOOT_MODES)}; got {config.boot_mode!r}"
+        )
+    if config.stability_rule not in _VALID_STABILITY_RULES:
+        raise ValueError(
+            "AutoKConfig.stability_rule must be one of "
+            f"{sorted(_VALID_STABILITY_RULES)}; got {config.stability_rule!r}"
+        )
+
+    for name in ("alpha", "knockoff_q", "posterior_level"):
+        value = getattr(config, name)
+        if (
+            not _is_real_number(value)
+            or not np.isfinite(value)
+            or not 0.0 < float(value) < 1.0
+        ):
+            raise ValueError(f"AutoKConfig.{name} must be finite and between 0 and 1")
+    if (
+        not _is_real_number(config.stability_pi)
+        or not np.isfinite(config.stability_pi)
+        or not 0.5 < float(config.stability_pi) <= 1.0
+    ):
+        raise ValueError("AutoKConfig.stability_pi must be finite and in (0.5, 1]")
+    if (
+        not _is_real_number(config.xfit_ridge)
+        or not np.isfinite(config.xfit_ridge)
+        or float(config.xfit_ridge) < 0.0
+    ):
+        raise ValueError("AutoKConfig.xfit_ridge must be finite and non-negative")
+    if (
+        not _is_real_number(config.floor_z)
+        or not np.isfinite(config.floor_z)
+        or float(config.floor_z) <= 0.0
+    ):
+        raise ValueError("AutoKConfig.floor_z must be positive and finite")
+    if not _is_real_number(config.floor_window) or not np.isfinite(config.floor_window):
+        raise ValueError("AutoKConfig.floor_window must be finite")
+    if isinstance(config.floor_window, (int, np.integer)):
+        if int(config.floor_window) < 5:
+            raise ValueError("AutoKConfig.floor_window as an integer must be >= 5")
+    elif not 0.0 < float(config.floor_window) <= 0.5:
+        raise ValueError("AutoKConfig.floor_window as a fraction must be in (0, 0.5]")
+    if config.ebic_gamma != "auto" and (
+        not _is_real_number(config.ebic_gamma)
+        or not np.isfinite(config.ebic_gamma)
+        or not 0.0 <= float(config.ebic_gamma) <= 1.0
+    ):
+        raise ValueError("AutoKConfig.ebic_gamma must be 'auto' or finite in [0, 1]")
+    if not isinstance(config.consensus_methods, tuple) or not config.consensus_methods:
+        raise ValueError("AutoKConfig.consensus_methods must be a non-empty tuple")
+    if not all(isinstance(method, str) and method for method in config.consensus_methods):
+        raise ValueError("AutoKConfig.consensus_methods must contain non-empty strings")
+    unknown_consensus = [
+        method
+        for method in config.consensus_methods
+        if method.lower() not in _VALID_CONSENSUS_METHODS
+    ]
+    if unknown_consensus:
+        raise ValueError(
+            "AutoKConfig.consensus_methods contains unsupported method(s): "
+            f"{unknown_consensus}; supported methods are {sorted(_VALID_CONSENSUS_METHODS)}"
+        )
+
+    if config.objective_penalty not in _VALID_OBJECTIVE_PENALTIES:
         raise ValueError(
             "AutoKConfig.objective_penalty must be one of "
             f"{sorted(_VALID_OBJECTIVE_PENALTIES)}; got {config.objective_penalty!r}"
@@ -200,6 +408,66 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
             "AutoKConfig.binary_objective_mode must be one of "
             f"{sorted(_VALID_BINARY_OBJECTIVE_MODES)}; got {config.binary_objective_mode!r}"
         )
+
+    _warn_unused_method_fields(config)
+
+
+def _warn_unused_method_fields(config: AutoKConfig) -> None:
+    if config.k_method == "auto":
+        return
+    global _DEFAULT_AUTOK_CONFIG
+    if _DEFAULT_AUTOK_CONFIG is None:
+        _DEFAULT_AUTOK_CONFIG = AutoKConfig()
+    defaults = _DEFAULT_AUTOK_CONFIG
+    used_by = {
+        "alpha": {"chi2_stop", "forward_stop", "perm_gap"},
+        "m_mode": {"chi2_stop", "forward_stop"},
+        "stop_patience": {"chi2_stop", "changepoint", "perm_gap"},
+        "perm_B": {"perm_gap"},
+        "perm_null": {"perm_gap"},
+        "gap_rule": {"perm_gap"},
+        "knockoff_q": {"knockoff_path"},
+        "knockoff_draws": {"knockoff_path"},
+        "knockoff_s_method": {"knockoff_path"},
+        "knockoff_return": {"knockoff_path"},
+        "xfit_folds": {"xfit_objective", "gaussian_cv"},
+        "xfit_mode": {"xfit_objective", "gaussian_cv"},
+        "xfit_ridge": {"gaussian_cv"},
+        "ebic_gamma": {"penalized_objective", "k_posterior"},
+        "posterior_level": {"k_posterior"},
+        "posterior_pick": {"k_posterior"},
+        "boot_B": {"stability"},
+        "boot_mode": {"stability"},
+        "stability_rule": {"stability"},
+        "stability_pi": {"stability"},
+        "floor_z": {"changepoint"},
+        "floor_window": {"changepoint"},
+        "consensus_methods": {"consensus"},
+    }
+    consensus_methods = None
+    if config.k_method == "consensus":
+        consensus_aliases = {
+            "ebic": "penalized_objective",
+            "ric": "penalized_objective",
+            "posterior": "k_posterior",
+        }
+        consensus_methods = {
+            consensus_aliases.get(method.lower(), method.lower())
+            for method in config.consensus_methods
+        }
+        consensus_methods.add("consensus")
+    for field_name, methods in used_by.items():
+        if config.k_method in methods:
+            continue
+        if consensus_methods is not None and bool(consensus_methods & methods):
+            continue
+        if getattr(config, field_name) != getattr(defaults, field_name):
+            warnings.warn(
+                f"AutoKConfig.{field_name} is set but k_method={config.k_method!r} "
+                "does not use it.",
+                UserWarning,
+                stacklevel=3,
+            )
 
 
 def _ensure_supported_auto_k_mode(
@@ -252,8 +520,9 @@ def resolve_auto_k_config(
         _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
         return config
     raise ValueError(
-        "k='auto' requires time, groups, or auto_k_config with "
-        "k_method='elbow' or k_method='penalized_objective'"
+        "k='auto' requires time, groups, or auto_k_config with an explicit "
+        "AutoKConfig for a non-evaluate k_method such as 'elbow', "
+        "'penalized_objective', 'gaussian_cv', or 'perm_gap'"
     )
 
 
@@ -673,8 +942,30 @@ def select_k_elbow(
     return best_k, diag
 
 
+def _resolve_n_eff_mode(config: AutoKConfig) -> str | float:
+    mode = config.n_eff_mode
+    if mode == "auto":
+        v2_methods = {
+            "chi2_stop",
+            "forward_stop",
+            "perm_gap",
+            "knockoff_path",
+            "xfit_objective",
+            "gaussian_cv",
+            "k_posterior",
+            "stability",
+            "changepoint",
+            "consensus",
+            "auto",
+        }
+        if config.k_method in v2_methods or config.objective_penalty in {"ebic", "ric"}:
+            return "kish"
+        return "weight_sum"
+    return mode
+
+
 def _penalty_weight(config: AutoKConfig, n_eff: float) -> float:
-    if config.objective_penalty in {"bic", "mdl"}:
+    if config.objective_penalty in {"bic", "mdl", "ebic"}:
         return float(np.log(n_eff))
     if config.objective_penalty == "aic":
         return 2.0
@@ -685,7 +976,56 @@ def _penalty_weight(config: AutoKConfig, n_eff: float) -> float:
     if config.objective_penalty == "custom":
         assert config.objective_penalty_weight is not None
         return float(config.objective_penalty_weight)
+    if config.objective_penalty == "ric":
+        return 0.0
     raise ValueError(f"Unknown objective_penalty: {config.objective_penalty!r}")
+
+
+def _log_comb(n: int, k: np.ndarray) -> np.ndarray:
+    k_arr = np.asarray(k, dtype=np.float64)
+    out = gammaln(float(n) + 1.0) - gammaln(k_arr + 1.0) - gammaln(float(n) - k_arr + 1.0)
+    out[(k_arr < 0) | (k_arr > n)] = np.inf
+    return out
+
+
+def _resolve_ebic_gamma(config: AutoKConfig, *, n_eff: float, n_candidates: int) -> float:
+    if config.ebic_gamma == "auto":
+        if n_candidates <= 1:
+            return 0.0
+        return float(min(1.0, max(0.0, 1.0 - np.log(n_eff) / (2.0 * np.log(n_candidates)))))
+    return float(config.ebic_gamma)
+
+
+def _penalty_array(
+    config: AutoKConfig,
+    ks: np.ndarray,
+    *,
+    n_eff: float,
+    n_candidates: int | None,
+) -> tuple[np.ndarray, float, float | None, int | None]:
+    penalty_kind = config.objective_penalty
+    if penalty_kind in {"ebic", "ric"}:
+        if n_candidates is None:
+            raise ValueError("n_candidates is required for EBIC/RIC objective penalties")
+        n_candidates_int = int(n_candidates)
+        if n_candidates_int < 1:
+            raise ValueError("n_candidates must be a positive integer")
+        if np.max(ks, initial=0) > n_candidates_int:
+            raise ValueError("n_candidates must be >= the largest evaluated k")
+    else:
+        n_candidates_int = None
+
+    if penalty_kind == "ebic":
+        gamma = _resolve_ebic_gamma(config, n_eff=n_eff, n_candidates=n_candidates_int)
+        penalty = ks.astype(np.float64) * np.log(n_eff) + 2.0 * gamma * _log_comb(n_candidates_int, ks)
+        return penalty, float(np.log(n_eff)), gamma, n_candidates_int
+    if penalty_kind == "ric":
+        gamma = None
+        penalty = 2.0 * ks.astype(np.float64) * np.log(float(n_candidates_int))
+        return penalty, 2.0 * float(np.log(float(n_candidates_int))), gamma, n_candidates_int
+
+    penalty_weight = _penalty_weight(config, n_eff)
+    return penalty_weight * ks.astype(np.float64), penalty_weight, None, n_candidates_int
 
 
 def _objective_weight_diagnostics(
@@ -697,12 +1037,20 @@ def _objective_weight_diagnostics(
     weight_sum = float(np.sum(w))
     sum_sq = float(np.sum(w * w))
     kish_n_eff = float(weight_sum * weight_sum / sum_sq) if sum_sq > 0.0 else float("nan")
-    if config.objective_n_eff is None:
-        n_eff = weight_sum
-        n_eff_source = "selector_weight_sum"
-    else:
+    if config.objective_n_eff is not None:
         n_eff = float(config.objective_n_eff)
         n_eff_source = "objective_n_eff"
+    else:
+        mode = _resolve_n_eff_mode(config)
+        if mode == "kish":
+            n_eff = kish_n_eff
+            n_eff_source = "kish"
+        elif mode == "weight_sum":
+            n_eff = weight_sum
+            n_eff_source = "selector_weight_sum"
+        else:
+            n_eff = float(mode)
+            n_eff_source = "n_eff_mode"
     if n_eff <= 1.0 or not np.isfinite(n_eff):
         raise ValueError("objective effective sample size must be finite and > 1")
     if config.objective_penalty == "hqc" and n_eff <= np.e:
@@ -717,6 +1065,7 @@ def select_k_penalized_objective(
     objective_scale: float | Literal["n_eff"],
     n_samples: int,
     sample_weight: Optional[np.ndarray] = None,
+    n_candidates: int | None = None,
     min_k: Optional[int] = None,
     max_k: Optional[int] = None,
     df_path: Optional[np.ndarray] = None,
@@ -734,14 +1083,14 @@ def select_k_penalized_objective(
     effective_max_k = min(int(max_k if max_k is not None else config.max_k), path_length)
     if effective_max_k <= 0:
         return 0, pd.DataFrame()
-    min_k_eff = max(1, min(int(min_k if min_k is not None else config.min_k), effective_max_k))
+    min_k_raw = int(min_k if min_k is not None else config.min_k)
+    min_k_eff = max(0, min(min_k_raw, effective_max_k))
 
     _, weight_sum, kish_n_eff, n_eff, n_eff_source = _objective_weight_diagnostics(
         sample_weight,
         int(n_samples),
         config,
     )
-    penalty_weight = _penalty_weight(config, n_eff)
     if objective_scale == "n_eff":
         scale_value = n_eff
         scale_label = "n_eff"
@@ -751,16 +1100,28 @@ def select_k_penalized_objective(
     if not np.isfinite(scale_value):
         raise ValueError("objective_scale must be finite")
 
-    ks = np.arange(1, effective_max_k + 1, dtype=np.int64)
+    k_start = 0 if min_k_eff == 0 else 1
+    ks = np.arange(k_start, effective_max_k + 1, dtype=np.int64)
     if df_path is None:
         df = ks.astype(np.float64)
     else:
         df_arr = np.asarray(df_path, dtype=np.float64).reshape(-1)
         if len(df_arr) < effective_max_k:
             raise ValueError("df_path must be at least as long as the effective objective path")
-        df = df_arr[:effective_max_k]
-    penalty = penalty_weight * df
-    objective_used = obj[:effective_max_k]
+        if k_start == 0:
+            df = np.concatenate(([0.0], df_arr[:effective_max_k]))
+        else:
+            df = df_arr[:effective_max_k]
+    penalty, penalty_weight, ebic_gamma, n_candidates_used = _penalty_array(
+        config,
+        ks,
+        n_eff=n_eff,
+        n_candidates=n_candidates,
+    )
+    if config.objective_penalty not in {"ebic", "ric"}:
+        penalty = penalty_weight * df
+    objective_used = obj[ks - 1].astype(np.float64, copy=True)
+    objective_used[ks == 0] = 0.0
     penalized_score = scale_value * objective_used - penalty
     n_finite_objective = int(np.sum(np.isfinite(objective_used)))
     n_finite_penalized_score = int(np.sum(np.isfinite(penalized_score)))
@@ -779,11 +1140,11 @@ def select_k_penalized_objective(
         )
         best_k = int(min_k_eff)
 
-    delta = np.zeros(effective_max_k, dtype=np.float64)
-    delta[0] = objective_used[0]
-    if effective_max_k > 1:
-        delta[1:] = np.diff(objective_used)
-    objective_nonmonotone_steps = int(np.sum(delta[1:] < -1e-12))
+    full_objective = np.concatenate(([0.0], obj[:effective_max_k]))
+    full_delta = np.diff(full_objective)
+    delta_map = dict(zip(np.arange(1, effective_max_k + 1, dtype=np.int64), full_delta))
+    delta = np.array([0.0 if k == 0 else delta_map[int(k)] for k in ks], dtype=np.float64)
+    objective_nonmonotone_steps = int(np.sum(full_delta[1:] < -1e-12))
     path_exhausted_before_max_k = bool(effective_max_k < int(config.max_k))
     selected_at_effective_max_k = bool(best_k == effective_max_k)
     selected_at_config_max_k = bool(best_k == int(config.max_k))
@@ -797,6 +1158,9 @@ def select_k_penalized_objective(
             "df": df,
             "penalty_weight": penalty_weight,
             "penalty": penalty,
+            "penalty_kind": config.objective_penalty,
+            "ebic_gamma": ebic_gamma,
+            "n_candidates": n_candidates_used,
             "penalized_score": penalized_score,
             "selected": ks == best_k,
             "n_eff": n_eff,
@@ -819,6 +1183,148 @@ def select_k_penalized_objective(
         }
     )
     return best_k, diag
+
+
+def select_k_posterior(
+    objective_path: np.ndarray,
+    config: AutoKConfig,
+    *,
+    objective_scale: float | Literal["n_eff"],
+    n_samples: int,
+    n_candidates: int,
+    sample_weight: Optional[np.ndarray] = None,
+    min_k: Optional[int] = None,
+    max_k: Optional[int] = None,
+) -> Tuple[int, pd.DataFrame]:
+    """Select k from a pseudo-posterior over prefixes on one greedy path.
+
+    HPD intervals are computed over selectable k values. If ``min_k > 0``, the
+    zero-feature posterior mass is still reported as ``p_zero`` but is excluded
+    from MAP/HPD selection.
+    """
+    validate_auto_k_config(config)
+    if config.k_method != "k_posterior":
+        raise ValueError("select_k_posterior requires AutoKConfig(k_method='k_posterior')")
+
+    obj = np.asarray(objective_path, dtype=np.float64).reshape(-1)
+    path_length = int(len(obj))
+    effective_max_k = min(int(max_k if max_k is not None else config.max_k), path_length)
+    if effective_max_k <= 0:
+        return 0, pd.DataFrame()
+    min_k_raw = int(min_k if min_k is not None else config.min_k)
+    min_k_eff = max(0, min(min_k_raw, effective_max_k))
+
+    _, weight_sum, kish_n_eff, n_eff, n_eff_source = _objective_weight_diagnostics(
+        sample_weight,
+        int(n_samples),
+        config,
+    )
+    if objective_scale == "n_eff":
+        scale_value = n_eff
+        scale_label = "n_eff"
+    else:
+        scale_value = float(objective_scale)
+        scale_label = str(float(objective_scale))
+    if not np.isfinite(scale_value):
+        raise ValueError("objective_scale must be finite")
+
+    if min_k_eff == 0:
+        ks = np.arange(0, effective_max_k + 1, dtype=np.int64)
+    else:
+        ks = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.arange(min_k_eff, effective_max_k + 1, dtype=np.int64),
+            )
+        )
+    if int(n_candidates) < 1 or int(n_candidates) < int(np.max(ks, initial=0)):
+        raise ValueError("n_candidates must be a positive integer >= the largest evaluated k")
+    objective_used = obj[ks - 1].astype(np.float64, copy=True)
+    objective_used[ks == 0] = 0.0
+    gamma = _resolve_ebic_gamma(config, n_eff=n_eff, n_candidates=int(n_candidates))
+    log_comb = _log_comb(int(n_candidates), ks)
+    log_post = 0.5 * (scale_value * objective_used - ks.astype(np.float64) * np.log(n_eff))
+    log_post -= gamma * log_comb
+    finite = np.isfinite(log_post)
+    if not bool(finite.any()):
+        warnings.warn(
+            "All posterior log-weights are non-finite; falling back to effective minimum k.",
+            UserWarning,
+            stacklevel=2,
+        )
+        best_k = int(min_k_eff)
+        post = np.zeros_like(log_post)
+        in_hpd = np.zeros_like(finite, dtype=bool)
+    else:
+        log_norm = float(logsumexp(log_post[finite]))
+        post = np.zeros_like(log_post, dtype=np.float64)
+        post[finite] = np.exp(log_post[finite] - log_norm)
+        selectable = finite.copy()
+        if min_k_eff > 0:
+            selectable &= ks >= min_k_eff
+        if not bool(selectable.any()):
+            warnings.warn(
+                "No selectable posterior log-weights are finite; falling back to effective minimum k.",
+                UserWarning,
+                stacklevel=2,
+            )
+            best_k = int(min_k_eff)
+            in_hpd = np.zeros_like(finite, dtype=bool)
+        else:
+            selectable_pos = np.flatnonzero(selectable)
+            selectable_log_norm = float(logsumexp(log_post[selectable]))
+            selectable_post = np.exp(log_post[selectable_pos] - selectable_log_norm)
+            map_pos = int(np.lexsort((ks[selectable_pos], -selectable_post))[0])
+            map_k = int(ks[selectable_pos][map_pos])
+            order = np.argsort(-selectable_post, kind="mergesort")
+            cumsum = np.cumsum(selectable_post[order])
+            cutoff = int(np.searchsorted(cumsum, float(config.posterior_level), side="left"))
+            cutoff = min(cutoff, len(order) - 1)
+            hpd_positions = selectable_pos[order[: cutoff + 1]]
+            in_hpd = np.zeros_like(finite, dtype=bool)
+            in_hpd[hpd_positions] = True
+            if config.posterior_pick == "smallest_in_hpd":
+                best_k = int(np.min(ks[in_hpd]))
+            else:
+                best_k = map_k
+
+    hpd_ks = ks[in_hpd]
+    hpd_lo = int(np.min(hpd_ks)) if hpd_ks.size else int(min_k_eff)
+    hpd_hi = int(np.max(hpd_ks)) if hpd_ks.size else int(min_k_eff)
+    p_zero = float(post[ks == 0][0]) if np.any(ks == 0) else 0.0
+    entropy = float(-np.sum(post[post > 0.0] * np.log(post[post > 0.0])))
+    delta = np.zeros_like(objective_used)
+    nonzero = ks > 0
+    delta[nonzero] = np.diff(np.concatenate(([0.0], obj[:effective_max_k])))[ks[nonzero] - 1]
+
+    diag = pd.DataFrame(
+        {
+            "k": ks,
+            "objective": objective_used,
+            "delta_objective": delta,
+            "log_post": log_post,
+            "post": post,
+            "in_hpd": in_hpd,
+            "selected": ks == best_k,
+            "n_eff": n_eff,
+            "n_eff_source": n_eff_source,
+            "weight_sum": weight_sum,
+            "kish_n_eff": kish_n_eff,
+            "objective_scale": scale_value,
+            "objective_scale_source": scale_label,
+            "ebic_gamma": gamma,
+            "n_candidates": int(n_candidates),
+            "posterior_level": float(config.posterior_level),
+            "hpd_lo": hpd_lo,
+            "hpd_hi": hpd_hi,
+            "p_zero": p_zero,
+            "entropy": entropy,
+            "effective_min_k": min_k_eff,
+            "effective_max_k": effective_max_k,
+            "path_length": path_length,
+        }
+    )
+    return int(best_k), diag
 
 
 def compute_objective_for_path(

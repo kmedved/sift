@@ -545,8 +545,12 @@ def test_public_selectors_validate_auto_k_config(config_kwargs, match):
 def test_filter_spec_auto_k_handler_contract():
     assert set(filter_api.MRMR_CLASSIC_SPEC.auto_k_handlers) == {"evaluate"}
     assert set(filter_api.MRMR_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "auto",
         "evaluate",
         "elbow",
+        "gaussian_cv",
+        "stability",
+        "xfit_objective",
     }
 
     for specs in (filter_api.JMI_CLASSIC_SPECS, filter_api.JMIM_CLASSIC_SPECS):
@@ -555,21 +559,43 @@ def test_filter_spec_auto_k_handler_contract():
             assert set(spec.auto_k_handlers) == {"evaluate"}
 
     assert set(filter_api.JMI_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "auto",
         "evaluate",
         "elbow",
+        "gaussian_cv",
+        "stability",
+        "xfit_objective",
     }
     assert set(filter_api.JMIM_GAUSSIAN_SPEC.auto_k_handlers) == {
+        "auto",
         "evaluate",
         "elbow",
+        "gaussian_cv",
+        "stability",
+        "xfit_objective",
     }
     assert set(filter_api.CEFSPLUS_SPEC.auto_k_handlers) == {
+        "auto",
+        "changepoint",
+        "chi2_stop",
+        "consensus",
         "evaluate",
         "elbow",
+        "forward_stop",
+        "gaussian_cv",
+        "k_posterior",
+        "knockoff_path",
         "penalized_objective",
+        "perm_gap",
+        "stability",
+        "xfit_objective",
     }
     assert set(filter_api.CEFSPLUS_BINARY_SPEC.auto_k_handlers) == {
+        "auto",
+        "changepoint",
         "evaluate",
         "elbow",
+        "k_posterior",
         "penalized_objective",
     }
 

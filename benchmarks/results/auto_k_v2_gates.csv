@@ -1,0 +1,13 @@
+method,G1_accuracy,G2_or_D5_null,G3_dense_weak,G4_structure,G5_runtime,G5_runtime_ratio,G6_stability,program_mean_regret_D1_D3_D7,program_std_k_over_oracle,D5_main_p_gt3,D5_main_max_k,program_success
+penalized/ebic,True,True,False,True,True,0.004453291855240291,False,0.0017075719050170584,0.0804829522395901,0.0,1,True
+penalized/ric,False,True,False,True,False,,False,0.0013318758814595526,0.05990373403396488,0.0,1,True
+chi2_stop,False,True,False,True,True,0.004442272244499244,False,0.001607304387532186,0.039877491842680066,0.0,1,True
+forward_stop,True,True,False,True,False,,False,0.0012934685454404193,0.0709718086020234,0.0,1,True
+perm_gap,False,True,False,True,,,False,0.0015607227064814242,0.05269924868887366,0.0,1,True
+knockoff_path,False,True,True,True,,,False,0.24830373128580102,0.3419152709982291,0.06666666666666667,12,False
+xfit_objective,False,False,False,True,False,9.55896287498003,False,0.03777578775898575,1.5425803747099707,0.13333333333333333,69,False
+gaussian_cv,False,True,False,True,False,9.37428875485876,False,0.003650689330763336,0.03739096259755926,0.0,3,True
+k_posterior,True,True,False,True,False,,False,0.0017075719050170584,0.0804829522395901,0.0,1,True
+stability,False,True,False,True,,,False,0.19689480170561707,0.10511271003091685,0.0,1,False
+changepoint,False,False,False,True,False,,False,0.03010250515680951,1.029292278885295,1.0,80,False
+consensus,False,True,False,True,,,False,0.0015747127850916118,0.04099974473707911,0.0,1,True

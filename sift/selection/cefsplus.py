@@ -10,12 +10,9 @@ from sift._numba import njit_optional_cache
 from sift.estimators.copula import (
     FeatureCache,
     gaussian_mi_from_corr,
-    greedy_corr_prune,
-    weighted_corr_with_vector,
-    weighted_correlation_matrix,
-    weighted_rank_gauss_1d,
 )
 from sift.selection.objective import objective_from_corr_path
+from sift.selection.panel import build_candidate_panel
 
 CorrPrune = float | None | Literal["auto"]
 
@@ -371,54 +368,20 @@ def select_cached(
     from sift._preprocess import to_numpy, validate_k
 
     k = validate_k(k, allow_auto=False)
-    corr_prune_eff = _resolve_corr_prune(method, corr_prune)
     y_arr = to_numpy(y, dtype=np.float32).ravel()
-    if y_arr.shape[0] != cache.n_rows_original:
-        raise ValueError(
-            f"y has {y_arr.shape[0]} rows but cache was built from "
-            f"{cache.n_rows_original} rows"
-        )
-    ys = y_arr[cache.row_idx]
-    zy = weighted_rank_gauss_1d(ys, cache.sample_weight)
+    panel = build_candidate_panel(
+        cache,
+        y_arr,
+        k,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        method=method,
+    )
+    R_cand = panel.R
+    r_cand = panel.r
+    rel_cand = panel.rel
 
-    r = weighted_corr_with_vector(cache.Z, zy, cache.sample_weight)
-    rel = gaussian_mi_from_corr(r)
-
-    p_valid = len(r)
-    if top_m is None:
-        top_m = max(5 * k, 250)
-    top_m = max(int(top_m), int(k))
-    top_m = min(top_m, p_valid)
-
-    if top_m < p_valid:
-        cand = np.argpartition(np.abs(r), -top_m)[-top_m:]
-    else:
-        cand = np.arange(p_valid)
-
-    if cache.Rxx is not None:
-        R_full = np.asarray(cache.Rxx, dtype=np.float64)
-        R_cand = np.ascontiguousarray(R_full[np.ix_(cand, cand)], dtype=np.float64)
-    else:
-        Z_cand = np.ascontiguousarray(cache.Z[:, cand], dtype=np.float64)
-        R_cand = weighted_correlation_matrix(
-            Z_cand,
-            np.asarray(cache.sample_weight, dtype=np.float64),
-            backend="blas",
-        )
-
-    if corr_prune_eff is not None:
-        keep = greedy_corr_prune(
-            np.arange(len(cand)),
-            R_cand,
-            np.abs(r[cand]),
-            corr_prune_eff,
-        )
-        cand = cand[keep]
-        R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)])
-    r_cand = r[cand].astype(np.float64)
-    rel_cand = rel[cand].astype(np.float64)
-
-    k_actual = min(k, len(cand))
+    k_actual = min(k, len(panel.cand))
 
     objective = None
     if method == "cefsplus":
@@ -444,8 +407,7 @@ def select_cached(
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    selected_valid = cand[sel_local]
-    selected_original = cache.valid_cols[selected_valid]
+    selected_original = panel.original[sel_local]
 
     if cache.feature_names is not None:
         out = [cache.feature_names[i] for i in selected_original]

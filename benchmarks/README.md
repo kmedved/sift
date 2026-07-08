@@ -38,6 +38,8 @@ its `--output` JSON, and reports any rows whose `promotion_status` starts with
 | `bench_knockoffs.py` | Gaussian-copula knockoff cache/model/mean/sample/stat/threshold timing, including derandomized draws and a CEFS+ smoke case. |
 | `bench_stability.py` | Stability-selection split streaming and fit memory. |
 | `bench_catboost.py` | CatBoost split helpers and optional tiny selector smoke cases (skipped without CatBoost). |
+| `auto_k_designs.py` | Shared synthetic DGP registry and support-scoring helpers for auto-k gates. |
+| `bench_auto_k.py` | Auto-k synthetic DGP harness with oracle-risk rows and support-recovery metrics. |
 | `bench_utils.py` | Shared helpers and `SCHEMA_VERSION` for the emitted JSON. |
 
 Each script accepts:
@@ -55,7 +57,116 @@ python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
+python benchmarks/bench_auto_k.py --designs D1,D2,D5 --seeds 3 \
+  --output /tmp/bench-auto-k.csv
 ```
+
+`bench_auto_k.py --methods ...` accepts comma-separated methods including
+`penalized/ebic`, `penalized/ric`, `k_posterior`, `chi2_stop`,
+`forward_stop`, `changepoint`, `perm_gap`, `xfit_objective`, `gaussian_cv`,
+`stability`, and `consensus`, plus the historical baselines.
+
+## Recorded Auto-K v2 Campaign
+
+`python benchmarks/bench_auto_k.py` was run on 2026-07-08 for the Auto-K v2
+promotion campaign. The full result files are committed under
+`benchmarks/results/`:
+
+- `auto_k_v2_main.csv`: D1-D8, 30 seeds, all v2 methods plus baselines
+  (4,320 rows).
+- `auto_k_v2_null.csv`: D5 null-calibration deep run, 50 seeds.
+- `auto_k_v2_d9.csv`: D9 full-size timing run, 2 seeds, with `--full`.
+- `auto_k_v2_catboost.csv`: guarded CatBoost transfer run, D1-D3, 10 seeds.
+- `auto_k_v2_summary.csv`, `auto_k_v2_gates.csv`, and
+  `auto_k_v2_catboost_summary.csv`: derived aggregate tables.
+
+Default decision: `penalized/ebic` is the measured default for CEFS+
+`k="auto"`. It passes the program-level bar, is calibrated on D5, is
+effectively free relative to the CEFS+ path build on D9, and works for binary
+CEFS+ without a fold-scoring bridge. `gaussian_cv` stays a useful power-user
+predictive curve but missed the D9 runtime target and D3 accuracy gate in this
+campaign. `changepoint`, `stability`, `xfit_objective`, and `knockoff_path`
+remain experimental or failed-gate for automatic sizing.
+
+Program-level gate summary:
+
+| method | mean regret D1-D3+D7 | std(k)/oracle | D5 P(k>3) | D5 max k | D9 runtime ratio | program |
+| --- | --- | --- | --- | --- | --- | --- |
+| penalized/ebic | 0.001708 | 0.08048 | 0 | 1 | 0.004453 | PASS |
+| chi2_stop | 0.001607 | 0.03988 | 0 | 1 | 0.004442 | PASS |
+| forward_stop | 0.001293 | 0.07097 | 0 | 1 |  | PASS |
+| perm_gap | 0.001561 | 0.05270 | 0 | 1 |  | PASS |
+| gaussian_cv | 0.003651 | 0.03739 | 0 | 3 | 9.374 | PASS |
+| k_posterior | 0.001708 | 0.08048 | 0 | 1 |  | PASS |
+| consensus | 0.001575 | 0.04100 | 0 | 1 |  | PASS |
+| knockoff_path | 0.2483 | 0.3419 | 0.06667 | 12 |  | FAIL |
+| xfit_objective | 0.03778 | 1.543 | 0.1333 | 69 | 9.559 | FAIL |
+| stability | 0.1969 | 0.1051 | 0 | 1 |  | FAIL |
+| changepoint | 0.03010 | 1.029 | 1.000 | 80 |  | FAIL |
+
+D5 deep null calibration:
+
+| method | P(k>3) | max k | mean k |
+| --- | --- | --- | --- |
+| chi2_stop | 0 | 1 | 0.04 |
+| forward_stop | 0 | 1 | 0.04 |
+| knockoff_path | 0.12 | 12 | 0.90 |
+| penalized/ebic | 0 | 1 | 0.16 |
+| perm_gap | 0 | 2 | 0.16 |
+
+D8-vs-D2 structure-honesty deltas, measured as mean regret on D8 minus D2:
+
+| method | D2 | D8 | D8-D2 |
+| --- | --- | --- | --- |
+| chi2_stop | 0.00007443 | 0.00007431 | -0.00000012 |
+| consensus | 0.00007443 | 0.00007431 | -0.00000012 |
+| gaussian_cv | 0 | 0 | 0 |
+| stability | 0 | 0 | 0 |
+| k_posterior | 0.0003003 | 0.0004390 | 0.0001387 |
+| penalized/ebic | 0.0003003 | 0.0004390 | 0.0001387 |
+| forward_stop | 0.0003612 | 0.0005133 | 0.0001521 |
+| perm_gap | 0.00004094 | 0.0004241 | 0.0003832 |
+| knockoff_path | 0.001629 | 0.002844 | 0.001215 |
+| xfit_objective | 0.0005186 | 0.002000 | 0.001482 |
+| changepoint | 0.01591 | 0.02674 | 0.01082 |
+
+D9 full-size timing:
+
+| method | mean k | mean regret | selection runtime s |
+| --- | --- | --- | --- |
+| fixed_k=50 | 50.0 | 0.0005060 | 0.000003 |
+| elbow | 16.0 | 0.00002757 | 0.000130 |
+| chi2_stop | 15.0 | 0.00001267 | 0.000554 |
+| penalized/ebic | 15.0 | 0.00001267 | 0.000556 |
+| penalized/bic | 16.0 | 0.00007072 | 0.000557 |
+| evaluate/time_holdout/best | 100.0 | 0.0009807 | 0.2243 |
+| perm_gap | 15.0 | 0.00001267 | 0.9351 |
+| evaluate/one_se | 16.0 | 0.00002757 | 1.043 |
+| gaussian_cv | 15.0 | 0.00001267 | 2.103 |
+| xfit_objective | 15.0 | 0.00001267 | 2.144 |
+
+CatBoost transfer, D1-D3:
+
+| design | method | mean regret | median abs k error | runtime s |
+| --- | --- | --- | --- | --- |
+| D1 | chi2_stop | 0 | 0 | 0.000613 |
+| D1 | consensus | 0 | 0 | 0.05039 |
+| D1 | evaluate/one_se | 0 | 1.0 | 0.07136 |
+| D1 | gaussian_cv | 0 | 0 | 0.04845 |
+| D1 | penalized/ebic | 0 | 0.5 | 0.000359 |
+| D2 | chi2_stop | 0.0000079 | 0 | 0.000560 |
+| D2 | consensus | 0.0000079 | 0 | 0.05196 |
+| D2 | evaluate/one_se | 0.0000079 | 1.0 | 0.07450 |
+| D2 | gaussian_cv | 0.0000079 | 0 | 0.04930 |
+| D2 | penalized/ebic | 0.0000079 | 0 | 0.000349 |
+| D3 | chi2_stop | 0.006729 | 42.5 | 0.000579 |
+| D3 | consensus | 0.006143 | 42.5 | 0.04769 |
+| D3 | evaluate/one_se | 0.003735 | 36.5 | 0.07114 |
+| D3 | gaussian_cv | 0.01273 | 47.0 | 0.04625 |
+| D3 | penalized/ebic | 0.004189 | 41.0 | 0.000327 |
+
+The complete per-design x method aggregate is in
+`benchmarks/results/auto_k_v2_summary.csv`.
 
 The focused 0.7.0 knockoffs smoke is:
 

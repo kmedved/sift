@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import numpy as np
@@ -35,13 +35,26 @@ from sift.selection.cefsplus_binary_common import (
 from sift.selection.filter_auto_k import (
     auto_k_mode_label,
     prepare_filter_eval_data,
+    select_binary_changepoint,
     select_binary_elbow,
     select_binary_evaluate,
     select_binary_penalized,
+    select_binary_posterior,
+    select_gaussian_auto_path,
     select_filter_classic_auto_k,
+    select_gaussian_changepoint_path,
+    select_gaussian_chi2_path,
+    select_gaussian_consensus_path,
+    select_gaussian_cv_path,
     select_gaussian_elbow_path,
     select_gaussian_evaluate_path,
+    select_gaussian_forward_stop_path,
+    select_gaussian_knockoff_path,
     select_gaussian_penalized_path,
+    select_gaussian_perm_gap_path,
+    select_gaussian_posterior_path,
+    select_gaussian_stability_path,
+    select_gaussian_xfit_objective_path,
 )
 from sift.selection.loops import jmi_select, mrmr_select
 
@@ -211,6 +224,8 @@ def make_auto_gaussian(
             groups=eval_groups,
             time=eval_time,
             sample_weight=eval_weight,
+            source_groups=ctx.groups,
+            source_time=ctx.time,
             cat_features=cat_features,
             cat_encoding=_kw(ctx, "cat_encoding"),
             corr_prune=_kw(ctx, "corr_prune", "auto"),
@@ -257,6 +272,37 @@ def binary_auto_elbow_payload(ctx: "FilterContext") -> SelectionPayload:
 
 def binary_auto_penalized_payload(ctx: "FilterContext") -> SelectionPayload:
     return _binary_auto_payload(ctx, select_binary_penalized)
+
+
+def binary_auto_posterior_payload(ctx: "FilterContext") -> SelectionPayload:
+    return _binary_auto_payload(ctx, select_binary_posterior)
+
+
+def binary_auto_changepoint_payload(ctx: "FilterContext") -> SelectionPayload:
+    return _binary_auto_payload(ctx, select_binary_changepoint)
+
+
+def binary_auto_auto_payload(ctx: "FilterContext") -> SelectionPayload:
+    assert ctx.auto_k_config is not None
+    routed = replace(
+        ctx.auto_k_config,
+        k_method="penalized_objective",
+        objective_penalty="ebic",
+        min_k=0,
+    )
+    payload = _binary_auto_payload(replace(ctx, auto_k_config=routed), select_binary_penalized)
+    if payload.diagnostics and "auto_k" in payload.diagnostics:
+        summary = dict(payload.diagnostics["auto_k"])
+        summary["method"] = "auto"
+        summary["routed_method"] = "penalized_objective"
+        summary["auto_routing"] = {
+            "chosen": "penalized_objective",
+            "objective_penalty": "ebic",
+            "reason": "binary_cefsplus_measured_default",
+            "facts": {"selector_method": "cefsplus_binary"},
+        }
+        payload.diagnostics["auto_k"] = summary
+    return payload
 
 
 def make_mrmr_classic_path() -> ClassicPath:
@@ -645,5 +691,16 @@ def _kw(ctx: "FilterContext", name: str, default=None):
     return ctx.selector_kwargs.get(name, default)
 
 GAUSSIAN_EVALUATE = select_gaussian_evaluate_path
+GAUSSIAN_AUTO = select_gaussian_auto_path
 GAUSSIAN_ELBOW = select_gaussian_elbow_path
 GAUSSIAN_PENALIZED = select_gaussian_penalized_path
+GAUSSIAN_POSTERIOR = select_gaussian_posterior_path
+GAUSSIAN_CHI2 = select_gaussian_chi2_path
+GAUSSIAN_FORWARD_STOP = select_gaussian_forward_stop_path
+GAUSSIAN_CHANGEPOINT = select_gaussian_changepoint_path
+GAUSSIAN_PERM_GAP = select_gaussian_perm_gap_path
+GAUSSIAN_XFIT_OBJECTIVE = select_gaussian_xfit_objective_path
+GAUSSIAN_CV = select_gaussian_cv_path
+GAUSSIAN_KNOCKOFF = select_gaussian_knockoff_path
+GAUSSIAN_STABILITY = select_gaussian_stability_path
+GAUSSIAN_CONSENSUS = select_gaussian_consensus_path
