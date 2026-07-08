@@ -5,6 +5,9 @@
 - Added q-calibrated Gaussian-copula knockoff selection: `select_fdr`,
   `KnockoffSelector`, `sample_knockoffs`, feature-group thresholding, and
   approximate plug-in validity metadata.
+- Added `benchmarks/bench_knockoffs.py` for the new knockoff timing surface.
+  Its quick/full records are informational smoke data rather than promotion
+  gates.
 - Accelerated Gaussian cache construction by vectorizing the weighted
   rank-Gaussian transform; this benefits all Gaussian/cache selectors, not only
   knockoffs.
@@ -20,3 +23,8 @@
 - Documentation and metadata consistently frame knockoff FDR control as an
   approximate plug-in Gaussian-copula result unless the fitted feature model is
   the true Model-X distribution.
+- Added standalone API, algorithm, advanced-workflow, and contributing docs
+  aligned with the 0.7.0 public surface.
+- Release documentation now links the `select_fdr` workflow, `KnockoffSelector`,
+  `sample_knockoffs`, and the focused docs/benchmark smoke checks from the
+  README, development guide, benchmark guide, and release tracker.

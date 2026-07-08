@@ -32,6 +32,7 @@ Run focused slices while working on specific areas:
 ```bash
 python -m pytest tests/test_docs_smoke.py -q
 python -m pytest tests/test_cefsplus.py tests/test_cefsplus_binary.py -q
+python -m pytest tests/test_knockoff_sampler.py tests/test_knockoff_filter.py tests/test_knockoff_fdr_control.py -q
 python -m pytest tests/test_select_k_auto_no_target_leak.py tests/test_jmi_weights.py -q
 python -m pytest tests/test_mrmr_parallel.py tests/test_filter_results.py -q
 python -m pytest tests/test_stability_selection.py tests/test_block_bootstrap.py -q
@@ -70,7 +71,8 @@ python -m pytest tests/test_docs_smoke.py -q
 ```
 
 When adding or renaming public exports, update both `sift/__init__.py` and
-`DOCS.MD`.
+`DOCS.MD`. If the export is a first-screen workflow such as `select_fdr`, also
+update `README.md`, [docs/user-guide.md](user-guide.md), and the release notes.
 
 When moving private selector internals, also check docs and tests for stale
 module names:
@@ -94,6 +96,8 @@ Use the individual benchmark scripts when working on a hot path:
 python benchmarks/bench_mrmr.py --quick --output /tmp/bench-mrmr.json
 python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
+python benchmarks/bench_cefsplus.py --quick --output /tmp/bench-cefsplus.json
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 ```
 
@@ -108,8 +112,17 @@ Before release-oriented promotion, run:
 ```bash
 python -m pytest -q
 python -m pytest tests/test_docs_smoke.py -q
+python -m pytest tests/test_benchmarks.py -q
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
+```
+
+For the 0.7.0 knockoffs bundle, the focused smoke is:
+
+```bash
+python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 ```
 
 ## Generated Files

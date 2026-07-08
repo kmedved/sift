@@ -8,6 +8,19 @@ This document describes the current public API in this repository. The primary
 imports are exposed from `sift`; advanced utilities live in submodules such as
 `sift.selection`, `sift.sampling`, `sift.estimators`, and `sift._permute`.
 
+## Documentation Map
+
+- [Standalone API reference](docs/API.md): compact function/class reference for
+  the public 0.7.0 surface.
+- [Algorithm guide](docs/ALGORITHMS.md): method assumptions, output contracts,
+  and selection guidance.
+- [Advanced workflow guide](docs/ADVANCED.md): time series, groups, smart
+  sampling, caches, categorical handling, sample weights, and knockoffs.
+- [User guide](docs/user-guide.md): task-oriented examples and practical
+  selector usage.
+- [Troubleshooting](docs/troubleshooting.md): common errors and diagnostics.
+- [Release notes](docs/release-notes.md): user-facing release changes.
+
 ## Installation
 
 Install from the repository root:
@@ -65,7 +78,7 @@ return integer indices.
 | JMIM | `select_jmim` | Conservative JMI variant using a minimum joint score. |
 | CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
 | Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
-| Knockoff FDR | `select_fdr`, `KnockoffSelector` | q-calibrated approximate Gaussian-copula knockoff selection. |
+| Knockoff FDR | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` | q-calibrated approximate Gaussian-copula knockoff selection and advanced sampler access. |
 | Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` | Choosing feature count by holdout, group CV, objective elbow, or penalized objective. |
 | Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
 | Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
@@ -1661,13 +1674,15 @@ pytest runs:
 ```bash
 python benchmarks/run_benchmarks.py --quick --output benchmarks/latest.json
 python benchmarks/run_benchmarks.py --full --output benchmarks/latest-full.json
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 ```
 
 The shared JSON schema records baseline/current wall time, optional peak memory,
 semantic parity, benchmark kind, and promotion status. Promotion rows are
 intended as gates; informational/smoke/parity rows are coverage and comparison
 signals, not proof that an optimization was promoted. Generated benchmark JSON
-files are local artifacts and are not committed by default.
+files are local artifacts and are not committed by default. The knockoff
+benchmark emits informational rows for the `select_fdr` timing surface.
 
 ## Return Types
 

@@ -1,9 +1,9 @@
 # SIFT
 
 SIFT is a Python feature-selection toolbox for fast filter selectors, automatic
-feature-count selection, stability selection, smart sampling, Boruta-style
-selection, grouped or time-aware permutation importance, and optional CatBoost
-selection.
+feature-count selection, q-calibrated Gaussian-copula knockoffs, stability
+selection, smart sampling, Boruta-style selection, grouped or time-aware
+permutation importance, and optional CatBoost selection.
 
 The package is a single Python library. Public entry points are exported from
 `sift`, while advanced building blocks live under `sift.selection`,
@@ -55,12 +55,18 @@ result = select_fdr(X, y, q=0.1, verbose=False)
 trusted_features = result.selected_features
 ```
 
+`select_fdr` reports approximate plug-in Gaussian-copula validity metadata; see
+the user guide for the exact Model-X assumptions behind the q-calibrated result.
+
 For the full public API, examples, selector support matrix, and option details,
 start with [DOCS.MD](DOCS.MD).
 
 ## Documentation
 
 - [Full API manual](DOCS.MD)
+- [Standalone API reference](docs/API.md)
+- [Algorithm guide](docs/ALGORITHMS.md)
+- [Advanced workflow guide](docs/ADVANCED.md)
 - [User guide](docs/user-guide.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture and module boundaries](docs/architecture.md)
@@ -68,6 +74,7 @@ start with [DOCS.MD](DOCS.MD).
 - [Benchmarks](benchmarks/README.md)
 - [Release notes](docs/release-notes.md)
 - [Release tracker](TODO.MD)
+- [Contributing guide](CONTRIBUTING.md)
 
 ## Main Components
 
@@ -76,10 +83,23 @@ start with [DOCS.MD](DOCS.MD).
 | Core filters | `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary` |
 | q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` |
 | Automatic `k` | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective` |
-| Result objects and wrappers | `FilterSelectionResult`, `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector` |
+| Result objects and wrappers | `FilterSelectionResult`, `KnockoffSelectionResult`, `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector` |
 | Cache-backed Gaussian paths | `build_cache`, `select_cached`, `FeatureCache` |
 | Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif` |
 | Model-based importance | `permutation_importance`, `BorutaSelector`, `select_boruta`, `select_boruta_shap`, CatBoost helpers |
+
+## Choosing a Selector
+
+| Goal | Start with |
+| --- | --- |
+| Fast relevance/redundancy baseline | `select_mrmr` |
+| Complementary information path | `select_jmi` or `select_jmim` |
+| Compact regression subset | `select_cefsplus` |
+| Binary-target conditional path | `select_cefsplus_binary` |
+| q-calibrated trusted discoveries | `select_fdr` or `KnockoffSelector` |
+| Robustness across resamples | `StabilitySelector` |
+| All-relevant feature discovery | `BorutaSelector` |
+| Model-aware nonlinear selection | `catboost_select` |
 
 ## Development
 

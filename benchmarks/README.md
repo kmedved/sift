@@ -2,6 +2,8 @@
 
 Promotion-oriented benchmark scripts for SIFT. Each script measures one hot path
 and emits JSON records that the aggregator consumes for release gating.
+Knockoff rows are informational in 0.7.0: they verify the new `select_fdr`
+timing surface and catch smoke regressions without acting as promotion gates.
 
 ## Quick Start
 
@@ -55,10 +57,18 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 ```
 
+The focused 0.7.0 knockoffs smoke is:
+
+```bash
+python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
+```
+
 ## Recorded Knockoff Full Run
 
 `python benchmarks/bench_knockoffs.py --full --output /tmp/bench-knockoffs-full.json`
-on 2026-07-07:
+on 2026-07-07. These rows are informational sanity data for the
+Gaussian-copula knockoff cache/model/mean/sample/stat/threshold surface, not
+hard release gates:
 
 | stat | n | p | draws | cache s | fit s | mean s | sample s | stat s | total s |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -84,10 +94,12 @@ Aggregated output is a JSON object:
 }
 ```
 
-Individual scripts may emit either the full object form or a bare records list
-(both are accepted by the aggregator). Each record carries a
+Individual scripts write the shared object form; the aggregator also accepts a
+bare records list for legacy or ad hoc scripts. Each record carries a
 `benchmark_kind` (default `promotion`) and a `promotion_status` field; rows
-whose status starts with `blocked` fail the promotion gate.
+whose status starts with `blocked` fail the promotion gate. `bench_knockoffs.py`
+emits schema-wrapped records with `benchmark_kind="informational"` and
+`promotion_status="informational"`.
 
 ## Adding a New Benchmark
 

@@ -10,7 +10,16 @@ This file tracks the public-release work from the Oracle/source review plus the 
   `sift/selectors.py`, `sift/scoring.py`, `sift/selection/result.py`, and
   `sift/selection/path_eval.py`. `/Users/kmedved/miniconda3/envs/darko/bin/python -m pytest -ra`
   passed with 336 passed and 2 skipped. Keep this gate open until all new
-  imported modules/tests/benchmarks are included in the release commit.
+  imported modules/tests/benchmarks are included in the release commit. The
+  0.7.0 knockoffs release bundle adds `select_fdr`, `KnockoffSelector`,
+  `sample_knockoffs`, the informational `benchmarks/bench_knockoffs.py` timing
+  surface, and aligned public docs; the focused release smoke is
+  `tests/test_docs_smoke.py`, `tests/test_benchmarks.py`, and
+  `benchmarks/bench_knockoffs.py --quick`. Focused local smoke on 2026-07-08:
+  `python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q`
+  passed with 7 tests; the knockoff sampler/filter/FDR pytest slice passed
+  with 64 tests; the `bench_knockoffs.py --quick` smoke completed
+  successfully and wrote `/tmp/bench-knockoffs.json`.
 
 ## Top Priorities
 
@@ -38,6 +47,9 @@ This file tracks the public-release work from the Oracle/source review plus the 
   tie-safe objective-gain `cefsplus`, and optional feature-group thresholding.
   `lcd`, mRMR, JMI, and JMIM knockoff statistic keys remain reserved until
   their exact-tie antisymmetry is proven.
+  Benchmark: `benchmarks/bench_knockoffs.py` times cache construction, model
+  fitting, mean reuse, sampling, statistic computation, and thresholding for
+  quick/full grids. Its records are informational rather than promotion gates.
 
 ## Correctness Findings
 
@@ -148,13 +160,19 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ### 16. Stale README examples referenced APIs that do not exist
 
-- [x] Promote `DOCS.MD` and remove stale `README.md`.
-  Scope: `README.md`, `DOCS.MD`, and `setup.py`.
-  Notes: `README.md` was removed; `setup.py` now uses `DOCS.MD` for the package long description; `DOCS.MD` is the source of truth unless the API changes.
+- [x] Promote `DOCS.MD` and keep `README.md` as a concise entry point.
+  Scope: `README.md`, `DOCS.MD`, `pyproject.toml`, and `setup.py`.
+  Notes: `setup.py`/`pyproject.toml` use `DOCS.MD` for the package long
+  description; `DOCS.MD` is the source of truth unless the API changes.
+  `README.md` is intentionally present as a short project overview with
+  first-screen examples and links into the full docs.
 
 - [x] Finish docs/API alignment against `DOCS.MD`.
-  Scope: `DOCS.MD`, `setup.py`, `sift/__init__.py`, `sift/api.py`, and `sift/catboost.py`.
-  Notes: `DOCS.MD` top-level exports now have smoke coverage against `sift.__all__`, and documented install extras are checked against `setup.py`.
+  Scope: `DOCS.MD`, `pyproject.toml`, `setup.py`, `sift/__init__.py`,
+  `sift/api.py`, and `sift/catboost.py`.
+  Notes: `DOCS.MD` top-level exports now have smoke coverage against
+  `sift.__all__`, and documented install extras are checked against
+  `pyproject.toml`.
   Tests: `tests/test_docs_smoke.py` verifies exports and extras.
 
 ### 17. Boruta-Shap default multiclass classifier uses binary CatBoost loss
@@ -387,14 +405,21 @@ This file tracks the public-release work from the Oracle/source review plus the 
   back to original row ids and asserts equality.
 
 - [x] Add documentation smoke tests.
-  Notes: verify documented extras exist in `setup.py` and compare `DOCS.MD` top-level exports with `sift.__all__`.
+  Notes: verify documented extras exist in `pyproject.toml` and compare
+  `DOCS.MD` top-level exports with `sift.__all__`.
+
+- [x] Add knockoff sampler/filter/FDR-control tests.
+  Notes: `tests/test_knockoff_sampler.py`, `tests/test_knockoff_filter.py`,
+  `tests/test_knockoff_fdr_control.py`, and sparse-weight cache coverage in
+  `tests/test_cache_subsample.py` cover the 0.7.0 knockoff surface.
 
 ## Benchmark Suite
 
 - [x] Add a benchmark suite under `benchmarks/`.
   Notes: `bench_mrmr.py`, `bench_jmi.py`, `bench_permutation.py`,
-  `bench_filters.py`, `bench_cefsplus.py`, `bench_stability.py`,
-  `bench_catboost.py`, and `run_benchmarks.py` now share a promotion JSON schema.
+  `bench_filters.py`, `bench_cefsplus.py`, `bench_knockoffs.py`,
+  `bench_stability.py`, `bench_catboost.py`, and `run_benchmarks.py` now share
+  a promotion JSON schema.
   Track wall time, optional peak memory, selected feature agreement, and
   benchmark kind/promotion status where applicable. Informational/smoke/parity
   rows are not treated as promoted optimizations. Benchmark scripts write row
@@ -412,12 +437,14 @@ Benchmark matrix:
 | Stability | `n_bootstrap`, `p`, `store_coefs` | time, memory |
 | Smart sampler | `n`, group cardinality, anchors, residual weighting | time, memory, inclusion probabilities |
 | Permutation importance | `p`, `n_repeats`, backend, DataFrame vs ndarray | time, memory |
+| Knockoffs | `n`, `p`, `n_draws`, `statistic` | cache/model/mean/sample/stat/threshold time, selected count |
 | CatBoost forward/RFE | `k`, `prefilter_k`, splits | fits, time, score |
 
 ## Open Questions
 
 - [x] Is `DOCS.MD` intended to describe the current API while README may be older?
-  Decision: remove `README.md` and promote `DOCS.MD`.
+  Decision: `DOCS.MD` is the long-form source of truth and `README.md` is a
+  concise entry point that must stay aligned with first-screen public APIs.
 
 - [x] Should target encoders inside function-style selectors be allowed at all?
   Decision: allowed only with explicit `allow_full_data_target_encoding=True`; default behavior rejects supervised full-data encoding.

@@ -92,7 +92,7 @@ masking, derandomized draws, metadata, and result ranking.
 Core SIFT uses `numpy`, `pandas`, `scipy`, `scikit-learn`, `joblib`, and
 `numba`.
 
-Optional dependency groups are defined in `setup.py`:
+Optional dependency groups are defined in `pyproject.toml`:
 
 - `categorical`: target, leave-one-out, and James-Stein encoders from
   `category_encoders`.
