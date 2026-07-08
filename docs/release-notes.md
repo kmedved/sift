@@ -7,6 +7,12 @@
   permutation-gap null envelopes, closed-form Gaussian CV curves,
   knockoff-path stopping, bootstrap stability, changepoint diagnostics,
   consensus diagnostics, and a synthetic auto-k harness.
+- Changed no-config CEFS+ and binary CEFS+ `k="auto"` to use the measured
+  Auto-K v2 router. Calls with `groups` or `time` now route to EBIC by default
+  instead of the older `evaluate/group_cv` or `evaluate/time_holdout` path, and
+  calls without validation context now work. The router uses method-specific
+  effective floors, so pass an explicit `AutoKConfig` when you need a hard
+  `min_k` or the legacy evaluate behavior.
 
 ## 0.7.0
 

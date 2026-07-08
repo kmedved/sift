@@ -343,7 +343,12 @@ nested mode for train-only fold paths where supported.
 on Gaussian mRMR/JMI/JMIM. The router records `auto_routing` in
 `diagnostics_["auto_k"]`. CEFS+ currently routes to EBIC by default, uses EBIC
 when `p_valid > n_eff_kish`, uses `perm_gap` for heavy weight skew, and uses
-`gaussian_cv/one_se` for non-CEFS+ Gaussian selectors.
+`gaussian_cv/one_se` for non-CEFS+ Gaussian selectors. No-config CEFS+ calls
+with `groups` or `time` now use this router instead of the older
+`evaluate/group_cv` or `evaluate/time_holdout` behavior, and no-context calls
+now work. Router branches use method-specific effective floors (`0` for EBIC
+and permutation-gap stops, at least `1` for Gaussian CV curves), so use an
+explicit `AutoKConfig(k_method=...)` when you need a hard `min_k`.
 
 Important `AutoKConfig` method fields:
 

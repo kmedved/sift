@@ -5,6 +5,53 @@ Companions: [auto-k-v2.md](auto-k-v2.md), [knockoffs-followups.md](knockoffs-fol
 
 ---
 
+## Status after the second follow-up pass (supervisor re-review, final)
+
+All parts are now complete and independently verified (suite: 710 passed /
+12 skipped; program gates recomputed from the raw CSVs and matching the
+recorded tables; D1 campaign rows reproduced bit-exactly via the CLI;
+FIX-2b gate rerun: stability signal k̂ = 10 on 5/5 seeds, null k̂ = 0 on 5/5;
+zero-config router verified end-to-end incl. binary and the weight-skew /
+p>n_eff branches).
+
+- **Part 5 done.** `penalized/ebic` is the measured default — confirmed, and
+  understated by the campaign summary: it is the **only** v2 method passing
+  G1 on all of D1/D2/D3/D7 (gaussian_cv fails D3 G1: median |k̂−k_oracle| 7.5
+  vs baseline 2.0, regret 0.0146; chi2_stop/consensus also miss D3's
+  median-k bar). knockoff_path / changepoint / stability / xfit_objective
+  failed-gate labels all verified from raw data; stability's residual D3/D7
+  failure is the spec-predicted block-swapping scope limit, not a bug.
+- **Part 6 done.** Router routes no-config CEFS+ (and binary) `k="auto"` to
+  EBIC with `auto_routing` diagnostics and an EBIC fallback on degenerate
+  primaries.
+- **FIX-2b done** (Φ floor 0.5, `stopped_by="stability_floor"`); Part 2 and
+  Part 3 remainders done (D4 β=0.053, CatBoost transfer run recorded,
+  `--quick` wired, U(0,1) KS test, EBIC/RIC arithmetic + γ-monotonicity,
+  tibshirani knee, digamma drift, Nogueira Φ + jackknife, SeqStep+ hand
+  computation, calibration/recovery sims, negative control).
+
+Closeout after this review:
+
+1. Release notes now call out the behavior change: no-config `k="auto"` on
+   CEFS+ with `time`/`groups` previously ran `evaluate/time_holdout|group_cv`;
+   it now routes to EBIC, and the previously-raising no-context case now works.
+2. DOCS.MD, docs/API.md, and docs/ADVANCED.md now document that the router uses
+   method-specific effective floors (0 for ebic/perm_gap, >=1 for gaussian_cv);
+   users needing a hard floor should set an explicit `k_method`.
+3. Real-data sanity check completed on the WNBA DPM script
+   `/Users/kmedved/Dropbox/github/wnba_darko/pipeline_scripts/models/32_dpm.py`:
+   CEFS+ `k="auto"` routed to EBIC and selected the configured cap of 125 for
+   all four on/off context targets and all four strict-box DPM prior targets.
+
+Remaining reading note (no code blocker):
+
+1. When reading the D9 table, note "selection runtime" excludes the shared
+   path/cache build; gaussian_cv's G5 FAIL is per the letter of the gate
+   (vs 0.5x evaluate) - its 2.1s absolute cost at 50kx2000 is small next to
+   the ~15s cache build. Docs should not over-read it as "slow".
+
+---
+
 ## Status after the first follow-up pass (supervisor re-review)
 
 Verified against the working tree after the second follow-up pass (focused

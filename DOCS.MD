@@ -609,7 +609,10 @@ The filter selectors accept `k="auto"`. For CEFS+ and binary CEFS+, omitting
 `auto_k_config` uses the measured Auto-K v2 router. The current zero-config
 CEFS+ route chooses EBIC, a multiplicity-aware information criterion that
 cleared the synthetic benchmark campaign with D5 null calibration and D9
-runtime gates:
+runtime gates. This is a behavior change from the earlier no-config CEFS+
+path: calls that pass `groups` or `time` now route to EBIC instead of
+`evaluate/group_cv` or `evaluate/time_holdout`, and calls without validation
+context now work instead of requiring split context.
 
 ```python
 from sift import select_cefsplus
@@ -653,7 +656,10 @@ selected = select_mrmr(
   the presence of groups/time. The shipped CEFS+ rule table uses EBIC as the
   measured default, switches to EBIC when `p_valid > n_eff_kish`, uses
   `perm_gap` for heavy weight skew, and sends explicit non-CEFS+ Gaussian
-  auto routes to `gaussian_cv/one_se`.
+  auto routes to `gaussian_cv/one_se`. Router branches use method-specific
+  effective floors (`0` for EBIC and permutation-gap stops, at least `1` for
+  Gaussian CV curves); pass an explicit `AutoKConfig(k_method=...)` when you
+  need a hard `min_k` contract.
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model. `selection_rule="best"` preserves the historical argmin
   behavior. `selection_rule="plateau"` and `"tolerance"` require

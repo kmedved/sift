@@ -167,7 +167,10 @@ currently routes to EBIC based on the Auto-K v2 benchmark campaign. Prefer
 groups/time/weights make analytic nulls suspicious. Inspect `changepoint`,
 `stability`, `xfit_objective`, and `knockoff_path` diagnostics before trusting
 their selected `k`; they remain experimental or failed-gate for automatic
-sizing.
+sizing. This router replaces the older no-config CEFS+ split-routing behavior:
+passing `groups` or `time` no longer implies `evaluate/group_cv` or
+`evaluate/time_holdout`. Router branches also use method-specific effective
+floors, so set an explicit method when a hard `min_k` is part of the contract.
 
 Selection rules for `evaluate` include:
 
