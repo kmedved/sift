@@ -1755,6 +1755,38 @@ def test_auto_k_auto_router_fallback_records_metadata(monkeypatch):
     assert summary["auto_routing"]["fallback"]["chosen"] == "penalized_objective"
 
 
+def test_auto_k_auto_router_warns_and_records_saturation(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(20, dtype=np.float64)
+        valid_cols = np.arange(5, dtype=np.int64)
+
+    def fake_runner(routed_config, **_kwargs):
+        assert routed_config.k_method == "penalized_objective"
+        return ["x0", "x1", "x2"], [0, 1, 2], pd.DataFrame(), {
+            "selected_k": 3,
+            "effective_max_k": 3,
+            "selected_at_effective_max_k": True,
+        }
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+
+    with pytest.warns(UserWarning, match="selected the effective max_k"):
+        selected, indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+            cache=DummyCache(),
+            y=np.zeros(20),
+            method="cefsplus",
+            max_k=3,
+            top_m=10,
+            auto_k_config=AutoKConfig(k_method="auto", min_k=0, max_k=3),
+            verbose=False,
+        )
+
+    assert selected == ["x0", "x1", "x2"]
+    assert indices == [0, 1, 2]
+    assert summary["auto_routing"]["chosen"] == "penalized_objective"
+    assert summary["auto_routing"]["saturated"] is True
+
+
 def test_binary_cefsplus_no_config_auto_routes_to_ebic():
     rng = np.random.default_rng(1102)
     X = pd.DataFrame(rng.normal(size=(140, 8)), columns=[f"x{i}" for i in range(8)])

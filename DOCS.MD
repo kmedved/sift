@@ -778,6 +778,7 @@ Which method should I use?
 | --- | --- |
 | You want the measured CEFS+ default | `select_cefsplus(X, y, k="auto")` |
 | You have enough rows and want predictive prefix size | `gaussian_cv` with `strategy="kfold"` or a real holdout |
+| Dense weak-signal domain where EBIC returns hundreds of detectable features | `gaussian_cv` or explicit prefix-risk scoring; read EBIC as support detectability |
 | You have no validation context and need an IC-style baseline | `penalized_objective` with `objective_penalty="ebic"` |
 | You need a calibrated no-signal stop | `chi2_stop` or `forward_stop` with `min_k=0` |
 | Weights, ranks, groups, or time structure make analytic nulls suspect | `perm_gap` with the appropriate `perm_null` |

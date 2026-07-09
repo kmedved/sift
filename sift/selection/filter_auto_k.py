@@ -1057,6 +1057,17 @@ def select_gaussian_auto_path(
     summary = dict(summary)
     summary["method"] = "auto"
     summary["routed_method"] = route["chosen"]
+    saturated = bool(summary.get("selected_at_effective_max_k", False))
+    route["saturated"] = saturated
+    if saturated:
+        warnings.warn(
+            "Auto-K router selected the effective max_k; the result is censored "
+            "and should be interpreted as at least that many features. Increase "
+            "max_k or inspect the objective/risk curve before treating this as "
+            "an interior automatic-k optimum.",
+            UserWarning,
+            stacklevel=2,
+        )
     summary["auto_routing"] = route
     return selected, selected_indices, auto_diag, summary
 

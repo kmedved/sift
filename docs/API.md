@@ -348,7 +348,10 @@ with `groups` or `time` now use this router instead of the older
 `evaluate/group_cv` or `evaluate/time_holdout` behavior, and no-context calls
 now work. Router branches use method-specific effective floors (`0` for EBIC
 and permutation-gap stops, at least `1` for Gaussian CV curves), so use an
-explicit `AutoKConfig(k_method=...)` when you need a hard `min_k`.
+explicit `AutoKConfig(k_method=...)` when you need a hard `min_k`. If the
+selected k hits the effective maximum, the router emits a `UserWarning` and
+sets `auto_routing["saturated"] = True`; treat that result as censored until
+you raise `max_k` or inspect the risk/objective curve.
 
 Important `AutoKConfig` method fields:
 

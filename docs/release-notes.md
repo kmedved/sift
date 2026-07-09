@@ -13,6 +13,9 @@
   calls without validation context now work. The router uses method-specific
   effective floors, so pass an explicit `AutoKConfig` when you need a hard
   `min_k` or the legacy evaluate behavior.
+- Auto-K router diagnostics now flag saturated/censored results in
+  `auto_routing["saturated"]` and emit a `UserWarning` when the selected k hits
+  the effective maximum.
 
 ## 0.7.0
 

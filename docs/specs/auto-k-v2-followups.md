@@ -38,10 +38,63 @@ Closeout after this review:
 2. DOCS.MD, docs/API.md, and docs/ADVANCED.md now document that the router uses
    method-specific effective floors (0 for ebic/perm_gap, >=1 for gaussian_cv);
    users needing a hard floor should set an explicit `k_method`.
-3. Real-data sanity check completed on the WNBA DPM script
-   `/Users/kmedved/Dropbox/github/wnba_darko/pipeline_scripts/models/32_dpm.py`:
-   CEFS+ `k="auto"` routed to EBIC and selected the configured cap of 125 for
-   all four on/off context targets and all four strict-box DPM prior targets.
+3. Real-data sanity check on the WNBA DPM script
+   `/Users/kmedved/Dropbox/github/wnba_darko/pipeline_scripts/models/32_dpm.py`
+   was run but is **censored, not completed**: CEFS+ `k="auto"` routed to
+   EBIC and hit the script's `auto_max_k=125` cap on all eight targets
+   (`selected_at_effective_max_k=True`). This is a lower-bound observation
+   ("≥125 features carry EBIC-detectable signal"), consistent with the
+   production fixed settings of ~300–360, and not evidence for or against
+   the default. The DPM feature surface is a dense-signal regime (the D4
+   analog, where every support-recovery method underselects by design and
+   the campaign's oracle wanted essentially all real features). The decisive
+   real-data experiment is still open — see "R2 closeout experiment" below.
+
+### R2 closeout experiment (real-data validation, completed)
+
+Run read-only against the WNBA DPM script on all eight CEFS+ targets. Outputs
+were written to `/private/tmp/wnba_dpm_autok_method_sweep_final.csv`,
+`/private/tmp/wnba_dpm_perm_gap_b20.csv`, and
+`/private/tmp/wnba_dpm_r2_risk_summary.csv`.
+
+1. **Uncapped EBIC stopped internally, but dense.** On/off context EBIC picked
+   409/502/489/418; strict-box EBIC picked 234/234/214/221. None of the
+   full-path runs selected the effective max, so the earlier 125 result was
+   purely a cap-censored lower bound.
+2. **Triangulation split by question.** Support/detectability methods stayed
+   high: RIC ≈ 212–409, chi2_stop ≈ 191–346, forward_stop ≈ 227–430, posterior
+   MAP ≈ EBIC. Predictive/null methods were much smaller: gaussian_cv/best
+   picked 5–109, gaussian_cv/one_se picked 1–52, and perm_gap B=20 picked
+   3–18. Consensus spread was >2x on every target, which correctly says k is
+   ill-determined unless the production question is specified.
+3. **Ridge-proxy risk curve resolved the production question.** A 5-fold
+   GroupKFold ridge proxy on CEFS+ prefixes gave:
+
+   | surface | target | EBIC k | risk-best k | one-SE k |
+   |---|---:|---:|---:|---:|
+   | on/off context | o_rapm | 409 | 150 | 30 |
+   | on/off context | d_rapm | 502 | 100 | 40 |
+   | on/off context | elo_o | 489 | 150 | 75 |
+   | on/off context | elo_d | 418 | 75 | 50 |
+   | strict box | elo_o | 234 | 100 | 100 |
+   | strict box | elo_d | 234 | 40 | 40 |
+   | strict box | o_rapm | 214 | 75 | 75 |
+   | strict box | d_rapm | 221 | 100 | 50 |
+
+   The risk curve is flat after an early knee and often worsens by the EBIC
+   prefix. For DPM, EBIC should be read as "count of detectable features";
+   predictive sufficiency is closer to the grouped risk curve / gaussian_cv
+   family.
+4. **Decision.** EBIC stays the zero-config CEFS+ default because it won the
+   benchmark gates and remains null-honest, free, and binary-compatible. For
+   dense-signal production domains like DPM, docs should recommend
+   `gaussian_cv` / explicit prefix-risk scoring and should frame EBIC as a
+   support-detectability criterion rather than a downstream model-size answer.
+
+Product fix motivated by this incident is implemented: the `k="auto"` router
+raises a `UserWarning` when `selected_at_effective_max_k=True` and records
+`saturated=True` in `auto_routing`. A silently-capped zero-config answer is how
+this censored run got mistaken for a completed validation.
 
 Remaining reading note (no code blocker):
 
