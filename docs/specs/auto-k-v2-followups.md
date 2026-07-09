@@ -105,6 +105,110 @@ Remaining reading note (no code blocker):
 
 ---
 
+## Part 7 — dense-regime followups (from scoring every method against the DPM risk curve)
+
+Every method's DPM pick was scored against the measured grouped-ridge risk
+curve (regret as % of achievable signal, mean over the 8 targets / max):
+
+| approach | mean regret | max |
+|---|---:|---:|
+| risk-curve one-SE pick (the instrument itself) | 0.5% | 1.3% |
+| `gaussian_cv` with `selection_rule="best"` | 2.9% | 7.1% |
+| `chi2_stop` | 4.4% | 8.5% |
+| `penalized/ebic` (zero-config default) | 6.6% | 12.8% |
+| production fixed k=300–360 | 7.0% | 17.6% |
+| `gaussian_cv` with `one_se` (current default rule) | 8.6% | 15.6% |
+| `perm_gap` B=20 (tibshirani knee) | 15.3% | 49.2% |
+
+Readings: (a) the zero-config default already matches/beats hand-tuned
+production on this data; (b) the selection *rule* dominates on dense data —
+same gaussian_cv curves, `best` 2.9% vs `one_se` 8.6%, an inversion of the
+sparse-design result (fold SEs are large relative to the shallow dense
+slope, so one-SE cuts far past the knee); (c) perm_gap's knee rule is not a
+sufficiency method on dense data — its 15.3% should retire it from any
+dense-regime advice.
+
+**FIX-7.1 — doc bug (do first).** The dense-regime guidance added in
+`c3ff024` ("use `gaussian_cv` …") currently makes things *worse* if followed
+with defaults: gaussian_cv defaults to `one_se` (8.6%) which underperforms
+the ebic default (6.6%) it advises away from. Amend DOCS.MD / API.md /
+ADVANCED.md: dense-regime advice is `gaussian_cv` **with
+`selection_rule="best"`** or an explicit raw-space prefix-risk curve; keep
+`one_se` advice for sparse regimes.
+
+**FIX-7.2 — benchmark the `gaussian_cv/best` variant** before promoting it in
+docs: add it as a method row to the campaign (D1–D8; it shares curves with
+gaussian_cv, only the rule differs). Accept if it stays within G1/G6 bars on
+sparse designs and beats `one_se` on D4; then FIX-7.1's wording is
+data-backed on both regimes.
+
+**FIX-7.3 — router disagreement diagnostic.** When the routed EBIC pick is
+large (k̂ ≥ 100 or k̂ ≥ 0.25·max_k), optionally cross-check with
+`gaussian_cv/best` (~10 s at 89k×713, measured) and warn when the two
+disagree by >2×: "dense-signal regime: EBIC counts detectable features
+(k=X); for downstream sizing consider gaussian_cv/best or a prefix-risk
+curve (k≈Y)". Off by default if cost is a concern (`auto_dense_check` flag);
+the warning text is the product.
+
+**FIX-7.4 — investigate the copula-proxy parsimony gap.** gaussian_cv/one_se
+picked 3–27 where the raw-space one-SE point is 30–100. Hypotheses: the
+rank-Gauss transform compresses heavy-tailed count features (this surface is
+skewed box-score data — the D6 regime), and/or fixed `xfit_ridge=1e-3` vs
+RidgeCV alpha selection. Compare the copula-proxy curve to the raw-space
+curve on one DPM target; if the proxy knee is systematically early on
+heavy-tailed features, document it as a known limitation.
+
+**FIX-7.5 — dense design at scale.** D4 predicted all of this but sits
+outside the program bar and at n=5000. Add a D4-scaled design (n≈90k,
+p≈700, dense weak signal, groups) and a gate on it, so future default
+decisions are accountable to the regime the user's production data actually
+lives in.
+
+**Status after Part 7 implementation.** Done with one important scope note:
+`gaussian_cv/best` is a dense-regime recommendation, not a new zero-config
+default. DOCS.MD / API.md / ADVANCED.md now say dense weak-signal sufficiency
+requires `gaussian_cv` with `selection_rule="best"` or an explicit prefix-risk
+curve; one-SE remains the sparse/parsimony rule. The benchmark harness accepts
+`gaussian_cv/best` and strategy suffixes such as `gaussian_cv/best/group_cv`.
+The D1-D8 campaign row is recorded in
+`benchmarks/results/auto_k_v2_main.csv` and summarized in
+`auto_k_v2_summary.csv` / `auto_k_v2_gates.csv`: program mean regret
+0.001022, D5 max k=3, D4 regret 0.06237 (vs gaussian_cv/one_se 0.22402),
+and D3 median |k̂-k_oracle| improves from 7.5 to 4.0 but still misses the
+strict G1 comparison against the best baseline (2.0). Therefore EBIC remains
+the measured zero-config default.
+
+The router has an opt-in dense diagnostic:
+`AutoKConfig(k_method="auto", auto_dense_check=True)`. When EBIC returns a
+large k (default: k>=100 or k>=0.25*effective_max_k), the router runs
+`gaussian_cv/best` and warns if the answers differ by more than 2x. The warning
+is intentionally phrased as a question split: EBIC counts detectable features;
+Gaussian CV / prefix-risk curves are downstream-size diagnostics. The routing
+metadata records the dense check, EBIC k, Gaussian-CV k, ratio, and whether a
+warning fired.
+
+D10 was added as the production-scale dense benchmark design: full mode is
+n=90k, p=700, 685 groups, 220 weak dense signals, with a 600-feature path cap.
+The recorded D10 full slice (2 seeds) is in
+`benchmarks/results/auto_k_v2_d10_full.csv`: gaussian_cv/best/group_cv mean
+regret 0.00538, gaussian_cv/best 0.00766, EBIC 0.01948, gaussian_cv/one_se
+0.02377. This synthetic surface is less extreme than WNBA DPM (EBIC does not
+overshoot by hundreds), but it does keep the dense-rule decision accountable:
+best beats one-SE, and grouped best is strongest.
+
+Copula-proxy parsimony gap: the durable evidence is the DPM point comparison,
+not a full saved copula curve. On the real DPM surface, gaussian_cv/best picked
+5-109 while raw grouped-ridge risk-best was 40-150 and raw one-SE was 30-100;
+gaussian_cv/one_se was smaller still (1-52). The most plausible mechanism is
+the intended rank-Gauss copula compression plus a fixed light ridge in a
+heavy-tailed / zero-inflated count surface; use the explicit raw-space
+prefix-risk curve when production model sizing matters. A future deeper
+diagnostic should persist the full Gaussian CV fold curve for one DPM target
+alongside the raw risk curve, but the production guidance no longer depends on
+that missing artifact.
+
+---
+
 ## Status after the first follow-up pass (supervisor re-review)
 
 Verified against the working tree after the second follow-up pass (focused

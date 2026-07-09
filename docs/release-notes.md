@@ -16,6 +16,10 @@
 - Auto-K router diagnostics now flag saturated/censored results in
   `auto_routing["saturated"]` and emit a `UserWarning` when the selected k hits
   the effective maximum.
+- Added an opt-in dense-regime Auto-K diagnostic:
+  `AutoKConfig(k_method="auto", auto_dense_check=True)` cross-checks large
+  EBIC picks against `gaussian_cv` with `selection_rule="best"` and warns when
+  detectable-feature count and downstream-size proxy disagree sharply.
 
 ## 0.7.0
 

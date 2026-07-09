@@ -239,6 +239,123 @@ def _run_gaussian_routed_path(routed_config: AutoKConfig, **kwargs) -> GaussianA
     return select_gaussian_penalized_path(**kwargs)
 
 
+def _auto_dense_check_requested(config: AutoKConfig, summary: dict, route: dict) -> tuple[bool, str]:
+    if not bool(config.auto_dense_check):
+        return False, "disabled"
+    if route.get("chosen") != "penalized_objective" or route.get("objective_penalty") != "ebic":
+        return False, "route_not_ebic"
+    selected_k = int(summary.get("selected_k", 0))
+    effective_max_k = int(summary.get("effective_max_k", config.max_k))
+    if effective_max_k <= 0:
+        return False, "empty_path"
+    large_by_count = selected_k >= int(config.auto_dense_min_k)
+    large_by_fraction = selected_k >= float(config.auto_dense_min_frac) * effective_max_k
+    if not (large_by_count or large_by_fraction):
+        return False, "selected_k_not_large"
+    return True, "large_ebic_pick"
+
+
+def _run_auto_dense_check(
+    *,
+    config: AutoKConfig,
+    summary: dict,
+    route: dict,
+    cache,
+    y: np.ndarray,
+    method: str,
+    groups,
+    time,
+    top_m: int,
+    corr_prune,
+) -> None:
+    should_run, reason = _auto_dense_check_requested(config, summary, route)
+    if not bool(config.auto_dense_check):
+        return
+
+    selected_k = int(summary.get("selected_k", 0))
+    effective_max_k = int(summary.get("effective_max_k", config.max_k))
+    route["dense_check"] = {
+        "enabled": True,
+        "reason": reason,
+        "ran": False,
+        "ebic_k": selected_k,
+        "effective_max_k": effective_max_k,
+        "method": "gaussian_cv/best",
+        "min_k": int(config.auto_dense_min_k),
+        "min_frac": float(config.auto_dense_min_frac),
+        "disagreement_ratio": float(config.auto_dense_disagreement_ratio),
+    }
+    if not should_run:
+        return
+
+    strategy = config.strategy
+    if strategy == "time_holdout" and time is None:
+        strategy = "kfold"
+    if strategy == "group_cv" and groups is None:
+        strategy = "kfold"
+    check_config = replace(
+        config,
+        k_method="gaussian_cv",
+        strategy=strategy,
+        selection_rule="best",
+        min_k=max(1, min(int(config.min_k), max(1, effective_max_k))),
+        max_k=max(1, effective_max_k),
+        auto_dense_check=False,
+        auto_dense_min_k=100,
+        auto_dense_min_frac=0.25,
+        auto_dense_disagreement_ratio=2.0,
+    )
+    try:
+        curves = gaussian_cv_curves(
+            cache,
+            y,
+            config=check_config,
+            groups=groups,
+            time=time,
+            top_m=top_m,
+            corr_prune=corr_prune,
+            method=method,
+        )
+        cv_k, _diag = select_k_gaussian_cv(curves, check_config)
+    except Exception as exc:  # pragma: no cover - rare defensive diagnostics path
+        route["dense_check"].update(
+            {
+                "reason": "gaussian_cv_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        warnings.warn(
+            "Auto-K dense check could not run gaussian_cv/best; selected k is unchanged. "
+            f"Reason: {type(exc).__name__}: {exc}",
+            UserWarning,
+            stacklevel=3,
+        )
+        return
+
+    cv_k = int(min(max(cv_k, 0), effective_max_k))
+    denom = max(1, min(selected_k, cv_k))
+    ratio = float(max(selected_k, cv_k) / denom)
+    disagrees = ratio > float(config.auto_dense_disagreement_ratio)
+    route["dense_check"].update(
+        {
+            "ran": True,
+            "reason": "checked",
+            "gaussian_cv_best_k": cv_k,
+            "strategy": strategy,
+            "ratio": ratio,
+            "warned": disagrees,
+        }
+    )
+    if disagrees:
+        warnings.warn(
+            "Auto-K dense-signal diagnostic: EBIC counts detectable features "
+            f"(k={selected_k}); for downstream sizing consider gaussian_cv/best "
+            f"or a prefix-risk curve (k≈{cv_k}).",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _effective_max_k(config: AutoKConfig, path_length: int) -> int:
     return min(int(config.max_k), int(path_length))
 
@@ -1068,6 +1185,18 @@ def select_gaussian_auto_path(
             UserWarning,
             stacklevel=2,
         )
+    _run_auto_dense_check(
+        config=auto_k_config,
+        summary=summary,
+        route=route,
+        cache=cache,
+        y=y,
+        method=method,
+        groups=groups,
+        time=time,
+        top_m=top_m,
+        corr_prune=corr_prune,
+    )
     summary["auto_routing"] = route
     return selected, selected_indices, auto_diag, summary
 

@@ -257,6 +257,70 @@ def _d9_test(seed: int, n_test: int, full: bool = False) -> tuple[pd.DataFrame, 
     return _feature_frame(X), _linear_y(X, beta, rng)
 
 
+def _d10_params(full: bool) -> tuple[int, int, int, int, int]:
+    if full:
+        return 90_000, 700, 685, 220, 600
+    return 12_000, 350, 180, 120, 250
+
+
+def _sample_d10(seed: int, n: int, full: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+    _n, p, n_groups, n_signal, _max_k = _d10_params(full)
+    rng = np.random.default_rng(seed)
+    groups = rng.integers(0, n_groups, size=n, endpoint=False)
+    X = rng.normal(size=(n, p)).astype(np.float32)
+
+    heavy_width = min(p, max(20, p // 5))
+    X[:, :heavy_width] = rng.standard_t(df=3, size=(n, heavy_width)).astype(np.float32)
+    count_start = heavy_width
+    count_stop = min(p, heavy_width + max(20, p // 4))
+    counts = rng.negative_binomial(n=2, p=0.35, size=(n, count_stop - count_start))
+    zero_mask = rng.random(size=counts.shape) < 0.35
+    X[:, count_start:count_stop] = np.where(zero_mask, 0, counts).astype(np.float32)
+
+    block_width = min(p - count_stop, max(0, p // 5))
+    if block_width:
+        latent = rng.normal(size=(n, 12)).astype(np.float32)
+        loadings = rng.normal(scale=0.45, size=(12, block_width)).astype(np.float32)
+        X[:, count_stop : count_stop + block_width] = (
+            latent @ loadings + 0.6 * rng.normal(size=(n, block_width))
+        ).astype(np.float32)
+
+    signal = np.zeros(n, dtype=np.float64)
+    beta = np.linspace(0.06, 0.012, n_signal)
+    for j, b in enumerate(beta):
+        col = X[:, j].astype(np.float64)
+        if j % 3 == 0:
+            col = np.sign(col) * np.log1p(np.abs(col))
+        elif j % 3 == 1:
+            col = np.arctan(col)
+        col = (col - np.mean(col)) / (np.std(col) + 1e-12)
+        signal += b * col
+    group_effects = rng.normal(scale=0.25, size=n_groups)
+    y = signal + group_effects[groups] + rng.normal(scale=1.0, size=n)
+    return X, y, groups, list(range(n_signal))
+
+
+def _d10(seed: int, full: bool = False) -> tuple[pd.DataFrame, np.ndarray, dict]:
+    n, _p, _n_groups, _n_signal, max_k = _d10_params(full)
+    X, y, groups, support = _sample_d10(seed, n, full)
+    return (
+        _feature_frame(X),
+        y,
+        {
+            "true_support": support,
+            "k_star": None,
+            "groups": groups,
+            "benchmark_max_k": max_k,
+            "regime": "production_scale_dense_weak_grouped",
+        },
+    )
+
+
+def _d10_test(seed: int, n_test: int, full: bool = False) -> tuple[pd.DataFrame, np.ndarray]:
+    X, y, _groups, _support = _sample_d10(seed + 10_000, n_test, full)
+    return _feature_frame(X), y
+
+
 DESIGNS: dict[str, AutoKDesign] = {
     "D1": AutoKDesign("D1", _d1, _d1_test),
     "D2": AutoKDesign("D2", _d2, _d2_test),
@@ -267,6 +331,7 @@ DESIGNS: dict[str, AutoKDesign] = {
     "D7": AutoKDesign("D7", _d7, _d7_test),
     "D8": AutoKDesign("D8", _d8, _d8_test),
     "D9": AutoKDesign("D9", _d9, _d9_test),
+    "D10": AutoKDesign("D10", _d10, _d10_test),
 }
 
 

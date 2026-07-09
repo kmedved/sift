@@ -85,7 +85,10 @@ Default decision: `penalized/ebic` is the measured default for CEFS+
 effectively free relative to the CEFS+ path build on D9, and works for binary
 CEFS+ without a fold-scoring bridge. `gaussian_cv` stays a useful power-user
 predictive curve but missed the D9 runtime target and D3 accuracy gate in this
-campaign. `changepoint`, `stability`, `xfit_objective`, and `knockoff_path`
+campaign. The additional `gaussian_cv/best` row is a dense-regime sizing
+variant: it improves D4 dense-weak behavior and D3 relative to
+`gaussian_cv/one_se`, but it still does not replace EBIC as the zero-config
+default. `changepoint`, `stability`, `xfit_objective`, and `knockoff_path`
 remain experimental or failed-gate for automatic sizing.
 
 Program-level gate summary:
@@ -97,6 +100,7 @@ Program-level gate summary:
 | forward_stop | 0.001293 | 0.07097 | 0 | 1 |  | PASS |
 | perm_gap | 0.001561 | 0.05270 | 0 | 1 |  | PASS |
 | gaussian_cv | 0.003651 | 0.03739 | 0 | 3 | 9.374 | PASS |
+| gaussian_cv/best | 0.001022 | 0.07229 | 0 | 3 | 11.238 | PASS |
 | k_posterior | 0.001708 | 0.08048 | 0 | 1 |  | PASS |
 | consensus | 0.001575 | 0.04100 | 0 | 1 |  | PASS |
 | knockoff_path | 0.2483 | 0.3419 | 0.06667 | 12 |  | FAIL |
@@ -143,7 +147,18 @@ D9 full-size timing:
 | perm_gap | 15.0 | 0.00001267 | 0.9351 |
 | evaluate/one_se | 16.0 | 0.00002757 | 1.043 |
 | gaussian_cv | 15.0 | 0.00001267 | 2.103 |
+| gaussian_cv/best | 15.0 | 0.00001267 | 2.521 |
 | xfit_objective | 15.0 | 0.00001267 | 2.144 |
+
+D10 full production-scale dense design (`n=90k`, `p=700`, grouped dense weak
+signal; 2 seeds):
+
+| method | mean k | mean regret | selection runtime s |
+| --- | --- | --- | --- |
+| gaussian_cv/best/group_cv | 213.0 | 0.005380 | 6.652 |
+| gaussian_cv/best | 210.5 | 0.007658 | 6.782 |
+| penalized/ebic | 199.5 | 0.01948 | 0.001961 |
+| gaussian_cv | 193.5 | 0.02377 | 6.657 |
 
 CatBoost transfer, D1-D3:
 

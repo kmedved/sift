@@ -659,7 +659,11 @@ selected = select_mrmr(
   auto routes to `gaussian_cv/one_se`. Router branches use method-specific
   effective floors (`0` for EBIC and permutation-gap stops, at least `1` for
   Gaussian CV curves); pass an explicit `AutoKConfig(k_method=...)` when you
-  need a hard `min_k` contract.
+  need a hard `min_k` contract. In dense weak-signal domains, set
+  `auto_dense_check=True` to have large EBIC picks cross-checked against
+  `gaussian_cv` with `selection_rule="best"`; the router warns when EBIC's
+  detectable-feature count and the Gaussian CV sufficiency pick disagree
+  sharply.
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model. `selection_rule="best"` preserves the historical argmin
   behavior. `selection_rule="plateau"` and `"tolerance"` require
@@ -697,8 +701,10 @@ selected = select_mrmr(
   also available on Gaussian mRMR/JMI/JMIM paths. Function-style selectors
   currently support `xfit_mode="shared_z"`; `xfit_mode="exact"` is reserved for
   fold-local cache rebuilding. `gaussian_cv` is the preferred fold-curve method;
-  `xfit_objective` uses a one-SE default plus a null guard but remains
-  experimental pending broader gates.
+  use `selection_rule="one_se"` for sparse support recovery and
+  `selection_rule="best"` when the production question is dense-regime
+  predictive sufficiency. `xfit_objective` uses a one-SE default plus a null
+  guard but remains experimental pending broader gates.
 - `k_method="k_posterior"` reports a pseudo-posterior over `k`, including HPD
   range, `P(k=0)`, and entropy. When `min_k > 0`, HPD is computed over
   selectable `k`, while `P(k=0)` still reports the unselectable zero-feature
@@ -762,6 +768,7 @@ Important v2 knobs:
 | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` | Bootstrap count/mode, max-one-SE or pi-threshold sizing, and a Phi floor for chance-level agreement. |
 | `floor_z`, `floor_window` | `changepoint` | Experimental noise-floor diagnostic parameters. |
 | `consensus_methods` | `consensus` | Submethods included in the lower-median consensus. |
+| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
 
 Supported function-style routes:
 
@@ -777,8 +784,8 @@ Which method should I use?
 | Situation | Good starting point |
 | --- | --- |
 | You want the measured CEFS+ default | `select_cefsplus(X, y, k="auto")` |
-| You have enough rows and want predictive prefix size | `gaussian_cv` with `strategy="kfold"` or a real holdout |
-| Dense weak-signal domain where EBIC returns hundreds of detectable features | `gaussian_cv` or explicit prefix-risk scoring; read EBIC as support detectability |
+| You have enough rows and want predictive prefix size | `gaussian_cv` with `selection_rule="best"` and `strategy="kfold"`/`"group_cv"`, or a real holdout |
+| Dense weak-signal domain where EBIC returns hundreds of detectable features | `gaussian_cv` with `selection_rule="best"` or explicit prefix-risk scoring; read EBIC as support detectability |
 | You have no validation context and need an IC-style baseline | `penalized_objective` with `objective_penalty="ebic"` |
 | You need a calibrated no-signal stop | `chi2_stop` or `forward_stop` with `min_k=0` |
 | Weights, ranks, groups, or time structure make analytic nulls suspect | `perm_gap` with the appropriate `perm_null` |

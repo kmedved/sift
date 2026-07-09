@@ -97,6 +97,12 @@ def _path_max_k(p: int, k_star: int | None) -> int:
     return min(p, max(4 * guess, 100))
 
 
+def _design_max_k(p: int, meta: dict) -> int:
+    if "benchmark_max_k" in meta:
+        return min(p, max(1, int(meta["benchmark_max_k"])))
+    return _path_max_k(p, meta.get("k_star"))
+
+
 def _risk_grid(max_k: int) -> list[int]:
     values = [0]
     values.extend(range(1, min(max_k, 30) + 1))
@@ -304,11 +310,24 @@ def _method_k(
             method="cefsplus",
         )
         k_hat, _diag = select_k_xfit_objective(curves, cfg)
-    elif method == "gaussian_cv":
+    elif method == "gaussian_cv" or method.startswith("gaussian_cv/"):
+        parts = method.split("/")
+        selection_rule = parts[1] if len(parts) >= 2 and parts[1] else "one_se"
+        strategy = parts[2] if len(parts) >= 3 and parts[2] else "kfold"
+        if selection_rule not in {"best", "one_se", "plateau", "tolerance"}:
+            raise ValueError(f"Unsupported gaussian_cv selection rule {selection_rule!r}")
+        if strategy not in {"kfold", "group_cv", "time_holdout"}:
+            raise ValueError(f"Unsupported gaussian_cv strategy {strategy!r}")
+        if strategy == "group_cv" and "groups" not in meta:
+            notes = "group_cv_requested_without_groups;using_kfold"
+            strategy = "kfold"
+        if strategy == "time_holdout" and "time" not in meta:
+            notes = "time_holdout_requested_without_time;using_kfold"
+            strategy = "kfold"
         cfg = AutoKConfig(
             k_method="gaussian_cv",
-            strategy="kfold",
-            selection_rule="one_se",
+            strategy=strategy,
+            selection_rule=selection_rule,
             min_k=1,
             max_k=max_k,
             xfit_folds=3,
@@ -321,6 +340,8 @@ def _method_k(
             top_m=max(5 * max_k, 250),
             corr_prune="auto",
             method="cefsplus",
+            groups=meta.get("groups"),
+            time=meta.get("time"),
         )
         k_hat, _diag = select_k_gaussian_cv(curves, cfg)
     elif method == "stability":
@@ -481,7 +502,7 @@ def run(args: argparse.Namespace) -> list[dict]:
         design = DESIGNS[design_id]
         for seed in range(int(args.seeds)):
             X, y, meta = design.make(seed, bool(args.full))
-            max_k = _path_max_k(X.shape[1], meta.get("k_star"))
+            max_k = _design_max_k(X.shape[1], meta)
             cache = build_cache(
                 X,
                 subsample=None if X.shape[0] <= 50_000 else 50_000,

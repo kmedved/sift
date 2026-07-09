@@ -103,6 +103,10 @@ class AutoKConfig:
     floor_z: float = 2.5
     floor_window: float | int = 0.2
     consensus_methods: tuple[str, ...] = ("ebic", "chi2_stop", "perm_gap", "gaussian_cv")
+    auto_dense_check: bool = False
+    auto_dense_min_k: int = 100
+    auto_dense_min_frac: float = 0.25
+    auto_dense_disagreement_ratio: float = 2.0
 
 
 _VALID_K_METHODS = frozenset(
@@ -211,6 +215,14 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
 
     if int(config.min_k) > int(config.max_k):
         raise ValueError("AutoKConfig.min_k must be <= AutoKConfig.max_k")
+    if not isinstance(config.auto_dense_check, (bool, np.bool_)):
+        raise ValueError("AutoKConfig.auto_dense_check must be boolean")
+    if (
+        isinstance(config.auto_dense_min_k, (bool, np.bool_))
+        or not isinstance(config.auto_dense_min_k, (int, np.integer))
+        or int(config.auto_dense_min_k) < 0
+    ):
+        raise ValueError("AutoKConfig.auto_dense_min_k must be a non-negative integer")
 
     if (
         not _is_real_number(config.val_frac)
@@ -398,6 +410,18 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
         or float(config.objective_n_eff) <= 1.0
     ):
         raise ValueError("AutoKConfig.objective_n_eff must be None or finite and > 1")
+    if (
+        not _is_real_number(config.auto_dense_min_frac)
+        or not np.isfinite(config.auto_dense_min_frac)
+        or not 0.0 <= float(config.auto_dense_min_frac) <= 1.0
+    ):
+        raise ValueError("AutoKConfig.auto_dense_min_frac must be finite and between 0 and 1")
+    if (
+        not _is_real_number(config.auto_dense_disagreement_ratio)
+        or not np.isfinite(config.auto_dense_disagreement_ratio)
+        or float(config.auto_dense_disagreement_ratio) <= 1.0
+    ):
+        raise ValueError("AutoKConfig.auto_dense_disagreement_ratio must be finite and > 1")
     if config.objective_penalty == "hqc" and (
         config.objective_n_eff is not None and float(config.objective_n_eff) <= np.e
     ):
@@ -443,6 +467,10 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         "floor_z": {"changepoint"},
         "floor_window": {"changepoint"},
         "consensus_methods": {"consensus"},
+        "auto_dense_check": {"auto"},
+        "auto_dense_min_k": {"auto"},
+        "auto_dense_min_frac": {"auto"},
+        "auto_dense_disagreement_ratio": {"auto"},
     }
     consensus_methods = None
     if config.k_method == "consensus":

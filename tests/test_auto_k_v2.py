@@ -195,6 +195,66 @@ def test_auto_k_harness_part2_regressions(monkeypatch):
     assert "exact_off_grid_k" in rows[0]["notes"]
 
 
+def test_benchmark_gaussian_cv_best_group_cv_spelling(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(12, dtype=np.float64)
+        valid_cols = np.arange(6, dtype=np.int64)
+
+    captured = {}
+
+    def fake_curves(*_args, config, groups=None, **_kwargs):
+        captured["selection_rule"] = config.selection_rule
+        captured["strategy"] = config.strategy
+        captured["groups"] = groups
+        return pd.DataFrame({"k": [3], "score_mean": [0.5], "score_se": [0.0]})
+
+    monkeypatch.setattr(bench_auto_k, "gaussian_cv_curves", fake_curves)
+    monkeypatch.setattr(bench_auto_k, "select_k_gaussian_cv", lambda *_args, **_kwargs: (3, pd.DataFrame()))
+
+    k_hat, notes, _runtime, selected_override = bench_auto_k._method_k(
+        "gaussian_cv/best/group_cv",
+        X=pd.DataFrame(np.zeros((12, 6))),
+        y=np.zeros(12),
+        path_names=[f"x{i}" for i in range(6)],
+        objective=np.linspace(0.1, 0.6, 6),
+        cache=DummyCache(),
+        meta={"groups": np.repeat(np.arange(4), 3)},
+        max_k=6,
+        seed=0,
+    )
+
+    assert k_hat == 3
+    assert notes == ""
+    assert selected_override is None
+    assert captured["selection_rule"] == "best"
+    assert captured["strategy"] == "group_cv"
+    np.testing.assert_array_equal(captured["groups"], np.repeat(np.arange(4), 3))
+
+    with pytest.raises(ValueError, match="Unsupported benchmark method"):
+        bench_auto_k._method_k(
+            "gaussian_cv_bad",
+            X=pd.DataFrame(np.zeros((12, 6))),
+            y=np.zeros(12),
+            path_names=[f"x{i}" for i in range(6)],
+            objective=np.linspace(0.1, 0.6, 6),
+            cache=DummyCache(),
+            meta={},
+            max_k=6,
+            seed=0,
+        )
+
+
+def test_d10_dense_design_exposes_grouped_production_scale_metadata():
+    X, y, meta = DESIGNS["D10"].make(0, False)
+
+    assert X.shape == (12_000, 350)
+    assert y.shape == (12_000,)
+    assert len(meta["groups"]) == 12_000
+    assert len(meta["true_support"]) == 120
+    assert meta["benchmark_max_k"] == 250
+    assert bench_auto_k._design_max_k(X.shape[1], meta) == 250
+
+
 def test_ebic_penalty_uses_kish_by_default_and_requires_candidates():
     objective = np.array([0.08, 0.12, 0.13])
     weights = np.array([10.0, 1.0, 1.0, 1.0])
@@ -1785,6 +1845,68 @@ def test_auto_k_auto_router_warns_and_records_saturation(monkeypatch):
     assert indices == [0, 1, 2]
     assert summary["auto_routing"]["chosen"] == "penalized_objective"
     assert summary["auto_routing"]["saturated"] is True
+
+
+def test_auto_k_auto_router_dense_check_warns_on_large_ebic_disagreement(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(200, dtype=np.float64)
+        valid_cols = np.arange(200, dtype=np.int64)
+
+    def fake_runner(routed_config, **_kwargs):
+        assert routed_config.k_method == "penalized_objective"
+        return ["x"] * 120, list(range(120)), pd.DataFrame(), {
+            "selected_k": 120,
+            "effective_max_k": 160,
+            "selected_at_effective_max_k": False,
+        }
+
+    captured = {}
+
+    def fake_curves(*_args, config, **_kwargs):
+        captured["config"] = config
+        return pd.DataFrame({"k": [40], "score": [0.1], "se": [0.0], "n_splits": [3]})
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+    monkeypatch.setattr(filter_auto_k, "gaussian_cv_curves", fake_curves)
+    monkeypatch.setattr(filter_auto_k, "select_k_gaussian_cv", lambda *_args, **_kwargs: (40, pd.DataFrame()))
+
+    with pytest.warns(UserWarning, match="dense-signal diagnostic"):
+        _selected, _indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+            cache=DummyCache(),
+            y=np.zeros(200),
+            method="cefsplus",
+            max_k=160,
+            top_m=200,
+            auto_k_config=AutoKConfig(
+                k_method="auto",
+                min_k=0,
+                max_k=160,
+                auto_dense_check=True,
+            ),
+            verbose=False,
+        )
+
+    check = summary["auto_routing"]["dense_check"]
+    assert captured["config"].k_method == "gaussian_cv"
+    assert captured["config"].selection_rule == "best"
+    assert check["ran"] is True
+    assert check["ebic_k"] == 120
+    assert check["gaussian_cv_best_k"] == 40
+    assert check["warned"] is True
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"auto_dense_check": 1}, "auto_dense_check"),
+        ({"auto_dense_min_k": -1}, "auto_dense_min_k"),
+        ({"auto_dense_min_frac": 1.5}, "auto_dense_min_frac"),
+        ({"auto_dense_disagreement_ratio": 1.0}, "auto_dense_disagreement_ratio"),
+    ],
+)
+def test_auto_dense_check_config_validation(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        validate_auto_k_config(AutoKConfig(k_method="auto", **kwargs))
 
 
 def test_binary_cefsplus_no_config_auto_routes_to_ebic():

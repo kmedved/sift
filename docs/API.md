@@ -351,7 +351,11 @@ and permutation-gap stops, at least `1` for Gaussian CV curves), so use an
 explicit `AutoKConfig(k_method=...)` when you need a hard `min_k`. If the
 selected k hits the effective maximum, the router emits a `UserWarning` and
 sets `auto_routing["saturated"] = True`; treat that result as censored until
-you raise `max_k` or inspect the risk/objective curve.
+you raise `max_k` or inspect the risk/objective curve. For dense weak-signal
+domains, set `auto_dense_check=True` on `AutoKConfig(k_method="auto")` to run
+an opt-in `gaussian_cv` cross-check with `selection_rule="best"` after large
+EBIC picks; the router warns when EBIC's detectable-feature count and the
+Gaussian CV sufficiency pick differ by more than the configured ratio.
 
 Important `AutoKConfig` method fields:
 
@@ -367,6 +371,7 @@ Important `AutoKConfig` method fields:
 | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` |
 | `floor_z`, `floor_window` | `changepoint` |
 | `consensus_methods` | `consensus` |
+| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` |
 
 `knockoff_path` returns an approximate Gaussian-copula plug-in selected set when
 `knockoff_return="set"`. `changepoint`, `stability`, `xfit_objective`, and

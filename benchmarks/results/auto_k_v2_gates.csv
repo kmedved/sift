@@ -11,3 +11,4 @@ k_posterior,True,True,False,True,False,,False,0.0017075719050170584,0.0804829522
 stability,False,True,False,True,,,False,0.19689480170561707,0.10511271003091685,0.0,1,False
 changepoint,False,False,False,True,False,,False,0.03010250515680951,1.029292278885295,1.0,80,False
 consensus,False,True,False,True,,,False,0.0015747127850916118,0.04099974473707911,0.0,1,True
+gaussian_cv/best,False,True,True,True,False,11.237548527541323,False,0.0010224737301366776,0.07228830365487154,0,3,True

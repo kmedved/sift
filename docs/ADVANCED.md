@@ -172,8 +172,10 @@ passing `groups` or `time` no longer implies `evaluate/group_cv` or
 `evaluate/time_holdout`. Router branches also use method-specific effective
 floors, so set an explicit method when a hard `min_k` is part of the contract.
 In dense weak-signal domains, EBIC can be best read as a count of detectable
-conditional signal; use `gaussian_cv` or an explicit prefix-risk curve when the
-production question is predictive sufficiency.
+conditional signal; use `gaussian_cv` with `selection_rule="best"` or an
+explicit prefix-risk curve when the production question is predictive
+sufficiency. The one-SE rule remains useful for sparse support recovery, but it
+can cut too far past a shallow dense-risk knee.
 
 Selection rules for `evaluate` include:
 
