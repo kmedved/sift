@@ -258,7 +258,7 @@ def _fold_score_arrays(
     if score_kind not in {"xfit_objective", "gaussian_cv"}:
         raise ValueError("score_kind must be 'xfit_objective' or 'gaussian_cv'")
 
-    Z = np.asarray(cache.Z, dtype=np.float64)
+    Z = np.asarray(cache.Z)
     base_w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
     if Z.shape[0] != base_w.shape[0]:
         raise ValueError("cache sample weights must match cache rows")

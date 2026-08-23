@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import List, Literal, Optional, Tuple
+import warnings
 
 import numpy as np
 
@@ -15,22 +16,6 @@ from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
 
 CorrPrune = float | None | Literal["auto"]
-
-
-def _resolve_corr_prune(
-    method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"],
-    corr_prune: CorrPrune,
-) -> float | None:
-    if corr_prune == "auto":
-        return 0.95 if method == "cefsplus" else None
-    if corr_prune is None:
-        return None
-    if isinstance(corr_prune, (bool, np.bool_)):
-        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
-    threshold = float(corr_prune)
-    if not np.isfinite(threshold) or threshold <= 0.0:
-        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
-    return threshold
 
 
 def _gaussian_mrmr_select(
@@ -145,148 +130,101 @@ def _cefsplus_loop_core(
     shrink: float = 1e-6,
     eps: float = 1e-12,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Greedy CEFS+ path via a partial Cholesky (residual) recursion.
+
+    Selecting feature ``j`` given the current set ``S`` maximizes
+    ``log|Sigma_S+j| - log|Sigma_{y,S+j}|``. With ``d_j`` the residual
+    variance of ``x_j`` given ``S``, ``c_j`` the residual covariance of
+    ``(x_j, y)`` given ``S`` and ``d_y`` the residual variance of ``y`` given
+    ``S``, the two Schur complements are ``s1_j = d_j`` and
+    ``s2_j = d_j - c_j^2 / d_y``. Maintaining ``d``, ``c`` and the partial
+    Cholesky rows costs O(m * t) per step instead of the O(m * t^2) inverse
+    updates, and uses no BLAS calls, so it cannot thrash against the caller's
+    BLAS thread pool.
+    """
     m = len(r)
     if k <= 0 or m == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
     k = min(k, m)
 
-    R_shrunk = (1.0 - shrink) * R.copy()
-    for i in range(m):
-        R_shrunk[i, i] = 1.0
-    r_shrunk = (1.0 - shrink) * r.copy()
-
+    scale = 1.0 - shrink
     selected = np.empty(k, dtype=np.int64)
     objective = np.empty(k if want_objective else 0, dtype=np.float64)
     remaining = np.ones(m, dtype=np.bool_)
 
-    j0 = 0
-    best_rel = tie_break_rel[0]
-    for j in range(1, m):
-        if tie_break_rel[j] > best_rel:
-            best_rel = tie_break_rel[j]
-            j0 = j
+    # Partial Cholesky rows for the selected columns, residual variances of
+    # every candidate, and residual covariances with the (shrunk) target.
+    L = np.zeros((m, k), dtype=np.float64)
+    Ly = np.zeros(k, dtype=np.float64)
+    d = np.ones(m, dtype=np.float64)
+    c = np.empty(m, dtype=np.float64)
+    for j in range(m):
+        c[j] = scale * r[j]
+    dy = 1.0
 
-    selected[0] = j0
-    remaining[j0] = False
-    count = 1
-
-    inv_S = np.array([[1.0]], dtype=np.float64)
     logdet_S = 0.0
+    logdet_yS = 0.0
+    score = np.empty(m, dtype=np.float64)
+    s1 = np.empty(m, dtype=np.float64)
+    s2 = np.empty(m, dtype=np.float64)
 
-    r0 = r_shrunk[j0]
-    det_yS = max(1.0 - r0 * r0, eps)
-    inv_yS = (1.0 / det_yS) * np.array([[1.0, -r0], [-r0, 1.0]], dtype=np.float64)
-    logdet_yS = np.log(det_yS)
-    if want_objective:
-        objective[0] = logdet_S - logdet_yS
-
+    count = 0
     while count < k:
-        n_rem = 0
-        for j in range(m):
-            if remaining[j]:
-                n_rem += 1
-        if n_rem == 0:
-            break
+        t = count
+        if t == 0:
+            j = 0
+            best_rel = tie_break_rel[0]
+            for jj in range(1, m):
+                if tie_break_rel[jj] > best_rel:
+                    best_rel = tie_break_rel[jj]
+                    j = jj
+            s1_best = 1.0
+            s2_best = max(1.0 - c[j] * c[j], eps)
+        else:
+            best_pos = -1
+            best_score = -np.inf
+            for jj in range(m):
+                if not remaining[jj]:
+                    continue
+                s1_j = max(d[jj], eps)
+                s2_j = max(d[jj] - c[jj] * c[jj] / dy, eps)
+                s1[jj] = s1_j
+                s2[jj] = s2_j
+                sc = np.log(s1_j) - np.log(s2_j)
+                score[jj] = sc
+                if best_pos < 0 or sc > best_score:
+                    best_score = sc
+                    best_pos = jj
+            if best_pos < 0:
+                break
+            j = best_pos
+            best_rel = tie_break_rel[j]
+            for jj in range(m):
+                if remaining[jj] and np.abs(score[jj] - best_score) < 1e-12:
+                    if tie_break_rel[jj] > best_rel:
+                        best_rel = tie_break_rel[jj]
+                        j = jj
+            s1_best = s1[j]
+            s2_best = s2[j]
 
-        rem = np.empty(n_rem, dtype=np.int64)
-        idx = 0
-        for j in range(m):
-            if remaining[j]:
-                rem[idx] = j
-                idx += 1
+        # Update the residual state for the remaining candidates.
+        sq = np.sqrt(s1_best)
+        ly = c[j] / sq
+        Ly[t] = ly
+        dy -= ly * ly
+        for i in range(m):
+            if not remaining[i] or i == j:
+                continue
+            acc = R[i, j] * scale
+            for a in range(t):
+                acc -= L[i, a] * L[j, a]
+            lij = acc / sq
+            L[i, t] = lij
+            d[i] -= lij * lij
+            c[i] -= lij * ly
 
-        s = count
-
-        B = np.empty((s, n_rem), dtype=np.float64)
-        for si in range(s):
-            for ri in range(n_rem):
-                B[si, ri] = R_shrunk[selected[si], rem[ri]]
-
-        tmp = inv_S @ B
-        t1 = np.zeros(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            for si in range(s):
-                t1[ri] += B[si, ri] * tmp[si, ri]
-
-        s1 = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            s1[ri] = max(1.0 - t1[ri], eps)
-
-        lf = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            lf[ri] = logdet_S + np.log(s1[ri])
-
-        B2 = np.empty((s + 1, n_rem), dtype=np.float64)
-        for ri in range(n_rem):
-            B2[0, ri] = r_shrunk[rem[ri]]
-        for si in range(s):
-            for ri in range(n_rem):
-                B2[si + 1, ri] = B[si, ri]
-
-        tmp2 = inv_yS @ B2
-        t2 = np.zeros(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            for si in range(s + 1):
-                t2[ri] += B2[si, ri] * tmp2[si, ri]
-
-        s2 = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            s2[ri] = max(1.0 - t2[ri], eps)
-
-        lc = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            lc[ri] = logdet_yS + np.log(s2[ri])
-
-        score = np.empty(n_rem, dtype=np.float64)
-        for ri in range(n_rem):
-            score[ri] = lf[ri] - lc[ri]
-
-        best_pos = 0
-        best_score = score[0]
-        for ri in range(1, n_rem):
-            if score[ri] > best_score:
-                best_score = score[ri]
-                best_pos = ri
-
-        best_rel = tie_break_rel[rem[best_pos]]
-        for ri in range(n_rem):
-            if np.abs(score[ri] - best_score) < 1e-12:
-                if tie_break_rel[rem[ri]] > best_rel:
-                    best_rel = tie_break_rel[rem[ri]]
-                    best_pos = ri
-
-        j = rem[best_pos]
-
-        b = B[:, best_pos].copy().reshape(-1, 1)
-        v = inv_S @ b
-        s1_best = s1[best_pos]
-
-        inv_S_new = np.empty((s + 1, s + 1), dtype=np.float64)
-        for i in range(s):
-            for jj in range(s):
-                inv_S_new[i, jj] = inv_S[i, jj] + v[i, 0] * v[jj, 0] / s1_best
-        for i in range(s):
-            inv_S_new[i, s] = -v[i, 0] / s1_best
-            inv_S_new[s, i] = -v[i, 0] / s1_best
-        inv_S_new[s, s] = 1.0 / s1_best
-        inv_S = inv_S_new
         logdet_S += np.log(s1_best)
-
-        b2 = B2[:, best_pos].copy().reshape(-1, 1)
-        v2 = inv_yS @ b2
-        s2_best = s2[best_pos]
-
-        inv_yS_new = np.empty((s + 2, s + 2), dtype=np.float64)
-        for i in range(s + 1):
-            for jj in range(s + 1):
-                inv_yS_new[i, jj] = inv_yS[i, jj] + v2[i, 0] * v2[jj, 0] / s2_best
-        for i in range(s + 1):
-            inv_yS_new[i, s + 1] = -v2[i, 0] / s2_best
-            inv_yS_new[s + 1, i] = -v2[i, 0] / s2_best
-        inv_yS_new[s + 1, s + 1] = 1.0 / s2_best
-        inv_yS = inv_yS_new
         logdet_yS += np.log(s2_best)
-
         selected[count] = j
         if want_objective:
             objective[count] = logdet_S - logdet_yS
@@ -347,6 +285,49 @@ def cefsplus_loop_with_objective(
     )
 
 
+def gaussian_noise_floor_mi(p_valid: int, n_eff: float) -> float:
+    """Gaussian-MI relevance expected from the strongest of ``p_valid`` null features.
+
+    Under independence a rank-Gaussian correlation is roughly N(0, 1/n_eff), so
+    the largest of ``p_valid`` null correlations is about ``sqrt(2 log p / n)``.
+    """
+    p_eff = max(int(p_valid), 2)
+    n = float(n_eff)
+    if not np.isfinite(n) or n <= 2.0:
+        return float("inf")
+    r2 = min(2.0 * np.log(p_eff) / n, 1.0 - 1e-12)
+    return float(-0.5 * np.log(1.0 - r2))
+
+
+def _warn_gaussian_mrmr_noise_floor(panel, sel_local: np.ndarray, method: str) -> None:
+    """Warn when Gaussian mRMR admits features whose relevance is at noise level.
+
+    Both mRMR formulas compare an MI relevance against an MI redundancy on the
+    same scale, so once the informative features are mutually redundant a
+    pure-noise column (tiny relevance, tiny redundancy) can outscore them.
+    JMI/JMIM/CEFS+ do not share this failure mode.
+    """
+    if sel_local.size == 0:
+        return
+    floor = gaussian_noise_floor_mi(panel.p_valid, panel.n_eff_kish)
+    if not np.isfinite(floor):
+        return
+    below = int(np.sum(np.asarray(panel.rel)[sel_local] < floor))
+    if below == 0:
+        return
+    warnings.warn(
+        f"Gaussian mRMR ({method}) selected {below} of {sel_local.size} features whose "
+        f"marginal Gaussian-MI relevance is below the noise floor "
+        f"({floor:.2e} for {panel.p_valid} candidates and n_eff={panel.n_eff_kish:.0f}). "
+        "The mRMR quotient/difference scores let low-relevance, low-redundancy "
+        "columns beat mutually redundant informative ones. Consider a smaller "
+        "top_m, or the Gaussian JMI/JMIM/CEFS+ paths, which condition on the "
+        "selected set instead of penalizing pairwise redundancy.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def select_cached(
     cache: FeatureCache,
     y,
@@ -356,6 +337,7 @@ def select_cached(
     corr_prune: CorrPrune = "auto",
     return_objective: bool = False,
     return_indices: bool = False,
+    warn_noise_floor: bool = True,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
 ]:
@@ -363,12 +345,16 @@ def select_cached(
 
     corr_prune="auto" preserves CEFS+'s default 0.95 pruning while leaving
     cached Gaussian mRMR/JMI/JMIM unpruned. Pass a float to opt into pruning for
-    any cached method, or None to disable pruning.
+    any cached method, or None to disable pruning. ``warn_noise_floor`` controls
+    the Gaussian-mRMR warning about noise-level picks; auto-k path builders
+    disable it because they cut the path afterwards.
     """
     from sift._preprocess import to_numpy, validate_k
 
     k = validate_k(k, allow_auto=False)
-    y_arr = to_numpy(y, dtype=np.float32).ravel()
+    y_arr = to_numpy(y, dtype=np.float64).ravel()
+    if not np.isfinite(y_arr).all():
+        raise ValueError("y contains non-finite values")
     panel = build_candidate_panel(
         cache,
         y_arr,
@@ -396,6 +382,8 @@ def select_cached(
             k_actual,
             use_quotient=method == "mrmr_quot",
         )
+        if warn_noise_floor:
+            _warn_gaussian_mrmr_noise_floor(panel, sel_local, method)
     elif method in ("jmi", "jmim"):
         sel_local = _gaussian_jmi_select(
             R_cand,

@@ -169,6 +169,12 @@ def ensure_weights(
         if not np.isfinite(mean) or mean <= 0.0:
             raise ValueError("sample_weight mean must be finite and > 0 to normalize")
         w = w / mean
+        # Quantize normalized weights to float32 precision, then restore their
+        # mean in float64. This greatly reduces rescaling-induced ulp changes
+        # that can alter tree tie-breaking without claiming exact invariance
+        # for every representable input and scale.
+        w = w.astype(np.float32).astype(np.float64)
+        w /= float(w.mean())
 
     return w
 
@@ -190,9 +196,15 @@ def validate_k(k, *, allow_auto: bool = True) -> int | Literal["auto"]:
 
 
 def validate_inputs(
-    X, y, task: str, impute: bool = True
+    X, y, task: str, impute: bool = True, *, dtype=np.float32
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Validate and convert inputs."""
+    """Validate and convert inputs.
+
+    ``dtype`` controls the returned feature dtype. The classic filter paths
+    keep ``float32``; solvers that immediately work in double precision pass
+    ``np.float64`` to avoid a lossy round trip (large offsets or tiny scales
+    can otherwise collapse to constants).
+    """
     from sift._impute import mean_impute
 
     feature_names = extract_feature_names(X)
@@ -211,7 +223,7 @@ def validate_inputs(
     if impute:
         X_arr = mean_impute(X_arr, copy=True)
 
-    X_arr = X_arr.astype(np.float32)
+    X_arr = X_arr.astype(dtype, copy=False)
 
     if task == "classification":
         if hasattr(y, "values"):

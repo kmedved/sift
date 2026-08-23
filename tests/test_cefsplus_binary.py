@@ -41,7 +41,7 @@ def test_validate_binary_target_string_mapping_is_order_stable():
     y1, _, mapping1 = validate_binary_target(np.array(["yes", "no", "yes", "no"]))
     y2, _, mapping2 = validate_binary_target(np.array(["no", "yes", "no", "yes"]))
 
-    assert mapping1 == {"'no'": 0, "'yes'": 1}
+    assert mapping1 == {"no": 0, "yes": 1}
     assert mapping2 == mapping1
     np.testing.assert_array_equal(y1, np.array([1.0, 0.0, 1.0, 0.0]))
     np.testing.assert_array_equal(y2, np.array([0.0, 1.0, 0.0, 1.0]))
@@ -50,7 +50,28 @@ def test_validate_binary_target_string_mapping_is_order_stable():
 def test_validate_binary_target_preserves_bool_mapping_metadata():
     _, _, mapping = validate_binary_target(np.array([True, False, True], dtype=object))
 
-    assert mapping == {"False": 0, "True": 1}
+    assert mapping == {False: 0, True: 1}
+
+
+def test_validate_binary_target_numeric_labels_use_numeric_order_and_raw_keys():
+    y01, _, mapping = validate_binary_target(np.array([10, 2, 10, 2]))
+
+    assert mapping == {2: 0, 10: 1}
+    np.testing.assert_array_equal(y01, np.array([1.0, 0.0, 1.0, 0.0]))
+
+
+def test_validate_binary_target_numeric_strings_keep_string_keys():
+    y01, _, mapping = validate_binary_target(np.array(["10", "2", "10", "2"]))
+
+    assert mapping == {"2": 0, "10": 1}
+    np.testing.assert_array_equal(y01, np.array([1.0, 0.0, 1.0, 0.0]))
+
+
+def test_validate_binary_target_distinguishes_equal_numeric_string_values():
+    y01, _, mapping = validate_binary_target(np.array(["2", "02", "2", "02"]))
+
+    assert mapping == {"02": 0, "2": 1}
+    np.testing.assert_array_equal(y01, np.array([1.0, 0.0, 1.0, 0.0]))
 
 
 def test_binary_first_step_matches_univariate_score_test():
@@ -539,6 +560,42 @@ def test_constant_and_duplicate_features_are_handled_deterministically():
     assert len(result.diagnostics_["univariate_scores"]) == X.shape[1]
     assert result.diagnostics_["n_constant_or_nonfinite"] == 1
     assert result.diagnostics_["n_corr_pruned"] == 1
+
+
+def test_bounded_memory_corr_prune_matches_dense_reference():
+    rng = np.random.default_rng(1010)
+    raw = rng.normal(size=(160, 15))
+    w = rng.uniform(0.2, 2.0, size=raw.shape[0])
+    Z, valid, _, _ = weighted_standardize(raw, w)
+    assert valid.all()
+    candidates = np.array([12, 2, 8, 5, 0, 14, 6, 9], dtype=np.int64)
+    scores = rng.normal(size=Z.shape[1])
+    threshold = 0.15
+
+    dense_R = cefsplus_binary_module.weighted_corr_matrix(Z[:, candidates], w)
+    ordered = np.lexsort((candidates, -scores[candidates]))
+    active = np.ones(ordered.size, dtype=bool)
+    kept_local = []
+    for pos, local_idx in enumerate(ordered):
+        if not active[pos]:
+            continue
+        kept_local.append(int(local_idx))
+        for later_pos in range(pos + 1, ordered.size):
+            if active[later_pos] and abs(float(dense_R[local_idx, ordered[later_pos]])) >= threshold:
+                active[later_pos] = False
+    expected_kept = candidates[np.asarray(kept_local, dtype=np.int64)]
+    expected_pruned = {int(candidates[i]) for i in ordered[~active]}
+
+    kept, pruned = cefsplus_binary_module._corr_prune_candidates(
+        Z,
+        w,
+        candidates,
+        scores,
+        threshold,
+    )
+
+    np.testing.assert_array_equal(kept, expected_kept)
+    assert pruned == expected_pruned
 
 
 def test_near_separation_does_not_crash():

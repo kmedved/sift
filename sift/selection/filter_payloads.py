@@ -383,6 +383,11 @@ def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
 
 def validate_standard(ctx: "FilterContext") -> None:
     check_regression_only(ctx.request.task, ctx.estimator)
+    if ctx.estimator == "gaussian":
+        # Gaussian/cache paths bypass validate_inputs, so check the regression
+        # target here; otherwise non-finite y rows would silently be treated
+        # as neutral (zero) ranks by the copula transform.
+        validate_cefsplus(ctx)
 
 
 def validate_ksg_no_weight(ctx: "FilterContext") -> None:

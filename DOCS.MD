@@ -264,11 +264,18 @@ Key options:
 - `mrmr_backend`: controls the mRMR redundancy/cache execution path. `"serial"`
   is the original Numba path, `"blas"` uses single-process vectorized
   correlation updates for classic mRMR, and `"processes"` uses joblib process
-  workers. `"auto"` resolves to `"serial"` when `n_jobs=1` and `"processes"`
-  otherwise.
+  workers. `"auto"` resolves to `"blas"` (3-10x faster than serial and free of
+  process start-up costs); pass `"processes"` explicitly to opt into workers.
 - `n_jobs`: worker count for `mrmr_backend="processes"`. `n_jobs=0` is invalid.
-  For Gaussian mRMR, this only parallelizes rank-Gaussian cache construction
-  when no prebuilt `cache` is supplied; a prebuilt cache is reused as-is.
+  For Gaussian mRMR, `n_jobs != 1` parallelizes rank-Gaussian cache
+  construction with threads when no prebuilt `cache` is supplied; a prebuilt
+  cache is reused as-is.
+- Gaussian mRMR compares an MI relevance against an MI redundancy on the same
+  scale, so once the informative features are mutually redundant a low-relevance
+  low-redundancy (noise) column can outscore them under either formula. SIFT
+  warns when selected features sit below the Gaussian noise floor; prefer the
+  Gaussian JMI/JMIM/CEFS+ paths, which condition on the selected set, for wide
+  noisy screens.
 
 Classification example:
 
@@ -412,12 +419,13 @@ result = select_fdr(
     X,
     y,
     q=0.1,                    # target FDR level
-    statistic="relevance",    # "relevance" or tie-safe "cefsplus"
+    statistic="relevance",    # "relevance", "lsm", "ridge", or tie-safe "cefsplus"
     n_draws=1,                # >1 enables derandomized aggregation
     eta=0.5,                  # selection-frequency cutoff for n_draws > 1
     offset=1,                 # 1 = knockoff+, 0 = modified knockoff threshold
     s_method="equi",          # "equi", "mvr", or "me"
-    feature_groups=None,      # optional group-level knockoff thresholding
+    feature_groups=None,      # labels, or "auto" for correlation-cluster representatives
+    group_corr_threshold=0.7, # |corr| cut used by feature_groups="auto"
     sample_weight=None,
     subsample=50_000,
     random_state=0,
@@ -443,6 +451,17 @@ Important options:
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
   original feature and its knockoff.
+- `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
+  the analytic augmented correlation and the observed original/knockoff
+  target correlations. It is exactly antisymmetric under swaps, needs no
+  tie handling, and is markedly more powerful than `relevance` on correlated
+  designs while keeping the same approximate plug-in validity framing.
+  `statistic_options=
+  {"max_steps": ...}` caps the LARS steps (columns that never enter get `W=0`).
+- `statistic="ridge"`: analytic ridge coefficient difference
+  `|beta_j| - |beta_j~|` with `beta = (G + lambda I)^-1 [r; r~]`; cheap,
+  deterministic, and antisymmetric by construction.
+  `statistic_options={"ridge_lambda": 0.5}` sets the penalty.
 - `statistic="cefsplus"`: tie-safe greedy CEFS+ entry-order statistic over the
   analytic augmented covariance. It uses pair-coupled screening, disables
   correlation pruning inside the augmented run, and scores entries by marginal
@@ -457,7 +476,10 @@ Important options:
   They can improve power on correlated designs; `s_mean` is diagnostic only and
   is not the optimization objective.
 - `n_draws`: repeat knockoff sampling and aggregate by selection frequency.
-  This improves run-to-run stability but is documented as approximate.
+  The configured `q` applies separately to each draw. For `n_draws > 1`, the
+  final frequency vote has no established FDR control; metadata therefore
+  reports `q_scope="per_draw"`, `aggregation_fdr_control="none"`, and
+  `fdr_control="none"` for the aggregated set.
 - `eta`: selected when `selection_frequency >= eta` for `n_draws > 1`.
 - `offset=1`: knockoff+ threshold. Use `offset=0` only when the modified
   knockoff/mFDR-style threshold is acceptable.
@@ -465,10 +487,32 @@ Important options:
   The default statistic does not need screening; `cefsplus` uses it to bound
   the augmented greedy problem.
 - `feature_groups`: optional per-feature group labels. When supplied, the
-  knockoff threshold is applied to group-level antisymmetric statistics and
-  selected groups are expanded back to their active member features. This is a
-  group-discovery mode; it should not be read as exact feature-level FDR inside
-  selected groups.
+  knockoff threshold is applied to a heuristic signed-maximum aggregation and
+  selected groups are expanded back to their active member features. This mode
+  has no established group- or feature-level FDR control; metadata reports
+  `group_fdr_control="none"`, `per_draw_fdr_control="none"`, and
+  `fdr_control="none"`.
+- `feature_groups="auto"`: clusters features by absolute correlation
+  (average linkage on `1 - |corr|`, cut at `1 - group_corr_threshold`), runs
+  the knockoff filter on one representative (medoid) per cluster, and expands
+  selected clusters to all their members. Use it when the metadata reports a
+  tiny `s_median` (near-collinear blocks such as duplicates, interactions, or
+  one-hot sets make individual knockoffs nearly identical to their originals
+  and destroy power). The result table adds `feature_group` and
+  `is_representative` columns; the discovery unit is the cluster. The expanded
+  feature list has no feature-level FDR guarantee. The representative null is
+  not automatically the same as the cluster null, so cluster-level FDR is also
+  unclaimed: metadata reports `representative_fdr_control="approximate_plugin"`
+  for a single draw, `group_fdr_control="none"`,
+  `feature_level_fdr_control="none"`, and `fdr_control="none"`. Clustering and
+  linkage require O(p^2) memory/time; pre-screen very wide feature sets first.
+- Power diagnostics: `selector_metadata["s_median"]` and
+  `["n_low_power_features"]` report the knockoff decorrelation; a
+  `UserWarning` is emitted when the median `s` is below `0.05`. Also note the
+  discrete nature of knockoff+: at level `q` with `offset=1` at least
+  `ceil(1/q)` features must be selected before the estimated FDP can drop to
+  `q`, so problems with very few true signals may legitimately return an empty
+  set at small `q`.
 - `cache`: pass a prebuilt `FeatureCache`; do not pass `sample_weight` with a
   cache because weights already live in the cache.
 - `sample_knockoffs(cache, random_state=...)`: advanced helper that returns one
@@ -897,7 +941,7 @@ cache = build_cache(
     random_state=0,
     compute_Rxx=True,
     n_jobs=1,
-    rank_backend="serial",    # "serial" or "processes"
+    rank_backend="serial",    # "serial", "threads", or "processes"
 )
 
 cefs = select_cached(cache, y, k=30, method="cefsplus")
@@ -928,11 +972,13 @@ rebuild or invalidate caches created before `feature_names_are_synthetic` was
 recorded; old objects cannot prove whether `x0`, `x1`, ... names were real
 DataFrame columns or generated positional names.
 
-Pass `rank_backend="processes"` with `n_jobs` to parallelize the
-rank-Gaussian column transforms during cache construction. Passing a prebuilt
-cache into `select_mrmr(..., estimator="gaussian")` reuses that cache and does
-not rebuild it; build the cache with `build_cache(..., n_jobs=..., rank_backend="processes")`
-when you want parallel cache construction.
+Pass `rank_backend="threads"` (preferred; the sort and quantile transform
+release the GIL, so no copies of `X` are made) or `"processes"` with `n_jobs`
+to parallelize the rank-Gaussian column transforms during cache construction.
+Passing a prebuilt cache into `select_mrmr(..., estimator="gaussian")` reuses
+that cache and does not rebuild it; build the cache with
+`build_cache(..., n_jobs=..., rank_backend="threads")` when you want parallel
+cache construction.
 
 `select_cached` uses `corr_prune="auto"` by default. In that mode, CEFS+ keeps
 its historical `0.95` pruning threshold, while cached Gaussian JMI, JMIM, and
@@ -1043,6 +1089,11 @@ selector.set_threshold(best_threshold)
 fig, ax = selector.plot_frequencies(top_n=30, show_coef=True)
 fig, axes = selector.plot_coef_distributions(top_n=12)
 ```
+
+`tune_threshold` refits stability selection inside each outer fold. If the
+original `fit` used `sample_weight`, `groups`, or `time`, pass those same arrays
+to `tune_threshold`; it requires the fit-time context, uses group-disjoint or
+time-ordered outer folds, and forwards the context to each fold-local selector.
 
 ### Block bootstrap for panels/time series
 
@@ -1265,11 +1316,16 @@ Important options:
 - `shap_sample_size`: optional SHAP row subsample.
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
-  fitting Boruta.
-  In `importance_data="test"` mode, supervised encodings are rejected to avoid
-  full-data target leakage. `cat_encoding="none"` is allowed only when the
-  categorical columns are already numeric/pre-encoded; raw object/category
-  columns still fail the numeric-input check.
+  fitting Boruta. Supervised encodings (`"loo"`, `"target"`, `"james_stein"`,
+  `"loo_logit"`) are fitted on the full dataset, which tree learners can
+  invert (leave-one-out values within a category are monotone in the row's own
+  target), so Boruta requires `allow_full_data_target_encoding=True` before
+  applying them, exactly like the filter selectors. Prefer pre-encoding
+  categoricals out-of-fold and passing `cat_encoding="none"`.
+  In `importance_data="test"` mode, supervised encodings are rejected outright.
+  `cat_encoding="none"` is allowed only when the categorical columns are
+  already numeric/pre-encoded; raw object/category columns still fail the
+  numeric-input check.
 
 Shadow permutations:
 

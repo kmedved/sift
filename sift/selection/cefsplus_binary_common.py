@@ -218,7 +218,11 @@ def build_binary_logloss_path(
         loo_clip_max=options.loo_clip_max,
         sample_weight=problem.weights if problem.weighted else None,
     )
-    X_arr, _, feature_names = validate_inputs(X_encoded, problem.y01, "regression")
+    # The logistic path works in float64 throughout; skipping the classic
+    # float32 round trip keeps large-offset or tiny-scale columns intact.
+    X_arr, _, feature_names = validate_inputs(
+        X_encoded, problem.y01, "regression", dtype=np.float64
+    )
     X_sub, y_sub, w_sub, row_idx = subsample_xy(
         X_arr,
         problem.y01,
@@ -326,18 +330,52 @@ def validate_binary_target(y) -> tuple[np.ndarray, np.ndarray, dict]:
     if len(unique) != 2:
         raise ValueError("binary CEFS+ requires exactly two target classes")
 
-    if all(isinstance(value, (bool, np.bool_)) for value in unique.tolist()):
+    unique_values = [
+        value.item() if isinstance(value, np.generic) else value
+        for value in unique.tolist()
+    ]
+    if all(isinstance(value, (bool, np.bool_)) for value in unique_values):
         y01 = raw.astype(bool).astype(np.float64)
-        classes = np.array([False, True], dtype=object)
-    elif numeric is not None and set(np.unique(numeric).tolist()) == {0.0, 1.0}:
-        y01 = numeric.astype(np.float64)
-        classes = np.array([0.0, 1.0], dtype=np.float64)
+        classes = [False, True]
+    elif numeric is not None:
+        classes = sorted(
+            unique_values,
+            key=lambda value: (float(value), type(value).__qualname__, repr(value)),
+        )
+        class0_numeric = float(classes[0])
+        class1_numeric = float(classes[1])
+        if class0_numeric != class1_numeric:
+            # Common numeric and numeric-string targets can be mapped in one
+            # vectorized pass. Preserve the slower raw-value mapping only for
+            # distinct labels with the same numeric representation (for
+            # example, "2" and "02").
+            y01 = (numeric == class1_numeric).astype(np.float64)
+        else:
+            class_to_code = {classes[0]: 0.0, classes[1]: 1.0}
+            y01 = np.asarray(
+                [
+                    class_to_code[
+                        value.item() if isinstance(value, np.generic) else value
+                    ]
+                    for value in raw
+                ],
+                dtype=np.float64,
+            )
     else:
-        classes = np.array(sorted(unique.tolist(), key=repr), dtype=object)
-        mapping = {classes[0]: 0.0, classes[1]: 1.0}
-        y01 = np.array([mapping[value] for value in raw], dtype=np.float64)
+        classes = sorted(
+            unique_values,
+            key=lambda value: (type(value).__qualname__, repr(value)),
+        )
+        class_to_code = {classes[0]: 0.0, classes[1]: 1.0}
+        y01 = np.asarray(
+            [
+                class_to_code[value.item() if isinstance(value, np.generic) else value]
+                for value in raw
+            ],
+            dtype=np.float64,
+        )
 
-    return y01, raw, {repr(classes[0]): 0, repr(classes[1]): 1}
+    return y01, raw, {classes[0]: 0, classes[1]: 1}
 
 
 def resolve_binary_weights(
@@ -471,13 +509,19 @@ def binary_refit_loglik_gains(
         np.full(len(y_sub), p0, dtype=np.float64),
     )
     max_prefix = min(Z_selected.shape[1], len(selected_original))
+    beta = None
     for k in range(1, max_prefix + 1):
         try:
-            beta = fit_logistic_ridge(Z_selected[:, :k], y_sub, w_sub, ridge=ridge)
+            # Each prefix extends the previous one by a column, so the previous
+            # solution (zero-padded) is a near-converged warm start.
+            beta = fit_logistic_ridge(
+                Z_selected[:, :k], y_sub, w_sub, ridge=ridge, beta_init=beta
+            )
             p = predict_logistic(Z_selected[:, :k], beta)
             gains[k - 1] = binary_loglik_from_prob(y_sub, w_sub, p) - ll0
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             failures += 1
+            beta = None
     return gains, failures
 
 

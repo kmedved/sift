@@ -43,10 +43,10 @@ def resolve_corr_prune(method: GaussianMethod, corr_prune: CorrPrune) -> float |
     if corr_prune is None:
         return None
     if isinstance(corr_prune, (bool, np.bool_)):
-        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
+        raise ValueError("corr_prune must be 'auto', None, or a finite float in (0, 1]")
     threshold = float(corr_prune)
-    if not np.isfinite(threshold) or threshold <= 0.0:
-        raise ValueError("corr_prune must be 'auto', None, or a positive finite float")
+    if not np.isfinite(threshold) or threshold <= 0.0 or threshold > 1.0:
+        raise ValueError("corr_prune must be 'auto', None, or a finite float in (0, 1]")
     return threshold
 
 
@@ -71,11 +71,12 @@ def local_standardize(
     Zero-variance columns are returned as zeros so downstream correlation
     formation stays finite and those columns carry neutral relevance.
     """
-    Z_arr = np.asarray(Z, dtype=np.float64)
+    Z_arr = np.asarray(Z)
     if Z_arr.ndim == 1:
         Z_arr = Z_arr.reshape(-1, 1)
     if columns is not None:
         Z_arr = Z_arr[:, np.asarray(columns, dtype=np.int64)]
+    Z_arr = np.asarray(Z_arr, dtype=np.float64)
     w_arr = np.asarray(w, dtype=np.float64).ravel()
     if Z_arr.shape[0] != w_arr.shape[0]:
         raise ValueError("w length must match Z rows")
@@ -226,7 +227,7 @@ def local_corr_panel(
 ) -> CandidatePanel:
     """Build a candidate panel from fold/bootstrap-local correlations."""
     w_arr = np.asarray(w, dtype=np.float64).ravel()
-    Z_arr = np.asarray(Z, dtype=np.float64)
+    Z_arr = np.asarray(Z)
     zy_arr = np.asarray(zy, dtype=np.float64).ravel()
     if Z_arr.ndim != 2:
         raise ValueError("Z must be 2D")
@@ -234,15 +235,89 @@ def local_corr_panel(
         raise ValueError("Z, zy, and w must have matching row counts")
 
     if local_standardize:
-        Z_used = globals()["local_standardize"](Z_arr, w_arr)
-        zy_used = globals()["local_standardize"](zy_arr, w_arr).ravel()
-        R_all = None
+        if not np.isfinite(Z_arr).all() or not np.isfinite(zy_arr).all():
+            raise ValueError("Z and zy must contain only finite values")
+        if not np.isfinite(w_arr).all() or np.any(w_arr < 0.0):
+            raise ValueError("w must contain finite non-negative weights")
+        w_sum = float(w_arr.sum())
+        if w_sum <= 0.0:
+            raise ValueError("Weights must sum to > 0")
+
+        z_mean = (w_arr @ Z_arr) / w_sum
+        y_mean = float(w_arr @ zy_arr / w_sum)
+        y_centered = zy_arr - y_mean
+        y_scale = float(
+            np.sqrt(max(float(w_arr @ (y_centered * y_centered) / w_sum), 0.0))
+        )
+        z_var = np.zeros(Z_arr.shape[1], dtype=np.float64)
+        covariance = np.zeros(Z_arr.shape[1], dtype=np.float64)
+        weighted_y = w_arr * y_centered
+        # Center bounded column blocks so large-offset inputs retain the
+        # stable two-pass variance of local_standardize without allocating a
+        # full float64 centered copy of the entire panel.
+        for start in range(0, Z_arr.shape[1], 256):
+            stop = min(start + 256, Z_arr.shape[1])
+            centered_block = (
+                np.asarray(Z_arr[:, start:stop], dtype=np.float64)
+                - z_mean[None, start:stop]
+            )
+            z_var[start:stop] = (
+                np.einsum(
+                    "i,ij,ij->j",
+                    w_arr,
+                    centered_block,
+                    centered_block,
+                    optimize=True,
+                )
+                / w_sum
+            )
+            covariance[start:stop] = centered_block.T @ weighted_y / w_sum
+        z_scale = np.sqrt(np.maximum(z_var, 0.0))
+        r = np.zeros(Z_arr.shape[1], dtype=np.float64)
+        good = z_scale > 1e-12
+        if y_scale > 1e-12 and np.any(good):
+            r[good] = covariance[good] / (z_scale[good] * y_scale)
+            np.clip(r, -0.999999, 0.999999, out=r)
+            # The prior explicit path returned float32 correlations from
+            # weighted_corr_with_vector; retain its candidate/tie behavior.
+            r = r.astype(np.float32).astype(np.float64)
+
+        cand = _candidate_order(r, top_m=top_m)
+        if cand.size:
+            Z_cand = globals()["local_standardize"](Z_arr, w_arr, columns=cand)
+            R_cand = weighted_correlation_matrix(Z_cand, w_arr, backend="blas")
+        else:
+            R_cand = np.empty((0, 0), dtype=np.float64)
+        corr_prune_eff = resolve_corr_prune(method, corr_prune)
+        if corr_prune_eff is not None and cand.size:
+            keep = greedy_corr_prune(
+                np.arange(cand.size, dtype=np.int64),
+                R_cand,
+                np.abs(r[cand]),
+                corr_prune_eff,
+            )
+            cand = cand[keep]
+            R_cand = np.ascontiguousarray(
+                R_cand[np.ix_(keep, keep)], dtype=np.float64
+            )
+        rel = gaussian_mi_from_corr(r)
+        kish, weight_sum = effective_sample_sizes(w_arr)
+        return CandidatePanel(
+            cand=np.asarray(cand, dtype=np.int64),
+            original=np.asarray(cand, dtype=np.int64),
+            R=np.ascontiguousarray(R_cand, dtype=np.float64),
+            r=np.asarray(r[cand], dtype=np.float64),
+            rel=np.asarray(rel[cand], dtype=np.float64),
+            p_valid=int(Z_arr.shape[1]),
+            n_eff_kish=kish,
+            n_eff_sum=weight_sum,
+            names=None,
+        )
     else:
         Z_used = Z_arr
         zy_used = zy_arr
         R_all = Rxx
-
-    r = weighted_corr_with_vector(Z_used, zy_used, w_arr)
+        r = weighted_corr_with_vector(Z_used, zy_used, w_arr)
     return _panel_from_corr(
         R_all,
         Z_used,

@@ -208,6 +208,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         block_size: int | str = "auto",
         cat_features: list[str] | None = None,
         cat_encoding: CatEncoding = "loo",
+        allow_full_data_target_encoding: bool = False,
         importance_data: Literal["train", "test"] = "train",
         test_size: float = 0.3,
         shap_sample_size: int | None = 2000,
@@ -229,6 +230,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.block_size = block_size
         self.cat_features = cat_features
         self.cat_encoding = cat_encoding
+        self.allow_full_data_target_encoding = allow_full_data_target_encoding
         self.importance_data = importance_data
         self.test_size = test_size
         self.shap_sample_size = shap_sample_size
@@ -556,6 +558,16 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                         "BorutaSelector(importance_data='test') cannot use supervised "
                         "cat_encoding on the full dataset. Pre-encode categoricals "
                         "leakage-safely or use importance_data='train'."
+                    )
+                if not self.allow_full_data_target_encoding:
+                    raise ValueError(
+                        f"cat_encoding={self.cat_encoding!r} fits a supervised categorical "
+                        "encoder on the full dataset before Boruta. Tree learners can read "
+                        "the row's own target back out of leave-one-out/target encodings, "
+                        "so pure-noise high-cardinality categoricals get accepted. Pass "
+                        "allow_full_data_target_encoding=True to opt into this "
+                        "leakage-prone behavior, or set cat_encoding='none' and "
+                        "pre-encode categoricals in a leakage-safe (out-of-fold) pipeline."
                     )
                 if self.task == "classification":
                     y_for_encoder = pd.Series(
@@ -928,6 +940,7 @@ def select_boruta(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "loo",
+    allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
     shap_sample_size: int | None = 2000,
@@ -1016,6 +1029,7 @@ def select_boruta(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,
         shap_sample_size=shap_sample_size,
@@ -1052,6 +1066,7 @@ def select_boruta_shap(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "loo",
+    allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
     shap_sample_size: int | None = 2000,
@@ -1092,6 +1107,7 @@ def select_boruta_shap(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,
         shap_sample_size=shap_sample_size,

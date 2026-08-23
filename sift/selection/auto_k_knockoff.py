@@ -11,8 +11,46 @@ from sift.estimators.copula import (
     weighted_correlation_matrix,
     weighted_rank_gauss_1d,
 )
+from sift.estimators.knockoffs import (
+    fit_gaussian_knockoffs,
+    gaussian_knockoff_mean,
+    sample_gaussian_knockoffs,
+)
 from sift.selection.auto_k import AutoKConfig, validate_auto_k_config
-from sift.selection.knockoff_filter import sample_knockoffs
+from sift.selection.knockoff_filter import (
+    _build_active_rxx,
+    _reject_duplicate_feature_names,
+    _weighted_variance,
+)
+
+
+def _prepare_knockoff_draw_state(cache, config: AutoKConfig):
+    """Fit one cache-level knockoff model for all auto-k draws."""
+    _reject_duplicate_feature_names(cache)
+    w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
+    if not np.isfinite(w).all() or np.any(w < 0.0) or float(w.sum()) <= 0.0:
+        raise ValueError("cache.sample_weight must be finite, non-negative, and sum to > 0")
+    Z = np.asarray(cache.Z)
+    active = _weighted_variance(Z, w) > 1e-12
+    if not bool(active.any()):
+        raise ValueError("No active non-constant features remain for knockoffs")
+    R_active = _build_active_rxx(cache, active, verbose=False)
+    model = fit_gaussian_knockoffs(
+        R_active,
+        s_method=config.knockoff_s_method,
+        min_eig=1e-3,
+    )
+    Z_active = (
+        np.asarray(Z, dtype=np.float32)
+        if bool(active.all())
+        else np.ascontiguousarray(Z[:, active], dtype=np.float32)
+    )
+    mean = (
+        gaussian_knockoff_mean(Z_active, model)
+        if int(config.knockoff_draws) > 1
+        else None
+    )
+    return Z, Z_active, active, model, mean
 
 
 def _pair_aware_cefsplus_entries(
@@ -232,6 +270,7 @@ def _draw_knockoff_path(
     config: AutoKConfig,
     top_m: int,
     random_state: int,
+    draw_state=None,
 ) -> tuple[np.ndarray, int, pd.DataFrame]:
     y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
     if y_arr.shape[0] != cache.n_rows_original:
@@ -240,15 +279,17 @@ def _draw_knockoff_path(
     w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
     zy = weighted_rank_gauss_1d(y_cache, w)
 
-    Z = np.asarray(cache.Z, dtype=np.float64)
-    Zt = np.asarray(
-        sample_knockoffs(
-            cache,
-            s_method=config.knockoff_s_method,
-            random_state=int(random_state),
-        ),
-        dtype=np.float64,
+    if draw_state is None:
+        draw_state = _prepare_knockoff_draw_state(cache, config)
+    Z, Z_active, active, model, mean = draw_state
+    Zt_active = sample_gaussian_knockoffs(
+        Z_active,
+        model,
+        np.random.default_rng(int(random_state)),
+        mean=mean,
     )
+    Zt = np.zeros_like(Z, dtype=np.float32)
+    Zt[:, active] = Zt_active
     r = weighted_corr_with_vector(Z, zy, w)
     rt = weighted_corr_with_vector(Zt, zy, w)
     p = Z.shape[1]
@@ -256,7 +297,9 @@ def _draw_knockoff_path(
     pair_score = np.maximum(np.abs(r), np.abs(rt))
     kept = np.lexsort((np.arange(p, dtype=np.int64), -pair_score))[:m].astype(np.int64)
 
-    Z_aug = np.ascontiguousarray(np.column_stack([Z[:, kept], Zt[:, kept]]), dtype=np.float64)
+    Z_aug = np.ascontiguousarray(
+        np.column_stack([Z[:, kept], Zt[:, kept]]), dtype=np.float32
+    )
     G = weighted_correlation_matrix(Z_aug, w, backend="blas")
     r_aug = np.concatenate([r[kept], rt[kept]])
     entries, gains = _pair_aware_cefsplus_entries(
@@ -292,6 +335,7 @@ def select_k_knockoff_path(
     if config.k_method != "knockoff_path":
         raise ValueError("select_k_knockoff_path requires AutoKConfig(k_method='knockoff_path')")
 
+    draw_state = _prepare_knockoff_draw_state(cache, config)
     seeds = np.random.SeedSequence(int(config.random_state)).spawn(int(config.knockoff_draws))
     selected_sets: list[np.ndarray] = []
     frames = []
@@ -303,6 +347,7 @@ def select_k_knockoff_path(
             config=config,
             top_m=top_m,
             random_state=seed,
+            draw_state=draw_state,
         )
         selected_sets.append(selected)
         diag = diag.copy()
@@ -310,9 +355,20 @@ def select_k_knockoff_path(
         frames.append(diag)
 
     diag_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    multi_draw = int(config.knockoff_draws) > 1
+    diag_all.attrs.update(
+        {
+            "q_scope": "per_draw",
+            "per_draw_fdr_control": "approximate_plugin",
+            "aggregation": "selection_frequency" if multi_draw else "single_draw",
+            "aggregation_threshold": 0.5 if multi_draw else None,
+            "aggregation_fdr_control": "none" if multi_draw else "not_applicable",
+            "aggregation_preserves_per_draw_fdr": not multi_draw,
+        }
+    )
     if not selected_sets:
         return np.empty(0, dtype=np.int64), 0, diag_all
-    if int(config.knockoff_draws) == 1:
+    if not multi_draw:
         selected_final = selected_sets[0]
     else:
         counts = np.zeros(cache.Z.shape[1], dtype=np.float64)

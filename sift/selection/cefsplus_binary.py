@@ -73,15 +73,21 @@ def weighted_standardize(
     X: np.ndarray,
     w: np.ndarray,
     *,
-    eps: float = 1e-12,
+    min_std: float = 1e-12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Weighted-standardize columns, dropping (near-)constant ones.
+
+    A column is kept when its weighted standard deviation exceeds ``min_std``,
+    the same convention as the Gaussian cache builder, so tiny-scale but
+    informative columns are not mistaken for constants.
+    """
     w_sum = float(np.sum(w))
     means = (w @ X) / w_sum
     centered = X - means
     variances = (w @ (centered * centered)) / w_sum
-    valid = np.isfinite(variances) & (variances > eps)
-    scales = np.sqrt(np.maximum(variances[valid], eps))
-    Z = centered[:, valid] / scales
+    stds = np.sqrt(np.maximum(variances, 0.0))
+    valid = np.isfinite(stds) & (stds > min_std)
+    Z = centered[:, valid] / stds[valid]
     return Z.astype(np.float64, copy=False), valid, means, variances
 
 
@@ -130,18 +136,38 @@ def fit_logistic_ridge(
     ridge: float,
     max_iter: int = 50,
     tol: float = 1e-8,
+    obj_rtol: float = 1e-10,
+    beta_init: np.ndarray | None = None,
 ) -> np.ndarray:
+    """Weighted ridge-penalized logistic regression by damped Newton steps.
+
+    ``beta_init`` warm-starts the solve (intercept first, then one coefficient
+    per column of ``X``; a shorter vector is zero-padded, which is the natural
+    start when one feature was appended to a previously fitted prefix). The
+    iteration stops when the step is tiny (``tol``) or when a full Newton
+    sweep no longer reduces the penalized objective by more than ``obj_rtol``
+    relative to its magnitude, which avoids creeping through dozens of
+    line-searched micro-steps on quasi-separable data.
+    """
     n = len(y)
     Xd = np.ones((n, X.shape[1] + 1), dtype=np.float64)
     if X.shape[1]:
         Xd[:, 1:] = X
 
-    p0 = np.clip(float(np.sum(w * y) / np.sum(w)), 1e-6, 1.0 - 1e-6)
     beta = np.zeros(Xd.shape[1], dtype=np.float64)
-    beta[0] = np.log(p0 / (1.0 - p0))
+    if beta_init is not None:
+        init = np.asarray(beta_init, dtype=np.float64).ravel()
+        if init.shape[0] > beta.shape[0] or not np.isfinite(init).all():
+            init = None
+        else:
+            beta[: init.shape[0]] = init
+    if beta_init is None or init is None:
+        p0 = np.clip(float(np.sum(w * y) / np.sum(w)), 1e-6, 1.0 - 1e-6)
+        beta[0] = np.log(p0 / (1.0 - p0))
     penalty = np.zeros(Xd.shape[1], dtype=np.float64)
     penalty[1:] = ridge
 
+    old_obj = _penalized_neg_logloss(Xd, y, w, beta, ridge=ridge)
     for _ in range(max_iter):
         eta = Xd @ beta
         p = np.clip(sigmoid(eta), 1e-6, 1.0 - 1e-6)
@@ -157,9 +183,9 @@ def fit_logistic_ridge(
         if not np.isfinite(step).all():
             raise FloatingPointError("logistic ridge Newton step was non-finite")
 
-        old_obj = _penalized_neg_logloss(Xd, y, w, beta, ridge=ridge)
         accepted = False
         scaled_step = step
+        new_obj = old_obj
         for scale in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125):
             candidate = beta + scale * step
             if not np.isfinite(candidate).all():
@@ -173,7 +199,11 @@ def fit_logistic_ridge(
         if not accepted:
             break
 
+        decrease = old_obj - new_obj
+        old_obj = new_obj
         if float(np.max(np.abs(scaled_step))) < tol:
+            break
+        if decrease <= obj_rtol * max(abs(new_obj), 1.0):
             break
     return beta
 
@@ -347,24 +377,29 @@ def _corr_prune_candidates(
         return candidates, set()
     if threshold <= 0.0:
         raise ValueError("corr_prune threshold must be positive when provided")
-    R = weighted_corr_matrix(Z[:, candidates], w)
     tie_break = candidates if tie_break_indices is None else tie_break_indices
     ordered_local = np.lexsort((tie_break, -scores[candidates]))
     active = np.ones(len(ordered_local), dtype=bool)
     keep_local: list[int] = []
-    pruned_local: set[int] = set()
+    w_sum = float(np.sum(w))
+    block_size = 256
     for pos, local_idx in enumerate(ordered_local):
         if not active[pos]:
             continue
         keep_local.append(int(local_idx))
-        for later_pos in range(pos + 1, len(ordered_local)):
-            if active[later_pos]:
-                other = int(ordered_local[later_pos])
-                if abs(float(R[local_idx, other])) >= threshold:
-                    active[later_pos] = False
-                    pruned_local.add(other)
+        later_positions = np.flatnonzero(active[pos + 1 :]) + pos + 1
+        if later_positions.size:
+            kept_col = int(candidates[local_idx])
+            weighted_kept = w * Z[:, kept_col]
+            for start in range(0, later_positions.size, block_size):
+                positions = later_positions[start : start + block_size]
+                later_local = ordered_local[positions]
+                later_cols = candidates[later_local]
+                correlations = Z[:, later_cols].T @ weighted_kept / w_sum
+                active[positions] &= ~(np.abs(correlations) >= threshold)
+    pruned_positions = ordered_local[~active]
     keep = candidates[np.asarray(keep_local, dtype=np.int64)]
-    pruned = {int(candidates[i]) for i in pruned_local}
+    pruned = {int(candidates[i]) for i in pruned_positions}
     return keep, pruned
 
 
@@ -460,7 +495,10 @@ def select_binary_logistic_path(
     while len(selected) < min(k, Z_work.shape[1]):
         if selected and len(selected) - block_refit_count >= refit_every:
             try:
-                beta = fit_logistic_ridge(Z_work[:, selected], y, w, ridge=ridge)
+                # Warm-start from the previous refit (new coefficients start at 0).
+                beta = fit_logistic_ridge(
+                    Z_work[:, selected], y, w, ridge=ridge, beta_init=beta
+                )
                 p = predict_logistic(Z_work[:, selected], beta)
                 block_refit_count = len(selected)
                 n_logistic_refits += 1

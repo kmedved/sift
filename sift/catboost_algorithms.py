@@ -21,6 +21,13 @@ from sift.catboost_common import (
     _validate_step_function,
 )
 
+
+def _fit_with_eval_set(model, train_pool, val_pool, early_stopping_rounds) -> None:
+    fit_kwargs = {"eval_set": val_pool, "verbose": False}
+    if early_stopping_rounds is not None:
+        fit_kwargs["early_stopping_rounds"] = int(early_stopping_rounds)
+    model.fit(train_pool, **fit_kwargs)
+
 def _select_features_single_split(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -38,7 +45,7 @@ def _select_features_single_split(
     w_val: Optional[pd.Series] = None,
     algorithm: str = 'shap',
     steps: int = 6,
-    train_early_stopping_rounds: int = 20,
+    train_early_stopping_rounds: Optional[int] = 20,
 ) -> Tuple[Dict[int, float], Dict[int, List[str]]]:
     """
     Run ONE-SHOT feature selection for a single train/val split.
@@ -93,8 +100,9 @@ def _select_features_single_split(
     except Exception as e:
         warnings.warn(f"select_features failed: {e}. Falling back to importance ranking.")
         # Fallback: train on all features, rank by importance
-        model.fit(train_pool, eval_set=val_pool,
-                  early_stopping_rounds=train_early_stopping_rounds, verbose=False)
+        _fit_with_eval_set(
+            model, train_pool, val_pool, train_early_stopping_rounds
+        )
         imp = model.get_feature_importance()
         order = np.argsort(-imp)
         ranked_features = [features[i] for i in order]
@@ -168,8 +176,9 @@ def _select_features_single_split(
 
         eval_model = ModelClass(**model_params)
         try:
-            eval_model.fit(train_pool_k, eval_set=val_pool_k,
-                          early_stopping_rounds=train_early_stopping_rounds, verbose=False)
+            _fit_with_eval_set(
+                eval_model, train_pool_k, val_pool_k, train_early_stopping_rounds
+            )
             scores[k] = _extract_score(eval_model, eval_metric)
         except Exception as e:
             warnings.warn(f"Training failed for k={k}: {e}")
@@ -413,7 +422,7 @@ def _forward_select_single_split(
     w_train: Optional[pd.Series] = None,
     w_val: Optional[pd.Series] = None,
     importance_type: str = 'PredictionValuesChange',
-    early_stopping_rounds: int = 20,
+    early_stopping_rounds: Optional[int] = 20,
 ) -> Tuple[Dict[int, float], List[str]]:
     """
     Forward selection by importance ranking (fast heuristic).
@@ -440,8 +449,7 @@ def _forward_select_single_split(
     val_pool = _create_pool(X_val, y_val, features, w_val, full_cat, full_text)
 
     model = ModelClass(**model_params)
-    model.fit(train_pool, eval_set=val_pool,
-              early_stopping_rounds=early_stopping_rounds, verbose=False)
+    _fit_with_eval_set(model, train_pool, val_pool, early_stopping_rounds)
 
     # Get importance (PredictionValuesChange is fast and reliable)
     importance = model.get_feature_importance(train_pool, type=importance_type)
@@ -468,8 +476,9 @@ def _forward_select_single_split(
 
         eval_model = ModelClass(**model_params)
         try:
-            eval_model.fit(train_pool_k, eval_set=val_pool_k,
-                          early_stopping_rounds=early_stopping_rounds, verbose=False)
+            _fit_with_eval_set(
+                eval_model, train_pool_k, val_pool_k, early_stopping_rounds
+            )
             scores[k] = _extract_score(eval_model, eval_metric)
         except Exception as e:
             warnings.warn(f"Forward selection scoring failed at k={k}: {e}")
@@ -493,7 +502,7 @@ def _forward_select_greedy_single_split(
     higher_is_better: bool,
     w_train: Optional[pd.Series] = None,
     w_val: Optional[pd.Series] = None,
-    early_stopping_rounds: int = 20,
+    early_stopping_rounds: Optional[int] = 20,
 ) -> Tuple[Dict[int, float], List[str]]:
     """
     True greedy forward selection: at each step, try all remaining features
@@ -523,8 +532,9 @@ def _forward_select_greedy_single_split(
 
             model = ModelClass(**model_params)
             try:
-                model.fit(train_pool, eval_set=val_pool,
-                         early_stopping_rounds=early_stopping_rounds, verbose=False)
+                _fit_with_eval_set(
+                    model, train_pool, val_pool, early_stopping_rounds
+                )
                 score = _extract_score(model, eval_metric)
 
                 is_better = (score > best_score) if higher_is_better else (score < best_score)

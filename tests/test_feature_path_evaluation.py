@@ -166,6 +166,107 @@ def test_evaluate_feature_path_accepts_precomputed_split_iterable():
     assert result.diagnostics["n_finite"].min() == 2
 
 
+def test_splitter_object_indices_are_validated():
+    X, y = _toy_regression_data(40)
+
+    class InvalidSplitter:
+        def split(self, X_split, y_split):
+            del X_split, y_split
+            yield np.array([0, 1, 100]), np.array([2, 3])
+
+    with pytest.raises(ValueError, match="out of range"):
+        evaluate_feature_path(
+            X,
+            y,
+            feature_path=["x0"],
+            k_grid=[1],
+            splitter=InvalidSplitter(),
+        )
+
+
+def test_splitter_without_groups_argument_rejects_groups():
+    X, y = _toy_regression_data(40)
+
+    class UngroupedSplitter:
+        def split(self, X_split, y_split):
+            del X_split, y_split
+            yield np.arange(20), np.arange(20, 40)
+
+    with pytest.raises(TypeError, match="does not accept a groups"):
+        evaluate_feature_path(
+            X,
+            y,
+            feature_path=["x0"],
+            k_grid=[1],
+            splitter=UngroupedSplitter(),
+            groups=np.repeat([0, 1], 20),
+        )
+
+
+def test_internal_fit_type_error_is_not_retried_without_weights():
+    X, y = _toy_regression_data(40)
+    calls = []
+
+    class BrokenEstimator:
+        def fit(self, X_fit, y_fit, sample_weight=None):
+            del X_fit, y_fit, sample_weight
+            calls.append(1)
+            raise TypeError("internal shape failure")
+
+        def predict(self, X_pred):
+            return np.zeros(len(X_pred))
+
+    estimator = BrokenEstimator()
+    with pytest.warns(RuntimeWarning, match="internal shape failure"):
+        result = evaluate_feature_path(
+            X,
+            y,
+            feature_path=["x0"],
+            k_grid=[1],
+            estimator=estimator,
+        )
+
+    assert len(calls) == 1
+    assert np.isinf(result.scores[1])
+
+
+def test_partial_fold_failure_cannot_win_feature_path_evaluation():
+    n = 60
+    X = pd.DataFrame(np.arange(n * 3, dtype=float).reshape(n, 3), columns=list("abc"))
+    y = np.ones(n)
+    splits = [
+        (np.arange(10, n), np.arange(0, 10)),
+        (np.arange(0, 30), np.arange(30, n)),
+    ]
+
+    class PartialFailureEstimator:
+        def fit(self, X_fit, y_fit, sample_weight=None):
+            del X_fit, y_fit, sample_weight
+            return self
+
+        def predict(self, X_pred):
+            if X_pred.shape[1] == 2:
+                if len(X_pred) > 20:
+                    raise RuntimeError("intentional partial-fold failure")
+                return np.ones(len(X_pred))
+            return np.zeros(len(X_pred))
+
+    with pytest.warns(RuntimeWarning, match="intentional partial-fold failure"):
+        result = evaluate_feature_path(
+            X,
+            y,
+            feature_path=list("abc"),
+            k_grid=[1, 2, 3],
+            estimator=PartialFailureEstimator(),
+            scoring="rmse",
+            splitter=splits,
+        )
+
+    assert result.diagnostics.set_index("k").loc[2, "n_finite"] == 1
+    assert np.isinf(result.scores[2])
+    assert result.best_k == 1
+
+
 def test_evaluate_feature_path_ignores_unused_non_numeric_dataframe_columns():
     X, y = _toy_regression_data(160)
     X["label"] = np.where(np.arange(len(X)) % 2 == 0, "home", "away")

@@ -678,8 +678,14 @@ def choose_k_from_score_curve(
     diag["score"] = diag["score_mean"]
 
     finite = diag[np.isfinite(diag["score_mean"])].copy()
-    fallback_k = int(diag["k"].max())
     if finite.empty:
+        fallback_k = max(0, int(config.min_k))
+        warnings.warn(
+            "All candidate score-curve values are non-finite; falling back to "
+            f"the method floor k={fallback_k}.",
+            UserWarning,
+            stacklevel=2,
+        )
         diag["best_k"] = fallback_k
         diag["best_score"] = np.inf if lower_is_better else -np.inf
         diag["within_tolerance"] = False

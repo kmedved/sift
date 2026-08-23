@@ -48,6 +48,23 @@ class TestBLASCorrelation:
         np.testing.assert_allclose(R, R.T)
         assert np.all(np.abs(R) <= 1.0)
 
+    def test_greedy_corr_prune_matches_scalar_nan_semantics(self):
+        from sift.estimators.copula import greedy_corr_prune
+
+        R = np.array(
+            [
+                [1.0, 0.96, np.nan, 0.2],
+                [0.96, 1.0, 0.1, 0.2],
+                [np.nan, 0.1, 1.0, 0.97],
+                [0.2, 0.2, 0.97, 1.0],
+            ]
+        )
+        kept = greedy_corr_prune(
+            np.arange(4), R, np.array([4.0, 3.0, 2.0, 1.0]), 0.95
+        )
+
+        np.testing.assert_array_equal(kept, np.array([0, 2]))
+
 
 class TestJMIIndexed:
     def test_indexed_matches_original(self, sample_data):
@@ -487,3 +504,187 @@ class TestSelectKAutoOptimized:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_rank_gauss_template_fast_path_matches_general_path():
+    """Constant weights + no ties use a shared template; must equal the general path bitwise."""
+    from sift.estimators.copula import weighted_rank_gauss_1d, weighted_rank_gauss_2d
+
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(2_000, 6))
+    X[:, 2] = np.round(X[:, 2] * 2.0)  # ties
+    X[::17, 4] = np.nan  # missing values
+    for w in (np.ones(2_000), np.full(2_000, 0.3), np.full(2_000, 0.7, dtype=np.float32)):
+        Z = weighted_rank_gauss_2d(X, w)
+        for j in range(X.shape[1]):
+            expected = weighted_rank_gauss_1d(X[:, j], np.asarray(w, dtype=np.float64))
+            np.testing.assert_array_equal(Z[:, j], expected)
+        Zt = weighted_rank_gauss_2d(X, w, n_jobs=2, rank_backend="threads")
+        np.testing.assert_array_equal(Z, Zt)
+
+
+def test_rank_gauss_accumulates_low_precision_weights_in_float64():
+    from sift.estimators.copula import weighted_rank_gauss_1d
+
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=20_000)
+    w32 = rng.lognormal(size=20_000).astype(np.float32)
+    np.testing.assert_array_equal(
+        weighted_rank_gauss_1d(x, w32),
+        weighted_rank_gauss_1d(x, w32.astype(np.float64)),
+    )
+
+
+def test_cefsplus_loop_matches_dense_objective_and_is_blas_free():
+    """The partial-Cholesky CEFS+ loop reproduces the exact greedy log-det objective."""
+    from sift.selection.cefsplus import cefsplus_loop_with_objective
+
+    rng = np.random.default_rng(11)
+    n, m = 3_000, 25
+    X = rng.normal(size=(n, m))
+    X[:, 5] = 0.9 * X[:, 0] + 0.1 * X[:, 5]
+    y = X[:, 0] - X[:, 3] + rng.normal(size=n)
+    R = np.corrcoef(X.T)
+    r = np.array([np.corrcoef(X[:, j], y)[0, 1] for j in range(m)])
+    rel = -0.5 * np.log(1.0 - r**2)
+    selected, objective = cefsplus_loop_with_objective(R, r, 10, rel)
+    assert len(selected) == 10 and len(set(selected.tolist())) == 10
+    shrink = 1e-6
+    Rs = (1.0 - shrink) * R
+    np.fill_diagonal(Rs, 1.0)
+    rs = (1.0 - shrink) * r
+    for t in range(1, 11):
+        S = selected[:t]
+        A = Rs[np.ix_(S, S)]
+        Ay = np.block([[np.array([[1.0]]), rs[S][None, :]], [rs[S][:, None], A]])
+        dense = np.linalg.slogdet(A)[1] - np.linalg.slogdet(Ay)[1]
+        assert abs(dense - objective[t - 1]) < 1e-9
+    # Greedy optimality: each pick maximizes the one-step objective.
+    for t in range(1, 4):
+        S = list(selected[:t])
+        best = None
+        for j in range(m):
+            if j in S:
+                continue
+            Sj = S + [j]
+            A = Rs[np.ix_(Sj, Sj)]
+            Ay = np.block([[np.array([[1.0]]), rs[Sj][None, :]], [rs[Sj][:, None], A]])
+            val = np.linalg.slogdet(A)[1] - np.linalg.slogdet(Ay)[1]
+            if best is None or val > best[0] + 1e-12:
+                best = (val, j)
+        assert best[1] == selected[t]
+
+
+def test_logistic_ridge_warm_start_matches_cold_start():
+    from sift.selection.cefsplus_binary import fit_logistic_ridge, predict_logistic
+
+    rng = np.random.default_rng(5)
+    n = 800
+    X = rng.normal(size=(n, 6))
+    p = 1.0 / (1.0 + np.exp(-(X[:, 0] - 0.5 * X[:, 1])))
+    y = (rng.random(n) < p).astype(float)
+    w = np.ones(n)
+    cold = fit_logistic_ridge(X[:, :5], y, w, ridge=1e-4)
+    warm = fit_logistic_ridge(X[:, :5], y, w, ridge=1e-4, beta_init=fit_logistic_ridge(X[:, :4], y, w, ridge=1e-4))
+    np.testing.assert_allclose(predict_logistic(X[:, :5], warm), predict_logistic(X[:, :5], cold), atol=1e-6)
+    # a mismatched / non-finite init falls back to the cold start
+    bad = fit_logistic_ridge(X[:, :5], y, w, ridge=1e-4, beta_init=np.array([np.nan, 0.0]))
+    np.testing.assert_allclose(bad, cold, atol=1e-8)
+
+
+def test_binary_cefsplus_keeps_large_offset_and_tiny_scale_features():
+    from sift import select_cefsplus_binary
+
+    rng = np.random.default_rng(0)
+    n = 1_500
+    s1 = rng.normal(size=n)
+    s2 = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "offset_signal": 1e9 + s1,
+            "tiny_signal": 1e-7 * s2,
+            "noise_a": rng.normal(size=n),
+            "noise_b": rng.normal(size=n),
+        }
+    )
+    y = (s1 + s2 + 0.5 * rng.normal(size=n) > 0).astype(int)
+    result = select_cefsplus_binary(X, y, k=2, verbose=False, return_result=True)
+    assert set(result.selected_features) == {"offset_signal", "tiny_signal"}
+    dropped = result.diagnostics_["dropped_features"]
+    assert "offset_signal" not in dropped and "tiny_signal" not in dropped
+
+
+def test_ensure_weights_is_stable_for_representative_constant_rescalings():
+    from sift._preprocess import ensure_weights
+
+    rng = np.random.default_rng(1)
+    w = rng.uniform(0.5, 2.0, size=500)
+    base = ensure_weights(w, 500)
+    np.testing.assert_allclose(base.mean(), 1.0, rtol=0, atol=1e-15)
+    for scale in (10.0, 3.0, 0.001, 1234.5):
+        np.testing.assert_array_equal(ensure_weights(w * scale, 500), base)
+
+
+def test_f_classif_bounded_blocks_match_scalar_reference():
+    from sift.estimators.relevance import CLASSIFICATION_BLOCK_SIZE, f_classif
+
+    rng = np.random.default_rng(4321)
+    n = 90
+    p = CLASSIFICATION_BLOCK_SIZE + 19
+    n_classes = 7
+    X = rng.normal(size=(n, p))
+    y = rng.integers(0, n_classes, size=n).astype(np.float64)
+    y[:n_classes] = np.arange(n_classes)
+    w = rng.uniform(0.2, 2.0, size=n)
+
+    expected = np.empty(p)
+    class_weights = np.array([w[y == cls].sum() for cls in range(n_classes)])
+    w_sum = float(w.sum())
+    for j in range(p):
+        x_mean = float(np.dot(w, X[:, j]) / w_sum)
+        ss_between = 0.0
+        ss_within = 0.0
+        for cls in range(n_classes):
+            mask = y == cls
+            mean_cls = float(np.dot(w[mask], X[mask, j]) / class_weights[cls])
+            ss_between += class_weights[cls] * (mean_cls - x_mean) ** 2
+            centered = X[mask, j] - mean_cls
+            ss_within += float(np.dot(w[mask], centered * centered))
+        expected[j] = (ss_between / (n_classes - 1)) / (
+            ss_within / (w_sum - n_classes)
+        )
+
+    actual = f_classif(X, y, w)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_gaussian_selectors_reject_non_finite_targets():
+    from sift import select_jmi, select_mrmr
+
+    rng = np.random.default_rng(2)
+    X = pd.DataFrame(rng.normal(size=(120, 5)), columns=list("abcde"))
+    y = X["a"].to_numpy() + rng.normal(size=120)
+    y[3] = np.nan
+    with pytest.raises(ValueError, match="Non-finite"):
+        select_mrmr(X, y, k=2, task="regression", estimator="gaussian", verbose=False)
+    with pytest.raises(ValueError, match="Non-finite"):
+        select_jmi(X, y, k=2, task="regression", estimator="gaussian", verbose=False)
+
+
+def test_gaussian_mrmr_warns_when_noise_level_features_are_selected():
+    from sift import select_mrmr
+
+    rng = np.random.default_rng(4)
+    n = 4_000
+    base = rng.normal(size=(n, 3))
+    # Informative block: mutually redundant copies of the same signals.
+    informative = np.column_stack([base, base + 0.3 * rng.normal(size=base.shape), base * 1.5 + 0.3 * rng.normal(size=base.shape)])
+    noise = rng.normal(size=(n, 40))
+    X = pd.DataFrame(np.column_stack([informative, noise]), columns=[f"f{i}" for i in range(49)])
+    y = base @ np.array([1.0, 0.8, 0.6]) + rng.normal(size=n)
+    with pytest.warns(UserWarning, match="noise floor"):
+        selected = select_mrmr(X, y, k=12, task="regression", estimator="gaussian", verbose=False)
+    assert any(int(name[1:]) >= 9 for name in selected)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        select_mrmr(X, y, k=3, task="regression", estimator="gaussian", verbose=False)

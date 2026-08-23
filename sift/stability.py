@@ -6,13 +6,22 @@ import pandas as pd
 from typing import Optional, List, Tuple, Union
 import warnings
 
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import (
     Lasso, LassoCV, ElasticNet, ElasticNetCV,
     LogisticRegression, LogisticRegressionCV
 )
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import GroupKFold, TimeSeriesSplit
+from sklearn.metrics import get_scorer
+from sklearn.model_selection import (
+    GridSearchCV,
+    GroupKFold,
+    KFold,
+    StratifiedKFold,
+    TimeSeriesSplit,
+)
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 
@@ -172,6 +181,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self
         """
         self._clear_fit_state()
+        self._fit_used_sample_weight_ = sample_weight is not None
+        self._fit_used_groups_ = groups is not None
+        self._fit_used_time_ = time is not None
         try:
             X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
                 X, y, sample_weight, groups, time, feature_names
@@ -194,6 +206,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             "_impute_means_",
             "_label_encoder",
             "_scaler",
+            "_alpha_ref_weight_",
+            "_fit_used_groups_",
+            "_fit_used_sample_weight_",
+            "_fit_used_time_",
             "alpha_",
             "classes_",
             "coef_bootstrap_",
@@ -234,17 +250,12 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             if len(time) != n:
                 raise ValueError(f"time has {len(time)} rows but X has {n}")
 
-        # Impute non-finite values (smart_sample may return original rows with NaNs)
-        X = self._impute_with_fit_stats(X, fit=True)
-
-        # Standardize
-        self._scaler = StandardScaler()
-        X_scaled = self._scaler.fit_transform(X)
-
-        # Get alpha
+        # Tune alpha on raw rows so every CV fold owns its imputation and scale
+        # statistics. Full-data preprocessing below is only for final fits.
+        self._alpha_ref_weight_ = None
         if self.alpha is None:
             self.alpha_ = self._find_alpha(
-                X_scaled,
+                X,
                 y,
                 sample_weight,
                 groups=groups,
@@ -252,6 +263,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             )
         else:
             self.alpha_ = self.alpha
+
+        # Impute and standardize the final fit data after alpha is chosen.
+        X = self._impute_with_fit_stats(X, fit=True)
+        self._scaler = StandardScaler()
+        X_scaled = self._scaler.fit_transform(X)
 
         if self.verbose:
             task_str = 'classification' if self.task == 'classification' else 'regression'
@@ -294,7 +310,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         train_idx, train_weight = self._dedupe_train_weights(train_idx, sample_weight)
         if self.task == 'classification':
             model = LogisticRegression(
-                penalty='l1', solver='saga', C=1.0 / self.alpha_,
+                penalty='l1', solver='saga', C=self._classification_C(train_weight),
                 max_iter=3000, random_state=seed, n_jobs=1,
             )
         elif self.l1_ratio >= 1.0:
@@ -485,10 +501,18 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         y: Union[np.ndarray, pd.Series],
         thresholds: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7, 0.8),
         cv: int = 3,
-        scoring: Optional[str] = None
+        scoring: Optional[str] = None,
+        sample_weight: Optional[np.ndarray] = None,
+        groups: np.ndarray | None = None,
+        time: np.ndarray | None = None,
     ) -> Tuple[float, pd.DataFrame]:
-        """Choose a threshold by CV score of a downstream linear model."""
-        from sklearn.model_selection import cross_val_score
+        """Choose a threshold with nested, fold-local stability selection.
+
+        Pass the same ``sample_weight``, ``groups``, and ``time`` context used
+        for :meth:`fit`. Group labels select group-disjoint outer folds; time
+        values select ordered time-series folds when groups are absent. The
+        context is also forwarded to each fold-local stability fit.
+        """
 
         if not hasattr(self, 'selection_frequencies_'):
             raise ValueError("Must call fit() before tune_threshold()")
@@ -502,50 +526,193 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             if not isinstance(thresh, numbers.Real) or not (0 <= float(thresh) <= 1):
                 raise ValueError("thresholds must contain values in [0, 1].")
 
+        required_context = (
+            ("sample_weight", "_fit_used_sample_weight_", sample_weight),
+            ("groups", "_fit_used_groups_", groups),
+            ("time", "_fit_used_time_", time),
+        )
+        missing_context = [
+            name
+            for name, attr, value in required_context
+            if getattr(self, attr, False) and value is None
+        ]
+        if missing_context:
+            raise ValueError(
+                "tune_threshold requires the fit-time context for: "
+                + ", ".join(missing_context)
+            )
+
         if isinstance(X, pd.DataFrame):
-            X = X[self.feature_names_in_].values
-        X = np.asarray(X)
-        y = np.asarray(y).ravel()
-        X_scaled = self._scaler.transform(self._impute_with_fit_stats(X, fit=False))
+            missing = [name for name in self.feature_names_in_ if name not in X.columns]
+            if missing:
+                raise ValueError(f"X is missing fitted features: {missing[:5]}")
+            X_selector_source = X[self.feature_names_in_]
+            X_values = X_selector_source.to_numpy()
+        else:
+            X_values = np.asarray(X)
+            X_selector_source = X_values
+        if X_values.ndim != 2 or X_values.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X must have {self.n_features_in_} feature columns for threshold tuning"
+            )
+        y_values = np.asarray(y).ravel()
+        if y_values.shape[0] != X_values.shape[0]:
+            raise ValueError("X and y must have the same number of rows")
+        n_rows = X_values.shape[0]
+        weight_values = (
+            None
+            if sample_weight is None
+            else ensure_weights(sample_weight, n_rows, normalize=True)
+        )
+        groups_values = None if groups is None else np.asarray(groups).ravel()
+        time_values = None if time is None else np.asarray(time).ravel()
+        for name, values in (("groups", groups_values), ("time", time_values)):
+            if values is not None and values.shape[0] != n_rows:
+                raise ValueError(f"{name} has {values.shape[0]} rows but X has {n_rows}")
+
+        # TimeSeriesSplit assumes rows are already chronological. Reorder all
+        # aligned inputs locally rather than requiring callers to mutate them.
+        if time_values is not None and groups_values is None:
+            order = np.argsort(time_values, kind="mergesort")
+            X_values = X_values[order]
+            X_selector_source = (
+                X_selector_source.iloc[order]
+                if isinstance(X_selector_source, pd.DataFrame)
+                else X_selector_source[order]
+            )
+            y_values = y_values[order]
+            time_values = time_values[order]
+            if weight_values is not None:
+                weight_values = weight_values[order]
+
         scoring = scoring or ('accuracy' if self.task == 'classification' else 'r2')
+        scorer = get_scorer(scoring)
+        if groups_values is not None:
+            n_groups = len(np.unique(groups_values))
+            if n_groups < 2:
+                raise ValueError("groups must contain at least two distinct values")
+            splitter = GroupKFold(n_splits=min(int(cv), n_groups))
+            split_iter = splitter.split(X_values, y_values, groups_values)
+        elif time_values is not None:
+            if n_rows < 3:
+                raise ValueError("time-aware threshold tuning requires at least 3 rows")
+            splitter = TimeSeriesSplit(n_splits=min(int(cv), n_rows - 1))
+            split_iter = splitter.split(X_values)
+        else:
+            splitter = (
+                StratifiedKFold(n_splits=int(cv), shuffle=True, random_state=self.random_state)
+                if self.task == 'classification'
+                else KFold(n_splits=int(cv), shuffle=True, random_state=self.random_state)
+            )
+            split_iter = splitter.split(
+                X_values,
+                y_values if self.task == 'classification' else None,
+            )
+        threshold_values = [float(value) for value in thresholds]
+        fold_scores = {value: [] for value in threshold_values}
+        fold_sizes = {value: [] for value in threshold_values}
+
+        for train_idx, val_idx in split_iter:
+            fold_selector = clone(self).set_params(store_coefs=False, verbose=False)
+            X_selector_train = (
+                X_selector_source.iloc[train_idx]
+                if isinstance(X_selector_source, pd.DataFrame)
+                else X_selector_source[train_idx]
+            )
+            fold_fit_kwargs = {}
+            if weight_values is not None:
+                fold_fit_kwargs["sample_weight"] = weight_values[train_idx]
+            if groups_values is not None:
+                fold_fit_kwargs["groups"] = groups_values[train_idx]
+            if time_values is not None:
+                fold_fit_kwargs["time"] = time_values[train_idx]
+            fold_selector.fit(
+                X_selector_train,
+                y_values[train_idx],
+                **fold_fit_kwargs,
+            )
+            frequencies = np.asarray(
+                fold_selector.selection_frequencies_, dtype=np.float64
+            )
+
+            for thresh in threshold_values:
+                selected = np.flatnonzero(frequencies >= thresh)
+                if self.max_features is not None and selected.size > self.max_features:
+                    order = np.argsort(-frequencies[selected], kind="mergesort")
+                    selected = selected[order[: self.max_features]]
+                fold_sizes[thresh].append(int(selected.size))
+                if selected.size == 0:
+                    fold_scores[thresh].append(float("nan"))
+                    continue
+
+                downstream = (
+                    LogisticRegression(penalty='l2', solver='lbfgs', max_iter=1000)
+                    if self.task == 'classification'
+                    else ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000)
+                )
+                model = make_pipeline(
+                    SimpleImputer(strategy="mean"),
+                    StandardScaler(),
+                    downstream,
+                )
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        downstream_fit_kwargs = {}
+                        if weight_values is not None:
+                            final_name = model.steps[-1][0]
+                            downstream_fit_kwargs[f"{final_name}__sample_weight"] = (
+                                weight_values[train_idx]
+                            )
+                        model.fit(
+                            X_values[train_idx][:, selected],
+                            y_values[train_idx],
+                            **downstream_fit_kwargs,
+                        )
+                        score_kwargs = {}
+                        if weight_values is not None:
+                            score_kwargs["sample_weight"] = weight_values[val_idx]
+                        score = float(
+                            scorer(
+                                model,
+                                X_values[val_idx][:, selected],
+                                y_values[val_idx],
+                                **score_kwargs,
+                            )
+                        )
+                except Exception as exc:
+                    warnings.warn(
+                        "Threshold tuning failed on one outer fold and recorded "
+                        f"a missing score: {type(exc).__name__}: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    score = float("nan")
+                fold_scores[thresh].append(score)
 
         rows = []
-        for thresh in thresholds:
-            mask = self.selection_frequencies_ >= thresh
-            n_selected = int(mask.sum())
-            if n_selected == 0:
-                rows.append({
-                    'threshold': thresh,
-                    'n_features': 0,
-                    'mean_score': np.nan,
-                    'std_score': np.nan,
-                })
-                continue
-
-            model = (
-                LogisticRegression(penalty='l2', solver='lbfgs', max_iter=1000)
-                if self.task == 'classification'
-                else ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000)
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                scores = cross_val_score(
-                    model,
-                    X_scaled[:, mask],
-                    y,
-                    cv=cv,
-                    scoring=scoring,
-                )
+        for thresh in threshold_values:
+            scores = np.asarray(fold_scores[thresh], dtype=np.float64)
+            finite = scores[np.isfinite(scores)]
+            sizes = np.asarray(fold_sizes[thresh], dtype=np.float64)
             rows.append({
                 'threshold': thresh,
-                'n_features': n_selected,
-                'mean_score': scores.mean(),
-                'std_score': scores.std(),
+                'n_features': float(np.mean(sizes)) if sizes.size else 0.0,
+                'min_features': int(np.min(sizes)) if sizes.size else 0,
+                'max_features': int(np.max(sizes)) if sizes.size else 0,
+                'mean_score': (
+                    float(np.mean(scores))
+                    if scores.size and finite.size == scores.size
+                    else np.nan
+                ),
+                'std_score': float(np.std(finite)) if finite.size else np.nan,
+                'n_finite': int(finite.size),
+                'n_splits': int(scores.size),
             })
 
         results = pd.DataFrame(rows)
         valid = results.dropna(subset=['mean_score'])
-        best_thresh = thresholds[0] if valid.empty else valid.loc[valid['mean_score'].idxmax(), 'threshold']
+        best_thresh = threshold_values[0] if valid.empty else valid.loc[valid['mean_score'].idxmax(), 'threshold']
         if self.verbose:
             print(f"Threshold tuning results (scoring={scoring}):")
             print(results.to_string(index=False))
@@ -863,7 +1030,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def _find_alpha(
         self,
-        X_scaled: np.ndarray,
+        X: np.ndarray,
         y: np.ndarray,
         sample_weight: np.ndarray,
         *,
@@ -871,7 +1038,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         time: np.ndarray | None = None,
     ) -> float:
         """Estimate alpha via CV on subsample."""
-        n = X_scaled.shape[0]
+        n = X.shape[0]
         rng = np.random.default_rng(self.random_state)
         idx = rng.choice(n, size=min(30_000, n), replace=False)
         if time is not None:
@@ -883,45 +1050,78 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                     idx = idx[np.argsort(np.asarray(time)[idx], kind="mergesort")]
         cv = self._alpha_cv(idx, y, groups, time)
 
+        if self.task == 'classification':
+            model = LogisticRegression(
+                penalty='l1',
+                solver='saga',
+                tol=1e-3,
+                max_iter=2000,
+                random_state=self.random_state,
+                n_jobs=1,
+            )
+            # Preserve the sparse-selection contract of the prior
+            # LogisticRegressionCV path while keeping imputation/scaling local
+            # to every fold. Accuracy also selects the strongest penalty among
+            # tied grid points because C is ordered from small to large.
+            param_grid = {"model__C": np.logspace(-4, 4, 20)}
+            scoring = "accuracy"
+        else:
+            y_scale = max(float(np.std(np.asarray(y)[idx])), 1e-6)
+            alpha_grid = y_scale * np.logspace(-4, 0, 30)
+            if self.l1_ratio >= 1.0:
+                model = Lasso(max_iter=2000)
+            else:
+                model = ElasticNet(l1_ratio=self.l1_ratio, max_iter=2000)
+            param_grid = {"model__alpha": alpha_grid}
+            scoring = "neg_mean_squared_error"
+
+        pipeline = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("scaler", StandardScaler()),
+                ("model", model),
+            ]
+        )
+        search = GridSearchCV(
+            pipeline,
+            param_grid=param_grid,
+            cv=cv,
+            scoring=scoring,
+            n_jobs=1,
+            error_score=np.nan,
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            search.fit(
+                np.asarray(X)[idx],
+                np.asarray(y)[idx],
+                model__sample_weight=np.asarray(sample_weight)[idx],
+            )
 
-            if self.task == 'classification':
-                # LogisticRegressionCV uses C (inverse of alpha)
-                # We search over C values and convert back
-                cv_model = LogisticRegressionCV(
-                    penalty='l1',
-                    solver='saga',
-                    cv=cv,
-                    Cs=20,
-                    max_iter=2000,
-                    random_state=self.random_state,
-                    n_jobs=1
-                )
-                cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
+        if self.task == 'classification':
+            self._alpha_ref_weight_ = self._cv_train_weight(cv, idx, sample_weight)
+            return 1.0 / float(search.best_params_["model__C"])
+        return float(search.best_params_["model__alpha"])
 
-                # C_ can be scalar or per-class array for multiclass
-                C = cv_model.C_
-                if np.ndim(C) > 0 and len(C) > 1:
-                    C_best = float(np.mean(C))  # Average across classes
-                else:
-                    C_best = float(C[0]) if np.ndim(C) > 0 else float(C)
-                return 1.0 / C_best
-            elif self.l1_ratio >= 1.0:
-                cv_model = LassoCV(
-                    cv=cv, **_cv_alpha_grid_kwargs(LassoCV, 30), max_iter=2000
-                )
-            else:
-                cv_model = ElasticNetCV(
-                    l1_ratio=self.l1_ratio,
-                    cv=cv,
-                    **_cv_alpha_grid_kwargs(ElasticNetCV, 30),
-                    max_iter=2000,
-                )
+    @staticmethod
+    def _cv_train_weight(cv, idx: np.ndarray, sample_weight: np.ndarray) -> float:
+        """Mean total sample weight of the CV training folds used for alpha search."""
+        w_idx = np.asarray(sample_weight, dtype=np.float64)[idx]
+        if isinstance(cv, (int, np.integer)):
+            return float(w_idx.sum()) * (int(cv) - 1) / int(cv)
+        totals = [float(w_idx[np.asarray(train, dtype=np.int64)].sum()) for train, _ in cv]
+        return float(np.mean(totals)) if totals else float(w_idx.sum())
 
-            cv_model.fit(X_scaled[idx], y[idx], sample_weight=sample_weight[idx])
-
-        return cv_model.alpha_
+    def _classification_C(self, train_weight: np.ndarray) -> float:
+        """Bootstrap-fit C keeping the CV-calibrated per-sample regularization."""
+        C = 1.0 / self.alpha_
+        ref = getattr(self, "_alpha_ref_weight_", None)
+        if ref is None or not np.isfinite(ref) or ref <= 0.0:
+            return C
+        total = float(np.sum(train_weight))
+        if not np.isfinite(total) or total <= 0.0:
+            return C
+        return C * ref / total
 
     def _alpha_cv(self, idx: np.ndarray, y: np.ndarray, groups, time):
         if groups is not None:

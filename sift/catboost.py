@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from typing import Any, Dict, List, Literal, Optional
+import inspect
 import warnings
 
 import numpy as np
@@ -146,8 +147,6 @@ def _build_catboost_model_params(
     model_params = {
         'iterations': n_estimators,
         'verbose': False,
-        'od_type': 'Iter',
-        'od_wait': 30,
         'allow_writing_files': False,
         'eval_metric': resolved_metric,
         'loss_function': resolved_loss,
@@ -222,6 +221,8 @@ def _build_catboost_splits(
     verbose: bool,
 ):
     groups_array = groups.values if groups is not None else None
+    if use_stability and cv is not None:
+        raise ValueError("cv and use_stability=True are mutually exclusive")
     _validate_group_splitter_groups(cv, groups_array)
 
     if use_stability:
@@ -242,9 +243,23 @@ def _build_catboost_splits(
 
     if cv is not None:
         try:
-            splits = list(cv.split(X_work, y, groups))
-        except TypeError:
-            splits = list(cv.split(X_work, y))
+            split_parameters = inspect.signature(cv.split).parameters.values()
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Cannot inspect custom cv.split signature") from exc
+        accepts_groups = any(
+            parameter.name == "groups"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in split_parameters
+        )
+        if groups_array is not None and not accepts_groups:
+            raise TypeError(
+                "group_col was provided, but custom cv.split does not accept groups"
+            )
+        splits = list(
+            cv.split(X_work, y, groups=groups_array)
+            if groups_array is not None
+            else cv.split(X_work, y)
+        )
         if verbose:
             print(f"  Custom CV: {type(cv).__name__} ({len(splits)} splits)")
         return splits
@@ -304,8 +319,15 @@ def _run_catboost_split_evaluation(
     all_features_by_k: Dict[int, List[List[str]]] = defaultdict(list)
     prefilter_features_first = None
     model_params = dict(model_params)
-    model_params["od_type"] = "Iter"
-    model_params["od_wait"] = int(train_early_stopping_rounds)
+    user_controls_overfitting = any(
+        key in model_params for key in ("od_type", "od_wait", "od_pval")
+    )
+    if not user_controls_overfitting:
+        model_params["od_type"] = "Iter"
+        model_params["od_wait"] = int(train_early_stopping_rounds)
+    fit_early_stopping_rounds = (
+        None if user_controls_overfitting else int(train_early_stopping_rounds)
+    )
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         if verbose:
@@ -360,7 +382,7 @@ def _run_catboost_split_evaluation(
                 w_train=w_train,
                 w_val=w_val,
                 importance_type='PredictionValuesChange',
-                early_stopping_rounds=train_early_stopping_rounds,
+                early_stopping_rounds=fit_early_stopping_rounds,
             )
             feats = {kk: selected_feats[:kk] for kk in fold_counts if kk <= len(selected_feats)}
         elif algorithm == 'forward_greedy':
@@ -380,7 +402,7 @@ def _run_catboost_split_evaluation(
                 higher_is_better=resolved_hib,
                 w_train=w_train,
                 w_val=w_val,
-                early_stopping_rounds=train_early_stopping_rounds,
+                early_stopping_rounds=fit_early_stopping_rounds,
             )
             feats = {kk: selected_feats[:kk] for kk in scores if kk <= len(selected_feats)}
         else:
@@ -401,7 +423,7 @@ def _run_catboost_split_evaluation(
                 w_val=w_val,
                 algorithm=algorithm,
                 steps=steps,
-                train_early_stopping_rounds=train_early_stopping_rounds,
+                train_early_stopping_rounds=fit_early_stopping_rounds,
             )
 
         for kk, score in scores.items():
@@ -510,7 +532,9 @@ def _select_final_catboost_features(
             selected_features = selected_features[:target_k]
         else:
             stable_features = [f for f in ordered_all if f in stable_set]
-            selected_features = stable_features if stable_features else ordered_all[:target_k]
+            selected_features = (
+                stable_features if stable_features else ordered_all[:target_k]
+            )[:target_k]
     else:
         stability_scores = None
         if target_k in all_features_by_k and all_features_by_k[target_k]:

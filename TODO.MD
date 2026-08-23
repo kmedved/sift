@@ -259,10 +259,15 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ### H. CEFS+ loop allocation
 
-- [ ] Reduce CEFS+ loop allocation pressure.
+- [x] Reduce CEFS+ loop allocation pressure.
   Scope: `sift/selection/cefsplus.py::cefsplus_loop`.
-  Notes: benchmark current allocations, reuse scratch arrays where possible, and consider BLAS/Cholesky-based redesigns.
-  Benchmark: `top_m=[250, 1_000, 5_000]`, `k=[50, 200]`, `compute_Rxx=True/False`.
+  Notes: the greedy loop is now a BLAS-free partial-Cholesky recursion that
+  maintains residual variances/covariances (O(k^2 m), fixed O(m k) scratch)
+  instead of rebuilding inverse blocks every step. It also removes the Numba
+  BLAS calls that thrashed against NumPy's OpenBLAS pool on dual-OpenBLAS
+  installs. `objective_from_corr_path` uses the same recursion.
+  Benchmark: m=1000/k=200 dropped from 584 ms to 18 ms in-process; auto-k
+  `perm_gap`/`stability`/`gaussian_cv` on 20k x 252 improved 4-7x.
 
 ### I. Filter result objects
 
@@ -375,7 +380,8 @@ This file tracks the public-release work from the Oracle/source review plus the 
   Notes: mRMR BLAS/process backends, vectorized R2 JMI, binned JMI reuse, stability split streaming, smart sampler dense probability accumulation, bootstrap OOB construction, and permutation importance backend/DataFrame work now have tests and benchmark coverage. CEFS+ allocation pressure remains benchmarked but not promoted as a public optimization yet.
 
 - [ ] Step 6b: Finish remaining cache/CEFS+ allocation work.
-  Notes: reusable standardized/cache design and CEFS+ allocation-pressure reduction remain open optimization work.
+  Notes: CEFS+ allocation pressure is resolved (partial-Cholesky loop). The
+  reusable standardized/cache design for classic selectors remains open.
 
 ## Test Plan
 

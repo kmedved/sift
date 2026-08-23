@@ -154,7 +154,7 @@ result = select_fdr(
     X,
     y,
     q=0.1,
-    statistic="relevance",    # "relevance" or tie-safe "cefsplus"
+    statistic="relevance",    # "relevance", "lsm", "ridge", or tie-safe "cefsplus"
     n_draws=1,
     eta=0.5,
     offset=1,                 # 1 = knockoff+, 0 = modified knockoff threshold
@@ -162,7 +162,8 @@ result = select_fdr(
     min_eig=1e-3,
     screen_pairs=2000,
     statistic_options=None,
-    feature_groups=None,
+    feature_groups=None,      # labels, or "auto" for correlation-cluster representatives
+    group_corr_threshold=0.7,
     sample_weight=None,
     subsample=50_000,
     cache=None,
@@ -195,17 +196,39 @@ approximate practical knockoff filter.
 Important options:
 
 - `statistic="relevance"` is the fast default.
+- `statistic="lsm"` is the lasso signed-max from a Gram-form LARS path on the
+  analytic augmented correlation; exactly antisymmetric and markedly more
+  powerful than `relevance` on correlated designs
+  (`statistic_options={"max_steps": int}`).
+- `statistic="ridge"` is the analytic ridge coefficient difference
+  (`statistic_options={"ridge_lambda": float}`, default `0.5`).
 - `statistic="cefsplus"` enables the tie-safe greedy CEFS+ statistic. It accepts
   `statistic_options={"path_depth": int, "min_gain_ratio": float}`.
 - `s_method="equi"` is fastest. `s_method="mvr"` and `"me"` use diagonal
   coordinate-descent objectives and can improve power on correlated designs.
 - `n_draws > 1` redraws knockoffs and selects features with frequency at least
   `eta`; `threshold` is then `None` and `selection_frequency` is populated.
+  Here `q` is a per-draw threshold level, not a guarantee for the aggregated
+  vote. The aggregated result reports `fdr_control="none"`,
+  `q_scope="per_draw"`, and `aggregation_fdr_control="none"`.
 - `offset=1` is the knockoff+ threshold. `offset=0` is less conservative and is
   best read as modified-knockoff or mFDR-style control.
-- `feature_groups` thresholds group-level antisymmetric statistics and expands
-  selected groups back to member features. This is group discovery, not exact
-  feature-level FDR inside a selected group.
+- `feature_groups` thresholds a heuristic signed-maximum group aggregation and
+  expands selected groups back to member features. This mode has no established
+  group- or feature-level FDR control; metadata reports
+  `group_fdr_control="none"`, `per_draw_fdr_control="none"`, and
+  `fdr_control="none"`.
+- `feature_groups="auto"` clusters features by `|corr| >= group_corr_threshold`
+  and runs the filter on one representative per cluster; the result table gains
+  `feature_group` and `is_representative` columns and selected clusters are
+  expanded. Use it when `selector_metadata["s_median"]` is tiny (a
+  `UserWarning` also flags this): near-collinear blocks leave feature-level
+  knockoffs with no power. Knockoff calibration applies to the representatives;
+  neither cluster- nor feature-level FDR is established after expansion. A
+  single draw reports `representative_fdr_control="approximate_plugin"`, while
+  `group_fdr_control`, `feature_level_fdr_control`, and `fdr_control` are
+  `"none"`. Correlation clustering/linkage costs O(p^2) memory/time, so
+  pre-screen very wide feature sets first.
 - `cache` and `sample_weight` are mutually exclusive because row weights already
   live inside a prebuilt cache.
 

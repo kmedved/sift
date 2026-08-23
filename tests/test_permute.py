@@ -73,6 +73,24 @@ def test_time_only_block_is_deterministic_and_permutation_preserving():
     assert sorted(map(tuple, permuted.tolist())) == sorted(map(tuple, X.tolist()))
 
 
+@pytest.mark.parametrize("axis", ["columns", "rows"])
+def test_block_size_at_least_group_size_cannot_return_identity(axis):
+    X = np.arange(24, dtype=np.float64).reshape(8, 3)
+    time = np.arange(8)
+
+    permuted = permute_matrix(
+        X,
+        method="block",
+        groups=None,
+        time=time,
+        block_size=1000,
+        seed=0,
+        axis=axis,
+    )
+
+    assert not np.array_equal(permuted, X)
+
+
 def test_permute_matrix_rejects_invalid_method_and_axis():
     X = np.arange(6, dtype=np.float64).reshape(3, 2)
 

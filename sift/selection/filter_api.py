@@ -377,7 +377,7 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         estimator=spec.estimator,
         n_jobs=n_jobs,
         mrmr_backend=mrmr_backend,
-        rank_backend="processes" if mrmr_backend == "processes" else "serial",
+        rank_backend="threads" if n_jobs != 1 else "serial",
     )
 
 
@@ -464,7 +464,9 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
     groups, time = _validate_groups_time(request.groups, request.time, int(x_shape[0]))
     kw = (request.selector_kwargs or {}).get
     k_value = validate_k(request.k)
-    if k_value == "auto":
+    if k_value == "auto" and request.auto_k_config is not None:
+        # With no explicit config, the delegated select_cefsplus call routes
+        # k='auto' through the Auto-K router just like the logloss path.
         auto_k_config = resolve_auto_k_config(request.auto_k_config, time, groups)
         _require_evaluate_context(auto_k_config, groups, time)
         _require_unique_evaluate_feature_names(auto_k_config, request.X)

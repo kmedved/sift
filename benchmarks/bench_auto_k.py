@@ -541,17 +541,25 @@ def run(args: argparse.Namespace) -> list[dict]:
                 if method == "oracle":
                     k_hat, notes, runtime_s, selected_override = int(k_oracle), "", 0.0, None
                 else:
-                    k_hat, notes, runtime_s, selected_override = _method_k(
-                        method,
-                        X=X,
-                        y=y,
-                        path_names=path_names,
-                        objective=objective,
-                        cache=cache,
-                        meta=meta,
-                        max_k=max_path_k,
-                        seed=seed,
-                    )
+                    method_kwargs = {
+                        "X": X,
+                        "y": y,
+                        "path_names": path_names,
+                        "objective": objective,
+                        "cache": cache,
+                        "meta": meta,
+                        "max_k": max_path_k,
+                        "seed": seed,
+                    }
+                    # Discard one warm-up run, then report a median rather than
+                    # a noisy single cold measurement.
+                    _method_k(method, **method_kwargs)
+                    trials = [
+                        _method_k(method, **method_kwargs)
+                        for _ in range(int(getattr(args, "timing_repeats", 3)))
+                    ]
+                    k_hat, notes, _runtime, selected_override = trials[0]
+                    runtime_s = float(np.median([trial[2] for trial in trials]))
                 if selected_override is None:
                     selected_indices = path_indices[: max(0, min(k_hat, len(path_indices)))]
                     if k_hat in rmse_curve:
@@ -607,6 +615,12 @@ def _normalize_args(args: argparse.Namespace, parser: argparse.ArgumentParser | 
     if args.quick:
         args.seeds = min(int(args.seeds), 1)
         args.n_test = min(int(args.n_test), 1_000)
+    timing_repeats = int(getattr(args, "timing_repeats", 3))
+    if timing_repeats <= 0:
+        if parser is not None:
+            parser.error("--timing-repeats must be positive")
+        raise ValueError("--timing-repeats must be positive")
+    args.timing_repeats = timing_repeats
     return args
 
 
@@ -618,6 +632,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", choices=("ridge", "catboost"), default="ridge")
     parser.add_argument("--n-test", type=int, default=20_000)
+    parser.add_argument("--timing-repeats", type=int, default=3)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--full", action="store_true")
     args = parser.parse_args()

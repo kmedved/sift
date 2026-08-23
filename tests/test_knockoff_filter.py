@@ -16,6 +16,7 @@ from sift.selection.knockoff_filter import (
     _build_context,
     _cefsplus_incremental_scores,
     _group_knockoff_statistics,
+    _lasso_entry_penalties,
     _SUBSAMPLE_DEFAULT,
     knockoff_threshold,
     sample_knockoffs,
@@ -67,6 +68,23 @@ def test_knockoff_threshold_arithmetic_and_validation():
         knockoff_threshold(W, 0.5, offset=2)
     with pytest.raises(ValueError, match="finite"):
         knockoff_threshold(np.array([np.nan]), 0.5)
+
+
+def test_knockoff_threshold_matches_literal_scan_with_duplicates_and_zeros():
+    rng = np.random.default_rng(1901)
+    W = rng.choice(np.array([-3.0, -1.0, 0.0, 1.0, 2.0, 2.0]), size=500)
+
+    for q in (0.1, 0.25, 0.7):
+        for offset in (0, 1):
+            expected = np.inf
+            for threshold in np.unique(np.abs(W[W != 0.0])):
+                ratio = (offset + np.sum(W <= -threshold)) / max(
+                    1, np.sum(W >= threshold)
+                )
+                if ratio <= q:
+                    expected = float(threshold)
+                    break
+            assert knockoff_threshold(W, q, offset=offset) == expected
 
 
 def test_enabled_statistics_are_swap_antisymmetric():
@@ -151,6 +169,45 @@ def test_enabled_statistics_are_antisymmetric_under_multiple_pair_swaps():
             expected = W.copy()
             expected[swap_pairs] *= -1.0
             np.testing.assert_allclose(W_swapped, expected, atol=1e-10)
+
+
+def test_lsm_entry_penalties_follow_coefficient_path_after_lasso_drops():
+    from sklearn.linear_model import lars_path_gram
+
+    rng = np.random.default_rng(67)
+    n, p = 300, 12
+    X = rng.normal(size=(n, p))
+    X[:, 1] = 0.95 * X[:, 0] + 0.3122 * rng.normal(size=n)
+    X[:, 5] = 0.7 * X[:, 0] + 0.714 * rng.normal(size=n)
+    X = (X - X.mean(axis=0)) / X.std(axis=0)
+    y = X[:, 0] - 0.8 * X[:, 1] + 0.3 * X[:, 5] + rng.normal(scale=0.8, size=n)
+    y -= y.mean()
+
+    alphas, active, coefs = lars_path_gram(
+        Xy=X.T @ y,
+        Gram=X.T @ X,
+        n_samples=n,
+        method="lasso",
+        max_iter=2 * p,
+        eps=np.finfo(np.float64).eps,
+    )
+    assert len(alphas) - 1 > len(active)  # This path contains lasso drops.
+
+    actual = _lasso_entry_penalties(alphas, coefs, active)
+    expected = np.zeros(p)
+    for col in range(p):
+        nonzero = np.flatnonzero(coefs[col] != 0.0)
+        if nonzero.size:
+            expected[col] = alphas[max(int(nonzero[0]) - 1, 0)]
+    for col in active:
+        if not np.any(coefs[col] != 0.0):
+            expected[col] = alphas[-1]
+
+    old_final_active_mapping = np.zeros(p)
+    for step, col in enumerate(active):
+        old_final_active_mapping[col] = alphas[step]
+    assert not np.allclose(old_final_active_mapping, expected)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=0)
 
 
 def test_cefsplus_tie_safe_wrapper_neutralizes_exact_pair_ties():
@@ -322,6 +379,11 @@ def test_select_fdr_feature_groups_thresholds_and_expands_selected_groups():
 
     assert result.selector_metadata["feature_groups"] is True
     assert result.selector_metadata["n_feature_groups"] == 3
+    assert result.selector_metadata["group_mode"] == "signed_max_heuristic"
+    assert result.selector_metadata["group_fdr_control"] == "none"
+    assert result.selector_metadata["per_draw_fdr_control"] == "none"
+    assert result.selector_metadata["fdr_control"] == "none"
+    assert result.selector_metadata["aggregation_preserves_per_draw_fdr"] is False
     assert result.W["feature_group"].tolist() == groups
     assert "feature_group" in result.get_feature_ranking().columns
     assert result.diagnostics_["feature_groups"] == ["ab", "cd", "ef"]
@@ -348,6 +410,8 @@ def test_select_fdr_feature_groups_zero_target_keeps_group_column():
 
     assert result.W["feature_group"].tolist() == groups
     assert result.selector_metadata["feature_groups"] is True
+    assert result.selector_metadata["group_fdr_control"] == "none"
+    assert result.selector_metadata["per_draw_fdr_control"] == "none"
     assert result.diagnostics_["feature_groups"] == ["a", "b"]
     assert result.diagnostics_["group_W_draws"] == [[0.0, 0.0], [0.0, 0.0]]
     assert result.diagnostics_["group_thresholds"] == [float(np.inf), float(np.inf)]
@@ -586,10 +650,42 @@ def test_select_fdr_derandomized_frequencies_and_zero_target():
     assert result.selection_frequency.eq(0.0).all()
     assert result.selected_features == []
     assert result.diagnostics_["reason"] == "zero_target_variance"
+    assert result.selector_metadata["q_scope"] == "per_draw"
+    assert result.selector_metadata["per_draw_fdr_control"] == "approximate_plugin"
+    assert result.selector_metadata["fdr_control"] == "none"
+    assert result.selector_metadata["aggregation_fdr_control"] == "none"
+    assert not result.selector_metadata["aggregation_preserves_per_draw_fdr"]
     assert ["W_draw_0", "W_draw_1", "W_draw_2"] == [
         col for col in result.W.columns if col.startswith("W_draw_")
     ]
     assert result.W[["W_draw_0", "W_draw_1", "W_draw_2"]].eq(0.0).all().all()
+
+
+def test_multi_draw_reuses_invariant_augmented_correlation(monkeypatch):
+    import sift.selection.knockoff_filter as knockoff_module
+
+    X, y = _signal_frame(n=100, p=8, seed=107)
+    calls = 0
+    original = knockoff_module._build_augmented_correlation
+
+    def wrapped(model, kept):
+        nonlocal calls
+        calls += 1
+        return original(model, kept)
+
+    monkeypatch.setattr(knockoff_module, "_build_augmented_correlation", wrapped)
+    select_fdr(
+        X,
+        y,
+        q=0.4,
+        statistic="ridge",
+        screen_pairs=None,
+        n_draws=3,
+        random_state=7,
+        verbose=False,
+    )
+
+    assert calls == 1
 
 
 def test_select_fdr_validation_errors():
@@ -771,3 +867,172 @@ def test_knockoff_selector_rejects_unsupported_fit_time_arguments(fit_kwargs, me
 
     with pytest.raises(ValueError, match=message):
         KnockoffSelector(verbose=False).fit(X, y, **fit_kwargs)
+
+
+def _ar1_design(n: int, p: int, rho: float, k_true: int, amp: float, seed: int):
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(n, p))
+    X = np.empty_like(Z)
+    X[:, 0] = Z[:, 0]
+    for j in range(1, p):
+        X[:, j] = rho * X[:, j - 1] + np.sqrt(1.0 - rho**2) * Z[:, j]
+    beta = np.zeros(p)
+    idx = rng.choice(p, size=k_true, replace=False)
+    beta[idx] = amp * rng.choice([-1.0, 1.0], size=k_true) / np.sqrt(n)
+    y = X @ beta + rng.normal(size=n)
+    truth = np.zeros(p, dtype=bool)
+    truth[idx] = True
+    return X, y, truth
+
+
+@pytest.mark.parametrize("statistic", ["lsm", "ridge"])
+def test_lsm_and_ridge_statistics_control_fdr_and_have_power(statistic):
+    fdps = []
+    powers = []
+    for seed in range(4):
+        X, y, truth = _ar1_design(n=1500, p=120, rho=0.5, k_true=12, amp=6.0, seed=seed)
+        result = select_fdr(X, y, q=0.2, statistic=statistic, random_state=seed, verbose=False)
+        selected = np.asarray(result.selected_indices, dtype=int)
+        fdps.append((~truth[selected]).sum() / max(1, selected.size))
+        powers.append(truth[selected].sum() / truth.sum())
+        assert result.selector_metadata["statistic"] == statistic
+        assert np.isfinite(result.W["W"]).all()
+    assert np.mean(fdps) <= 0.3
+    assert np.mean(powers) >= 0.4
+
+
+def test_lsm_beats_marginal_relevance_on_correlated_design():
+    X, y, truth = _ar1_design(n=3000, p=200, rho=0.6, k_true=20, amp=7.0, seed=11)
+    base = select_fdr(X, y, q=0.1, statistic="relevance", random_state=11, verbose=False)
+    lsm = select_fdr(X, y, q=0.1, statistic="lsm", random_state=11, verbose=False)
+    base_power = truth[np.asarray(base.selected_indices, dtype=int)].sum()
+    lsm_power = truth[np.asarray(lsm.selected_indices, dtype=int)].sum()
+    assert lsm_power >= base_power
+
+
+def test_lsm_and_ridge_options_are_validated():
+    X, y = _signal_frame(n=80, p=6, seed=5)
+    with pytest.raises(ValueError, match="Unknown statistic_options"):
+        select_fdr(X, y, statistic="lsm", statistic_options={"ridge_lambda": 0.1}, verbose=False)
+    with pytest.raises(ValueError, match="max_steps"):
+        select_fdr(X, y, statistic="lsm", statistic_options={"max_steps": 0}, verbose=False)
+    with pytest.raises(ValueError, match="ridge_lambda"):
+        select_fdr(X, y, statistic="ridge", statistic_options={"ridge_lambda": 0.0}, verbose=False)
+    out = select_fdr(X, y, statistic="ridge", statistic_options={"ridge_lambda": 0.25}, verbose=False)
+    assert out.selector_metadata["statistic"] == "ridge"
+    out = select_fdr(X, y, statistic="lsm", statistic_options={"max_steps": 4}, verbose=False)
+    assert out.selector_metadata["statistic"] == "lsm"
+
+
+def test_select_fdr_warns_when_knockoffs_have_no_power_and_reports_s_diagnostics():
+    rng = np.random.default_rng(0)
+    base = rng.normal(size=(300, 4))
+    # Near-duplicate columns force the equicorrelated s towards zero.
+    X = np.column_stack([base, base + 1e-3 * rng.normal(size=base.shape)])
+    y = base[:, 0] + rng.normal(size=300)
+    with pytest.warns(UserWarning, match="very little power"):
+        result = select_fdr(X, y, q=0.2, verbose=False)
+    assert result.selector_metadata["s_median"] < 0.05
+    assert result.selector_metadata["n_low_power_features"] == 8
+
+    X_ok, y_ok = _signal_frame(n=200, p=6, seed=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ok = select_fdr(X_ok, y_ok, q=0.2, verbose=False)
+    assert ok.selector_metadata["s_median"] > 0.05
+    assert ok.selector_metadata["n_low_power_features"] == 0
+
+
+def test_cluster_feature_groups_medoids_and_labels():
+    from sift.selection.knockoff_filter import cluster_feature_groups
+
+    R = np.array(
+        [
+            [1.0, 0.95, 0.1, 0.0],
+            [0.95, 1.0, 0.1, 0.0],
+            [0.1, 0.1, 1.0, 0.05],
+            [0.0, 0.0, 0.05, 1.0],
+        ]
+    )
+    labels, reps = cluster_feature_groups(R, corr_threshold=0.7)
+    assert labels[0] == labels[1]
+    assert len({labels[0], labels[2], labels[3]}) == 3
+    assert reps.shape[0] == 3
+    assert set(reps.tolist()) >= {2, 3}
+    with pytest.raises(ValueError, match="group_corr_threshold"):
+        cluster_feature_groups(R, corr_threshold=1.0)
+
+
+def test_select_fdr_auto_feature_groups_expands_selected_clusters():
+    rng = np.random.default_rng(3)
+    n = 1500
+    n_signal = 8
+    signal = rng.normal(size=(n, n_signal))
+    # Each signal has two near-copies; plus independent noise columns.
+    X = np.column_stack(
+        [signal, signal + 0.05 * rng.normal(size=signal.shape), signal + 0.05 * rng.normal(size=signal.shape), rng.normal(size=(n, 12))]
+    )
+    y = signal @ np.linspace(3.0, 1.5, n_signal) + rng.normal(size=n)
+    columns = [f"f{i}" for i in range(X.shape[1])]
+    frame = pd.DataFrame(X, columns=columns)
+
+    with pytest.warns(UserWarning, match="very little power"):
+        plain = select_fdr(frame, y, q=0.2, statistic="lsm", verbose=False)
+    auto = select_fdr(frame, y, q=0.2, statistic="lsm", feature_groups="auto", group_corr_threshold=0.7, verbose=False)
+
+    md = auto.selector_metadata
+    assert md["feature_groups"] is True
+    assert md["group_mode"] == "cluster_representative"
+    assert md["n_feature_groups"] == n_signal + 12
+    assert md["discovery_unit"] == "cluster"
+    assert md["q_calibration_unit"] == "cluster_representative"
+    assert md["representative_fdr_control"] == "approximate_plugin"
+    assert md["representative_per_draw_fdr_control"] == "approximate_plugin"
+    assert md["group_fdr_control"] == "none"
+    assert md["group_per_draw_fdr_control"] == "none"
+    assert md["feature_level_fdr_control"] == "none"
+    assert md["fdr_control"] == "none"
+    assert md["per_draw_fdr_control"] == "none"
+    assert md["aggregation_fdr_control"] == "none"
+    assert md["aggregation_preserves_per_draw_fdr"] is False
+    assert set(auto.W.columns) >= {"feature_group", "is_representative"}
+    assert auto.W["is_representative"].sum() == md["n_feature_groups"]
+    # Members of a cluster share W and selection status.
+    for group_id, block in auto.W.groupby("feature_group"):
+        assert block["W"].nunique() == 1
+        assert block["selected"].nunique() == 1
+    # Selected clusters expand to all members; the near-collinear plain run has no power.
+    selected = set(auto.selected_features)
+    for j in range(n_signal):
+        cluster = {f"f{j}", f"f{j + n_signal}", f"f{j + 2 * n_signal}"}
+        assert cluster <= selected or not (cluster & selected)
+    assert len(auto.selected_features) >= 3 * 5
+    assert not any(int(name[1:]) >= 3 * n_signal for name in auto.selected_features)
+    assert len(plain.selected_features) < len(auto.selected_features)
+    ranking = auto.get_feature_ranking()
+    assert "feature_group" in ranking.columns
+    assert auto.diagnostics_["representative_result"].selector_metadata["n_features"] == md["n_feature_groups"]
+
+    with pytest.raises(ValueError, match="feature_groups must be"):
+        select_fdr(frame, y, feature_groups="clusters", verbose=False)
+
+    selector = KnockoffSelector(q=0.2, statistic="lsm", feature_groups="auto", group_corr_threshold=0.7, verbose=False).fit(frame, y)
+    assert list(selector.selected_features_) == auto.selected_features
+
+
+def test_select_fdr_preserves_large_offset_float64_target_ordering():
+    X, y = _signal_frame(n=200, p=8, seed=205)
+    base = select_fdr(X, y, q=0.5, offset=0, random_state=3, verbose=False)
+    shifted = select_fdr(
+        X,
+        y + 1e10,
+        q=0.5,
+        offset=0,
+        random_state=3,
+        verbose=False,
+    )
+
+    assert np.unique((y + 1e10).astype(np.float32)).size == 1
+    assert shifted.diagnostics_.get("reason") != "zero_target_variance"
+    assert shifted.selected_features == base.selected_features
+    np.testing.assert_allclose(shifted.W["W"], base.W["W"], rtol=0, atol=0)
