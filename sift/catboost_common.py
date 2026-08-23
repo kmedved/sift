@@ -140,7 +140,9 @@ class CatBoostSelectionResult:
     selected_features : list of str
         Final selected feature names.
     best_k : int
-        Number of features in best configuration.
+        Number of selected features. For automatic selection this is the
+        parsimonious count chosen from the score curve and can differ from the
+        raw best-scoring count; inspect ``scores_by_k`` for the full curve.
     scores_by_k : dict
         Mean validation score for each k tried.
     scores_std_by_k : dict
@@ -223,7 +225,7 @@ class CatBoostSelectionResult:
         fig, ax = plt.subplots(figsize=figsize)
         ax.errorbar(ks, means, yerr=stds, marker='o', capsize=3)
         ax.axvline(self.best_k, color='red', linestyle='--', alpha=0.7,
-                   label=f'Best k={self.best_k}')
+                   label=f'Selected k={self.best_k}')
         ax.set_xlabel('Number of Features (k)')
         ax.set_ylabel(f'{self.metric} ({"↑" if self.higher_is_better else "↓"} better)')
         ax.set_title('Feature Selection: Score vs k')

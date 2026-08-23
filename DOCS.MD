@@ -11,7 +11,7 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
 ## Documentation Map
 
 - [Standalone API reference](docs/API.md): compact function/class reference for
-  the public 0.7.0 surface.
+  the public 0.8.0 surface.
 - [Algorithm guide](docs/ALGORITHMS.md): method assumptions, output contracts,
   and selection guidance.
 - [Advanced workflow guide](docs/ADVANCED.md): time series, groups, smart
@@ -1457,6 +1457,20 @@ Algorithm choices:
 | `"prediction"` | Recursive elimination using prediction-change importance. | Faster RFE path. |
 | `"forward"` | Fit once, rank by importance, evaluate prefixes. | Fast. |
 | `"forward_greedy"` | True greedy forward search. | Most expensive for large feature sets. |
+
+Choosing `k` automatically (`k=None`):
+
+- Every feature count in the search grid (`min_features`, `step_function`, or
+  `feature_counts`) is scored on the validation splits. The score-curve optimum
+  is the global arg-best over those scores (exact ties prefer fewer features)
+  and is reported in the verbose output as the best-scoring `k`.
+- The returned `selected_features`/`result.best_k` apply a parsimony rule:
+  walking down from the best-scoring count, SIFT takes the smallest count whose
+  mean score stays within `tolerance` (relative to `|best_score|`, default
+  `0.01`) of the best, giving up after `selection_patience` consecutive counts
+  outside that band. `tolerance=0` selects the best-scoring count unless
+  smaller counts tie it exactly. `result.features_within_tolerance(...)` applies
+  the same band to the stored per-`k` feature lists after the fact.
 
 Prefiltering:
 

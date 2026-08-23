@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+No changes yet.
+
+## 0.8.0
+
 ### Performance
 
 - Greedy correlation pruning and knockoff thresholding now use vectorized and
@@ -71,6 +75,16 @@
 
 ### Correctness and validation
 
+- Fixed `catboost_select(k=None)` reporting the wrong `best_k`: the old scan
+  walked down from the largest count and stopped after `selection_patience`
+  non-improvements even though every count had already been scored, so a
+  better small prefix could be missed (a curve with its optimum at the
+  smallest count returned the largest count). The score-curve optimum is now
+  the global arg-best; `tolerance` and `selection_patience` implement a separate
+  parsimony rule for the returned feature count (smallest count within the
+  tolerance band of the best, giving up after `selection_patience` consecutive
+  misses). Both parameters are now validated. Automatic selections can
+  therefore move to smaller counts than before.
 - Low-level classic selectors reject non-positive `top_m`; cached Gaussian
   selectors reject non-finite targets and correlation-pruning thresholds above
   one. Binary target metadata preserves raw labels and numeric ordering.

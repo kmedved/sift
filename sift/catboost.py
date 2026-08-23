@@ -441,6 +441,27 @@ def _run_catboost_split_evaluation(
     return all_scores, all_features_by_k, prefilter_features_first
 
 
+def _validate_selection_params(
+    tolerance: float,
+    selection_patience: int,
+) -> tuple[float, int]:
+    if isinstance(tolerance, (bool, np.bool_)):
+        raise ValueError("tolerance must be a finite non-negative float")
+    try:
+        tolerance_float = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tolerance must be a finite non-negative float") from exc
+    if not np.isfinite(tolerance_float) or tolerance_float < 0.0:
+        raise ValueError("tolerance must be a finite non-negative float")
+    if (
+        isinstance(selection_patience, (bool, np.bool_))
+        or not isinstance(selection_patience, (int, np.integer))
+        or int(selection_patience) < 1
+    ):
+        raise ValueError("selection_patience must be a positive integer")
+    return tolerance_float, int(selection_patience)
+
+
 def _choose_catboost_target_k(
     all_scores: Dict[int, List[float]],
     *,
@@ -450,6 +471,21 @@ def _choose_catboost_target_k(
     selection_patience: int,
     verbose: bool,
 ) -> tuple[int, int, float, Dict[int, float], Dict[int, float]]:
+    """Pick the feature count from the per-k validation scores.
+
+    ``best_k``/``best_score`` are the global arg-best over every evaluated
+    count (ties go to the smaller count). When ``k`` was not requested, the
+    returned ``target_k`` is the parsimonious choice: walking down from
+    ``best_k``, the smallest count whose mean score stays within ``tolerance``
+    (relative to ``|best_score|``) of the best, giving up after
+    ``selection_patience`` consecutive counts outside that band so an isolated
+    lucky tiny prefix far below the plateau is not taken. ``tolerance=0``
+    therefore selects ``best_k`` unless smaller counts tie it exactly.
+    """
+    tolerance_float, patience = _validate_selection_params(
+        tolerance,
+        selection_patience,
+    )
     scores_mean = {}
     scores_std = {}
     for kk, values in all_scores.items():
@@ -462,33 +498,36 @@ def _choose_catboost_target_k(
     if not scores_mean:
         raise RuntimeError("No valid scores computed. Check your data and parameters.")
 
-    sorted_counts = sorted(scores_mean.keys(), reverse=True)
-    best_k = sorted_counts[0]
-    best_score = scores_mean[best_k]
-    no_improve_count = 0
+    # Global arg-best over all evaluated counts; exact ties prefer fewer features.
+    best_k, best_score = best_score_from_dict(scores_mean, resolved_hib)
 
-    for kk in sorted_counts[1:]:
+    # Parsimony walk: accept smaller counts within the tolerance band of the best.
+    delta = abs(best_score) * tolerance_float
+    parsimonious_k = best_k
+    misses = 0
+    for kk in sorted((kk for kk in scores_mean if kk < best_k), reverse=True):
         score = scores_mean[kk]
-        if resolved_hib:
-            is_better = score > best_score
-            rel_improvement = (score - best_score) / (abs(best_score) + 1e-10)
+        within = (
+            score >= best_score - delta
+            if resolved_hib
+            else score <= best_score + delta
+        )
+        if within:
+            parsimonious_k = kk
+            misses = 0
         else:
-            is_better = score < best_score
-            rel_improvement = (best_score - score) / (abs(best_score) + 1e-10)
+            misses += 1
+            if misses >= patience:
+                break
 
-        if is_better and rel_improvement > tolerance:
-            best_score = score
-            best_k = kk
-            no_improve_count = 0
-        else:
-            no_improve_count += 1
+    if verbose:
+        print(
+            f"  Best score {best_score:.4f} at k={best_k}; "
+            f"parsimony rule (tolerance={tolerance_float:g}) selected "
+            f"k={parsimonious_k}"
+        )
 
-        if no_improve_count >= selection_patience:
-            if verbose:
-                print(f"  Early stopping at k={kk}")
-            break
-
-    max_eval_k = max(scores_mean.keys()) if scores_mean else 0
+    max_eval_k = max(scores_mean)
     if k_req is not None:
         if k_req > max_eval_k:
             warnings.warn(
@@ -500,7 +539,7 @@ def _choose_catboost_target_k(
             valid_ks = [kk for kk in scores_mean.keys() if kk <= k_req]
             target_k = max(valid_ks) if valid_ks else max_eval_k
     else:
-        target_k = best_k
+        target_k = parsimonious_k
 
     return target_k, best_k, best_score, scores_mean, scores_std
 
@@ -665,6 +704,7 @@ def catboost_select(
     _validate_choice("prefilter_method", prefilter_method, _VALID_PREFILTER_METHODS)
     _validate_step_function(step_function)
     _validate_stability_params(n_bootstrap, stability_threshold)
+    _validate_selection_params(tolerance, selection_patience)
 
     y = _normalize_catboost_target(y, X.index)
     n_samples, n_features_orig = X.shape
@@ -753,7 +793,7 @@ def catboost_select(
         k_req=k_req,
         verbose=verbose,
     )
-    target_k, _, best_score, scores_mean, scores_std = _choose_catboost_target_k(
+    target_k, best_k, best_score, scores_mean, scores_std = _choose_catboost_target_k(
         all_scores,
         k_req=k_req,
         resolved_hib=resolved_hib,
@@ -785,7 +825,10 @@ def catboost_select(
 
     if verbose:
         score = scores_mean.get(target_k, best_score)
-        print(f"Selected {len(selected_features)} features (best k={target_k}, score={score:.4f})")
+        print(
+            f"Selected {len(selected_features)} features (k={target_k}, score={score:.4f}; "
+            f"best-scoring k={best_k}, score={best_score:.4f})"
+        )
 
     return CatBoostSelectionResult(
         selected_features=selected_features,
