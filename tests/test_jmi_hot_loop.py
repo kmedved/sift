@@ -1,7 +1,8 @@
 import numpy as np
+import pytest
 
 from sift.estimators import joint_mi as jmi
-from sift.selection.loops import jmi_select
+from sift.selection.loops import jmi_select, mrmr_select
 
 
 def _legacy_r2_jmi_select(
@@ -76,6 +77,18 @@ def _legacy_r2_jmi_select(
         count += 1
 
     return idx_map[selected[:count]]
+
+
+@pytest.mark.parametrize("top_m", [0, -1, 1.5, True])
+def test_low_level_selectors_reject_invalid_top_m(top_m):
+    X = np.arange(30, dtype=np.float64).reshape(10, 3)
+    y = np.arange(10, dtype=np.float64)
+    relevance = np.ones(3, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="top_m"):
+        mrmr_select(X, relevance, k=2, top_m=top_m)
+    with pytest.raises(ValueError, match="top_m"):
+        jmi_select(X, y, k=2, relevance=relevance, top_m=top_m)
 
 
 def _r2_case(weighted):

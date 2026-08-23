@@ -104,6 +104,26 @@ def build_group_info(
     return info
 
 
+def _permuted_block_order(
+    idx: np.ndarray,
+    block_size: int | str,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Return a non-identity permutation of contiguous blocks for ``idx``."""
+    n = len(idx)
+    if n <= 1:
+        return idx
+    bs = int(np.sqrt(n)) if block_size == "auto" else int(block_size)
+    # A single block can only reproduce the input. Cap the block width so every
+    # non-singleton group has at least two blocks.
+    bs = max(1, min(bs, n - 1))
+    blocks = [idx[start : start + bs] for start in range(0, n, bs)]
+    block_order = rng.permutation(len(blocks))
+    if np.array_equal(block_order, np.arange(len(blocks))):
+        block_order = np.roll(block_order, 1)
+    return np.concatenate([blocks[int(i)] for i in block_order])
+
+
 def permute_array(
     x: np.ndarray,
     *,
@@ -155,12 +175,7 @@ def permute_array(
             n = len(idx)
             if n <= 1:
                 continue
-            bs = int(np.sqrt(n)) if block_size == "auto" else int(block_size)
-            bs = max(1, min(bs, n))
-            n_blocks = max(1, int(np.ceil(n / bs)))
-            blocks = [idx[i * bs : (i + 1) * bs] for i in range(n_blocks)]
-            rng.shuffle(blocks)
-            new_order = np.concatenate(blocks)
+            new_order = _permuted_block_order(idx, block_size, rng)
             out[idx] = x[new_order]
         return out
 
@@ -219,12 +234,7 @@ def permute_rows(
             n_g = len(idx)
             if n_g <= 1:
                 continue
-            bs = int(np.sqrt(n_g)) if block_size == "auto" else int(block_size)
-            bs = max(1, min(bs, n_g))
-            n_blocks = int(np.ceil(n_g / bs))
-            blocks = [idx[i * bs : (i + 1) * bs] for i in range(n_blocks)]
-            rng.shuffle(blocks)
-            new_order = np.concatenate(blocks)
+            new_order = _permuted_block_order(idx, block_size, rng)
             out[idx, :] = X[new_order, :]
         return out
 

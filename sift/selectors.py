@@ -29,7 +29,7 @@ from sift.selection.cefsplus_binary_common import (
     resolve_binary_weights,
     validate_binary_target,
 )
-from sift.selection.auto_k import resolve_auto_k_config
+from sift.selection.auto_k import AutoKConfig, resolve_auto_k_config
 from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
 from sift.selection.knockoff_filter import _SUBSAMPLE_DEFAULT
 
@@ -209,6 +209,10 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     def _supports_auto_k(self) -> bool:
         return True
 
+    def _routes_no_config_auto_k(self) -> bool:
+        """Whether k='auto' without a config should use the Auto-K router."""
+        return False
+
     def _categorical_target(self, y):
         return y
 
@@ -387,6 +391,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                     f"{self.__class__.__name__} requires a fixed positive integer k; "
                     "k='auto' is not supported."
                 )
+            if resolved_auto_k is None and self._routes_no_config_auto_k():
+                # Mirror the function API: CEFS+ selectors without an explicit
+                # config use the measured Auto-K router instead of the legacy
+                # evaluate/time_holdout inference.
+                resolved_auto_k = AutoKConfig(k_method="auto")
             effective_auto_k = resolve_auto_k_config(
                 resolved_auto_k,
                 time,
@@ -694,6 +703,9 @@ class CEFSPlusSelector(_BaseSelector):
     ):
         self._init_selector(select_cefsplus, locals())
 
+    def _routes_no_config_auto_k(self) -> bool:
+        return True
+
 
 class CEFSPlusBinarySelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`."""
@@ -720,6 +732,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
         auto_k_config=None,
     ):
         self._init_selector(select_cefsplus_binary, locals())
+
+    def _routes_no_config_auto_k(self) -> bool:
+        return True
 
     def _task(self) -> str:
         return "classification"
@@ -849,6 +864,7 @@ class KnockoffSelector(_BaseSelector):
         screen_pairs: int | None = 2000,
         statistic_options: dict | None = None,
         feature_groups=None,
+        group_corr_threshold: float = 0.7,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
         allow_full_data_target_encoding: bool = False,

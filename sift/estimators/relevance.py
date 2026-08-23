@@ -6,6 +6,9 @@ import numpy as np
 
 from sift._numba import njit_optional_cache
 
+MIN_VARIANCE = 1e-24
+CLASSIFICATION_BLOCK_SIZE = 256
+
 
 # Keep these kernels serial: CatBoost/OpenMP can crash when Numba's parallel
 # runtime is initialized after CatBoost has already been imported.
@@ -30,25 +33,34 @@ def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
     for i in range(n):
         y_ss += w[i] * (y[i] - y_mean) ** 2
 
+    # Row-major traversal: X is C-contiguous (n, p), so accumulating all
+    # columns while sweeping rows keeps memory access contiguous. The
+    # per-column summation order is unchanged (row 0..n-1), so results are
+    # bitwise identical to the column-by-column form.
+    x_mean = np.zeros(p, dtype=np.float64)
+    for i in range(n):
+        wi = w[i]
+        for j in range(p):
+            x_mean[j] += wi * X[i, j]
+    for j in range(p):
+        x_mean[j] /= w_sum
+
+    x_ss = np.zeros(p, dtype=np.float64)
+    xy_cov = np.zeros(p, dtype=np.float64)
+    for i in range(n):
+        wi = w[i]
+        yc = y[i] - y_mean
+        for j in range(p):
+            xc = X[i, j] - x_mean[j]
+            x_ss[j] += wi * xc * xc
+            xy_cov[j] += wi * xc * yc
+
     scores = np.empty(p, dtype=np.float64)
     for j in range(p):
-        x_mean = 0.0
-        for i in range(n):
-            x_mean += w[i] * X[i, j]
-        x_mean /= w_sum
-
-        x_ss = 0.0
-        xy_cov = 0.0
-        for i in range(n):
-            xc = X[i, j] - x_mean
-            yc = y[i] - y_mean
-            x_ss += w[i] * xc * xc
-            xy_cov += w[i] * xc * yc
-
-        if x_ss < 1e-12 or y_ss < 1e-12:
+        if x_ss[j] < w_sum * MIN_VARIANCE or y_ss < w_sum * MIN_VARIANCE:
             scores[j] = 0.0
         else:
-            r = xy_cov / np.sqrt(x_ss * y_ss)
+            r = xy_cov[j] / np.sqrt(x_ss[j] * y_ss)
             r2 = min(r * r, 0.99999)
             scores[j] = r2 / (1.0 - r2) * (w_sum - 2)
 
@@ -71,39 +83,46 @@ def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
 
     scores = np.empty(p, dtype=np.float64)
 
-    for j in range(p):
-        x_mean = 0.0
-        for i in range(n):
-            x_mean += w[i] * X[i, j]
-        x_mean /= w_sum
+    df_between = n_classes - 1
+    df_within = w_sum - n_classes
 
-        class_sums = np.zeros(n_classes, dtype=np.float64)
-        class_sq_sums = np.zeros(n_classes, dtype=np.float64)
-
+    # Sweep rows within bounded column blocks. Per-column accumulation remains
+    # in row order (and therefore bitwise-equivalent to the scalar loop), while
+    # peak scratch memory is O(n_classes * block_size), not O(n_classes * p).
+    for start in range(0, p, CLASSIFICATION_BLOCK_SIZE):
+        stop = min(start + CLASSIFICATION_BLOCK_SIZE, p)
+        width = stop - start
+        x_mean = np.zeros(width, dtype=np.float64)
+        class_sums = np.zeros((n_classes, width), dtype=np.float64)
+        class_sq_sums = np.zeros((n_classes, width), dtype=np.float64)
         for i in range(n):
-            val = X[i, j]
+            wi = w[i]
             c_idx = int(y[i])
-            class_sums[c_idx] += w[i] * val
-            class_sq_sums[c_idx] += w[i] * val * val
+            for local_j in range(width):
+                val = X[i, start + local_j]
+                x_mean[local_j] += wi * val
+                class_sums[c_idx, local_j] += wi * val
+                class_sq_sums[c_idx, local_j] += wi * val * val
 
-        ss_between = 0.0
-        ss_within = 0.0
+        for local_j in range(width):
+            x_mean_j = x_mean[local_j] / w_sum
+            ss_between = 0.0
+            ss_within = 0.0
+            for c_idx in range(n_classes):
+                w_c = class_weights[c_idx]
+                if w_c < 1e-12:
+                    continue
+                mean_c = class_sums[c_idx, local_j] / w_c
+                ss_between += w_c * (mean_c - x_mean_j) ** 2
+                ss_within += (
+                    class_sq_sums[c_idx, local_j] - w_c * mean_c * mean_c
+                )
 
-        for c_idx in range(n_classes):
-            w_c = class_weights[c_idx]
-            if w_c < 1e-12:
-                continue
-            mean_c = class_sums[c_idx] / w_c
-            ss_between += w_c * (mean_c - x_mean) ** 2
-            ss_within += class_sq_sums[c_idx] - w_c * mean_c * mean_c
-
-        df_between = n_classes - 1
-        df_within = w_sum - n_classes
-
-        if df_within <= 0 or df_between <= 0 or ss_within < 1e-12:
-            scores[j] = 0.0
-        else:
-            scores[j] = (ss_between / df_between) / (ss_within / df_within)
+            j = start + local_j
+            if df_within <= 0 or df_between <= 0 or ss_within < 1e-12:
+                scores[j] = 0.0
+            else:
+                scores[j] = (ss_between / df_between) / (ss_within / df_within)
 
     return scores
 

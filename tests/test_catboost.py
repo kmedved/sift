@@ -185,6 +185,22 @@ class TestScoreDirection:
         assert selected == ["a", "b"]
         assert stability_scores is None
 
+    def test_stability_selection_never_exceeds_target_k(self):
+        selected, stability_scores = _select_final_catboost_features(
+            target_k=2,
+            k_req=None,
+            all_features_by_k={
+                2: [["a", "b"], ["a", "c"], ["b", "c"]],
+            },
+            all_features=["a", "b", "c"],
+            prefilter_features_first=None,
+            use_stability=True,
+            stability_threshold=0.5,
+        )
+
+        assert len(selected) == 2
+        assert stability_scores is not None
+
 
 class TestFeatureTypes:
     """Tests for feature type detection."""
@@ -295,6 +311,70 @@ class TestCatBoostInputValidation:
                 y,
                 k=1,
                 cv=GroupKFold(n_splits=2),
+                prefilter_k=None,
+                n_estimators=10,
+                verbose=False,
+            )
+
+    def test_cv_and_stability_are_mutually_exclusive(self):
+        from sklearn.model_selection import KFold
+
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0], "f1": [1.0, 0.0, 1.0, 0.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                cv=KFold(n_splits=2),
+                use_stability=True,
+                prefilter_k=None,
+                n_estimators=10,
+                verbose=False,
+            )
+
+    def test_custom_splitter_without_groups_argument_rejects_group_col(self):
+        class UngroupedSplitter:
+            def split(self, X, y):
+                del X, y
+                yield np.array([0, 1]), np.array([2, 3])
+
+        X = pd.DataFrame(
+            {
+                "f0": [0.0, 1.0, 2.0, 3.0],
+                "group": [0, 0, 1, 1],
+            }
+        )
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(TypeError, match="does not accept groups"):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                cv=UngroupedSplitter(),
+                group_col="group",
+                prefilter_k=None,
+                n_estimators=10,
+                verbose=False,
+            )
+
+    def test_internal_custom_splitter_type_error_propagates(self):
+        class BrokenSplitter:
+            def split(self, X, y):
+                del X, y
+                raise TypeError("internal splitter failure")
+
+        X = pd.DataFrame({"f0": [0.0, 1.0, 2.0, 3.0]})
+        y = pd.Series([0.0, 1.0, 2.0, 3.0])
+
+        with pytest.raises(TypeError, match="internal splitter failure"):
+            catboost_select(
+                X,
+                y,
+                k=1,
+                cv=BrokenSplitter(),
                 prefilter_k=None,
                 n_estimators=10,
                 verbose=False,
@@ -488,6 +568,48 @@ class TestCatBoostRegression:
             captured["sample_weight"],
             weights.iloc[train_idx],
         )
+
+    def test_user_overfitting_detector_params_are_preserved(self, monkeypatch):
+        X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+        y = pd.Series(np.arange(5, dtype=float))
+        captured = {}
+
+        def fake_select(*args, model_params, train_early_stopping_rounds, **kwargs):
+            del args, kwargs
+            captured["model_params"] = dict(model_params)
+            captured["fit_early_stopping"] = train_early_stopping_rounds
+            return {1: 0.1}, {1: ["a"]}
+
+        monkeypatch.setattr(catboost_module, "_select_features_single_split", fake_select)
+
+        catboost_module._run_catboost_split_evaluation(
+            X_work=X,
+            y=y,
+            sample_weights=None,
+            splits=[(np.array([0, 1, 2]), np.array([3, 4]))],
+            all_features=list(X.columns),
+            counts=[1],
+            task="regression",
+            model_params={"od_type": "IncToDec", "od_pval": 0.01, "od_wait": 7},
+            cat_features_final=[],
+            text_feat=[],
+            prefilter_k=None,
+            prefilter_method="none",
+            random_state=0,
+            n_jobs=1,
+            algorithm="prediction",
+            resolved_metric="RMSE",
+            resolved_hib=False,
+            train_early_stopping_rounds=20,
+            steps=1,
+            k_req=1,
+            verbose=False,
+        )
+
+        assert captured["model_params"]["od_type"] == "IncToDec"
+        assert captured["model_params"]["od_pval"] == 0.01
+        assert captured["model_params"]["od_wait"] == 7
+        assert captured["fit_early_stopping"] is None
 
     def test_prediction_algorithm(self):
         """Test fastest algorithm option."""

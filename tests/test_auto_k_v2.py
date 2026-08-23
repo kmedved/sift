@@ -94,6 +94,71 @@ def test_local_standardize_uses_local_weights_and_neutralizes_constant_columns()
     np.testing.assert_allclose(out[:, 1:], 0.0)
 
 
+def test_local_corr_panel_matches_explicit_full_standardization():
+    from sift.estimators.copula import (
+        gaussian_mi_from_corr,
+        weighted_corr_with_vector,
+        weighted_correlation_matrix,
+    )
+    from sift.selection.panel import local_corr_panel
+
+    rng = np.random.default_rng(901)
+    Z = rng.normal(size=(80, 12)).astype(np.float32)
+    zy = rng.normal(size=80)
+    w = rng.uniform(0.2, 2.0, size=80)
+    Z_full = local_standardize(Z, w)
+    zy_full = local_standardize(zy, w).ravel()
+    r_full = np.asarray(weighted_corr_with_vector(Z_full, zy_full, w), dtype=float)
+    cand = np.argpartition(np.abs(r_full), -7)[-7:]
+    R_full = weighted_correlation_matrix(Z_full[:, cand], w, backend="blas")
+
+    panel = local_corr_panel(
+        Z,
+        zy,
+        w,
+        top_m=7,
+        corr_prune=None,
+        method="cefsplus",
+        local_standardize=True,
+    )
+
+    assert set(panel.cand.tolist()) == set(cand.tolist())
+    order = np.array([int(np.where(cand == value)[0][0]) for value in panel.cand])
+    np.testing.assert_allclose(panel.r, r_full[panel.cand], rtol=2e-6, atol=2e-7)
+    np.testing.assert_allclose(
+        panel.R, R_full[np.ix_(order, order)], rtol=2e-6, atol=2e-7
+    )
+    np.testing.assert_allclose(panel.rel, gaussian_mi_from_corr(panel.r), rtol=1e-7)
+
+
+def test_local_corr_panel_is_stable_for_large_offset_inputs():
+    from sift.estimators.copula import weighted_corr_with_vector
+    from sift.selection.panel import local_corr_panel
+
+    rng = np.random.default_rng(902)
+    Z = 1e12 + rng.normal(scale=2.0, size=(120, 9))
+    zy = -1e11 + rng.normal(scale=3.0, size=120)
+    w = rng.uniform(0.2, 2.0, size=120)
+    Z_full = local_standardize(Z, w)
+    zy_full = local_standardize(zy, w).ravel()
+    expected_r = np.asarray(
+        weighted_corr_with_vector(Z_full, zy_full, w), dtype=np.float64
+    )
+
+    panel = local_corr_panel(
+        Z,
+        zy,
+        w,
+        top_m=Z.shape[1],
+        corr_prune=None,
+        method="cefsplus",
+        local_standardize=True,
+    )
+
+    assert np.isfinite(panel.r).all()
+    np.testing.assert_allclose(panel.r, expected_r[panel.cand], rtol=1e-6, atol=1e-7)
+
+
 def test_auto_k_designs_and_block_support_scoring_are_importable():
     X, y, meta = DESIGNS["D3"].make(0, False)
     assert X.shape[0] == y.shape[0]
@@ -167,10 +232,11 @@ def test_auto_k_harness_part2_regressions(monkeypatch):
         "_fit_rmse_curve",
         lambda *_args, **_kwargs: {0: 3.0, 1: 1.0},
     )
+    method_runtimes = iter([99.0, 3.0, 1.0, 2.0])
     monkeypatch.setattr(
         bench_auto_k,
         "_method_k",
-        lambda method, **_kwargs: (2, "", 0.01, None),
+        lambda method, **_kwargs: (2, "", next(method_runtimes), None),
     )
 
     def fake_exact(_X, _y, _X_test, _y_test, selected_indices, **_kwargs):
@@ -192,6 +258,7 @@ def test_auto_k_harness_part2_regressions(monkeypatch):
 
     assert exact_calls["selected_indices"] == [0, 1]
     assert rows[0]["k_dispersion_group"] == "DX:dummy"
+    assert rows[0]["runtime_s"] == 2.0
     assert "exact_off_grid_k" in rows[0]["notes"]
 
 
@@ -560,6 +627,22 @@ def test_chi2_stop_forward_stop_and_changepoint_rules():
         p_candidates=20,
     )
     assert clamp_diag["k"].max() == 3
+
+    floor_cfg = AutoKConfig(
+        k_method="chi2_stop",
+        min_k=3,
+        max_k=5,
+        alpha=0.05,
+        stop_patience=1,
+    )
+    floor_k, floor_diag = select_k_chi2_stop(
+        np.zeros(5),
+        floor_cfg,
+        n_eff=100.0,
+        p_candidates=20,
+    )
+    assert floor_k == 3
+    assert floor_diag["stopped_by"].iloc[0] == "floored"
 
     low_cfg = AutoKConfig(k_method="forward_stop", min_k=0, max_k=5, alpha=0.05)
     high_cfg = AutoKConfig(k_method="forward_stop", min_k=0, max_k=5, alpha=0.20)
@@ -1259,8 +1342,8 @@ def test_knockoff_multi_draw_aggregation_clamps_to_max_k(monkeypatch):
         ]
     )
 
-    def fake_draw(_cache, _y, *, config, top_m, random_state):
-        del config, top_m, random_state
+    def fake_draw(_cache, _y, *, config, top_m, random_state, draw_state):
+        del config, top_m, random_state, draw_state
         selected = next(draws)
         diag = pd.DataFrame(
             {
@@ -1271,6 +1354,11 @@ def test_knockoff_multi_draw_aggregation_clamps_to_max_k(monkeypatch):
         return selected, int(selected.size), diag
 
     monkeypatch.setattr(auto_k_knockoff, "_draw_knockoff_path", fake_draw)
+    monkeypatch.setattr(
+        auto_k_knockoff,
+        "_prepare_knockoff_draw_state",
+        lambda cache, config: object(),
+    )
     cfg = AutoKConfig(
         k_method="knockoff_path",
         min_k=0,
@@ -1288,6 +1376,37 @@ def test_knockoff_multi_draw_aggregation_clamps_to_max_k(monkeypatch):
     assert k_hat == 2
     assert selected.tolist() == [0, 1]
     assert diag["selected_final"].sum() == 2
+    assert diag.attrs["q_scope"] == "per_draw"
+    assert diag.attrs["aggregation_fdr_control"] == "none"
+    assert not diag.attrs["aggregation_preserves_per_draw_fdr"]
+
+
+def test_knockoff_multi_draw_fits_model_once(monkeypatch):
+    rng = np.random.default_rng(1001)
+    X = pd.DataFrame(rng.normal(size=(90, 7)))
+    y = X.iloc[:, 0].to_numpy() + rng.normal(scale=0.5, size=len(X))
+    cache = build_cache(X, subsample=None, compute_Rxx=True)
+    original = auto_k_knockoff.fit_gaussian_knockoffs
+    calls = 0
+
+    def wrapped(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(auto_k_knockoff, "fit_gaussian_knockoffs", wrapped)
+    cfg = AutoKConfig(
+        k_method="knockoff_path",
+        min_k=0,
+        max_k=3,
+        knockoff_draws=3,
+        knockoff_q=0.5,
+        random_state=1001,
+    )
+
+    select_k_knockoff_path(cache, y, cfg, top_m=7)
+
+    assert calls == 1
 
 
 def test_knockoff_pair_table_seqstep_hand_computation():
@@ -1615,6 +1734,68 @@ def test_public_chi2_panel_mode_uses_screened_panel_width():
     assert diag["m_eff"].iloc[0] <= 6
 
 
+def test_consensus_gain_tests_preserve_panel_semantics(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(40, dtype=np.float64)
+        valid_cols = np.arange(20, dtype=np.int64)
+
+    captured = {}
+    panel_eigs = np.array([1.5, 0.5], dtype=np.float64)
+
+    monkeypatch.setattr(
+        filter_auto_k,
+        "_gain_test_candidate_inputs",
+        lambda *_args, **_kwargs: (6, panel_eigs),
+    )
+
+    def fake_chi(objective, config, *, n_eff, p_candidates, panel_eigs):
+        captured.update(
+            m_mode=config.m_mode,
+            p_candidates=p_candidates,
+            panel_eigs=panel_eigs,
+        )
+        return 2, pd.DataFrame()
+
+    monkeypatch.setattr(filter_auto_k, "select_k_chi2_stop", fake_chi)
+    cfg = AutoKConfig(
+        k_method="consensus",
+        min_k=0,
+        max_k=4,
+        m_mode="li_ji",
+        consensus_methods=("chi2_stop",),
+    )
+
+    k_hat, _ = filter_auto_k._consensus_method_k(
+        "chi2_stop",
+        cache=DummyCache(),
+        y=np.zeros(40),
+        method="cefsplus",
+        objective=np.arange(4, dtype=np.float64),
+        config=cfg,
+        top_m=6,
+        corr_prune="auto",
+        groups=None,
+        time=None,
+        source_groups=None,
+        source_time=None,
+        path_length=4,
+    )
+
+    assert k_hat == 2
+    assert captured["m_mode"] == "li_ji"
+    assert captured["p_candidates"] == 6
+    assert captured["panel_eigs"] is panel_eigs
+
+
+def test_consensus_submethods_get_distinct_deterministic_seeds():
+    first = filter_auto_k._consensus_method_seed(123, "perm_gap")
+    second = filter_auto_k._consensus_method_seed(123, "stability")
+
+    assert first == filter_auto_k._consensus_method_seed(123, "perm_gap")
+    assert first != second
+    assert isinstance(filter_auto_k._consensus_method_seed(-1, "perm_gap"), int)
+
+
 def test_gaussian_mrmr_stability_passes_selector_method(monkeypatch):
     rng = np.random.default_rng(1002)
     X = pd.DataFrame(rng.normal(size=(80, 8)), columns=[f"x{i}" for i in range(8)])
@@ -1813,6 +1994,72 @@ def test_auto_k_auto_router_fallback_records_metadata(monkeypatch):
     assert calls == ["gaussian_cv", "penalized_objective"]
     assert summary["auto_routing"]["primary"] == "gaussian_cv"
     assert summary["auto_routing"]["fallback"]["chosen"] == "penalized_objective"
+
+
+def test_auto_k_router_falls_back_on_degenerate_placeholder_selection(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(20, dtype=np.float64)
+        valid_cols = np.arange(5, dtype=np.int64)
+
+    calls = []
+
+    def fake_runner(routed_config, **_kwargs):
+        calls.append(routed_config.k_method)
+        if len(calls) == 1:
+            return ["x0"], [0], pd.DataFrame(), {
+                "selected_k": 1,
+                "stopped_by": "degenerate_folds",
+            }
+        return ["x1"], [1], pd.DataFrame(), {"selected_k": 1}
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+
+    selected, indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+        cache=DummyCache(),
+        y=np.zeros(20),
+        method="mrmr_quot",
+        max_k=4,
+        top_m=10,
+        auto_k_config=AutoKConfig(k_method="auto", min_k=1, max_k=4),
+        verbose=False,
+    )
+
+    assert selected == ["x1"]
+    assert indices == [1]
+    assert calls == ["gaussian_cv", "penalized_objective"]
+    assert summary["auto_routing"]["fallback"]["reason"].endswith("degenerate_folds")
+
+
+def test_score_curve_rejects_partial_fold_coverage_and_all_invalid_uses_floor():
+    from sift.selection.auto_k import choose_k_from_score_curve
+    from sift.selection.auto_k_core import build_score_curve_diagnostics
+
+    diagnostics = build_score_curve_diagnostics(
+        [1, 2, 3],
+        {
+            1: [1.0, 1.0, 1.0, 1.0, 1.0],
+            2: [0.5, np.inf, np.inf, np.inf, np.inf],
+            3: [0.9, 0.9, 0.9, 0.9, 0.9],
+        },
+    )
+    assert diagnostics.loc[diagnostics["k"] == 1, "score_mean"].iloc[0] == 1.0
+    assert np.isinf(diagnostics.loc[diagnostics["k"] == 2, "score_mean"].iloc[0])
+    assert diagnostics.loc[diagnostics["k"] == 2, "n_finite"].iloc[0] == 1
+
+    selected_k, _ = choose_k_from_score_curve(
+        diagnostics,
+        AutoKConfig(k_method="evaluate", min_k=1, max_k=3, selection_rule="best"),
+    )
+    assert selected_k == 3
+
+    with pytest.warns(UserWarning, match="method floor k=1"):
+        selected_k, selected_diag = choose_k_from_score_curve(
+            diagnostics.loc[diagnostics["k"] == 2],
+            AutoKConfig(k_method="evaluate", min_k=1, max_k=2),
+        )
+
+    assert selected_k == 1
+    assert not selected_diag["selected"].any()
 
 
 def test_auto_k_auto_router_warns_and_records_saturation(monkeypatch):

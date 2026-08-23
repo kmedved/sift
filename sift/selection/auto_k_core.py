@@ -136,7 +136,15 @@ def build_score_curve_diagnostics(
     for k in k_grid:
         values = np.asarray(split_scores.get(k, []), dtype=np.float64)
         finite = values[np.isfinite(values)]
-        score_mean = float(np.mean(values)) if values.size else float("inf")
+        # Prefix sizes must be compared on the same validation coverage. A k
+        # that succeeds on only one unusually favorable fold must not beat a k
+        # evaluated on every fold. Preserve finite counts for diagnostics, but
+        # make any partially failed row ineligible for selection.
+        score_mean = (
+            float(np.mean(values))
+            if values.size and finite.size == values.size
+            else float("inf")
+        )
         score_std = float(np.std(finite, ddof=1)) if finite.size >= 2 else float("nan")
         score_se = score_std / float(np.sqrt(finite.size)) if finite.size >= 2 else float("nan")
         rows.append(

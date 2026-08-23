@@ -289,6 +289,7 @@ class TestBorutaSelector:
         selector = BorutaSelector(
             task="classification",
             cat_encoding="loo_logit",
+            allow_full_data_target_encoding=True,
             max_iter=1,
             verbose=False,
         ).fit(X, y)
@@ -298,6 +299,29 @@ class TestBorutaSelector:
         assert pd.api.types.is_numeric_dtype(transformed["cat"])
         with pytest.raises(ValueError, match="requires a DataFrame"):
             selector.transform(X.to_numpy())
+
+    def test_supervised_categorical_encoding_requires_explicit_opt_in(self):
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(
+            {
+                "cat": pd.Series(rng.choice(list("abcdef"), size=60), dtype="category"),
+                "num": rng.normal(size=60),
+            }
+        )
+        y = (X["num"] > 0).astype(int).to_numpy()
+        with pytest.raises(ValueError, match="allow_full_data_target_encoding"):
+            BorutaSelector(task="classification", max_iter=1, verbose=False).fit(X, y)
+        with pytest.raises(ValueError, match="allow_full_data_target_encoding"):
+            select_boruta(X, y, task="classification", cat_encoding="loo_logit", max_iter=1, verbose=False)
+        # cat_encoding='none' with a raw categorical still fails the numeric check
+        with pytest.raises(ValueError, match="Non-numeric"):
+            select_boruta(X, y, task="classification", cat_encoding="none", max_iter=1, verbose=False)
+        # explicit opt-in restores the previous behavior
+        out = select_boruta(
+            X, y, task="classification", cat_encoding="loo_logit",
+            allow_full_data_target_encoding=True, max_iter=2, verbose=False,
+        )
+        assert isinstance(out, list)
 
     def test_failed_refit_clears_previous_fit_state(self, monkeypatch):
         X = pd.DataFrame(np.random.default_rng(0).normal(size=(40, 3)), columns=list("abc"))

@@ -63,6 +63,34 @@ def test_stability_selector_classification():
     assert selector.n_features_selected_ > 0
 
 
+def test_stability_selector_default_classification_alpha_stays_sparse():
+    rng = np.random.default_rng(1)
+    n, p = 600, 30
+    X = rng.normal(size=(n, p))
+    y = (
+        2.0 * X[:, 0]
+        - 1.7 * X[:, 1]
+        + 1.4 * X[:, 2]
+        + 1.1 * X[:, 3]
+        + rng.normal(size=n)
+        > 0.0
+    ).astype(int)
+
+    selector = StabilitySelector(
+        n_bootstrap=30,
+        threshold=0.6,
+        task="classification",
+        alpha=None,
+        random_state=1,
+        n_jobs=1,
+        verbose=False,
+    ).fit(X, y)
+
+    assert set(range(4)) <= set(selector.selected_features_.tolist())
+    assert selector.n_features_selected_ <= 8
+    assert float(np.max(selector.selection_frequencies_[4:])) < selector.threshold
+
+
 def test_plot_coef_distributions_rejects_empty_feature_list():
     selector = StabilitySelector(verbose=False)
     selector.coef_bootstrap_ = np.empty((1, 0), dtype=np.float32)
@@ -202,65 +230,186 @@ def test_stability_selector_validates_runtime_options(selector_kwargs, match):
         selector.fit(X, y)
 
 
-def test_tune_threshold_reuses_fit_time_imputation(monkeypatch):
-    rng = np.random.default_rng(777)
-    X_fit = pd.DataFrame(
-        {
-            "f0": [1.0, 3.0, np.nan, 7.0, 9.0, 11.0],
-            "f1": [2.0, np.nan, 6.0, 8.0, 10.0, 12.0],
-        }
+def test_tune_threshold_refits_selection_inside_each_outer_fold(monkeypatch):
+    X = np.arange(18, dtype=float).reshape(9, 2)
+    X[1, 0] = np.nan
+    y = np.arange(9, dtype=float)
+    fit_sizes = []
+    downstream_sizes = []
+
+    class FoldSelector:
+        def set_params(self, **kwargs):
+            return self
+
+        def fit(self, X_fit, y_fit):
+            fit_sizes.append((len(X_fit), len(y_fit), bool(np.isnan(X_fit).any())))
+            self.selection_frequencies_ = np.array([1.0, 0.0])
+            return self
+
+    class Downstream:
+        def fit(self, X_fit, y_fit):
+            downstream_sizes.append((len(X_fit), len(y_fit)))
+            return self
+
+    monkeypatch.setattr(stability_module, "clone", lambda selector: FoldSelector())
+    monkeypatch.setattr(stability_module, "make_pipeline", lambda *steps: Downstream())
+    monkeypatch.setattr(
+        stability_module,
+        "get_scorer",
+        lambda scoring: lambda model, X_val, y_val: float(len(X_val)),
     )
-    y_fit = X_fit["f0"].fillna(0).to_numpy() + rng.normal(size=len(X_fit)) * 0.01
 
-    selector = StabilitySelector(
-        n_bootstrap=2,
-        threshold=0.1,
-        alpha=0.1,
-        n_jobs=1,
-        verbose=False,
-    )
-    selector.fit(X_fit, y_fit)
+    selector = StabilitySelector(alpha=0.1, n_jobs=1, random_state=0, verbose=False)
+    selector.selection_frequencies_ = np.array([1.0, 0.0])
+    selector.feature_names_in_ = ["x0", "x1"]
+    selector.n_features_in_ = 2
 
-    selector.selection_frequencies_ = np.array([1.0, 0.0], dtype=np.float32)
-
-    X_tune = pd.DataFrame(
-        {
-            "f0": [100.0, np.nan, 300.0, 400.0],
-            "f1": [np.nan, 500.0, 600.0, 700.0],
-        }
-    )
-    y_tune = np.array([1.0, 2.0, 3.0, 4.0])
-
-    captured = {}
-
-    def fake_cross_val_score(model, X, y, cv=None, scoring=None):
-        captured["X"] = np.array(X, copy=True)
-        captured["y"] = np.array(y, copy=True)
-        captured["cv"] = cv
-        captured["scoring"] = scoring
-        return np.array([0.25, 0.5, 0.75], dtype=np.float32)
-
-    monkeypatch.setattr("sklearn.model_selection.cross_val_score", fake_cross_val_score)
-
-    best_threshold, results = selector.tune_threshold(X_tune, y_tune, thresholds=[0.5], cv=3)
+    best_threshold, results = selector.tune_threshold(X, y, thresholds=[0.5], cv=3)
 
     assert best_threshold == 0.5
-    assert results.loc[0, "n_features"] == 1
-    assert captured["cv"] == 3
-    assert captured["scoring"] == "r2"
+    assert [(n_x, n_y) for n_x, n_y, _ in fit_sizes] == [(6, 6)] * 3
+    assert sorted(has_nan for _, _, has_nan in fit_sizes) == [False, True, True]
+    assert downstream_sizes == [(6, 6), (6, 6), (6, 6)]
+    assert results.loc[0, "n_features"] == 1.0
+    assert results.loc[0, "n_finite"] == 3
 
-    expected_imputed = np.array(
-        [
-            [100.0, 7.6],
-            [6.2, 500.0],
-            [300.0, 600.0],
-            [400.0, 700.0],
-        ],
-        dtype=np.float32,
+
+def test_tune_threshold_aligns_reordered_dataframe_columns(monkeypatch):
+    X = pd.DataFrame(
+        {
+            "extra": np.arange(12, dtype=float),
+            "f1": np.linspace(1.0, 2.0, 12),
+            "f0": np.linspace(-1.0, 1.0, 12),
+        }
     )
-    expected_scaled = selector._scaler.transform(expected_imputed)
+    y = X["f0"].to_numpy()
+    seen_columns = []
 
-    np.testing.assert_allclose(captured["X"], expected_scaled[:, [0]])
+    class FoldSelector:
+        def set_params(self, **kwargs):
+            return self
+
+        def fit(self, X_fit, y_fit):
+            del y_fit
+            seen_columns.append(list(X_fit.columns))
+            self.selection_frequencies_ = np.array([1.0, 0.0])
+            return self
+
+    class Downstream:
+        def fit(self, X_fit, y_fit):
+            del X_fit, y_fit
+            return self
+
+    monkeypatch.setattr(stability_module, "clone", lambda selector: FoldSelector())
+    monkeypatch.setattr(stability_module, "make_pipeline", lambda *steps: Downstream())
+    monkeypatch.setattr(
+        stability_module,
+        "get_scorer",
+        lambda scoring: lambda model, X_val, y_val: 1.0,
+    )
+
+    selector = StabilitySelector(alpha=0.1, n_jobs=1, random_state=0, verbose=False)
+    selector.selection_frequencies_ = np.array([1.0, 0.0])
+    selector.feature_names_in_ = ["f0", "f1"]
+    selector.n_features_in_ = 2
+
+    selector.tune_threshold(X, y, thresholds=[0.5], cv=3)
+
+    assert seen_columns == [["f0", "f1"]] * 3
+
+
+def test_tune_threshold_forwards_weight_group_and_time_context(monkeypatch):
+    X = np.arange(48, dtype=float).reshape(12, 4)
+    y = np.arange(12, dtype=float)
+    weights = np.linspace(0.5, 2.0, 12)
+    groups = np.repeat(np.arange(4), 3)
+    time = np.tile(np.arange(3), 4)
+    seen_fit_kwargs = []
+    seen_downstream_kwargs = []
+
+    class FoldSelector:
+        def set_params(self, **kwargs):
+            return self
+
+        def fit(self, X_fit, y_fit, **kwargs):
+            assert len(X_fit) == len(y_fit)
+            seen_fit_kwargs.append(kwargs)
+            self.selection_frequencies_ = np.array([1.0, 0.0, 0.0, 0.0])
+            return self
+
+    class Downstream:
+        steps = [("model", object())]
+
+        def fit(self, X_fit, y_fit, **kwargs):
+            assert len(X_fit) == len(y_fit)
+            seen_downstream_kwargs.append(kwargs)
+            return self
+
+    monkeypatch.setattr(stability_module, "clone", lambda selector: FoldSelector())
+    monkeypatch.setattr(stability_module, "make_pipeline", lambda *steps: Downstream())
+    monkeypatch.setattr(
+        stability_module,
+        "get_scorer",
+        lambda scoring: lambda model, X_val, y_val, **kwargs: 1.0,
+    )
+
+    selector = StabilitySelector(alpha=0.1, n_jobs=1, random_state=0, verbose=False)
+    selector.selection_frequencies_ = np.array([1.0, 0.0, 0.0, 0.0])
+    selector.feature_names_in_ = ["x0", "x1", "x2", "x3"]
+    selector.n_features_in_ = 4
+    selector._fit_used_sample_weight_ = True
+    selector._fit_used_groups_ = True
+    selector._fit_used_time_ = True
+
+    with pytest.raises(ValueError, match="sample_weight, groups, time"):
+        selector.tune_threshold(X, y, thresholds=[0.5], cv=2)
+
+    selector.tune_threshold(
+        X,
+        y,
+        thresholds=[0.5],
+        cv=2,
+        sample_weight=weights,
+        groups=groups,
+        time=time,
+    )
+
+    assert len(seen_fit_kwargs) == 2
+    for kwargs in seen_fit_kwargs:
+        assert set(kwargs) == {"sample_weight", "groups", "time"}
+        assert len(kwargs["sample_weight"]) == len(kwargs["groups"]) == len(kwargs["time"])
+        assert len(np.unique(kwargs["groups"])) < len(np.unique(groups))
+    assert len(seen_downstream_kwargs) == 2
+    assert all("model__sample_weight" in kwargs for kwargs in seen_downstream_kwargs)
+
+
+def test_find_alpha_uses_fold_local_preprocessing_pipeline(monkeypatch):
+    captured = {}
+
+    class FakeSearch:
+        def __init__(self, estimator, **kwargs):
+            captured["steps"] = [name for name, _ in estimator.steps]
+            captured["kwargs"] = kwargs
+            self.best_params_ = {"model__alpha": 0.25}
+
+        def fit(self, X_fit, y_fit, **fit_params):
+            captured["X"] = np.asarray(X_fit)
+            captured["fit_params"] = fit_params
+            return self
+
+    monkeypatch.setattr(stability_module, "GridSearchCV", FakeSearch)
+    X = np.arange(24, dtype=float).reshape(12, 2)
+    X[3, 0] = np.nan
+    y = np.arange(12, dtype=float)
+    weights = np.ones(12)
+    selector = StabilitySelector(alpha=None, n_jobs=1, random_state=0, verbose=False)
+
+    alpha = selector._find_alpha(X, y, weights)
+
+    assert alpha == 0.25
+    assert captured["steps"] == ["imputer", "scaler", "model"]
+    assert np.isnan(captured["X"]).any()
+    assert "model__sample_weight" in captured["fit_params"]
 
 
 def test_tune_threshold_default_thresholds_are_immutable():

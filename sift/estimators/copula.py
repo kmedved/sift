@@ -11,7 +11,7 @@ from scipy.special import ndtri
 
 from sift._numba import njit_optional_cache
 
-RankBackend = Literal["serial", "processes"]
+RankBackend = Literal["serial", "threads", "processes"]
 
 
 @dataclass
@@ -90,7 +90,7 @@ def build_cache(
     Rxx = weighted_correlation_matrix(Z, ws) if compute_Rxx else None
 
     return FeatureCache(
-        Z=Z.astype(np.float32),
+        Z=Z.astype(np.float32, copy=False),
         Rxx=Rxx.astype(np.float32) if Rxx is not None else None,
         valid_cols=valid_cols,
         row_idx=row_idx,
@@ -101,58 +101,131 @@ def build_cache(
     )
 
 
-def weighted_rank_gauss_1d(x: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Weighted rank-based Gaussian transform."""
+def _standardized_gauss_scores(ranks: np.ndarray, w_sorted: np.ndarray, total: float) -> np.ndarray:
+    """Map weighted mid-ranks to weighted-standardized Gaussian scores."""
+    u = ranks / total
+    np.clip(u, 1e-6, 1 - 1e-6, out=u)
+    z = ndtri(u)
+    z_mean = np.dot(w_sorted, z) / total
+    z -= z_mean
+    z_var = np.dot(w_sorted, z * z) / total
+    z_std = np.sqrt(z_var) if z_var > 1e-12 else 1.0
+    z /= z_std
+    return z
+
+
+def _uniform_gauss_template(m: int, weight: float = 1.0) -> np.ndarray:
+    """Standardized Gaussian scores for ``m`` untied rows with equal weights.
+
+    With constant weights and no ties the weighted mid-rank of the ``i``-th
+    sorted value is ``(i + 0.5) * w`` out of ``m * w``, so the transformed
+    column is the same vector for every feature; only the sort order differs.
+    The arithmetic mirrors the general path exactly so the template is
+    bitwise identical to a per-column computation.
+    """
+    w_sorted = np.full(m, float(weight), dtype=np.float64)
+    return _standardized_gauss_scores(_untied_ranks(w_sorted), w_sorted, float(w_sorted.sum()))
+
+
+def _untied_ranks(w_sorted: np.ndarray) -> np.ndarray:
+    """Weighted mid-ranks for untied sorted rows (same arithmetic as tie blocks)."""
+    m = w_sorted.shape[0]
+    ranks = np.empty(m, dtype=np.float64)
+    ranks[0] = 0.0
+    if m > 1:
+        np.cumsum(w_sorted[:-1], out=ranks[1:])
+    ranks += 0.5 * w_sorted
+    return ranks
+
+
+def weighted_rank_gauss_1d(
+    x: np.ndarray,
+    w: np.ndarray,
+    *,
+    _template: np.ndarray | None = None,
+) -> np.ndarray:
+    """Weighted rank-based Gaussian transform.
+
+    Ties receive the same weighted mid-rank. Weights are accumulated in
+    float64 regardless of the input dtype. ``_template`` is an internal
+    fast-path hook used by :func:`weighted_rank_gauss_2d`: when all weights are
+    equal and a column has no ties or missing values, the standardized scores
+    of the sorted column equal a precomputed template and only need to be
+    scattered back into row order.
+    """
     mask = np.isfinite(x)
-    m = mask.sum()
+    m = int(mask.sum())
     if m <= 1:
         return np.zeros_like(x, dtype=np.float32)
 
-    x_valid = x[mask]
-    w_valid = w[mask]
+    w64 = np.asarray(w, dtype=np.float64)
+    all_finite = m == x.shape[0]
+    x_valid = x if all_finite else x[mask]
+    w_valid = w64 if all_finite else w64[mask]
 
-    order = np.argsort(x_valid, kind="mergesort")
+    # Tie blocks make the result independent of the within-tie order (up to
+    # float64 summation order of tied weights, invisible after the float32
+    # cast), so the faster default introsort is safe here.
+    order = np.argsort(x_valid, kind="quicksort")
     x_sorted = x_valid[order]
-    w_sorted = w_valid[order]
 
+    block_start = np.empty(m, dtype=bool)
+    block_start[0] = True
+    np.not_equal(x_sorted[1:], x_sorted[:-1], out=block_start[1:])
+    no_ties = bool(block_start.all())
+
+    if no_ties and all_finite and _template is not None and _template.shape[0] == m:
+        out = np.empty(x.shape[0], dtype=np.float32)
+        out[order] = _template
+        return out
+
+    w_sorted = w_valid[order]
     total = float(w_sorted.sum())
     if not np.isfinite(total) or total <= 0.0:
         return np.zeros_like(x, dtype=np.float32)
 
-    block_start = np.empty(m, dtype=bool)
-    block_start[0] = True
-    block_start[1:] = x_sorted[1:] != x_sorted[:-1]
-    starts = np.flatnonzero(block_start)
-    block_weights = np.add.reduceat(w_sorted, starts)
-    cum_before = np.empty_like(block_weights, dtype=np.float64)
-    cum_before[0] = 0.0
-    if block_weights.shape[0] > 1:
-        cum_before[1:] = np.cumsum(block_weights[:-1])
-    block_ranks = cum_before + 0.5 * block_weights
-    block_lengths = np.diff(np.append(starts, m))
-    ranks = np.repeat(block_ranks, block_lengths)
+    if no_ties:
+        ranks = _untied_ranks(w_sorted)
+    else:
+        starts = np.flatnonzero(block_start)
+        block_weights = np.add.reduceat(w_sorted, starts)
+        cum_before = np.empty_like(block_weights, dtype=np.float64)
+        cum_before[0] = 0.0
+        if block_weights.shape[0] > 1:
+            np.cumsum(block_weights[:-1], out=cum_before[1:])
+        block_ranks = cum_before + 0.5 * block_weights
+        block_lengths = np.diff(np.append(starts, m))
+        ranks = np.repeat(block_ranks, block_lengths)
 
-    u = np.clip(ranks / total, 1e-6, 1 - 1e-6)
-    z = ndtri(u)
+    z = _standardized_gauss_scores(ranks, w_sorted, total)
 
-    z_mean = np.dot(w_sorted, z) / total
-    z_centered = z - z_mean
-    z_var = np.dot(w_sorted, z_centered ** 2) / total
-    z_std = np.sqrt(z_var) if z_var > 1e-12 else 1.0
-    z_standardized = z_centered / z_std
-
-    inv_order = np.argsort(order)
-    out = np.zeros_like(x, dtype=np.float32)
-    out[mask] = z_standardized[inv_order].astype(np.float32)
+    if all_finite:
+        out = np.empty(x.shape[0], dtype=np.float32)
+        out[order] = z
+        return out
+    scattered = np.empty(m, dtype=np.float32)
+    scattered[order] = z
+    out = np.zeros(x.shape[0], dtype=np.float32)
+    out[mask] = scattered
     return out
 
 
 def _validate_rank_backend(rank_backend: RankBackend, n_jobs: int) -> RankBackend:
     if n_jobs == 0:
         raise ValueError("n_jobs must not be 0")
-    if rank_backend not in ("serial", "processes"):
-        raise ValueError("rank_backend must be one of 'serial' or 'processes'")
+    if rank_backend not in ("serial", "threads", "processes"):
+        raise ValueError("rank_backend must be one of 'serial', 'threads', or 'processes'")
     return rank_backend
+
+
+def _rank_gauss_template(w: np.ndarray, n: int) -> np.ndarray | None:
+    """Return the shared no-tie template when all weights are equal."""
+    w_arr = np.asarray(w)
+    if n <= 1 or w_arr.shape[0] != n:
+        return None
+    if not np.all(w_arr == w_arr[0]) or not np.isfinite(w_arr[0]) or w_arr[0] <= 0.0:
+        return None
+    return _uniform_gauss_template(n, float(w_arr[0])).astype(np.float32)
 
 
 def _weighted_rank_gauss_chunk(
@@ -160,11 +233,24 @@ def _weighted_rank_gauss_chunk(
     w: np.ndarray,
     start: int,
     stop: int,
+    template: np.ndarray | None = None,
 ) -> tuple[int, np.ndarray]:
     chunk = np.empty((X.shape[0], stop - start), dtype=np.float32)
     for offset, j in enumerate(range(start, stop)):
-        chunk[:, offset] = weighted_rank_gauss_1d(X[:, j], w)
+        chunk[:, offset] = weighted_rank_gauss_1d(X[:, j], w, _template=template)
     return start, chunk
+
+
+def _weighted_rank_gauss_into(
+    Z: np.ndarray,
+    X: np.ndarray,
+    w: np.ndarray,
+    start: int,
+    stop: int,
+    template: np.ndarray | None,
+) -> None:
+    for j in range(start, stop):
+        Z[:, j] = weighted_rank_gauss_1d(X[:, j], w, _template=template)
 
 
 def weighted_rank_gauss_2d(
@@ -174,18 +260,32 @@ def weighted_rank_gauss_2d(
     n_jobs: int = 1,
     rank_backend: RankBackend = "serial",
 ) -> np.ndarray:
+    """Column-wise weighted rank-Gaussian transform.
+
+    ``rank_backend="threads"`` parallelizes columns with threads (the sort and
+    the Gaussian quantile release the GIL); ``"processes"`` uses joblib process
+    workers, which costs a copy of ``X`` per worker.
+    """
     rank_backend = _validate_rank_backend(rank_backend, n_jobs)
     n, p = X.shape
     Z = np.empty((n, p), dtype=np.float32)
+    template = _rank_gauss_template(w, n)
     n_workers = max(1, min(p, effective_n_jobs(n_jobs))) if p else 1
     if rank_backend == "serial" or n_workers <= 1:
-        for j in range(p):
-            Z[:, j] = weighted_rank_gauss_1d(X[:, j], w)
+        _weighted_rank_gauss_into(Z, X, w, 0, p, template)
         return Z
 
     bounds = np.linspace(0, p, n_workers + 1, dtype=np.int64)
+    if rank_backend == "threads":
+        Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_weighted_rank_gauss_into)(Z, X, w, int(bounds[i]), int(bounds[i + 1]), template)
+            for i in range(n_workers)
+            if bounds[i] < bounds[i + 1]
+        )
+        return Z
+
     chunks = Parallel(n_jobs=n_jobs, prefer="processes", max_nbytes="16M", batch_size=1)(
-        delayed(_weighted_rank_gauss_chunk)(X, w, int(bounds[i]), int(bounds[i + 1]))
+        delayed(_weighted_rank_gauss_chunk)(X, w, int(bounds[i]), int(bounds[i + 1]), template)
         for i in range(n_workers)
         if bounds[i] < bounds[i + 1]
     )
@@ -242,14 +342,24 @@ def weighted_correlation_matrix_blas(
 
     R = np.zeros((p, p), dtype=np.float64)
     batch_size = max(1, int(batch_size))
+    sqrt_w = np.sqrt(w)
 
     for start in range(0, n, batch_size):
         stop = min(n, start + batch_size)
-        Zb = Z[start:stop]
-        wb = w[start:stop]
-        if Zb.dtype != np.float64:
-            Zb = Zb.astype(np.float64, copy=False)
-        R += Zb.T @ (Zb * wb[:, None])
+        # Scale rows by sqrt(w) so the weighted Gram is a symmetric rank-k
+        # update (Zw' Zw), which BLAS computes with half the flops of Z' (w Z).
+        Zw = Z[start:stop] * sqrt_w[start:stop, None]
+        if Zw.dtype != np.float64:
+            Zw = Zw.astype(np.float64, copy=False)
+        # Some CatBoost/OpenMP builds leave stale floating-point status flags
+        # that NumPy reports on the next finite BLAS matmul. Suppress only the
+        # operation-level warning and validate the accumulated Gram below so
+        # genuine overflow/non-finite output still fails explicitly.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            R += Zw.T @ Zw
+
+    if not np.isfinite(R).all():
+        raise FloatingPointError("Weighted correlation Gram was non-finite")
 
     R /= w_sum
     R = 0.5 * (R + R.T)
@@ -408,11 +518,7 @@ def greedy_corr_prune(
         if not active[i]:
             continue
         keep.append(fi)
-
-        for j in range(i + 1, len(order)):
-            if active[j]:
-                fj = order[j]
-                if np.abs(Rxx[fi, fj]) >= threshold:
-                    active[j] = False
+        later = order[i + 1 :]
+        active[i + 1 :] &= ~(np.abs(Rxx[fi, later]) >= threshold)
 
     return np.array(keep, dtype=np.int64)

@@ -80,6 +80,50 @@ def test_select_cached_rejects_y_length_mismatch():
         select_cached(cache, np.r_[y, 0.0], k=3)
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_select_cached_rejects_nonfinite_target(bad):
+    rng = np.random.default_rng(910)
+    X = rng.normal(size=(60, 8))
+    y = rng.normal(size=60)
+    y[7] = bad
+    cache = build_cache(X, subsample=None)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        select_cached(cache, y, k=3)
+
+
+@pytest.mark.parametrize("corr_prune", [1.0001, 120.0])
+def test_gaussian_corr_prune_rejects_thresholds_above_one(corr_prune):
+    rng = np.random.default_rng(911)
+    X = rng.normal(size=(60, 8))
+    y = rng.normal(size=60)
+    cache = build_cache(X, subsample=None)
+
+    with pytest.raises(ValueError, match=r"\(0, 1\]"):
+        select_cached(cache, y, k=3, corr_prune=corr_prune)
+
+
+def test_classic_r2_selectors_are_invariant_to_tiny_feature_scale():
+    rng = np.random.default_rng(912)
+    signal = rng.normal(size=160)
+    noise = rng.normal(size=(160, 5))
+    X = pd.DataFrame(
+        np.column_stack([signal, noise]),
+        columns=["signal", "n1", "n2", "n3", "n4", "n5"],
+    )
+    X_tiny = X.copy()
+    X_tiny["signal"] *= 1e-7
+    y = signal + rng.normal(scale=0.05, size=len(signal))
+
+    for selector in (select_mrmr, select_jmi, select_jmim):
+        kwargs = {"task": "regression", "estimator": "classic"}
+        if selector is not select_mrmr:
+            kwargs["estimator"] = "r2"
+        expected = selector(X, y, k=3, verbose=False, **kwargs)
+        actual = selector(X_tiny, y, k=3, verbose=False, **kwargs)
+        assert actual == expected
+
+
 def test_compute_objective_for_path_rejects_y_length_mismatch():
     rng = np.random.default_rng(42)
     n, p = 50, 6

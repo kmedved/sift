@@ -10,6 +10,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from scipy.linalg import LinAlgError, cho_factor, cho_solve
+
 from sift._preprocess import to_numpy
 from sift.estimators.copula import (
     FeatureCache,
@@ -31,6 +33,7 @@ _STATISTIC_NOT_ENABLED = (
     "is reserved for a future tie-safe knockoff statistic and is not yet enabled"
 )
 _CEFSPLUS_DEFAULT_PATH_DEPTH = 10
+_LOW_POWER_S = 0.05
 _INTEGER_TARGET_WARNING_EMITTED = False
 
 
@@ -325,7 +328,7 @@ def _resolve_cache(
         random_state=random_state,
         compute_Rxx=True,
         n_jobs=n_jobs,
-        rank_backend="processes" if n_jobs != 1 else "serial",
+        rank_backend="threads" if n_jobs != 1 else "serial",
     )
 
 
@@ -391,14 +394,24 @@ def _build_context(
     build_augmented: bool = True,
     statistic_name: str = "",
     r: np.ndarray | None = None,
+    fixed_kept: np.ndarray | None = None,
+    fixed_G: np.ndarray | None = None,
 ) -> KnockoffStatContext:
     r = np.asarray(weighted_corr_with_vector(Z, zy, w) if r is None else r, dtype=np.float64).ravel()
     if r.shape[0] != Z.shape[1]:
         raise ValueError("precomputed r length must match Z columns")
     rt = np.asarray(weighted_corr_with_vector(Zt, zy, w), dtype=np.float64).ravel()
-    kept = _pair_screen(r, rt, screen_pairs)
+    kept = (
+        _pair_screen(r, rt, screen_pairs)
+        if fixed_kept is None
+        else np.asarray(fixed_kept, dtype=np.int64)
+    )
     if build_augmented:
-        G = _build_augmented_correlation(model, kept)
+        G = (
+            _build_augmented_correlation(model, kept)
+            if fixed_G is None
+            else np.asarray(fixed_G, dtype=np.float64)
+        )
         r_aug = np.concatenate([r[kept], rt[kept]]).astype(np.float64, copy=False)
     else:
         G = np.empty((0, 0), dtype=np.float64)
@@ -684,6 +697,126 @@ def _stat_cefsplus(context: KnockoffStatContext) -> np.ndarray:
     return out
 
 
+def _stat_ridge(context: KnockoffStatContext) -> np.ndarray:
+    """Ridge coefficient difference on the analytic augmented correlation.
+
+    ``beta = (G + lambda I)^{-1} [r; r_tilde]`` where ``G`` is the analytic
+    original/knockoff correlation of the screened pairs. ``G`` is invariant
+    under swapping a feature with its knockoff, so swapping ``r_j`` and
+    ``r_tilde_j`` swaps ``beta_j`` and ``beta_{j+m}`` exactly and
+    ``W_j = |beta_j| - |beta_{j+m}|`` flips sign: the statistic is
+    antisymmetric by construction, with no path or tie dependence.
+    """
+    kept = context.kept
+    m = kept.shape[0]
+    out = np.zeros(context.Z.shape[1], dtype=np.float64)
+    if m == 0:
+        return out
+    lam = _validate_nonnegative_float(context.options.get("ridge_lambda", 0.5), "ridge_lambda")
+    if lam <= 0.0:
+        raise ValueError("ridge_lambda must be > 0")
+    G = np.asarray(context.G, dtype=np.float64)
+    r_aug = np.asarray(context.r_aug, dtype=np.float64)
+    A = G + lam * np.eye(G.shape[0], dtype=np.float64)
+    try:
+        cf = cho_factor(A, lower=True, check_finite=False)
+        beta = cho_solve(cf, r_aug, check_finite=False)
+    except LinAlgError:
+        beta = np.linalg.lstsq(A, r_aug, rcond=None)[0]
+    out[kept] = np.abs(beta[:m]) - np.abs(beta[m:])
+    return out
+
+
+def _lasso_entry_penalties(
+    alphas: np.ndarray,
+    coef_path: np.ndarray,
+    final_active: Sequence[int],
+) -> np.ndarray:
+    """Recover first-entry penalties from a LARS coefficient path.
+
+    ``lars_path_gram(..., method="lasso")`` returns the active variables at
+    the *end* of the path. Variables can drop and re-enter, so that final list
+    cannot be zipped to the path alphas. A variable first becomes nonzero one
+    knot after it is admitted; its entry penalty is therefore the preceding
+    alpha. A final active variable that was admitted at the truncated last knot
+    can still have an all-zero coefficient path, so retain that one boundary
+    case at the last returned alpha.
+    """
+    alpha_arr = np.asarray(alphas, dtype=np.float64).ravel()
+    coefs = np.asarray(coef_path, dtype=np.float64)
+    if coefs.ndim != 2:
+        raise ValueError("coef_path must be a 2D array")
+    if coefs.shape[1] != alpha_arr.shape[0]:
+        raise ValueError("coef_path columns must match the number of alphas")
+
+    n_features = coefs.shape[0]
+    entry = np.zeros(n_features, dtype=np.float64)
+    if alpha_arr.size == 0 or n_features == 0:
+        return entry
+
+    nonzero = coefs != 0.0
+    entered = np.any(nonzero, axis=1)
+    first_nonzero = np.argmax(nonzero, axis=1)
+    entered_idx = np.flatnonzero(entered)
+    if entered_idx.size:
+        alpha_idx = np.maximum(first_nonzero[entered_idx] - 1, 0)
+        entry[entered_idx] = np.maximum(alpha_arr[alpha_idx], 0.0)
+
+    # When max_iter truncates immediately after admitting a variable, its
+    # coefficient has not yet moved away from zero. It is nevertheless in the
+    # returned terminal active set and entered at the final knot.
+    for col in np.asarray(final_active, dtype=np.int64):
+        col_int = int(col)
+        if 0 <= col_int < n_features and not entered[col_int]:
+            entry[col_int] = float(max(alpha_arr[-1], 0.0))
+    return entry
+
+
+def _stat_lsm(context: KnockoffStatContext) -> np.ndarray:
+    """Lasso signed-max statistic from a Gram-form LARS path.
+
+    Runs the lasso path (LARS) on the analytic augmented correlation ``G`` and
+    the observed correlations ``[r; r_tilde]`` and records the penalty at which
+    each column first enters. ``W_j = max(Z_j, Z_tilde_j) * sign(Z_j -
+    Z_tilde_j)``. Because ``G`` is swap-invariant and LARS is permutation
+    equivariant, swapping a pair swaps the entry penalties and flips ``W_j``.
+    Columns that never enter within ``max_steps`` get ``Z = 0``; a pair with
+    both entries zero contributes ``W = 0`` and is ignored by the threshold.
+    """
+    from sklearn.linear_model import lars_path_gram
+
+    kept = context.kept
+    m = kept.shape[0]
+    out = np.zeros(context.Z.shape[1], dtype=np.float64)
+    if m == 0:
+        return out
+    n_rows = int(context.Z.shape[0])
+    max_steps_opt = context.options.get("max_steps")
+    if max_steps_opt is None:
+        max_steps = min(2 * m, max(200, 4 * _CEFSPLUS_DEFAULT_PATH_DEPTH * 10))
+    else:
+        max_steps = min(2 * m, _validate_positive_int(max_steps_opt, "max_steps"))
+    G = np.asarray(context.G, dtype=np.float64)
+    r_aug = np.asarray(context.r_aug, dtype=np.float64)
+    if np.all(np.abs(r_aug) <= 1e-12):
+        return out
+    # Scale by n so the penalties live on the usual lasso scale; LARS is
+    # equivariant to this common scaling of Gram and Xy.
+    alphas, active, coefs = lars_path_gram(
+        Xy=r_aug * n_rows,
+        Gram=G * n_rows,
+        n_samples=n_rows,
+        method="lasso",
+        max_iter=int(max_steps),
+        eps=np.finfo(np.float64).eps,
+    )
+    entry = _lasso_entry_penalties(alphas, coefs, active)
+    z_orig = entry[:m]
+    z_ko = entry[m:]
+    out[kept] = np.maximum(z_orig, z_ko) * np.sign(z_orig - z_ko)
+    return out
+
+
 def _reserved_statistic(context: KnockoffStatContext) -> np.ndarray:
     name = context.statistic_name or "statistic"
     raise ValueError(f"{name} {_STATISTIC_NOT_ENABLED}")
@@ -710,6 +843,20 @@ _KNOCKOFF_STAT_REGISTRY: dict[str, KnockoffStatSpec] = {
         enabled=True,
         needs_screening=True,
         allowed_options=frozenset({"path_depth", "min_gain_ratio"}),
+    ),
+    "lsm": KnockoffStatSpec(
+        "lsm",
+        _stat_lsm,
+        enabled=True,
+        needs_screening=True,
+        allowed_options=frozenset({"max_steps"}),
+    ),
+    "ridge": KnockoffStatSpec(
+        "ridge",
+        _stat_ridge,
+        enabled=True,
+        needs_screening=True,
+        allowed_options=frozenset({"ridge_lambda"}),
     ),
     "mrmr_diff": KnockoffStatSpec("mrmr_diff", _reserved_statistic, enabled=False),
     "mrmr_quot": KnockoffStatSpec("mrmr_quot", _reserved_statistic, enabled=False),
@@ -738,11 +885,19 @@ def knockoff_threshold(W: np.ndarray, q: float, *, offset: int = 1) -> float:
     W_arr = np.asarray(W, dtype=np.float64).ravel()
     if not np.isfinite(W_arr).all():
         raise ValueError("W must contain only finite values")
-    ts = np.unique(np.abs(W_arr[W_arr != 0.0]))
-    for t in ts:
-        fdp = (offset_int + np.sum(W_arr <= -t)) / max(1, np.sum(W_arr >= t))
-        if fdp <= q_float:
-            return float(t)
+    positive = np.sort(W_arr[W_arr > 0.0])
+    negative_magnitudes = np.sort(-W_arr[W_arr < 0.0])
+    if positive.size == 0 and negative_magnitudes.size == 0:
+        return float(np.inf)
+    ts = np.union1d(positive, negative_magnitudes)
+    n_positive = positive.size - np.searchsorted(positive, ts, side="left")
+    n_negative = negative_magnitudes.size - np.searchsorted(
+        negative_magnitudes, ts, side="left"
+    )
+    fdp = (offset_int + n_negative) / np.maximum(1, n_positive)
+    eligible = np.flatnonzero(fdp <= q_float)
+    if eligible.size:
+        return float(ts[int(eligible[0])])
     return float(np.inf)
 
 
@@ -866,6 +1021,203 @@ def _all_zero_result(
     )
 
 
+def cluster_feature_groups(
+    Rxx: np.ndarray,
+    *,
+    corr_threshold: float = 0.7,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cluster features by absolute correlation and pick a medoid per cluster.
+
+    Returns ``(labels, representatives)`` where ``labels[j]`` is the 0-based
+    cluster id of feature ``j`` and ``representatives[c]`` is the member of
+    cluster ``c`` with the largest total absolute correlation to its cluster.
+    Uses average linkage on ``1 - |R|`` cut at ``1 - corr_threshold``.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
+
+    threshold = float(corr_threshold)
+    if not np.isfinite(threshold) or not 0.0 < threshold < 1.0:
+        raise ValueError("group_corr_threshold must be a finite float in (0, 1)")
+    R = np.abs(np.asarray(Rxx, dtype=np.float64))
+    p = R.shape[0]
+    if R.ndim != 2 or R.shape != (p, p):
+        raise ValueError("Rxx must be a square correlation matrix")
+    if p == 1:
+        return np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64)
+    R = 0.5 * (R + R.T)
+    np.fill_diagonal(R, 1.0)
+    D = np.clip(1.0 - R, 0.0, 2.0)
+    np.fill_diagonal(D, 0.0)
+    Z_link = linkage(squareform(D, checks=False), method="average")
+    raw = fcluster(Z_link, t=1.0 - threshold, criterion="distance")
+    _, labels = np.unique(raw, return_inverse=True)
+    labels = labels.astype(np.int64)
+    n_clusters = int(labels.max()) + 1
+    reps = np.empty(n_clusters, dtype=np.int64)
+    for c in range(n_clusters):
+        members = np.flatnonzero(labels == c)
+        if members.shape[0] == 1:
+            reps[c] = members[0]
+            continue
+        sub = R[np.ix_(members, members)]
+        reps[c] = members[int(np.argmax(sub.sum(axis=1)))]
+    return labels, reps
+
+
+def _select_fdr_cluster_representatives(
+    cache: FeatureCache,
+    y,
+    *,
+    q: float,
+    statistic: str,
+    n_draws: int,
+    eta: float,
+    offset: int,
+    s_method: str,
+    min_eig: float,
+    screen_pairs: int | None,
+    statistic_options: dict,
+    group_corr_threshold: float,
+    random_state: int,
+    n_jobs: int,
+    verbose: bool,
+) -> KnockoffSelectionResult:
+    p_valid = cache.Z.shape[1]
+    active_all = np.ones(p_valid, dtype=bool)
+    R_full = _build_active_rxx(cache, active_all, verbose=verbose)
+    labels, reps = cluster_feature_groups(R_full, corr_threshold=group_corr_threshold)
+    reps_sorted = np.sort(reps)
+    reduced = FeatureCache(
+        Z=np.ascontiguousarray(cache.Z[:, reps_sorted]),
+        Rxx=np.ascontiguousarray(R_full[np.ix_(reps_sorted, reps_sorted)]).astype(np.float32),
+        valid_cols=np.asarray(cache.valid_cols, dtype=np.int64)[reps_sorted],
+        row_idx=cache.row_idx,
+        sample_weight=cache.sample_weight,
+        n_rows_original=cache.n_rows_original,
+        feature_names=cache.feature_names,
+        feature_names_are_synthetic=cache.feature_names_are_synthetic,
+    )
+    if verbose:
+        print(
+            f"feature_groups='auto': {p_valid} features -> {reps_sorted.shape[0]} "
+            f"clusters at |corr| >= {group_corr_threshold:g}; running knockoffs on representatives"
+        )
+    rep_result = select_fdr(
+        y=y,
+        cache=reduced,
+        q=q,
+        statistic=statistic,
+        n_draws=n_draws,
+        eta=eta,
+        offset=offset,
+        s_method=s_method,
+        min_eig=min_eig,
+        screen_pairs=screen_pairs,
+        statistic_options=statistic_options,
+        feature_groups=None,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        verbose=verbose,
+    )
+
+    # Expand representative-level results back to every valid feature.
+    feature_names = _feature_names_for_valid_cols(cache)
+    rep_of_feature = reps[labels]  # valid-column position of each feature's representative
+    rep_row = {int(pos): i for i, pos in enumerate(reps_sorted)}
+    W_rep = rep_result.W["W"].to_numpy()
+    selected_rep = rep_result.W["selected"].to_numpy()
+    freq_rep = rep_result.W["selection_frequency"].to_numpy()
+    rel_rep = rep_result.W["relevance"].to_numpy()
+    idx_in_rep = np.asarray([rep_row[int(pos)] for pos in rep_of_feature], dtype=np.int64)
+
+    W_table = pd.DataFrame(
+        {
+            "feature": feature_names,
+            "selected_index": np.asarray(cache.valid_cols, dtype=np.int64),
+            "W": W_rep[idx_in_rep],
+            "selected": selected_rep[idx_in_rep],
+            "selection_frequency": freq_rep[idx_in_rep],
+            "relevance": rel_rep[idx_in_rep],
+            "selector": "knockoff_fdr",
+            "feature_group": labels.astype(int),
+            "is_representative": np.asarray([int(rep_of_feature[j]) == j for j in range(p_valid)], dtype=bool),
+        }
+    )
+    for col in rep_result.W.columns:
+        if col.startswith("W_draw_"):
+            W_table[col] = rep_result.W[col].to_numpy()[idx_in_rep]
+
+    # Selected features: members of selected clusters, ordered by cluster W
+    # (representatives first within a cluster, then valid-column order).
+    order = np.lexsort(
+        (
+            np.arange(p_valid),
+            ~W_table["is_representative"].to_numpy(),
+            -W_table["W"].to_numpy(),
+        )
+    )
+    selected_positions = [int(i) for i in order if bool(W_table["selected"].iloc[int(i)])]
+    selected_features = [feature_names[i] for i in selected_positions]
+    selected_indices = [int(cache.valid_cols[i]) for i in selected_positions]
+
+    metadata = dict(rep_result.selector_metadata)
+    metadata.update(
+        {
+            "n_features": int(p_valid),
+            "feature_groups": True,
+            "n_feature_groups": int(reps_sorted.shape[0]),
+            "group_mode": "cluster_representative",
+            "discovery_unit": "cluster",
+            "q_calibration_unit": "cluster_representative",
+            "representative_fdr_control": rep_result.selector_metadata.get(
+                "fdr_control", "none"
+            ),
+            "representative_per_draw_fdr_control": rep_result.selector_metadata.get(
+                "per_draw_fdr_control", "none"
+            ),
+            "group_fdr_control": "none",
+            "group_per_draw_fdr_control": "none",
+            "feature_level_fdr_control": "none",
+            "fdr_control": "none",
+            "per_draw_fdr_control": "none",
+            "aggregation": (
+                "cluster_expansion"
+                if int(rep_result.selector_metadata.get("n_draws", 1)) == 1
+                else "selection_frequency_then_cluster_expansion"
+            ),
+            "aggregation_fdr_control": "none",
+            "aggregation_preserves_per_draw_fdr": False,
+            "group_corr_threshold": float(group_corr_threshold),
+            "n_representatives": int(reps_sorted.shape[0]),
+        }
+    )
+    diagnostics = dict(rep_result.diagnostics_ or {})
+    diagnostics.update(
+        {
+            "cluster_labels": labels.astype(int).tolist(),
+            "cluster_representatives_valid_positions": reps.astype(int).tolist(),
+            "representative_result": rep_result,
+        }
+    )
+    selection_frequency = None
+    if rep_result.selection_frequency is not None:
+        selection_frequency = pd.Series(
+            W_table["selection_frequency"].to_numpy(),
+            index=feature_names,
+            name="selection_frequency",
+        )
+    return KnockoffSelectionResult(
+        selected_features=selected_features,
+        selected_indices=selected_indices,
+        selector_metadata=metadata,
+        W=W_table,
+        threshold=rep_result.threshold,
+        selection_frequency=selection_frequency,
+        diagnostics_=diagnostics,
+    )
+
+
 def select_fdr(
     X=None,
     y=None,
@@ -879,7 +1231,8 @@ def select_fdr(
     min_eig: float = 1e-3,
     screen_pairs: int | None = 2000,
     statistic_options: dict | None = None,
-    feature_groups: Sequence[Any] | None = None,
+    feature_groups: Sequence[Any] | str | None = None,
+    group_corr_threshold: float = 0.7,
     sample_weight=None,
     subsample: Any = _SUBSAMPLE_DEFAULT,
     cache: FeatureCache | None = None,
@@ -887,7 +1240,15 @@ def select_fdr(
     n_jobs: int = 1,
     verbose: bool = True,
 ) -> KnockoffSelectionResult:
-    """Select features by a q-calibrated Gaussian-copula knockoff filter."""
+    """Select features by a q-calibrated Gaussian-copula knockoff filter.
+
+    ``feature_groups="auto"`` clusters near-collinear features (average-linkage
+    on ``1 - |corr|`` cut at ``1 - group_corr_threshold``), runs the knockoff
+    filter on one representative (medoid) per cluster, and reports selected
+    clusters. This restores power when tightly correlated blocks would
+    otherwise force the knockoff decorrelation ``s`` towards zero; the
+    discovery unit becomes the cluster, not the individual feature.
+    """
 
     q_float = _validate_probability(q, "q")
     n_draws_int = _validate_positive_int(n_draws, "n_draws")
@@ -916,6 +1277,26 @@ def select_fdr(
     p_valid = resolved_cache.Z.shape[1]
     if resolved_cache.valid_cols.shape[0] != p_valid:
         raise ValueError("cache.valid_cols length must match cache.Z columns")
+    if isinstance(feature_groups, str):
+        if feature_groups != "auto":
+            raise ValueError("feature_groups must be None, 'auto', or a sequence of group labels")
+        return _select_fdr_cluster_representatives(
+            resolved_cache,
+            y,
+            q=q_float,
+            statistic=stat_spec.name,
+            n_draws=n_draws_int,
+            eta=eta_float,
+            offset=offset_int,
+            s_method=s_method,
+            min_eig=min_eig,
+            screen_pairs=screen_pairs_int,
+            statistic_options=options,
+            group_corr_threshold=group_corr_threshold,
+            random_state=random_state,
+            n_jobs=n_jobs,
+            verbose=verbose,
+        )
     feature_names = _feature_names_for_valid_cols(resolved_cache)
     group_info = _resolve_feature_groups(resolved_cache, feature_groups)
     if group_info is None:
@@ -926,7 +1307,9 @@ def select_fdr(
 
     if y is None:
         raise ValueError("y is required")
-    y_arr = to_numpy(y, dtype=np.float32).ravel()
+    # Preserve target ordering before the rank transform. Large offsets can
+    # collapse a genuinely varying float64 target to one float32 value.
+    y_arr = to_numpy(y, dtype=np.float64).ravel()
     if y_arr.shape[0] != resolved_cache.n_rows_original:
         raise ValueError(
             f"y has {y_arr.shape[0]} rows but cache was built from "
@@ -950,6 +1333,21 @@ def select_fdr(
 
     R_active = _build_active_rxx(resolved_cache, active, verbose=verbose)
     model = fit_gaussian_knockoffs(R_active, s_method=s_method, min_eig=min_eig)
+    s_median = float(np.median(model.s))
+    n_low_s = int(np.sum(model.s < _LOW_POWER_S))
+    if s_median < _LOW_POWER_S:
+        warnings.warn(
+            "Knockoff construction has very little power: the median knockoff "
+            f"decorrelation s is {s_median:.3g} (s_method={s_method!r}, "
+            f"lambda_min={model.lambda_min:.3g}), so most knockoffs are nearly "
+            "identical to their originals and W statistics will be close to 0. "
+            "This usually means near-collinear features (duplicates, "
+            "interactions, one-hot blocks). Consider s_method='mvr' or 'me', "
+            "feature_groups for collinear clusters, or pruning near-duplicate "
+            "columns before select_fdr.",
+            UserWarning,
+            stacklevel=2,
+        )
     active_positions = np.flatnonzero(active).astype(np.int64)
     path_depth_requested = options.get("path_depth")
     if stat_spec.name == "cefsplus":
@@ -979,6 +1377,8 @@ def select_fdr(
         r_orig_active = r_orig
         relevance[active_positions] = np.asarray(gaussian_mi_from_corr(r_orig), dtype=np.float64)
 
+    manual_group_heuristic = group_labels is not None
+    per_draw_fdr_control = "none" if manual_group_heuristic else "approximate_plugin"
     metadata: dict[str, Any] = {
         "selector": "knockoff_fdr",
         "n_features": int(p_valid),
@@ -994,14 +1394,28 @@ def select_fdr(
         "gamma": float(model.gamma),
         "lambda_min": float(model.lambda_min),
         "s_mean": float(np.mean(model.s)),
+        "s_median": s_median,
+        "n_low_power_features": n_low_s,
         "random_state": int(random_state),
         "n_rows_used": int(resolved_cache.Z.shape[0]),
-        "fdr_control": "approximate_plugin",
+        "fdr_control": (
+            "approximate_plugin"
+            if n_draws_int == 1 and not manual_group_heuristic
+            else "none"
+        ),
+        "per_draw_fdr_control": per_draw_fdr_control,
+        "q_scope": "per_draw",
+        "aggregation": "single_draw" if n_draws_int == 1 else "selection_frequency",
+        "aggregation_threshold": None if n_draws_int == 1 else eta_float,
+        "aggregation_fdr_control": "not_applicable" if n_draws_int == 1 else "none",
+        "aggregation_preserves_per_draw_fdr": n_draws_int == 1 and not manual_group_heuristic,
         "validity_model": "gaussian_copula_plugin",
         "weighted_model": bool(np.ptp(w) > 1e-9),
         "n_zero_weight_variance_features": n_zero_variance,
         "feature_groups": group_labels is not None,
         "n_feature_groups": None if group_labels is None else len(group_labels),
+        "group_mode": None if group_labels is None else "signed_max_heuristic",
+        "group_fdr_control": None if group_labels is None else "none",
     }
 
     if zy_var <= 1e-12:
@@ -1024,6 +1438,13 @@ def select_fdr(
     selection_sets_valid: list[list[int]] = []
     mean_active = gaussian_knockoff_mean(Z_active, model) if n_draws_int > 1 else None
     active_group_codes = None if group_codes is None else group_codes[active_positions]
+    fixed_kept = None
+    fixed_G = None
+    if stat_spec.needs_screening and (
+        screen_pairs_int is None or screen_pairs_int >= active_positions.size
+    ):
+        fixed_kept = np.arange(active_positions.size, dtype=np.int64)
+        fixed_G = _build_augmented_correlation(model, fixed_kept)
 
     for draw_idx, child in enumerate(child_sequences):
         rng = np.random.default_rng(child)
@@ -1041,6 +1462,8 @@ def select_fdr(
             build_augmented=stat_spec.needs_screening,
             statistic_name=stat_spec.name,
             r=r_orig_active,
+            fixed_kept=fixed_kept,
+            fixed_G=fixed_G,
         )
         W_active = np.asarray(stat_spec.fn(context), dtype=np.float64).ravel()
         if W_active.shape[0] != active_positions.shape[0]:
@@ -1142,6 +1565,7 @@ def select_fdr(
 
 __all__ = [
     "KnockoffSelectionResult",
+    "cluster_feature_groups",
     "KnockoffStatContext",
     "KnockoffStatSpec",
     "VALID_KNOCKOFF_STATISTICS",

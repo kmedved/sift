@@ -132,7 +132,8 @@ class SmartSamplerConfig:
         Minimum base probability (ensures coverage).
     anchor_fn : callable, optional
         Function(df, group_col, time_col) -> boolean mask identifying anchor rows.
-        Anchors are always included with probability 1.
+        Retained anchors are included with probability 1. At least one anchor is
+        retained per non-empty group when ``anchor_max_share`` is positive.
     anchor_max_share : float
         Maximum share of per-group quota for anchors.
     random_state : int, optional
@@ -209,6 +210,12 @@ def _validate_smart_columns(
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
+    if "sample_weight" in df.columns:
+        raise ValueError(
+            "smart_sample writes its inverse-probability weights to a "
+            "'sample_weight' column, but the input already has one. Rename or "
+            "drop that column first so a feature is not silently overwritten."
+        )
 
 
 def _prepare_scaled_matrix(df: pd.DataFrame, feature_cols: List[str]) -> np.ndarray:
@@ -440,7 +447,9 @@ def _add_rows(pi: np.ndarray, indices: np.ndarray, pis: np.ndarray) -> None:
     idx = np.asarray(indices, dtype=np.intp)
     vals = np.asarray(pis, dtype=np.float32)
     np.add.at(pi, idx, vals)
-    np.minimum(pi, 1.0, out=pi)
+    # Only the touched entries can exceed 1; clipping the whole vector here
+    # made every per-group call O(n).
+    pi[idx] = np.minimum(pi[idx], 1.0)
 
 
 def _cap_group_anchors(
@@ -453,12 +462,10 @@ def _cap_group_anchors(
     anchor_pos = np.flatnonzero(anchor_mask[g_idx])
     if not anchor_pos.size:
         return anchor_pos
-    if config.anchor_max_share <= 0:
+    if config.anchor_max_share <= 0 or target_g <= 0:
         return np.array([], dtype=int)
 
-    max_anchor_keep = int(np.floor(config.anchor_max_share * target_g))
-    if max_anchor_keep <= 0:
-        return np.array([], dtype=int)
+    max_anchor_keep = max(1, int(np.floor(config.anchor_max_share * target_g)))
     max_anchor_keep = min(max_anchor_keep, target_g)
     if anchor_pos.size <= max_anchor_keep:
         return anchor_pos

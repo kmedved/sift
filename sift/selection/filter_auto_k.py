@@ -948,6 +948,11 @@ def select_gaussian_cv_path(
     )
     selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
     selected_count = min(selected_count, len(path))
+    stopped_by = None
+    if auto_diag is not None:
+        stopped_by = auto_diag.attrs.get("stopped_by")
+    if stopped_by is None:
+        stopped_by = curves.attrs.get("stopped_by")
     _print_selected_k("Gaussian CV", selected_count, verbose)
     effective_max_k = (
         int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else len(path)
@@ -964,6 +969,7 @@ def select_gaussian_cv_path(
             "proxy": "gaussian_linear_copula",
             "xfit_ridge": float(auto_k_config.xfit_ridge),
             "proxy_only_objective": False,
+            "stopped_by": stopped_by,
         },
     )
     return path[:selected_count], path_indices[:selected_count], auto_diag, summary
@@ -1009,8 +1015,12 @@ def select_gaussian_knockoff_path(
         selected = [names[int(i)] for i in selected_original]
         selected_indices = selected_original.astype(int).tolist()
         path_length = selected_count
-        fdr_control = "approximate_plugin"
-        approximate_fdr_control = True
+        fdr_control = (
+            "approximate_plugin"
+            if int(auto_k_config.knockoff_draws) == 1
+            else "none"
+        )
+        approximate_fdr_control = int(auto_k_config.knockoff_draws) == 1
     _print_selected_k("Knockoff path", selected_count, verbose)
     summary = auto_k_summary(
         auto_k_config,
@@ -1026,7 +1036,25 @@ def select_gaussian_knockoff_path(
             "knockoff_return": auto_k_config.knockoff_return,
             "fdr_control": fdr_control,
             "approximate_fdr_control": approximate_fdr_control,
-            "count_only": not approximate_fdr_control,
+            "per_draw_fdr_control": "approximate_plugin",
+            "q_scope": "per_draw",
+            "aggregation": (
+                "single_draw"
+                if int(auto_k_config.knockoff_draws) == 1
+                else "selection_frequency"
+            ),
+            "aggregation_threshold": (
+                None if int(auto_k_config.knockoff_draws) == 1 else 0.5
+            ),
+            "aggregation_fdr_control": (
+                "not_applicable"
+                if int(auto_k_config.knockoff_draws) == 1
+                else "none"
+            ),
+            "aggregation_preserves_per_draw_fdr": (
+                int(auto_k_config.knockoff_draws) == 1
+            ),
+            "count_only": auto_k_config.knockoff_return == "prefix",
             "corr_prune_disabled": True,
         },
     )
@@ -1147,9 +1175,10 @@ def select_gaussian_auto_path(
         **runner_kwargs,
     )
     stopped_by = summary.get("stopped_by")
+    degenerate_stop = stopped_by in {"degenerate_folds", "degenerate"}
+    empty_terminal_stop = not selected and stopped_by == "max_k"
     if (
-        not selected
-        and stopped_by in {"degenerate_folds", "degenerate", "max_k"}
+        (degenerate_stop or empty_terminal_stop)
         and routed_config.k_method != "penalized_objective"
     ):
         fallback_config = replace(
@@ -1201,6 +1230,12 @@ def select_gaussian_auto_path(
     return selected, selected_indices, auto_diag, summary
 
 
+def _consensus_method_seed(random_state: int, method: str) -> int:
+    """Derive deterministic, method-distinct consensus RNG streams."""
+    entropy = [int(random_state) % (2**32), *[ord(char) for char in method.lower()]]
+    return int(np.random.SeedSequence(entropy).generate_state(1, dtype=np.uint32)[0])
+
+
 def _consensus_method_k(
     name: str,
     *,
@@ -1218,7 +1253,11 @@ def _consensus_method_k(
     path_length: int,
 ) -> tuple[int | None, str]:
     lower = name.lower()
-    base = replace(config, min_k=min(int(config.min_k), int(path_length)), max_k=path_length)
+    base = replace(
+        config,
+        min_k=min(int(config.min_k), int(path_length)),
+        max_k=path_length,
+    )
     if lower in {"ebic", "ric"}:
         cfg = replace(
             base,
@@ -1251,12 +1290,42 @@ def _consensus_method_k(
     if lower == "chi2_stop":
         cfg = replace(base, k_method="chi2_stop", min_k=0)
         n_eff, _source = _objective_n_eff(cfg, cache.sample_weight, len(cache.sample_weight))
-        k_hat, _diag = select_k_chi2_stop(objective, cfg, n_eff=n_eff, p_candidates=len(cache.valid_cols))
+        p_candidates, panel_eigs = _gain_test_candidate_inputs(
+            cache,
+            y,
+            path_length,
+            top_m,
+            corr_prune,
+            method,
+            cfg,
+        )
+        k_hat, _diag = select_k_chi2_stop(
+            objective,
+            cfg,
+            n_eff=n_eff,
+            p_candidates=p_candidates,
+            panel_eigs=panel_eigs,
+        )
         return min(k_hat, path_length), ""
     if lower == "forward_stop":
         cfg = replace(base, k_method="forward_stop", min_k=0)
         n_eff, _source = _objective_n_eff(cfg, cache.sample_weight, len(cache.sample_weight))
-        k_hat, _diag = select_k_forward_stop(objective, cfg, n_eff=n_eff, p_candidates=len(cache.valid_cols))
+        p_candidates, panel_eigs = _gain_test_candidate_inputs(
+            cache,
+            y,
+            path_length,
+            top_m,
+            corr_prune,
+            method,
+            cfg,
+        )
+        k_hat, _diag = select_k_forward_stop(
+            objective,
+            cfg,
+            n_eff=n_eff,
+            p_candidates=p_candidates,
+            panel_eigs=panel_eigs,
+        )
         return min(k_hat, path_length), ""
     if lower == "changepoint":
         cfg = replace(base, k_method="changepoint")
@@ -1270,7 +1339,11 @@ def _consensus_method_k(
         )
         return min(k_hat, path_length), ""
     if lower == "perm_gap":
-        cfg = replace(base, k_method="perm_gap")
+        cfg = replace(
+            base,
+            k_method="perm_gap",
+            random_state=_consensus_method_seed(int(config.random_state), lower),
+        )
         nulls = null_objective_paths(
             cache,
             y,
@@ -1291,7 +1364,12 @@ def _consensus_method_k(
             strategy = "kfold"
         if strategy == "group_cv" and groups is None:
             strategy = "kfold"
-        cfg = replace(base, k_method=lower, strategy=strategy)
+        cfg = replace(
+            base,
+            k_method=lower,
+            strategy=strategy,
+            random_state=_consensus_method_seed(int(config.random_state), lower),
+        )
         if lower == "gaussian_cv":
             curves = gaussian_cv_curves(
                 cache,
@@ -1318,7 +1396,11 @@ def _consensus_method_k(
             k_hat, _diag = select_k_xfit_objective(curves, cfg)
         return min(k_hat, path_length), f"strategy={strategy}"
     if lower == "stability":
-        cfg = replace(base, k_method="stability")
+        cfg = replace(
+            base,
+            k_method="stability",
+            random_state=_consensus_method_seed(int(config.random_state), lower),
+        )
         boot = bootstrap_paths(
             cache,
             y,
@@ -1453,6 +1535,7 @@ def _cached_filter_path(
         corr_prune=corr_prune,
         return_indices=want_indices,
         return_objective=return_objective,
+        warn_noise_floor=False,
     )
     if return_objective and want_indices:
         path, indices, objective = result

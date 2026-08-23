@@ -162,10 +162,9 @@ def select_k_chi2_stop(
         if run >= patience:
             start_pos = pos - patience + 1
             candidate_k = int(diag["k"].iloc[start_pos] - 1)
-            if candidate_k >= floor:
-                selected_k = candidate_k
-                stopped_by = "test"
-                break
+            selected_k = max(candidate_k, floor)
+            stopped_by = "floored" if candidate_k < floor else "test"
+            break
 
     diag = diag.copy()
     diag["significant"] = significant

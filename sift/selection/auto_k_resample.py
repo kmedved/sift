@@ -290,30 +290,43 @@ def select_k_stability(
     B = len(paths)
     p = int(p_valid)
     rows = []
+    indicators = np.zeros((B, p), dtype=bool)
+    counts = np.zeros(p, dtype=np.float64)
+    set_sizes = np.zeros(B, dtype=np.int64)
+    intersections = np.zeros((B, B), dtype=np.int64)
+    normalized_paths = [np.asarray(path, dtype=np.int64) for path in paths]
+    upper_i, upper_j = np.triu_indices(B, k=1)
     for k in range(1, max_len + 1):
-        indicators = np.zeros((B, p), dtype=np.float64)
-        counts = np.zeros(p, dtype=np.float64)
-        sets = []
-        for b, path in enumerate(paths):
-            prefix = np.asarray(path[: min(k, len(path))], dtype=np.int64)
-            prefix = prefix[(prefix >= 0) & (prefix < p)]
-            sets.append(set(prefix.tolist()))
-            if prefix.size:
-                indicators[b, prefix] = 1.0
-                counts[prefix] += 1.0
+        for b, path in enumerate(normalized_paths):
+            feature = int(path[k - 1])
+            if feature < 0 or feature >= p or indicators[b, feature]:
+                continue
+            peers = np.flatnonzero(indicators[:, feature])
+            if peers.size:
+                intersections[b, peers] += 1
+                intersections[peers, b] += 1
+            indicators[b, feature] = True
+            counts[feature] += 1.0
+            set_sizes[b] += 1
         phi = _stability_phi_from_counts(counts, B=B, k=k, p=p)
         phi_se = _stability_phi_jackknife_se(indicators, counts, k=k, p=p)
-        jaccards = []
-        for i in range(B):
-            for j in range(i + 1, B):
-                union = sets[i] | sets[j]
-                jaccards.append(1.0 if not union else len(sets[i] & sets[j]) / len(union))
+        union_sizes = (
+            set_sizes[upper_i]
+            + set_sizes[upper_j]
+            - intersections[upper_i, upper_j]
+        )
+        jaccards = np.ones(union_sizes.size, dtype=np.float64)
+        nonempty = union_sizes > 0
+        jaccards[nonempty] = (
+            intersections[upper_i[nonempty], upper_j[nonempty]]
+            / union_sizes[nonempty]
+        )
         rows.append(
             {
                 "k": k,
                 "phi": float(phi),
                 "phi_se": phi_se,
-                "mean_jaccard": float(np.mean(jaccards)) if jaccards else 1.0,
+                "mean_jaccard": float(np.mean(jaccards)) if jaccards.size else 1.0,
             }
         )
     diag = pd.DataFrame(rows)
@@ -321,11 +334,6 @@ def select_k_stability(
     max_phi = float(finite_all["phi"].max()) if not finite_all.empty else float("nan")
     stopped_by = str(config.stability_rule)
     if config.stability_rule == "pi_threshold":
-        counts = np.zeros(p, dtype=np.float64)
-        for path in paths:
-            prefix = np.asarray(path[:max_len], dtype=np.int64)
-            prefix = prefix[(prefix >= 0) & (prefix < p)]
-            counts[prefix] += 1.0
         raw_selected = int(np.sum(counts / max(1, B) >= float(config.stability_pi)))
         threshold_floor = 0 if int(config.min_k) <= 0 else effective_min
         finite = finite_all

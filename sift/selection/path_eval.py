@@ -7,6 +7,7 @@ from typing import Any, Callable, Hashable, Iterable, List, Mapping, Optional
 
 import copy
 import inspect
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -49,24 +50,36 @@ def _split_weights(weights: np.ndarray, idx: np.ndarray, *, label: str) -> np.nd
 def _resolve_feature_path(
     X: pd.DataFrame,
     feature_path: Iterable[Hashable],
-) -> List[str]:
-    """Resolve the path against DataFrame columns."""
-    resolved: List[str] = []
+) -> tuple[List[Hashable], List[int]]:
+    """Resolve the path against DataFrame columns.
+
+    Returns ``(names, positions)``. Integer entries are treated as positional
+    indices (so duplicate column labels cannot redirect them), string entries
+    resolve to the first matching column label.
+    """
+    resolved_names: List[Hashable] = []
+    resolved_positions: List[int] = []
     missing: list[str] = []
+    columns = list(X.columns)
+    first_position: dict[Hashable, int] = {}
+    for idx, col in enumerate(columns):
+        first_position.setdefault(col, idx)
 
     for f in feature_path:
         if isinstance(f, str):
-            if f in X.columns:
-                resolved.append(f)
+            if f in first_position:
+                resolved_names.append(f)
+                resolved_positions.append(first_position[f])
                 continue
             missing.append(f)
             continue
         if isinstance(f, (int, np.integer)):
             idx = int(f)
-            if idx < 0 or idx >= X.shape[1]:
+            if idx < 0 or idx >= len(columns):
                 missing.append(str(f))
                 continue
-            resolved.append(X.columns[idx])
+            resolved_names.append(columns[idx])
+            resolved_positions.append(idx)
             continue
         raise TypeError(
             "feature_path must contain feature names (str) or positional indices (int)"
@@ -77,19 +90,20 @@ def _resolve_feature_path(
         suffix = "..." if len(missing) > 5 else ""
         raise ValueError(f"feature_path contains missing features: {preview}{suffix}")
 
-    if not resolved:
+    if not resolved_positions:
         raise ValueError("feature_path resolved to zero features")
 
-    # Keep path order while de-duplicating.
-    deduped: list[str] = []
-    seen = set()
-    for f in resolved:
-        if f in seen:
+    # Keep path order while de-duplicating by position.
+    names: list[Hashable] = []
+    positions: list[int] = []
+    seen: set[int] = set()
+    for name, pos in zip(resolved_names, resolved_positions):
+        if pos in seen:
             continue
-        seen.add(f)
-        deduped.append(f)
-
-    return deduped
+        seen.add(pos)
+        names.append(name)
+        positions.append(pos)
+    return names, positions
 
 
 def _resolve_k_grid(k_grid: Iterable[int], *, max_k: int) -> List[int]:
@@ -123,6 +137,7 @@ def _build_splits(
     random_state: int,
     val_frac: float,
     groups: Optional[np.ndarray],
+    y: Optional[np.ndarray] = None,
 ) -> List[tuple[np.ndarray, np.ndarray]]:
     """Build train/validation splits from splitter or default holdout."""
     def _coerce_split_pair(pair: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -174,13 +189,25 @@ def _build_splits(
 
     if hasattr(splitter, "split"):
         # Splitter is expected to provide a .split(X, y, groups=None)-style API.
-        # Try groups first, then fall back to two-arg split.
         data = np.empty((n, 1))
-        y_dummy = np.zeros(n)
-        try:
-            return list(splitter.split(data, y_dummy, groups=groups))
-        except TypeError:
-            return list(splitter.split(data, y_dummy))
+        # Pass the real target so stratified splitters actually stratify.
+        y_split = np.zeros(n) if y is None else np.asarray(y).ravel()
+        groups_arr = None if groups is None else np.asarray(groups).ravel()
+        if groups_arr is not None and groups_arr.shape[0] != n:
+            raise ValueError(f"groups has {groups_arr.shape[0]} rows but expected {n}")
+        if groups_arr is not None and not _accepts_keyword(splitter.split, "groups"):
+            raise TypeError(
+                "groups were provided, but splitter.split does not accept a groups argument"
+            )
+        raw_splits = (
+            splitter.split(data, y_split, groups=groups_arr)
+            if groups_arr is not None
+            else splitter.split(data, y_split)
+        )
+        splits = [_coerce_split_pair(pair) for pair in raw_splits]
+        if not splits:
+            raise ValueError("splitter object produced no splits")
+        return splits
 
     raise TypeError(
         "splitter must be None, a splitter object with split(...), or (train_idx, val_idx)"
@@ -245,6 +272,20 @@ def _to_estimator(
     return est
 
 
+def _accepts_keyword(callable_obj: Any, keyword: str) -> bool:
+    """Return whether a callable explicitly or generically accepts a keyword."""
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Cannot inspect {callable_obj!r} to determine support for {keyword!r}"
+        ) from exc
+    return any(
+        parameter.name == keyword or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _fit_estimator(
     estimator: Any,
     X_tr: np.ndarray,
@@ -253,17 +294,16 @@ def _fit_estimator(
 ) -> None:
     if hasattr(estimator, "steps"):
         final_name, final_estimator = estimator.steps[-1]
-        if "sample_weight" in inspect.signature(final_estimator.fit).parameters:
+        if _accepts_keyword(final_estimator.fit, "sample_weight"):
             estimator.fit(X_tr, y_tr, **{f"{final_name}__sample_weight": w_tr})
             return
         estimator.fit(X_tr, y_tr)
         return
 
-    try:
+    if _accepts_keyword(estimator.fit, "sample_weight"):
         estimator.fit(X_tr, y_tr, sample_weight=w_tr)
         return
-    except TypeError:
-        estimator.fit(X_tr, y_tr)
+    estimator.fit(X_tr, y_tr)
 
 
 def _fit_predict_score(
@@ -290,7 +330,13 @@ def _fit_predict_score(
         if not np.isfinite(score):
             return float("inf")
         return float(score)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            "Feature-path evaluation failed for one estimator fit/score and "
+            f"recorded an infinite score: {type(exc).__name__}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return float("inf")
 
 
@@ -353,18 +399,14 @@ def evaluate_feature_path(
 
     if isinstance(X, pd.DataFrame):
         X_df = X
-        path_names = _resolve_feature_path(X_df, feature_path)
-        feature_index = {col: idx for idx, col in enumerate(X_df.columns)}
-        path_positions = [feature_index[name] for name in path_names]
+        path_names, path_positions = _resolve_feature_path(X_df, feature_path)
         X_path = X_df.iloc[:, path_positions].to_numpy(dtype=np.float64)
     else:
         X_arr = np.asarray(X, dtype=np.float64)
         if X_arr.ndim != 2:
             raise ValueError("X must be 2D")
         X_df = pd.DataFrame(columns=[f"x{i}" for i in range(X_arr.shape[1])])
-        path_names = _resolve_feature_path(X_df, feature_path)
-        feature_index = {col: idx for idx, col in enumerate(X_df.columns)}
-        path_positions = [feature_index[name] for name in path_names]
+        path_names, path_positions = _resolve_feature_path(X_df, feature_path)
         X_path = X_arr[:, path_positions]
 
     y_arr = np.asarray(y).ravel()
@@ -382,6 +424,7 @@ def evaluate_feature_path(
         random_state=random_state,
         val_frac=val_frac,
         groups=groups,
+        y=y_arr,
     )
 
     raw_scores: dict[int, list[float]] = {k: [] for k in k_values}
@@ -420,9 +463,11 @@ def evaluate_feature_path(
         values = np.asarray(raw_scores[k], dtype=np.float64)
         finite = values[np.isfinite(values)]
         finite_counts[k] = int(finite.size)
-        if finite.size == 0:
+        if finite.size != values.size:
             means[k] = float("inf")
-            stds[k] = float("nan")
+            stds[k] = (
+                float(np.std(finite, ddof=0)) if finite.size > 1 else float("nan")
+            )
             continue
         means[k] = float(np.mean(finite))
         stds[k] = float(np.std(finite, ddof=0)) if finite.size > 1 else 0.0

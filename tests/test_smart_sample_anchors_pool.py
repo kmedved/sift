@@ -39,7 +39,7 @@ def test_smart_sample_keeps_anchors():
     assert anchor_ids.issubset(sampled_ids)
 
 
-def test_tiny_anchor_max_share_can_keep_zero_mandatory_anchors():
+def test_positive_anchor_max_share_keeps_at_least_one_mandatory_anchor():
     n = 10
     g_idx = np.arange(n)
     anchor_mask = np.ones(n, dtype=bool)
@@ -51,4 +51,5 @@ def test_tiny_anchor_max_share_can_keep_zero_mandatory_anchors():
 
     kept = _cap_group_anchors(g_idx, anchor_mask, base_scores, target_g=5, config=config)
 
-    assert kept.size == 0
+    assert kept.size == 1
+    assert kept[0] == 9

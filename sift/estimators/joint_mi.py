@@ -10,6 +10,8 @@ from scipy.special import digamma
 
 from sift._numba import njit_optional_cache
 
+MIN_VARIANCE = 1e-24
+
 
 def _weighted_entropy_from_codes(
     codes: np.ndarray,
@@ -136,7 +138,7 @@ def r2_joint_mi(
     for i in range(n):
         y_var += w[i] * (y[i] - y_mean) ** 2
     y_var /= w_sum
-    y_std = np.sqrt(y_var) if y_var > 1e-12 else 1.0
+    y_std = np.sqrt(y_var) if y_var > MIN_VARIANCE else 1.0
 
     y_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -151,7 +153,7 @@ def r2_joint_mi(
     for i in range(n):
         s_var += w[i] * (selected[i] - s_mean) ** 2
     s_var /= w_sum
-    s_std = np.sqrt(s_var) if s_var > 1e-12 else 1.0
+    s_std = np.sqrt(s_var) if s_var > MIN_VARIANCE else 1.0
 
     s_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -174,7 +176,7 @@ def r2_joint_mi(
         for i in range(n):
             f_var += w[i] * (candidates[i, j] - f_mean) ** 2
         f_var /= w_sum
-        f_std = np.sqrt(f_var) if f_var > 1e-12 else 1.0
+        f_std = np.sqrt(f_var) if f_var > MIN_VARIANCE else 1.0
 
         r_yf = 0.0
         r_fs = 0.0
@@ -229,7 +231,7 @@ def r2_joint_mi_indexed(
     for i in range(n):
         y_var += w[i] * (y[i] - y_mean) ** 2
     y_var /= w_sum
-    y_std = np.sqrt(y_var) if y_var > 1e-12 else 1.0
+    y_std = np.sqrt(y_var) if y_var > MIN_VARIANCE else 1.0
 
     y_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -244,7 +246,7 @@ def r2_joint_mi_indexed(
     for i in range(n):
         s_var += w[i] * (selected[i] - s_mean) ** 2
     s_var /= w_sum
-    s_std = np.sqrt(s_var) if s_var > 1e-12 else 1.0
+    s_std = np.sqrt(s_var) if s_var > MIN_VARIANCE else 1.0
 
     s_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -269,7 +271,7 @@ def r2_joint_mi_indexed(
         for i in range(n):
             f_var += w[i] * (X_full[i, j] - f_mean) ** 2
         f_var /= w_sum
-        f_std = np.sqrt(f_var) if f_var > 1e-12 else 1.0
+        f_std = np.sqrt(f_var) if f_var > MIN_VARIANCE else 1.0
 
         r_yf = 0.0
         r_fs = 0.0
@@ -303,7 +305,7 @@ def _weighted_standardize_2d(
     mean = (X_arr * w[:, None]).sum(axis=0) / w_sum
     centered = X_arr - mean
     var = (centered * centered * w[:, None]).sum(axis=0) / w_sum
-    std = np.where(var > 1e-12, np.sqrt(var), 1.0)
+    std = np.where(var > MIN_VARIANCE, np.sqrt(var), 1.0)
     return centered / std
 
 
@@ -317,7 +319,7 @@ def _weighted_standardize_1d(
     mean = float(np.dot(w, x_arr) / w_sum)
     centered = x_arr - mean
     var = float(np.dot(w, centered * centered) / w_sum)
-    std = np.sqrt(var) if var > 1e-12 else 1.0
+    std = np.sqrt(var) if var > MIN_VARIANCE else 1.0
     return centered / std
 
 
@@ -602,20 +604,12 @@ def _compact_discrete_target_codes(y: np.ndarray) -> np.ndarray:
 
 
 def _safe_count_neighbors(tree: cKDTree, points: np.ndarray, radii: np.ndarray, n: int) -> np.ndarray:
-    """Count neighbors with fallback for older SciPy."""
-    try:
-        return np.array(
-            [
-                tree.query_ball_point(points[i], radii[i], p=np.inf, return_length=True) - 1
-                for i in range(n)
-            ],
-            dtype=np.int64,
-        )
-    except TypeError:
-        return np.array(
-            [
-                len(tree.query_ball_point(points[i], radii[i], p=np.inf)) - 1
-                for i in range(n)
-            ],
-            dtype=np.int64,
-        )
+    """Count neighbors within per-point radii (excluding the point itself).
+
+    SciPy's ``query_ball_point`` accepts an array of radii, so a single
+    vectorized call replaces the former per-point Python loop.
+    """
+    counts = tree.query_ball_point(
+        points, np.asarray(radii, dtype=np.float64), p=np.inf, return_length=True
+    )
+    return np.asarray(counts, dtype=np.int64) - 1

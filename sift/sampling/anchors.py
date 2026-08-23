@@ -121,7 +121,7 @@ def quantile_anchors(
                 groupby_cols.extend(valid_subgroups)
 
             threshold = df.groupby(groupby_cols)[value_col].transform(
-                lambda s: s.quantile(quantile)
+                "quantile", quantile
             )
         else:
             threshold = df[value_col].quantile(quantile)
