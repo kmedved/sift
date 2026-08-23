@@ -4,22 +4,40 @@ This file tracks the public-release work from the Oracle/source review plus the 
 
 ## Release Gate
 
-- [ ] Clear the public-release block.
-  Notes: release-blocking correctness items from both reviews are fixed or explicitly documented. Current local state after the scorer/grid/warning fixes: base `python -m pytest -ra` passed with 274 passed, 10 skipped, and no warnings; darko `/Users/kmedved/miniconda3/envs/darko/bin/python -m pytest -ra` passed with 336 passed, 2 skipped, and no warnings. The remaining skips are optional-dependency/version-conditional coverage for `catboost` and `category_encoders`; remaining open work is performance/feature follow-up unless a release policy requires benchmarks before publishing.
-  Latest integration note: the five-agent follow-up added public modules under
-  `sift/selectors.py`, `sift/scoring.py`, `sift/selection/result.py`, and
-  `sift/selection/path_eval.py`. `/Users/kmedved/miniconda3/envs/darko/bin/python -m pytest -ra`
-  passed with 336 passed and 2 skipped. Keep this gate open until all new
-  imported modules/tests/benchmarks are included in the release commit. The
-  0.7.0 knockoffs release bundle adds `select_fdr`, `KnockoffSelector`,
-  `sample_knockoffs`, the informational `benchmarks/bench_knockoffs.py` timing
-  surface, and aligned public docs; the focused release smoke is
-  `tests/test_docs_smoke.py`, `tests/test_benchmarks.py`, and
-  `benchmarks/bench_knockoffs.py --quick`. Focused local smoke on 2026-07-08:
-  `python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q`
-  passed with 7 tests; the knockoff sampler/filter/FDR pytest slice passed
-  with 64 tests; the `bench_knockoffs.py --quick` smoke completed
-  successfully and wrote `/tmp/bench-knockoffs.json`.
+- [x] Clear the public-release block.
+  Notes: release-blocking correctness items from the Oracle/source review, the
+  follow-up LLM review, and the 2026-08 deep-dive review are fixed or
+  explicitly documented. Current local state on 2026-08-23 (base interpreter
+  `/opt/anaconda3/bin/python3`, Python 3.12, no `catboost`/`category_encoders`):
+  `python -m pytest -ra` passed with 713 passed and 17 skipped. The full
+  optional-dependency run in the `darko311` environment passed with 787 tests
+  and 12 skipped. All base skips are optional-dependency gates for `catboost`
+  and `category_encoders`; the four base warnings belong to expected categories
+  exercised by tests (loky fork deprecation, Gaussian-mRMR noise-floor warning,
+  and nested auto-k non-finite-curve fallback). CI runs the full suite on
+  Python 3.10-3.12 plus a CatBoost job.
+  The 0.8.0 bundle (see `docs/release-notes.md`): the
+  performance pass (threaded/templated rank-Gaussian cache, BLAS-free
+  partial-Cholesky CEFS+, warm-started binary CEFS+, BLAS mRMR default,
+  row-major Numba kernels, smart-sampler fixes), knockoff `lsm`/`ridge`
+  statistics, `feature_groups="auto"`, low-power diagnostics, the Boruta
+  supervised-encoding opt-in, stability alpha calibration, Gaussian target
+  validation, `evaluate_feature_path` positional fixes, selector-class Auto-K
+  routing, and the `catboost_select(k=None)` global arg-best/parsimony fix
+  (2026-08-23, with direction-agnostic regression tests in
+  `tests/test_catboost_selection.py`).
+  Release preparation closed on 2026-08-23: `sift.__version__` is `0.8.0`, the
+  release-notes section is titled `0.8.0`, the focused docs/benchmark pytest
+  smoke passed with 7 tests, and `benchmarks/bench_knockoffs.py --quick`
+  completed successfully. The aggregate `benchmarks/run_benchmarks.py --quick`
+  promotion harness also completed successfully with selection parity on every
+  before/after row. Creating a GitHub release, tag, or package upload is a
+  separate publishing action and is not part of this repository gate.
+  Historical context: the 0.7.0 knockoffs bundle added `select_fdr`,
+  `KnockoffSelector`, `sample_knockoffs`, the informational
+  `benchmarks/bench_knockoffs.py` timing surface, and aligned public docs; the
+  earlier darko-environment runs (336 passed, 2 skipped) and the 2026-07-08
+  focused smoke are superseded by the counts above.
 
 ## Top Priorities
 

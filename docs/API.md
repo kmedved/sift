@@ -1,6 +1,6 @@
 # SIFT API Reference
 
-This page is a standalone reference for the public SIFT API in the 0.7.0
+This page is a standalone reference for the public SIFT API in the 0.8.0
 surface. For deeper examples and option notes, see the canonical manual in
 [`DOCS.MD`](../DOCS.MD).
 
