@@ -845,6 +845,7 @@ class TestBorutaCategoricals:
             X,
             y,
             cat_encoding="loo",
+            allow_full_data_target_encoding=True,
             max_iter=10,
             verbose=False,
         )
