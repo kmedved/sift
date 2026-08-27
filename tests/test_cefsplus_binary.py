@@ -623,7 +623,11 @@ def test_dataframe_numpy_result_metadata_and_selector_transform():
     assert isinstance(result, FilterSelectionResult)
     assert result.selector_metadata["selector"] == "cefsplus_binary"
     assert [X.columns[i] for i in result.selected_indices] == result.selected_features
-    assert result.get_feature_ranking()["score"].notna().all()
+    ranking = result.get_feature_ranking()
+    assert len(ranking) == X.shape[1]
+    assert ranking["selected"].sum() == len(result.selected_features)
+    assert ranking.loc[ranking["selected"], "score"].notna().all()
+    assert ranking.loc[~ranking["selected"], "score"].isna().all()
     assert result.diagnostics_["subsample_row_idx"] is None
 
     np_result = select_cefsplus_binary(

@@ -247,7 +247,7 @@ def bootstrap_paths(
 def _stability_phi_from_counts(counts: np.ndarray, *, B: int, k: int, p: int) -> float:
     denom = (k / p) * (1.0 - k / p) if 0 < k < p else 0.0
     if denom <= 0.0:
-        return 1.0 if k >= p else np.nan
+        return np.nan
     pi = np.asarray(counts, dtype=np.float64) / max(1, int(B))
     instability = np.mean((B / max(1, B - 1)) * pi * (1.0 - pi))
     return float(1.0 - instability / denom)
@@ -284,9 +284,10 @@ def select_k_stability(
     if not paths:
         return 0, pd.DataFrame()
     max_len = min(int(config.max_k), min((len(path) for path in paths), default=0))
-    if max_len <= 0:
+    max_identifiable = min(max_len, max(0, int(p_valid) - 1))
+    if max_identifiable <= 0:
         return 0, pd.DataFrame()
-    effective_min = max(1, min(int(config.min_k), max_len))
+    effective_min = max(1, min(int(config.min_k), max_identifiable))
     B = len(paths)
     p = int(p_valid)
     rows = []
@@ -296,7 +297,7 @@ def select_k_stability(
     intersections = np.zeros((B, B), dtype=np.int64)
     normalized_paths = [np.asarray(path, dtype=np.int64) for path in paths]
     upper_i, upper_j = np.triu_indices(B, k=1)
-    for k in range(1, max_len + 1):
+    for k in range(1, max_identifiable + 1):
         for b, path in enumerate(normalized_paths):
             feature = int(path[k - 1])
             if feature < 0 or feature >= p or indicators[b, feature]:
@@ -350,9 +351,9 @@ def select_k_stability(
                 tol = float(best.get("phi_se", np.nan))
                 tol = 0.0 if not np.isfinite(tol) else tol
                 plateau = finite[finite["phi"] >= best_phi - tol]
-                plateau_cap = int(plateau["k"].max()) if not plateau.empty else max_len
+                plateau_cap = int(plateau["k"].max()) if not plateau.empty else max_identifiable
                 selected_k = min(
-                    max_len,
+                    max_identifiable,
                     max(threshold_floor, min(raw_selected, plateau_cap)),
                 )
     else:

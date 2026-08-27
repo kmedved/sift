@@ -87,13 +87,12 @@ CEFS+ statistic with pair-coupled screening and objective-gain W magnitudes. It
 can recover redundant signal families that a marginal statistic treats as a
 single effect, but it is still slower at large `screen_pairs`/`path_depth`, so
 use it as a redundancy-aware second opinion rather than a better default.
-`path_depth` defaults to a conservative cap of 10 screened pairs — which also
-caps the number of features CEFS+ can select at roughly 10, since only entered
-features receive positive W. If you expect more discoveries than that, raise
-`statistic_options={"path_depth": ...}` (the effective value is reported in
-`selector_metadata["path_depth"]`, and a selection count equal to it is a hint
-the cap is binding). `statistic_options={"min_gain_ratio": 1e-4}` is an opt-in
-speed knob for large CEFS+ runs.
+Without an explicit `path_depth`, CEFS+ starts with a q-aware bounded path and
+doubles it when discoveries reach the cap. The initial and final depths are
+reported in selector metadata. Set `statistic_options={"path_depth": ...}` only
+when you need a hard compute cap; a saturated explicit cap emits a warning.
+`statistic_options={"min_gain_ratio": 1e-4}` is an opt-in speed knob for large
+CEFS+ runs.
 
 `s_method="mvr"` and `"me"` use diagonal coordinate-descent optimizers for the
 MVR and maximum-entropy knockoff objectives. They can improve power on

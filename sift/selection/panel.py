@@ -39,7 +39,7 @@ class CandidatePanel:
 def resolve_corr_prune(method: GaussianMethod, corr_prune: CorrPrune) -> float | None:
     """Resolve the public corr_prune option for a cache-backed method."""
     if corr_prune == "auto":
-        return 0.95 if method == "cefsplus" else None
+        return None
     if corr_prune is None:
         return None
     if isinstance(corr_prune, (bool, np.bool_)):

@@ -10,8 +10,6 @@ from scipy.special import digamma
 
 from sift._numba import njit_optional_cache
 
-MIN_VARIANCE = 1e-24
-
 
 def _weighted_entropy_from_codes(
     codes: np.ndarray,
@@ -138,7 +136,7 @@ def r2_joint_mi(
     for i in range(n):
         y_var += w[i] * (y[i] - y_mean) ** 2
     y_var /= w_sum
-    y_std = np.sqrt(y_var) if y_var > MIN_VARIANCE else 1.0
+    y_std = np.sqrt(y_var) if y_var > 0.0 else 1.0
 
     y_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -153,7 +151,7 @@ def r2_joint_mi(
     for i in range(n):
         s_var += w[i] * (selected[i] - s_mean) ** 2
     s_var /= w_sum
-    s_std = np.sqrt(s_var) if s_var > MIN_VARIANCE else 1.0
+    s_std = np.sqrt(s_var) if s_var > 0.0 else 1.0
 
     s_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -176,7 +174,7 @@ def r2_joint_mi(
         for i in range(n):
             f_var += w[i] * (candidates[i, j] - f_mean) ** 2
         f_var /= w_sum
-        f_std = np.sqrt(f_var) if f_var > MIN_VARIANCE else 1.0
+        f_std = np.sqrt(f_var) if f_var > 0.0 else 1.0
 
         r_yf = 0.0
         r_fs = 0.0
@@ -231,7 +229,7 @@ def r2_joint_mi_indexed(
     for i in range(n):
         y_var += w[i] * (y[i] - y_mean) ** 2
     y_var /= w_sum
-    y_std = np.sqrt(y_var) if y_var > MIN_VARIANCE else 1.0
+    y_std = np.sqrt(y_var) if y_var > 0.0 else 1.0
 
     y_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -246,7 +244,7 @@ def r2_joint_mi_indexed(
     for i in range(n):
         s_var += w[i] * (selected[i] - s_mean) ** 2
     s_var /= w_sum
-    s_std = np.sqrt(s_var) if s_var > MIN_VARIANCE else 1.0
+    s_std = np.sqrt(s_var) if s_var > 0.0 else 1.0
 
     s_s = np.empty(n, dtype=np.float64)
     for i in range(n):
@@ -271,7 +269,7 @@ def r2_joint_mi_indexed(
         for i in range(n):
             f_var += w[i] * (X_full[i, j] - f_mean) ** 2
         f_var /= w_sum
-        f_std = np.sqrt(f_var) if f_var > MIN_VARIANCE else 1.0
+        f_std = np.sqrt(f_var) if f_var > 0.0 else 1.0
 
         r_yf = 0.0
         r_fs = 0.0
@@ -305,7 +303,7 @@ def _weighted_standardize_2d(
     mean = (X_arr * w[:, None]).sum(axis=0) / w_sum
     centered = X_arr - mean
     var = (centered * centered * w[:, None]).sum(axis=0) / w_sum
-    std = np.where(var > MIN_VARIANCE, np.sqrt(var), 1.0)
+    std = np.where(var > 0.0, np.sqrt(var), 1.0)
     return centered / std
 
 
@@ -319,7 +317,7 @@ def _weighted_standardize_1d(
     mean = float(np.dot(w, x_arr) / w_sum)
     centered = x_arr - mean
     var = float(np.dot(w, centered * centered) / w_sum)
-    std = np.sqrt(var) if var > MIN_VARIANCE else 1.0
+    std = np.sqrt(var) if var > 0.0 else 1.0
     return centered / std
 
 
@@ -543,14 +541,20 @@ def ksg_joint_mi(
     n, p = candidates.shape
     scores = np.empty(p, dtype=np.float64)
 
-    y_s = (y - y.mean()) / (y.std() + 1e-10)
-    s_s = (selected - selected.mean()) / (selected.std() + 1e-10)
+    y_centered = y - y.mean()
+    y_std = y_centered.std()
+    y_s = y_centered / y_std if y_std > 0.0 else np.zeros_like(y_centered)
+    s_centered = selected - selected.mean()
+    s_std = s_centered.std()
+    s_s = s_centered / s_std if s_std > 0.0 else np.zeros_like(s_centered)
     Y_marginal = y_s.reshape(-1, 1)
     tree_y = cKDTree(Y_marginal)
 
     for j in range(p):
         f = candidates[:, j]
-        f_s = (f - f.mean()) / (f.std() + 1e-10)
+        f_centered = f - f.mean()
+        f_std = f_centered.std()
+        f_s = f_centered / f_std if f_std > 0.0 else np.zeros_like(f_centered)
 
         X_joint = np.column_stack([f_s, s_s])
         XY_full = np.column_stack([f_s, s_s, y_s])
@@ -575,7 +579,7 @@ def ksg_joint_mi(
 
 def _quantile_bin(x: np.ndarray, n_bins: int) -> np.ndarray:
     """Quantile-based binning."""
-    if x.size == 0 or np.std(x) < 1e-12:
+    if x.size == 0 or np.ptp(x) == 0.0:
         return np.zeros(len(x), dtype=np.int32)
     percentiles = np.linspace(0, 100, n_bins + 1)
     bins = np.percentile(x, percentiles)

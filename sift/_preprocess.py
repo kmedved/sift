@@ -97,6 +97,34 @@ def best_score_from_dict(scores: dict, higher_is_better: bool) -> Tuple[Any, flo
 # --- Input conversion ---
 
 
+def validate_task(task: str) -> None:
+    """Validate the public selector task before dispatch."""
+    if task not in {"regression", "classification"}:
+        raise ValueError(
+            "task must be 'regression' or 'classification', "
+            f"got {task!r}"
+        )
+
+
+def validate_classification_target(y) -> None:
+    """Reject continuous or multi-output targets passed as class labels."""
+    from sklearn.utils.multiclass import type_of_target
+
+    y_raw = y.values if hasattr(y, "values") else np.asarray(y)
+    if pd.isna(y_raw).any():
+        raise ValueError("Missing values in y are not allowed for classification.")
+    if pd.api.types.is_numeric_dtype(y_raw):
+        y_num = np.asarray(y_raw, dtype=np.float64)
+        if not np.isfinite(y_num).all():
+            raise ValueError("Non-finite values in y are not allowed for classification.")
+    target_type = type_of_target(y_raw)
+    if target_type not in {"binary", "multiclass"}:
+        raise ValueError(
+            "Classification y must contain discrete binary or multiclass labels; "
+            f"got target type {target_type!r}."
+        )
+
+
 def to_numpy(data, dtype=np.float32) -> np.ndarray:
     """Convert Pandas/Polars/list to numpy array."""
     if hasattr(data, "to_pandas"):
@@ -207,6 +235,8 @@ def validate_inputs(
     """
     from sift._impute import mean_impute
 
+    validate_task(task)
+
     feature_names = extract_feature_names(X)
     if hasattr(X, "select_dtypes"):
         non_numeric = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
@@ -231,21 +261,12 @@ def validate_inputs(
         else:
             y_raw = np.asarray(y)
 
-        if pd.api.types.is_numeric_dtype(y_raw):
-            try:
-                y_num = np.asarray(y_raw, dtype=np.float64)
-            except (TypeError, ValueError):
-                y_num = None
-            if y_num is not None and not np.isfinite(y_num).all():
-                raise ValueError("Non-finite values in y are not allowed for classification.")
-
-        if pd.isna(y_raw).any():
-            raise ValueError("Missing values in y are not allowed for classification.")
+        validate_classification_target(y_raw)
 
         _, y_arr = np.unique(y_raw, return_inverse=True)
         y_arr = y_arr.astype(np.int32)
     else:
-        y_arr = to_numpy(y, dtype=np.float32)
+        y_arr = to_numpy(y, dtype=np.float64)
         if not np.isfinite(y_arr).all():
             raise ValueError("Non-finite values in y are not allowed for regression.")
 
@@ -291,15 +312,13 @@ def subsample_xy(
     n = X.shape[0]
     w = ensure_weights(sample_weight, n, normalize=True)
 
-    if subsample is not None and n > subsample:
+    positive = np.flatnonzero(w > 0.0)
+    if subsample is not None and positive.size > subsample:
         rng = np.random.default_rng(random_state)
-        row_idx = rng.choice(n, size=subsample, replace=False)
-        X_sub, y_sub, w_sub = X[row_idx], y[row_idx], w[row_idx]
-        if float(w_sub.sum()) <= 0.0:
-            raise ValueError("Subsample has zero total weight; check sample_weight.")
+        row_idx = rng.choice(positive, size=subsample, replace=False)
     else:
-        row_idx = np.arange(n)
-        X_sub, y_sub, w_sub = X, y, w
+        row_idx = positive
+    X_sub, y_sub, w_sub = X[row_idx], y[row_idx], w[row_idx]
 
     mean = float(w_sub.mean())
     if not np.isfinite(mean) or mean <= 0.0:

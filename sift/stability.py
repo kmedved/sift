@@ -1,4 +1,5 @@
 from dataclasses import replace
+from functools import wraps
 import inspect
 import numbers
 import numpy as np
@@ -10,7 +11,7 @@ from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import (
     Lasso, LassoCV, ElasticNet, ElasticNetCV,
-    LogisticRegression, LogisticRegressionCV
+    LogisticRegression, LogisticRegressionCV, Ridge,
 )
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import get_scorer
@@ -24,6 +25,7 @@ from sklearn.model_selection import (
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
+from threadpoolctl import threadpool_limits
 
 from sift._preprocess import ensure_weights
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
@@ -37,6 +39,17 @@ from sift.sampling.stability import (
     _block_bootstrap_indices,
     _bootstrap_indices,
 )
+
+
+def _single_threaded_blas(func):
+    """Keep bootstrap model fits from multiplying native BLAS threads."""
+
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with threadpool_limits(limits=1):
+            return func(*args, **kwargs)
+
+    return wrapped
 
 
 def _cv_alpha_grid_kwargs(model_cls, n_alphas: int) -> dict[str, int]:
@@ -70,6 +83,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         Minimum selection frequency to keep a feature.
     alpha : float, optional
         Regularization strength. If None, estimated via CV.
+    alpha_rule : {'one_se', 'best'}, default='one_se'
+        Rule used when ``alpha`` is estimated. ``one_se`` chooses the strongest
+        regularization whose CV score is within one standard error of the best;
+        ``best`` chooses the prediction-optimal grid point.
     l1_ratio : float, default=1.0
         ElasticNet mixing (1.0 = Lasso, <1.0 = ElasticNet). Only for regression.
     task : str, default='regression'
@@ -117,6 +134,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         sample_frac: float = 0.5,
         threshold: float = 0.6,
         alpha: Optional[float] = None,
+        alpha_rule: str = "one_se",
         l1_ratio: float = 1.0,
         task: str = 'regression',
         max_features: Optional[int] = None,
@@ -135,6 +153,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.sample_frac = sample_frac
         self.threshold = threshold
         self.alpha = alpha
+        self.alpha_rule = alpha_rule
         self.l1_ratio = l1_ratio
         self.task = task
         self.max_features = max_features
@@ -207,10 +226,12 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             "_label_encoder",
             "_scaler",
             "_alpha_ref_weight_",
+            "_target_center_",
             "_fit_used_groups_",
             "_fit_used_sample_weight_",
             "_fit_used_time_",
             "alpha_",
+            "alpha_rule_effective_",
             "classes_",
             "coef_bootstrap_",
             "feature_names_in_",
@@ -237,6 +258,15 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 X, y, sample_weight, feature_names
             )
 
+        if self.task == "regression":
+            self._target_center_ = float(
+                np.average(
+                    np.asarray(y, dtype=np.float64),
+                    weights=np.asarray(sample_weight, dtype=np.float64),
+                )
+            )
+            y = np.asarray(y, dtype=np.float64) - self._target_center_
+
         n, p = X.shape
         self.feature_names_in_ = feature_names
         self.n_features_in_ = p
@@ -261,8 +291,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 groups=groups,
                 time=time,
             )
+            self.alpha_rule_effective_ = self.alpha_rule
         else:
             self.alpha_ = self.alpha
+            self.alpha_rule_effective_ = "fixed"
 
         # Impute and standardize the final fit data after alpha is chosen.
         X = self._impute_with_fit_stats(X, fit=True)
@@ -347,6 +379,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         )
         return unique_idx, summed_weight.astype(np.float32, copy=False)
 
+    @_single_threaded_blas
     def _run_stability_chunks(self, X_scaled, y, sample_weight, split_iter):
         p = X_scaled.shape[1]
         rng = np.random.default_rng(self.random_state)
@@ -648,7 +681,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 downstream = (
                     LogisticRegression(penalty='l2', solver='lbfgs', max_iter=1000)
                     if self.task == 'classification'
-                    else ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=2000)
+                    else Ridge(alpha=1.0)
                 )
                 model = make_pipeline(
                     SimpleImputer(strategy="mean"),
@@ -854,6 +887,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         ):
             raise ValueError("alpha must be positive when provided.")
 
+        if self.alpha_rule not in {"one_se", "best"}:
+            raise ValueError("alpha_rule must be 'one_se' or 'best'.")
+
         if not isinstance(self.l1_ratio, numbers.Real) or not (0 <= float(self.l1_ratio) <= 1):
             raise ValueError("l1_ratio must be in [0, 1].")
 
@@ -925,7 +961,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         else:
             if not np.isfinite(y_raw).all():
                 raise ValueError("Target values must be finite for regression.")
-            y = y_raw.astype(np.float32)
+            y = y_raw.astype(np.float64)
 
         sample_weight = ensure_weights(sample_weight, len(y), normalize=True).astype(np.float32)
 
@@ -997,7 +1033,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             if not np.isfinite(y_raw).all():
                 raise ValueError("Target values must be finite for regression.")
             y_col = '_y'
-            df[y_col] = y_raw.astype(np.float32)
+            df[y_col] = y_raw.astype(np.float64)
 
         sampled = smart_sample(
             df=df,
@@ -1022,7 +1058,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                     f"Increase sample_frac or disable use_smart_sampler for classification."
                 )
         else:
-            y_out = sampled[y_col].values.astype(np.float32)
+            y_out = sampled[y_col].values.astype(np.float64)
 
         self.sampled_n_ = len(sampled)
 
@@ -1066,7 +1102,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             param_grid = {"model__C": np.logspace(-4, 4, 20)}
             scoring = "accuracy"
         else:
-            y_scale = max(float(np.std(np.asarray(y)[idx])), 1e-6)
+            y_scale = float(np.std(np.asarray(y)[idx]))
+            if not np.isfinite(y_scale) or y_scale <= 0.0:
+                y_scale = np.finfo(np.float64).tiny * 1e4
             alpha_grid = y_scale * np.logspace(-4, 0, 30)
             if self.l1_ratio >= 1.0:
                 model = Lasso(max_iter=2000)
@@ -1100,8 +1138,41 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         if self.task == 'classification':
             self._alpha_ref_weight_ = self._cv_train_weight(cv, idx, sample_weight)
-            return 1.0 / float(search.best_params_["model__C"])
-        return float(search.best_params_["model__alpha"])
+            parameter = "model__C"
+            best_value = float(search.best_params_[parameter])
+            if self.alpha_rule == "one_se":
+                best_value = self._one_se_parameter(search, parameter, prefer="smaller")
+            return 1.0 / best_value
+        parameter = "model__alpha"
+        best_value = float(search.best_params_[parameter])
+        if self.alpha_rule == "one_se":
+            best_value = self._one_se_parameter(search, parameter, prefer="larger")
+        return best_value
+
+    @staticmethod
+    def _one_se_parameter(search, parameter: str, *, prefer: str) -> float:
+        """Return the strongest parameter within one SE of the best CV score."""
+        results = search.cv_results_
+        means = np.asarray(results["mean_test_score"], dtype=np.float64)
+        stds = np.asarray(results["std_test_score"], dtype=np.float64)
+        finite = np.isfinite(means) & np.isfinite(stds)
+        if not bool(finite.any()):
+            return float(search.best_params_[parameter])
+        best_idx = int(np.nanargmax(np.where(finite, means, -np.inf)))
+        n_splits = max(int(getattr(search, "n_splits_", 1)), 1)
+        cutoff = means[best_idx] - stds[best_idx] / np.sqrt(n_splits)
+        eligible = np.flatnonzero(finite & (means >= cutoff))
+        values = np.asarray(
+            [params[parameter] for params in results["params"]],
+            dtype=np.float64,
+        )
+        if prefer == "larger":
+            chosen = int(eligible[np.argmax(values[eligible])])
+        elif prefer == "smaller":
+            chosen = int(eligible[np.argmin(values[eligible])])
+        else:
+            raise ValueError("prefer must be 'larger' or 'smaller'")
+        return float(values[chosen])
 
     @staticmethod
     def _cv_train_weight(cv, idx: np.ndarray, sample_weight: np.ndarray) -> float:

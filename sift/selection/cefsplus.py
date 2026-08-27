@@ -343,9 +343,9 @@ def select_cached(
 ]:
     """Select features using pre-built cache.
 
-    corr_prune="auto" preserves CEFS+'s default 0.95 pruning while leaving
-    cached Gaussian mRMR/JMI/JMIM unpruned. Pass a float to opt into pruning for
-    any cached method, or None to disable pruning. ``warn_noise_floor`` controls
+    corr_prune="auto" resolves to no pruning for every method. Pass a float to
+    opt into marginal-correlation pruning when duplicate suppression is more
+    important than retaining possible suppressor pairs. ``warn_noise_floor`` controls
     the Gaussian-mRMR warning about noise-level picks; auto-k path builders
     disable it because they cut the path afterwards.
     """

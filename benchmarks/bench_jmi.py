@@ -215,7 +215,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--quick", action="store_true", help="Run the fast local benchmark cases.")
     mode.add_argument("--full", action="store_true", help="Run larger benchmark cases.")
-    parser.add_argument("--repeat", type=int, default=1, help="Run count per row; best time is reported.")
+    parser.add_argument("--repeat", type=int, default=3, help="Run count per row; best time is reported.")
     parser.add_argument("--weighted", action="store_true", help="Use non-uniform sample weights.")
     parser.add_argument("--output", type=Path, help="Optional JSON output path.")
     args = parser.parse_args()

@@ -390,7 +390,7 @@ selected = select_cefsplus(
     y,
     k=20,
     top_m=None,
-    corr_prune=0.95,
+    corr_prune=None,
     sample_weight=None,
     subsample=50_000,
     random_state=0,
@@ -404,9 +404,10 @@ prunes highly correlated candidates before selection.
 
 Important options:
 
-- `corr_prune`: candidate pruning threshold. A value of `0.95` drops features
-  highly correlated with better-scoring candidates. CEFS+ uses this pruning by
-  default. Pass `None` to disable pruning.
+- `corr_prune`: optional candidate-pruning threshold. The default `None` keeps
+  possible suppressor pairs. A value such as `0.95` drops features highly
+  correlated with better marginally scoring candidates and can be useful when
+  duplicate suppression is more important than suppressor recovery.
 - `top_m`: number of relevance-prefiltered candidates to keep before CEFS+.
 - `cache`: pass a `FeatureCache` to reuse the expensive transform.
 
@@ -450,7 +451,10 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff.
+  original feature and its knockoff. It remains the compatibility default;
+  broader independent, correlated, and dense-weak panels did not show a single
+  statistic dominating, so compare `ridge` or `lsm` when conditional signal is
+  plausible.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
   target correlations. It is exactly antisymmetric under swaps, needs no
@@ -467,10 +471,12 @@ Important options:
   correlation pruning inside the augmented run, and scores entries by marginal
   objective gain. It is slower than the default statistic, so use it as a
   redundancy-aware second opinion rather than a better default.
-- `statistic_options`: for `cefsplus`, `path_depth` sets the hard greedy-path
-  cap and defaults to at most 10 screened pairs. `min_gain_ratio` optionally
-  stops once the best gain is tiny relative to the first gain. The default
-  leaves early stopping disabled.
+- `statistic_options`: for `cefsplus`, `path_depth` sets an explicit hard
+  greedy-path cap. Without it, SIFT starts from a q-aware bounded depth and
+  doubles the depth when the discovery set reaches that cap. Metadata reports
+  the initial and final depths; an explicit saturated cap emits a warning.
+  `min_gain_ratio` optionally stops once the best gain is tiny relative to the
+  first gain. The default leaves gain-based early stopping disabled.
 - `s_method`: `"equi"` is fastest; `"mvr"` and `"me"` use diagonal
   coordinate-descent optimizers for the MVR and maximum-entropy objectives.
   They can improve power on correlated designs; `s_mean` is diagnostic only and
@@ -535,7 +541,7 @@ selected = select_cefsplus_binary(
     k=20,                 # or "auto"
     loss="logloss",
     top_m=None,
-    corr_prune=0.95,
+    corr_prune=None,
     time=None,
     groups=None,
     auto_k_config=None,
@@ -577,8 +583,9 @@ Important options:
   candidate matrix once per refit block, then scores within-block candidates
   from Schur-complement submatrices with efficient-score adjustment. Treat
   larger values as an approximate speed mode.
-- `corr_prune`: absolute weighted feature-correlation pruning threshold in
-  `(0, 1]`. Pass `None` to disable pruning.
+- `corr_prune`: optional absolute weighted feature-correlation pruning threshold
+  in `(0, 1]`. The default `None` preserves possible suppressor pairs; pass a
+  threshold such as `0.95` to opt into duplicate-oriented pruning.
 - `cat_encoding="loo_logit"`: smoothed leave-one-out logit encoding for binary
   categorical features. Function-style selectors still require
   `allow_full_data_target_encoding=True` before fitting supervised encoders on
@@ -980,12 +987,11 @@ that cache and does not rebuild it; build the cache with
 `build_cache(..., n_jobs=..., rank_backend="threads")` when you want parallel
 cache construction.
 
-`select_cached` uses `corr_prune="auto"` by default. In that mode, CEFS+ keeps
-its historical `0.95` pruning threshold, while cached Gaussian JMI, JMIM, and
-mRMR do not prune correlated candidates and can return `k` features when at
-least `k` candidates remain after `top_m` and validity filtering. Pass a float
-such as `corr_prune=0.95` to opt into the same pruning for any cached method, or
-pass `corr_prune=None` to disable pruning.
+`select_cached` uses `corr_prune="auto"` by default. It resolves to no pruning
+for every method so possible suppressor pairs remain eligible and selectors can
+return `k` features when enough candidates survive `top_m` and validity
+filtering. Pass a float such as `corr_prune=0.95` to opt into duplicate-oriented
+pruning for any cached method.
 
 `select_cached(..., return_objective=True)` returns `(features, objective_path)`.
 
@@ -1006,6 +1012,7 @@ selected_reg = stability_regression(
     threshold=0.6,
     n_bootstrap=50,
     alpha=None,          # estimated by CV when None
+    alpha_rule="one_se", # selection-oriented; use "best" for predictive CV
     l1_ratio=1.0,        # 1.0=Lasso; <1.0=ElasticNet
     sample_frac=0.5,
     random_state=0,
@@ -1025,6 +1032,11 @@ selected_cls = stability_classif(
 
 For DataFrame inputs, wrappers return feature names by default. For ndarray
 inputs, they return integer indices unless `return_indices=False` is passed.
+
+When `alpha=None`, the default `alpha_rule="one_se"` chooses the strongest
+regularization within one standard error of the best CV score. This is a
+selection-oriented default that reduces noise-variable frequency; use
+`alpha_rule="best"` when predictive CV error is the primary objective.
 
 The lower-level convenience function `sift.stability.stability_select` returns
 `(selected_indices, selection_frequencies)`:

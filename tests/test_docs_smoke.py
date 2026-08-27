@@ -45,3 +45,20 @@ def test_docs_install_extras_match_pyproject():
     pyproject_extras = _read_pyproject_extras()
 
     assert docs_extras == pyproject_extras
+
+
+def test_readme_python_examples_execute():
+    readme_text = (ROOT / "README.md").read_text(encoding="utf8")
+    blocks = re.findall(r"```python\n(.*?)\n```", readme_text, re.S)
+    assert blocks
+
+    namespace = {}
+    for block in blocks:
+        exec(compile(block, "README.md", "exec"), namespace)
+
+
+def test_readme_has_only_pypi_safe_links():
+    readme_text = (ROOT / "README.md").read_text(encoding="utf8")
+    relative_links = re.findall(r"\]\((?!https?://|mailto:|#)[^)]+\)", readme_text)
+
+    assert relative_links == []

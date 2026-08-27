@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Hashable, Sequence
+from functools import wraps
 from typing import Any, Callable, Optional
 import warnings
 
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from scipy.linalg import LinAlgError, cho_factor, cho_solve
+from threadpoolctl import threadpool_limits
 
 from sift._preprocess import to_numpy
 from sift.estimators.copula import (
@@ -35,6 +37,19 @@ _STATISTIC_NOT_ENABLED = (
 _CEFSPLUS_DEFAULT_PATH_DEPTH = 10
 _LOW_POWER_S = 0.05
 _INTEGER_TARGET_WARNING_EMITTED = False
+
+
+def _single_threaded_ridge_knockoffs(func):
+    """Limit native pools for the complete ridge-knockoff operation."""
+
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        if str(kwargs.get("statistic", "relevance")).lower() != "ridge":
+            return func(*args, **kwargs)
+        with threadpool_limits(limits=1):
+            return func(*args, **kwargs)
+
+    return wrapped
 
 
 class _SubsampleDefaultType:
@@ -529,6 +544,16 @@ def _validate_path_depth(value: Any, m: int, *, default: int | None = None) -> i
     return min(depth, 2 * m)
 
 
+def _default_cefsplus_path_depth(q: float, offset: int, m: int) -> int:
+    """Choose a bounded q-aware starting depth for the greedy knockoff path."""
+    q_aware = int(np.ceil(2.0 * max(1, offset) / q))
+    return _validate_path_depth(
+        None,
+        m,
+        default=max(_CEFSPLUS_DEFAULT_PATH_DEPTH, q_aware),
+    )
+
+
 def _cefsplus_incremental_scores(
     G: np.ndarray,
     r: np.ndarray,
@@ -686,12 +711,31 @@ def _stat_cefsplus(context: KnockoffStatContext) -> np.ndarray:
         return out
     tie_break = np.asarray(gaussian_mi_from_corr(r_aug), dtype=np.float64)
     min_gain_ratio = _validate_nonnegative_float(context.options.get("min_gain_ratio", 0.0), "min_gain_ratio")
-    h = _cefsplus_incremental_scores(
-        context.G,
-        r_aug,
-        path_depth=path_depth,
-        tie_break=tie_break,
-        min_gain_ratio=min_gain_ratio,
+    adaptive = bool(context.options.get("_adaptive_path_depth", False))
+    q = float(context.options.get("_q", 0.1))
+    offset = int(context.options.get("_offset", 1))
+    while True:
+        h = _cefsplus_incremental_scores(
+            context.G,
+            r_aug,
+            path_depth=path_depth,
+            tie_break=tie_break,
+            min_gain_ratio=min_gain_ratio,
+        )
+        W_kept = h[:m] - h[m:]
+        threshold = knockoff_threshold(W_kept, q, offset=offset)
+        n_selected = int(np.sum(W_kept >= threshold)) if np.isfinite(threshold) else 0
+        saturated = n_selected >= path_depth and path_depth < 2 * m
+        if not adaptive or not saturated:
+            break
+        path_depth = min(2 * m, 2 * path_depth)
+
+    context.options["_path_depth_used"] = max(
+        int(context.options.get("_path_depth_used", 0)),
+        int(path_depth),
+    )
+    context.options["_path_depth_saturated"] = bool(
+        context.options.get("_path_depth_saturated", False) or saturated
     )
     out[kept] = h[:m] - h[m:]
     return out
@@ -1218,6 +1262,7 @@ def _select_fdr_cluster_representatives(
     )
 
 
+@_single_threaded_ridge_knockoffs
 def select_fdr(
     X=None,
     y=None,
@@ -1352,12 +1397,21 @@ def select_fdr(
     path_depth_requested = options.get("path_depth")
     if stat_spec.name == "cefsplus":
         m_pairs = active_positions.shape[0] if screen_pairs_int is None else min(active_positions.shape[0], screen_pairs_int)
-        path_depth_effective = _validate_path_depth(
-            path_depth_requested,
-            int(m_pairs),
-            default=_CEFSPLUS_DEFAULT_PATH_DEPTH,
-        )
+        if path_depth_requested is None:
+            path_depth_effective = _default_cefsplus_path_depth(
+                q_float,
+                offset_int,
+                int(m_pairs),
+            )
+        else:
+            path_depth_effective = _validate_path_depth(
+                path_depth_requested,
+                int(m_pairs),
+            )
         options["path_depth"] = path_depth_effective
+        options["_adaptive_path_depth"] = path_depth_requested is None
+        options["_q"] = q_float
+        options["_offset"] = offset_int
     else:
         path_depth_effective = None
     Z_active = (
@@ -1391,6 +1445,8 @@ def select_fdr(
         "screen_pairs": screen_pairs_int,
         "path_depth_requested": path_depth_requested,
         "path_depth": path_depth_effective,
+        "path_depth_initial": path_depth_effective,
+        "path_depth_adaptive": stat_spec.name == "cefsplus" and path_depth_requested is None,
         "gamma": float(model.gamma),
         "lambda_min": float(model.lambda_min),
         "s_mean": float(np.mean(model.s)),
@@ -1490,6 +1546,22 @@ def select_fdr(
         thresholds.append(threshold)
         selected_valid = active_positions[selected_active]
         selection_sets_valid.append(selected_valid.astype(int).tolist())
+
+    if stat_spec.name == "cefsplus":
+        metadata["path_depth"] = int(
+            options.get("_path_depth_used", path_depth_effective)
+        )
+        metadata["path_depth_saturated"] = bool(
+            options.get("_path_depth_saturated", False)
+        )
+        if metadata["path_depth_saturated"]:
+            warnings.warn(
+                "The CEFS+ knockoff discovery set reached the configured "
+                f"path_depth={metadata['path_depth']}; increasing path_depth may "
+                "yield additional discoveries.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     mean_W = W_draws.mean(axis=0)
     if n_draws_int == 1:

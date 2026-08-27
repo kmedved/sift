@@ -163,12 +163,12 @@ def test_cached_gaussian_methods_can_opt_into_corr_prune():
     assert len(selected) == 1
 
 
-def test_select_cached_cefsplus_auto_corr_prune_remains_default():
+def test_select_cached_cefsplus_auto_does_not_corr_prune():
     _, y, cache = _duplicate_signal_cache()
 
     selected = select_cached(cache, y, k=4, method="cefsplus", top_m=6)
 
-    assert len(selected) == 1
+    assert len(selected) == 4
 
 
 @pytest.mark.parametrize(

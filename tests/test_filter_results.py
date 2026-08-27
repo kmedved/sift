@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
+from sift import build_cache, select_cefsplus, select_jmi, select_jmim, select_mrmr
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.result import FilterSelectionResult
 
@@ -59,8 +59,12 @@ def test_filter_selectors_return_result_has_indices_and_metadata_fixed_k():
             "relevance",
             "selector",
         ]
-        assert ranking["selected"].all()
-        assert ranking["rank"].tolist() == list(range(1, len(result.selected_features) + 1))
+        assert len(ranking) == X.shape[1]
+        assert ranking["selected"].sum() == len(result.selected_features)
+        assert ranking.loc[ranking["selected"], "feature"].tolist() == result.selected_features
+        assert ranking["rank"].tolist() == list(range(1, X.shape[1] + 1))
+        assert np.isfinite(ranking["relevance"]).all()
+        assert result.diagnostics_ is not None
 
 
 def test_gaussian_return_result_duplicate_names_keep_positional_indices():
@@ -72,6 +76,35 @@ def test_gaussian_return_result_duplicate_names_keep_positional_indices():
 
     assert result.selected_features == ["dup"]
     assert result.selected_indices == [0]
+
+
+def test_gaussian_cache_ranking_maps_relevance_by_name_after_reorder():
+    rng = np.random.default_rng(3)
+    X_cache = pd.DataFrame(
+        {
+            "signal": rng.normal(size=160),
+            "noise_a": rng.normal(size=160),
+            "noise_b": rng.normal(size=160),
+        }
+    )
+    y = X_cache["signal"].to_numpy() + 0.05 * rng.normal(size=len(X_cache))
+    cache = build_cache(X_cache, subsample=None)
+    X_call = X_cache[["noise_b", "signal", "noise_a"]]
+
+    result = select_cefsplus(
+        X_call,
+        y,
+        k=1,
+        cache=cache,
+        verbose=False,
+        return_result=True,
+    )
+    ranking = result.get_feature_ranking().set_index("feature")
+
+    assert result.selected_features == ["signal"]
+    assert result.selected_indices == [1]
+    assert ranking.loc["signal", "relevance"] > ranking.loc["noise_a", "relevance"]
+    assert ranking.loc["signal", "relevance"] > ranking.loc["noise_b", "relevance"]
 
 
 def test_filter_selectors_auto_k_return_result():

@@ -6,7 +6,6 @@ import numpy as np
 
 from sift._numba import njit_optional_cache
 
-MIN_VARIANCE = 1e-24
 CLASSIFICATION_BLOCK_SIZE = 256
 
 
@@ -57,7 +56,7 @@ def f_regression(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
 
     scores = np.empty(p, dtype=np.float64)
     for j in range(p):
-        if x_ss[j] < w_sum * MIN_VARIANCE or y_ss < w_sum * MIN_VARIANCE:
+        if x_ss[j] <= 0.0 or y_ss <= 0.0:
             scores[j] = 0.0
         else:
             r = xy_cov[j] / np.sqrt(x_ss[j] * y_ss)
@@ -119,8 +118,14 @@ def f_classif(X: np.ndarray, y: np.ndarray, w: np.ndarray) -> np.ndarray:
                 )
 
             j = start + local_j
-            if df_within <= 0 or df_between <= 0 or ss_within < 1e-12:
+            if df_within <= 0 or df_between <= 0:
                 scores[j] = 0.0
+            elif ss_within <= 0.0:
+                scores[j] = (
+                    1.0 / np.finfo(np.float64).eps
+                    if ss_between > 0.0
+                    else 0.0
+                )
             else:
                 scores[j] = (ss_between / df_between) / (ss_within / df_within)
 

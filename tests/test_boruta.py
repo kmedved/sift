@@ -309,7 +309,7 @@ class TestBorutaSelector:
             }
         )
         y = (X["num"] > 0).astype(int).to_numpy()
-        with pytest.raises(ValueError, match="allow_full_data_target_encoding"):
+        with pytest.raises(ValueError, match="Non-numeric"):
             BorutaSelector(task="classification", max_iter=1, verbose=False).fit(X, y)
         with pytest.raises(ValueError, match="allow_full_data_target_encoding"):
             select_boruta(X, y, task="classification", cat_encoding="loo_logit", max_iter=1, verbose=False)

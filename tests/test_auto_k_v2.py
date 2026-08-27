@@ -1511,8 +1511,9 @@ def test_stability_rules_honor_effective_min_k():
     default_cfg = AutoKConfig(k_method="stability", min_k=2, max_k=3, boot_B=3)
     default_k, default_diag = select_k_stability(paths, 3, default_cfg)
     assert default_cfg.stability_rule == "max_one_se"
-    assert default_k == 3
-    assert default_diag.loc[default_diag["selected"], "k"].tolist() == [3]
+    assert default_k == 2
+    assert default_diag.loc[default_diag["selected"], "k"].tolist() == [2]
+    assert default_diag["k"].max() == 2
     assert default_diag["phi_se"].fillna(0.0).max() == 0.0
 
     max_rule_cfg = AutoKConfig(
@@ -1523,8 +1524,8 @@ def test_stability_rules_honor_effective_min_k():
         stability_rule="max_one_se",
     )
     max_rule_k, max_rule_diag = select_k_stability(paths, 3, max_rule_cfg)
-    assert max_rule_k == 3
-    assert max_rule_diag.loc[max_rule_diag["selected"], "k"].tolist() == [3]
+    assert max_rule_k == 2
+    assert max_rule_diag.loc[max_rule_diag["selected"], "k"].tolist() == [2]
 
     pi_cfg = AutoKConfig(
         k_method="stability",
@@ -1548,6 +1549,15 @@ def test_stability_rules_honor_effective_min_k():
 
 
 def test_nogueira_phi_ground_truth_and_jackknife_sanity():
+    assert np.isnan(
+        auto_k_resample._stability_phi_from_counts(
+            np.array([3.0, 3.0, 3.0]),
+            B=3,
+            k=3,
+            p=3,
+        )
+    )
+
     worked = auto_k_resample._stability_phi_from_counts(
         np.array([3.0, 1.0, 1.0, 1.0]),
         B=3,
