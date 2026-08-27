@@ -62,9 +62,10 @@ nothing.
 
 ## Documentation Checks
 
-`DOCS.MD` is the detailed API manual and is used as the package long
-description. The docs smoke tests verify that documented top-level exports and
-install extras match the package.
+`README.md` is the package long description; its links must therefore be
+absolute and PyPI-safe. `DOCS.MD` is the detailed API manual. The docs smoke
+tests verify the README examples, documented top-level exports, and install
+extras.
 
 ```bash
 python -m pytest tests/test_docs_smoke.py -q
@@ -104,8 +105,8 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 ## CI and Releases
 
 GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus optional CatBoost
-coverage. Publishing is triggered from GitHub releases through the package
-upload workflow.
+coverage and a scheduled quick benchmark gate. Publishing is triggered from
+GitHub releases through a separate build job and an OIDC-only PyPI job.
 
 Before release-oriented promotion, run:
 
@@ -113,12 +114,19 @@ Before release-oriented promotion, run:
 python -m pytest -q
 python -m pytest tests/test_docs_smoke.py -q
 python -m pytest tests/test_benchmarks.py -q
+python -m build
+python -m twine check dist/*
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-For the 0.7.0 knockoffs bundle, the focused smoke is:
+Before the first `sift-feature-selection` upload, configure the PyPI Trusted
+Publisher for repository `kmedved/sift`, workflow
+`.github/workflows/python-publish.yml`, and environment `pypi`. Release tags
+must match `v` plus `sift.__version__`.
+
+For the 0.8.0 release bundle, the focused smoke is:
 
 ```bash
 python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q

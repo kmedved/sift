@@ -73,28 +73,36 @@ def _time_select(
     n_jobs: int,
     k: int,
     blas_threads: int | None = None,
+    repeat: int = 3,
 ) -> tuple[float, list[str]]:
     thread_context = (
         threadpool_limits(limits=blas_threads)
         if backend == "blas" and blas_threads is not None
         else nullcontext()
     )
+    best_wall = float("inf")
+    best_selected: list[str] = []
     with thread_context:
-        start = time.perf_counter()
-        selected = select_mrmr(
-            X,
-            y,
-            k=k,
-            task="regression",
-            estimator="classic" if method == "classic" else "gaussian",
-            formula="quotient",
-            top_m=max(5 * k, 250),
-            subsample=None,
-            n_jobs=n_jobs,
-            mrmr_backend=backend,
-            verbose=False,
-        )
-    return time.perf_counter() - start, selected
+        for _ in range(repeat):
+            start = time.perf_counter()
+            selected = select_mrmr(
+                X,
+                y,
+                k=k,
+                task="regression",
+                estimator="classic" if method == "classic" else "gaussian",
+                formula="quotient",
+                top_m=max(5 * k, 250),
+                subsample=None,
+                n_jobs=n_jobs,
+                mrmr_backend=backend,
+                verbose=False,
+            )
+            wall = time.perf_counter() - start
+            if wall < best_wall:
+                best_wall = wall
+                best_selected = selected
+    return best_wall, best_selected
 
 
 def _warmup() -> None:
@@ -153,8 +161,12 @@ def main() -> int:
             "e.g. 1,2,4. Omit to run one unbounded BLAS row."
         ),
     )
+    parser.add_argument("--repeat", type=int, default=3, help="Run count per row; best time is reported.")
     parser.add_argument("--output", type=Path, help="Optional JSON output path.")
     args = parser.parse_args()
+
+    if args.repeat < 1:
+        parser.error("--repeat must be >= 1")
 
     full = bool(args.full)
     blas_thread_values = args.blas_threads if args.blas_threads is not None else [None]
@@ -165,7 +177,7 @@ def main() -> int:
         X, y = _make_data(n, p, seed=10_000 + case_idx)
 
         serial_time, serial_selected = _time_select(
-            X, y, method=method, backend="serial", n_jobs=1, k=k
+            X, y, method=method, backend="serial", n_jobs=1, k=k, repeat=args.repeat
         )
         records.append(
             {
@@ -199,6 +211,7 @@ def main() -> int:
                 n_jobs=1,
                 k=k,
                 blas_threads=blas_threads,
+                repeat=args.repeat,
             )
             parity = selected == serial_selected
             blas_kind = "promotion" if method == "classic" else "parity"
@@ -235,7 +248,13 @@ def main() -> int:
 
         for process_jobs in args.n_jobs:
             wall, selected = _time_select(
-                X, y, method=method, backend="processes", n_jobs=process_jobs, k=k
+                X,
+                y,
+                method=method,
+                backend="processes",
+                n_jobs=process_jobs,
+                k=k,
+                repeat=args.repeat,
             )
             parity = selected == serial_selected
             records.append(

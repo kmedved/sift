@@ -11,7 +11,18 @@ The package is a single Python library. Public entry points are exported from
 
 ## Quickstart
 
-Install from the repository root:
+Install the feature-selection distribution from PyPI (the import remains
+`sift`):
+
+```bash
+python -m pip install sift-feature-selection
+```
+
+The distribution name is distinct from Sift Science's occupied `Sift` project.
+For source compatibility this project still imports as `sift`, so the two
+projects must not be installed in the same Python environment.
+
+For local development, install from the repository root:
 
 ```bash
 python -m pip install -e .
@@ -59,22 +70,21 @@ trusted_features = result.selected_features
 the user guide for the exact Model-X assumptions behind the q-calibrated result.
 
 For the full public API, examples, selector support matrix, and option details,
-start with [DOCS.MD](DOCS.MD).
+start with the [full API manual](https://github.com/kmedved/sift/blob/main/DOCS.MD).
 
 ## Documentation
 
-- [Full API manual](DOCS.MD)
-- [Standalone API reference](docs/API.md)
-- [Algorithm guide](docs/ALGORITHMS.md)
-- [Advanced workflow guide](docs/ADVANCED.md)
-- [User guide](docs/user-guide.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Architecture and module boundaries](docs/architecture.md)
-- [Development guide](docs/development.md)
-- [Benchmarks](benchmarks/README.md)
-- [Release notes](docs/release-notes.md)
-- [Release tracker](TODO.MD)
-- [Contributing guide](CONTRIBUTING.md)
+- [Full API manual](https://github.com/kmedved/sift/blob/main/DOCS.MD)
+- [Standalone API reference](https://github.com/kmedved/sift/blob/main/docs/API.md)
+- [Algorithm guide](https://github.com/kmedved/sift/blob/main/docs/ALGORITHMS.md)
+- [Advanced workflow guide](https://github.com/kmedved/sift/blob/main/docs/ADVANCED.md)
+- [User guide](https://github.com/kmedved/sift/blob/main/docs/user-guide.md)
+- [Troubleshooting](https://github.com/kmedved/sift/blob/main/docs/troubleshooting.md)
+- [Architecture and module boundaries](https://github.com/kmedved/sift/blob/main/docs/architecture.md)
+- [Development guide](https://github.com/kmedved/sift/blob/main/docs/development.md)
+- [Benchmarks](https://github.com/kmedved/sift/blob/main/benchmarks/README.md)
+- [Release notes](https://github.com/kmedved/sift/blob/main/docs/release-notes.md)
+- [Contributing guide](https://github.com/kmedved/sift/blob/main/CONTRIBUTING.md)
 
 ## Main Components
 
@@ -110,9 +120,9 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-See [docs/development.md](docs/development.md) for focused test slices,
+See the [development guide](https://github.com/kmedved/sift/blob/main/docs/development.md) for focused test slices,
 benchmarks, documentation checks, and release notes.
 
 ## License
 
-SIFT is released under the [MIT License](LICENSE).
+SIFT is released under the [MIT License](https://github.com/kmedved/sift/blob/main/LICENSE).

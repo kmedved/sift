@@ -39,16 +39,20 @@ No changes yet.
 - Binary CEFS+ refits warm-start from the previous prefix and stop on relative
   objective convergence; long paths and `k="auto"` (EBIC refit) are 5-8x faster
   with identical selections. The binary path now stays in float64 end to end
-  and drops constants by standard deviation (`> 1e-12`) like the Gaussian
-  cache, so large-offset or tiny-scale informative columns are no longer lost.
+  and drops only exactly constant columns like the Gaussian cache, so
+  large-offset or tiny-scale informative columns are no longer lost.
+- Binary CEFS+, R² JMI, ridge knockoffs, and stability bootstrap fits now apply
+  narrow one-thread native-pool scopes around repeated matrix operations.
+  This prevents multiple OpenBLAS/OpenMP runtimes from oversubscribing one
+  another; `threadpoolctl` is now a direct dependency.
 - `select_mrmr(mrmr_backend="auto")` now resolves to the BLAS redundancy path
   for every `n_jobs` (3-10x faster than the serial Numba loop; the process
   backend remains an explicit opt-in). The `f_regression`, `f_classif`, and
   standardization kernels sweep rows instead of columns (about 10x faster).
   The row-order-preserving traversal itself is bitwise equivalent; separately,
-  regression relevance and JMI/mRMR standardization use a `1e-24` variance
-  floor so genuinely varying tiny-scale features remain scale invariant instead
-  of being treated as constants.
+  regression relevance and JMI/mRMR standardization use exact-constancy checks
+  so genuinely varying tiny-scale features remain scale invariant instead of
+  being treated as constants.
 - `smart_sample` clips only touched inclusion probabilities per group and
   `quantile_anchors` uses a vectorized group quantile (about 2x faster on large
   grouped panels, identical output).
@@ -72,8 +76,33 @@ No changes yet.
 - `select_fdr` now warns when the knockoff decorrelation is too small to have
   power (median `s < 0.05`) and reports `s_median` and
   `n_low_power_features` in the metadata.
+- CEFS+ knockoff paths no longer have a silent ten-discovery default cap. The
+  implicit path depth starts from a q-aware bound and expands when discoveries
+  saturate it; explicit saturated caps warn and depth metadata records the
+  initial and final values.
 
 ### Correctness and validation
+
+- Function selectors now reject unknown `task` values and continuous
+  classification targets. Regression targets remain float64 across classic,
+  Gaussian, stability, and smart-sampling paths, preventing large-offset target
+  collapse.
+- Prebuilt Gaussian caches reject call-time `sample_weight` instead of silently
+  ignoring it. Seeded knockoff caches discard zero-weight rows before sampling,
+  so irrelevant rows do not consume RNG draws.
+- Stability auto-k excludes the tautological `k=p` agreement endpoint.
+  Threshold tuning uses scale-equivariant ridge scoring, and automatic
+  stability regularization defaults to a one-standard-error rule; users can
+  request prediction-optimal CV with `alpha_rule="best"`.
+- CEFS+ correlation pruning is now opt-in. The unpruned default preserves
+  suppressor pairs, while `corr_prune=0.95` remains available for
+  duplicate-oriented diversity.
+- Function-style categorical encoding defaults to `"none"`, matching the
+  full-data leakage guard instead of selecting a supervised encoder that is
+  rejected by default.
+- Fixed-k filter results now retain complete rankings, relevance, path scores,
+  selected indices, and method diagnostics. Routed auto-k metadata omits
+  strategy and selection-rule fields for methods that did not use them.
 
 - Fixed `catboost_select(k=None)` reporting the wrong `best_k`: the old scan
   walked down from the largest count and stopped after `selection_patience`
@@ -148,6 +177,12 @@ No changes yet.
 - The CatBoost dependency job now runs the full test suite with all optional
   dependencies installed. The redundant Python 3.11 Numba job was removed;
   Numba is a required dependency and remains covered by every base matrix job.
+- The distribution is now published as `sift-feature-selection` (while the
+  import remains `sift`) to avoid the occupied `Sift` PyPI project. Wheels
+  exclude benchmark packages, PyPI renders the concise README with absolute
+  links, and the release workflow uses a separate verified build plus OIDC
+  Trusted Publishing. Critical Ruff checks and a scheduled quick benchmark
+  promotion gate now run in CI.
 
 ## 0.7.0
 

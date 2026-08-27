@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import wraps
 from typing import Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_limits
 
 from sift._preprocess import (
     CatEncoding,
@@ -16,6 +18,7 @@ from sift._preprocess import (
     RelevanceMethod,
     Task,
     resolve_jmi_estimator,
+    validate_task,
     validate_k,
 )
 from sift.estimators.copula import FeatureCache
@@ -63,6 +66,18 @@ from sift.selection.filter_payloads import (
 )
 from sift.selection.loops import MrmrBackend, resolve_mrmr_backend
 from sift.selection.result import FilterSelectionResult, build_selector_metadata
+
+
+def _single_threaded_binary_blas(func):
+    """Limit native pools across path construction and auto-k refits."""
+
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with threadpool_limits(limits=1):
+            return func(*args, **kwargs)
+
+    return wrapped
+
 
 XInput = Union[pd.DataFrame, np.ndarray]
 YInput = Union[pd.Series, np.ndarray]
@@ -211,7 +226,7 @@ def select_mrmr(
     sample_weight: np.ndarray | None = None,
     relevance: RelevanceMethod = "f", estimator: EstimatorMRMR = "classic",
     formula: Formula = "quotient", top_m: Optional[int] = None,
-    cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "loo",
+    cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = 50_000, random_state: int = 0, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
@@ -234,7 +249,7 @@ def select_jmi(
     sample_weight: np.ndarray | None = None,
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
-    cat_encoding: CatEncoding = "loo",
+    cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = 50_000, random_state: int = 0,
     verbose: bool = True, return_result: bool = False,
@@ -256,7 +271,7 @@ def select_jmim(
     sample_weight: np.ndarray | None = None,
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
-    cat_encoding: CatEncoding = "loo",
+    cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = 50_000, random_state: int = 0,
     verbose: bool = True, return_result: bool = False,
@@ -279,8 +294,8 @@ def select_cefsplus(
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
-    top_m: Optional[int] = None, corr_prune: float | None = 0.95,
-    cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "loo",
+    top_m: Optional[int] = None, corr_prune: float | None = None,
+    cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = 50_000, random_state: int = 0,
     verbose: bool = True, return_result: bool = False,
@@ -294,15 +309,16 @@ def select_cefsplus(
     return _select_filter(CEFSPLUS_SPEC, request)
 
 
+@_single_threaded_binary_blas
 def select_cefsplus_binary(
     X: XInput, y: YInput, k: KInput, *,
-    loss: str = "logloss", top_m: Optional[int] = None, corr_prune: float | None = 0.95,
+    loss: str = "logloss", top_m: Optional[int] = None, corr_prune: float | None = None,
     groups: Optional[np.ndarray] = None, time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
     class_weight=None,
     ridge: float = 1e-4, refit_every: int = 1,
-    cat_features: Optional[list[str]] = None, cat_encoding: str = "loo_logit",
+    cat_features: Optional[list[str]] = None, cat_encoding: str = "none",
     loo_smoothing: float = 20.0, loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     allow_full_data_target_encoding: bool = False,
@@ -350,6 +366,7 @@ def _select_filter(
 
 
 def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
+    validate_task(request.task)
     x_shape = request.X.shape if hasattr(request.X, "shape") else np.asarray(request.X).shape
     if len(x_shape) != 2:
         raise ValueError("X must be a 2D feature matrix")
@@ -396,10 +413,15 @@ def _format_payload(
             {
                 "auto_k_mode": ctx.auto_k_config.auto_k_mode,
                 "k_method": ctx.auto_k_config.k_method,
-                "auto_k_strategy": ctx.auto_k_config.strategy,
-                "selection_rule": ctx.auto_k_config.selection_rule,
             }
         )
+        if ctx.auto_k_config.k_method in {"evaluate", "xfit_objective", "gaussian_cv"}:
+            extra.update(
+                {
+                    "auto_k_strategy": ctx.auto_k_config.strategy,
+                    "selection_rule": ctx.auto_k_config.selection_rule,
+                }
+            )
     if payload.metadata_extra:
         extra.update(payload.metadata_extra)
 

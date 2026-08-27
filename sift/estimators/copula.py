@@ -34,7 +34,7 @@ def build_cache(
     subsample: int | None = 50_000,
     random_state: int = 0,
     compute_Rxx: bool = False,
-    min_std: float = 1e-12,
+    min_std: float = 0.0,
     n_jobs: int = 1,
     rank_backend: RankBackend = "serial",
 ) -> FeatureCache:
@@ -58,24 +58,23 @@ def build_cache(
     if feature_names is None:
         feature_names = [f"x{i}" for i in range(p)]
 
-    w = ensure_weights(sample_weight, n, normalize=True)
+    if not np.isfinite(min_std) or min_std < 0.0:
+        raise ValueError("min_std must be finite and non-negative")
 
-    if subsample is not None and n > subsample:
+    w = ensure_weights(sample_weight, n, normalize=True)
+    positive = np.flatnonzero(w > 0.0)
+    if subsample is not None and positive.size > subsample:
         rng = np.random.default_rng(random_state)
-        positive = np.flatnonzero(w > 0.0)
-        if positive.size == n:
-            row_idx = rng.choice(n, size=subsample, replace=False)
-        elif positive.size <= subsample:
-            row_idx = positive
-        else:
-            row_idx = rng.choice(positive, size=subsample, replace=False)
+        row_idx = rng.choice(positive, size=subsample, replace=False)
     else:
-        row_idx = np.arange(n)
+        row_idx = positive
 
     Xs = X_arr[row_idx]
     ws = w[row_idx]
-    if float(ws.sum()) <= 0.0:
+    weight_mean = float(ws.mean())
+    if not np.isfinite(weight_mean) or weight_mean <= 0.0:
         raise ValueError("Subsample has zero total weight; check sample_weight/subsample.")
+    ws = ws / weight_mean
     Xs = mean_impute(Xs, copy=False)
 
     stds = np.std(Xs, axis=0)

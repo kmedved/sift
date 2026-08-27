@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from functools import wraps
 from typing import Literal, Optional
 
 import numpy as np
@@ -13,8 +14,23 @@ from sift._numba import njit_optional_cache
 from sift._preprocess import validate_k
 
 FLOOR = 1e-6
-MIN_VARIANCE = 1e-24
 MrmrBackend = Literal["auto", "serial", "blas", "processes"]
+
+
+def _single_threaded_r2_jmi(func):
+    """Limit native pools for repeated R2-JMI correlation matvecs."""
+
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        estimator = kwargs.get(
+            "mi_estimator",
+            args[4] if len(args) > 4 else "r2",
+        )
+        context = threadpool_limits(limits=1) if estimator == "r2" else nullcontext()
+        with context:
+            return func(*args, **kwargs)
+
+    return wrapped
 
 
 def resolve_mrmr_backend(mrmr_backend: MrmrBackend, n_jobs: int) -> Literal["serial", "blas", "processes"]:
@@ -63,7 +79,7 @@ def _standardize_columns_weighted(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     std = np.empty(p, dtype=np.float64)
     for j in range(p):
         var[j] /= w_sum
-        std[j] = np.sqrt(var[j]) if var[j] > MIN_VARIANCE else 1.0
+        std[j] = np.sqrt(var[j]) if var[j] > 0.0 else 1.0
 
     Z = np.empty((n, p), dtype=np.float64)
     for i in range(n):
@@ -362,6 +378,7 @@ def mrmr_select(
 # Classic JMI/JMIM (incremental scoring)
 # =============================================================================
 
+@_single_threaded_r2_jmi
 def jmi_select(
     X: np.ndarray,
     y: np.ndarray,

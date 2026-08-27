@@ -19,7 +19,13 @@ from sift._preprocess import (
     validate_inputs,
 )
 from sift.estimators import relevance as rel_est
-from sift.estimators.copula import FeatureCache, build_cache
+from sift.estimators.copula import (
+    FeatureCache,
+    build_cache,
+    gaussian_mi_from_corr,
+    weighted_corr_with_vector,
+    weighted_rank_gauss_1d,
+)
 from sift.selection.cefsplus import select_cached
 from sift.selection.cefsplus_binary import make_diagnostics
 from sift.selection.cefsplus_binary_common import (
@@ -99,6 +105,25 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             )
         selected_idx = path_func(ctx, prep, k, top_m)
         selected = [prep.feature_names[i] for i in selected_idx]
+        ranking = None
+        diagnostics = None
+        if ctx.request.return_result:
+            relevance = _compute_relevance(
+                prep.X_arr,
+                prep.y_arr,
+                prep.w,
+                ctx.request.task,
+                _kw(ctx, "relevance"),
+            )
+            ranking = _path_ranking(
+                prep.feature_names,
+                selected_idx,
+                relevance,
+                ctx.spec.selector,
+            )
+            diagnostics = {
+                "path_relevance": relevance[selected_idx].astype(float).tolist(),
+            }
         return SelectionPayload(
             selected_features=selected,
             selected_indices=selected_idx.astype(int).tolist()
@@ -106,6 +131,8 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             else None,
             top_m=top_m,
             n_features=ctx.n_features_input,
+            ranking=ranking,
+            diagnostics=diagnostics,
         )
 
     return fixed_classic
@@ -162,26 +189,59 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
             print(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
-        selected, selected_indices = select_cached(
-            cache,
-            ctx.request.y,
-            k,
-            method=method,
-            top_m=top_m,
-            corr_prune=_kw(ctx, "corr_prune", "auto"),
-            return_indices=True,
-        )
+        if ctx.request.return_result:
+            selected, selected_indices, objective = select_cached(
+                cache,
+                ctx.request.y,
+                k,
+                method=method,
+                top_m=top_m,
+                corr_prune=_kw(ctx, "corr_prune", "auto"),
+                return_indices=True,
+                return_objective=True,
+            )
+        else:
+            selected, selected_indices = select_cached(
+                cache,
+                ctx.request.y,
+                k,
+                method=method,
+                top_m=top_m,
+                corr_prune=_kw(ctx, "corr_prune", "auto"),
+                return_indices=True,
+            )
+            objective = None
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
             ctx,
             cache,
             selected,
             selected_indices,
         )
+        ranking = None
+        diagnostics = None
+        if ctx.request.return_result:
+            objective_arr = np.asarray(objective, dtype=np.float64)
+            diagnostics = {
+                "objective_path": objective_arr.astype(float).tolist(),
+                "objective_gain": np.diff(
+                    np.concatenate(([0.0], objective_arr))
+                ).astype(float).tolist(),
+            }
+            if selected_indices is not None:
+                relevance = _gaussian_relevance_for_input(ctx, cache)
+                ranking = _path_ranking(
+                    ctx.feature_names,
+                    selected_indices,
+                    relevance,
+                    ctx.spec.selector,
+                )
         return SelectionPayload(
             selected_features=selected_features,
             selected_indices=selected_indices,
             top_m=top_m,
             n_features=n_features,
+            ranking=ranking,
+            diagnostics=diagnostics,
         )
 
     return fixed_gaussian
@@ -383,6 +443,8 @@ def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
 
 def validate_standard(ctx: "FilterContext") -> None:
     check_regression_only(ctx.request.task, ctx.estimator)
+    if ctx.request.cache is not None and ctx.estimator != "gaussian":
+        raise ValueError("cache is supported only with estimator='gaussian'")
     if ctx.estimator == "gaussian":
         # Gaussian/cache paths bypass validate_inputs, so check the regression
         # target here; otherwise non-finite y rows would silently be treated
@@ -397,7 +459,12 @@ def validate_ksg_no_weight(ctx: "FilterContext") -> None:
 
 
 def validate_cefsplus(ctx: "FilterContext") -> None:
-    y_arr = to_numpy(ctx.request.y, dtype=np.float32).ravel()
+    if ctx.request.cache is not None and ctx.request.sample_weight is not None:
+        raise ValueError(
+            "sample_weight is already fixed by the supplied cache; "
+            "pass weights to build_cache instead"
+        )
+    y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
     if len(y_arr) != ctx.n_rows:
         raise ValueError(f"X has {ctx.n_rows} rows but y has {len(y_arr)}")
     if not np.isfinite(y_arr).all():
@@ -513,15 +580,19 @@ def _binary_payload_from_selection(
         if selection.auto_objective is not None:
             diagnostics["auto_k_objective"] = selection.auto_objective.tolist()
 
-    ranking = pd.DataFrame(
-        {
-            "feature": selection.selected_features,
-            "rank": np.arange(1, len(selection.selected_features) + 1, dtype=np.int64),
-            "selected": np.ones(len(selection.selected_features), dtype=bool),
-            "selected_index": selection.selected_original,
-            "score": selection.selected_scores,
-            "selector": "cefsplus_binary",
-        }
+    ranking = _path_ranking(
+        run.feature_names,
+        selection.selected_original,
+        run.path.univariate_scores,
+        "cefsplus_binary",
+    )
+    path_score_by_index = dict(
+        zip(selection.selected_original, selection.selected_scores)
+    )
+    ranking.insert(
+        ranking.columns.get_loc("selector"),
+        "score",
+        [path_score_by_index.get(int(i), np.nan) for i in ranking["selected_index"]],
     )
     metadata_extra = {
         "loss": "logloss",
@@ -690,6 +761,77 @@ def _compute_relevance(
             f"Valid options: {sorted(rel_funcs.keys())}"
         )
     return rel_funcs[relevance](X_arr, y_arr, w)
+
+
+def _gaussian_relevance_for_input(
+    ctx: "FilterContext",
+    cache: FeatureCache,
+) -> np.ndarray:
+    y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
+    y_cache = y_arr[np.asarray(cache.row_idx, dtype=np.int64)]
+    weights = np.asarray(cache.sample_weight, dtype=np.float64)
+    zy = weighted_rank_gauss_1d(y_cache, weights)
+    rel_valid = gaussian_mi_from_corr(
+        weighted_corr_with_vector(cache.Z, zy, weights)
+    )
+    relevance = np.zeros(ctx.n_features_input, dtype=np.float64)
+    valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
+    rel_valid_arr = np.asarray(rel_valid, dtype=np.float64)
+    cache_names = list(cache.feature_names or [])
+    input_names = list(ctx.feature_names)
+    if (
+        len(cache_names) > 0
+        and len(set(cache_names)) == len(cache_names)
+        and len(set(input_names)) == len(input_names)
+        and set(cache_names) == set(input_names)
+    ):
+        input_index = {name: idx for idx, name in enumerate(input_names)}
+        for valid_pos, cache_original in enumerate(valid_cols):
+            if 0 <= int(cache_original) < len(cache_names):
+                relevance[input_index[cache_names[int(cache_original)]]] = rel_valid_arr[
+                    valid_pos
+                ]
+    else:
+        in_bounds = (valid_cols >= 0) & (valid_cols < relevance.size)
+        relevance[valid_cols[in_bounds]] = rel_valid_arr[in_bounds]
+    return relevance
+
+
+def _path_ranking(
+    feature_names: list[str],
+    selected_indices,
+    relevance: np.ndarray,
+    selector: str,
+) -> pd.DataFrame:
+    relevance_arr = np.asarray(relevance, dtype=np.float64).reshape(-1)
+    n_features = len(feature_names)
+    if relevance_arr.shape[0] != n_features:
+        raise RuntimeError("relevance length must match feature names")
+    selected = np.asarray(selected_indices, dtype=np.int64).reshape(-1)
+    if selected.size and (
+        np.any(selected < 0)
+        or np.any(selected >= n_features)
+        or np.unique(selected).size != selected.size
+    ):
+        raise RuntimeError("selected indices must be unique and in bounds")
+    selected_mask = np.zeros(n_features, dtype=bool)
+    selected_mask[selected] = True
+    remaining = np.flatnonzero(~selected_mask)
+    finite_relevance = np.where(np.isfinite(relevance_arr), relevance_arr, -np.inf)
+    remaining = remaining[
+        np.lexsort((remaining, -finite_relevance[remaining]))
+    ]
+    order = np.concatenate([selected, remaining])
+    return pd.DataFrame(
+        {
+            "feature": [feature_names[int(i)] for i in order],
+            "rank": np.arange(1, n_features + 1, dtype=np.int64),
+            "selected": selected_mask[order],
+            "selected_index": order,
+            "relevance": relevance_arr[order],
+            "selector": selector,
+        }
+    )
 
 
 def _kw(ctx: "FilterContext", name: str, default=None):

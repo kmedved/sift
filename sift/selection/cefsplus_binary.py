@@ -73,14 +73,15 @@ def weighted_standardize(
     X: np.ndarray,
     w: np.ndarray,
     *,
-    min_std: float = 1e-12,
+    min_std: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Weighted-standardize columns, dropping (near-)constant ones.
+    """Weighted-standardize columns, dropping constant ones.
 
     A column is kept when its weighted standard deviation exceeds ``min_std``,
-    the same convention as the Gaussian cache builder, so tiny-scale but
-    informative columns are not mistaken for constants.
+    which defaults to exact constancy so units do not affect validity.
     """
+    if not np.isfinite(min_std) or min_std < 0.0:
+        raise ValueError("min_std must be finite and non-negative")
     w_sum = float(np.sum(w))
     means = (w @ X) / w_sum
     centered = X - means

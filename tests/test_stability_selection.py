@@ -402,7 +402,13 @@ def test_find_alpha_uses_fold_local_preprocessing_pipeline(monkeypatch):
     X[3, 0] = np.nan
     y = np.arange(12, dtype=float)
     weights = np.ones(12)
-    selector = StabilitySelector(alpha=None, n_jobs=1, random_state=0, verbose=False)
+    selector = StabilitySelector(
+        alpha=None,
+        alpha_rule="best",
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    )
 
     alpha = selector._find_alpha(X, y, weights)
 
@@ -410,6 +416,38 @@ def test_find_alpha_uses_fold_local_preprocessing_pipeline(monkeypatch):
     assert captured["steps"] == ["imputer", "scaler", "model"]
     assert np.isnan(captured["X"]).any()
     assert "model__sample_weight" in captured["fit_params"]
+
+
+def test_one_se_alpha_rule_prefers_stronger_regularization():
+    class Search:
+        best_params_ = {"model__alpha": 0.1}
+        n_splits_ = 4
+        cv_results_ = {
+            "mean_test_score": [-1.02, -1.0, -1.015, -1.2],
+            "std_test_score": [0.02, 0.08, 0.02, 0.01],
+            "params": [
+                {"model__alpha": 0.05},
+                {"model__alpha": 0.1},
+                {"model__alpha": 0.2},
+                {"model__alpha": 0.4},
+            ],
+        }
+
+    chosen = StabilitySelector._one_se_parameter(
+        Search(),
+        "model__alpha",
+        prefer="larger",
+    )
+
+    assert chosen == 0.2
+
+
+def test_stability_selector_rejects_unknown_alpha_rule():
+    X = np.arange(30, dtype=float).reshape(10, 3)
+    y = np.arange(10, dtype=float)
+
+    with pytest.raises(ValueError, match="alpha_rule"):
+        StabilitySelector(alpha_rule="prediction", verbose=False).fit(X, y)
 
 
 def test_tune_threshold_default_thresholds_are_immutable():

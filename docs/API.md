@@ -107,7 +107,7 @@ selected = select_cefsplus(
     y,
     k=20,
     top_m=None,
-    corr_prune=0.95,
+    corr_prune=None,
     sample_weight=None,
     subsample=50_000,
     random_state=0,
@@ -116,8 +116,9 @@ selected = select_cefsplus(
 ```
 
 CEFS+ is a regression-only Gaussian-copula filter that uses a log-determinant
-conditional information objective. `corr_prune` removes highly correlated
-candidates from the greedy path.
+conditional information objective. `corr_prune=None` preserves possible
+suppressor pairs; pass a threshold such as `0.95` to opt into duplicate-oriented
+pruning.
 
 ### `select_cefsplus_binary`
 
@@ -133,7 +134,7 @@ selected = select_cefsplus_binary(
     ridge=1e-4,
     refit_every=1,
     top_m=None,
-    corr_prune=0.95,
+    corr_prune=None,
     sample_weight=None,
     verbose=False,
 )
@@ -438,6 +439,7 @@ selector = StabilitySelector(
     sample_frac=0.5,
     threshold=0.6,
     alpha=None,
+    alpha_rule="one_se",
     l1_ratio=1.0,
     task="regression",
     max_features=None,
