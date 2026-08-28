@@ -30,6 +30,19 @@ def _data(n=80, p=4):
     return X, y
 
 
+def _non_deterministic_tag(estimator) -> bool:
+    """Read the public sklearn tag across the pre/post-1.6 APIs."""
+    try:
+        from sklearn.utils import get_tags
+    except ImportError:  # sklearn < 1.6
+        return bool(estimator._get_tags()["non_deterministic"])
+
+    tags = get_tags(estimator)
+    if isinstance(tags, dict):
+        return bool(tags["non_deterministic"])
+    return bool(tags.non_deterministic)
+
+
 def test_gaussian_named_cache_requires_exact_dataframe_columns_and_order():
     X, y = _data()
     cache = build_cache(X, subsample=None)
@@ -165,14 +178,15 @@ def test_selector_get_feature_names_out_preserves_fitted_names(selector_cls, kwa
 
 
 def test_knockoff_selector_exposes_non_deterministic_tag_for_row_order_sensitivity():
-    assert KnockoffSelector(verbose=False)._get_tags()["non_deterministic"] is True
+    assert _non_deterministic_tag(KnockoffSelector(verbose=False)) is True
 
 
 def test_knockoff_tag_does_not_mutate_other_selector_tags():
-    # sklearn <1.6 exposes a shared default tag dict through _more_tags().
-    assert MRMRSelector(verbose=False)._get_tags()["non_deterministic"] is False
-    assert KnockoffSelector(verbose=False)._get_tags()["non_deterministic"] is True
-    assert MRMRSelector(verbose=False)._get_tags()["non_deterministic"] is False
+    # sklearn <1.6 exposes a shared default tag dict through _more_tags(); newer
+    # releases expose a Tags object through get_tags(). Neither path may leak.
+    assert _non_deterministic_tag(MRMRSelector(verbose=False)) is False
+    assert _non_deterministic_tag(KnockoffSelector(verbose=False)) is True
+    assert _non_deterministic_tag(MRMRSelector(verbose=False)) is False
 
 
 @pytest.mark.parametrize(
