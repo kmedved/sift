@@ -1382,6 +1382,13 @@ def compute_objective_for_path(
         weighted_rank_gauss_1d,
     )
     from sift.selection.objective import objective_from_corr_path
+    from sift.selection.knockoff_filter import (
+        _reject_duplicate_feature_names,
+        _validate_prebuilt_cache_structure,
+    )
+
+    _validate_prebuilt_cache_structure(cache)
+    _reject_duplicate_feature_names(cache)
 
     if not feature_path:
         return np.empty(0, dtype=np.float64)

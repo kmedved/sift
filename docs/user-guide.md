@@ -33,6 +33,9 @@ cefs = select_cefsplus(X, y, k=25, verbose=False)
 
 Fixed `k` is an upper bound. Selectors can return fewer features when constant
 features, invalid scores, `top_m`, or pruning remove candidates.
+For fixed-k filter calls, `groups` and `time` are rejected because they only
+define auto-k evaluation splits; use `k="auto"` with a matching strategy or
+omit those arguments. `KnockoffSelector` rejects row `groups` and `time` too.
 
 ## Binary CEFS+
 
@@ -81,8 +84,9 @@ Read the guarantee metadata literally:
   knockoff power. Large `gamma` or tiny `s_mean` usually means highly correlated
   features; deduplicate near-copies before building the cache when power matters.
 
-`statistic="relevance"` is the fastest default and usually the most powerful
-choice for marginal signals. `statistic="cefsplus"` enables a tie-safe greedy
+`statistic="relevance"` is the fastest compatibility default for marginal
+signals. Relative power is data-dependent, and no committed quality bakeoff
+establishes a universal winner. `statistic="cefsplus"` enables a tie-safe greedy
 CEFS+ statistic with pair-coupled screening and objective-gain W magnitudes. It
 can recover redundant signal families that a marginal statistic treats as a
 single effect, but it is still slower at large `screen_pairs`/`path_depth`, so
@@ -108,10 +112,12 @@ group.
 
 `n_draws > 1` redraws knockoffs and selects features whose selection frequency
 is at least `eta`. This is useful for run-to-run stability, but it is also
-reported as approximate. An empty result is a real answer: no feature survived
-the requested q threshold. Numeric continuous and binary targets are supported;
-integer multiclass labels trigger a warning because they are otherwise treated
-as numeric. Run one-vs-rest explicitly for categorical multiclass tasks.
+reported as approximate. An empty result is a valid answer: no feature survived
+the requested q threshold. `select_fdr` requires a finite numeric target;
+continuous targets and numeric binary labels are supported. Integer-valued
+multiclass targets trigger a warning because this routine treats `y` as numeric;
+string/categorical labels are not accepted by `select_fdr`, so encode a
+one-vs-rest target numerically for categorical multiclass tasks.
 
 Auto-k and knockoffs answer different questions. Auto-k asks how many features
 help prediction; knockoffs ask how many discoveries you can trust at a target
@@ -120,6 +126,8 @@ q. It is often useful to compare both diagnostics.
 ## Automatic Feature Count
 
 ```python
+import numpy as np
+
 from sift import AutoKConfig, select_cefsplus
 
 # Zero-config CEFS+ auto-k uses the measured Auto-K v2 router.
@@ -132,7 +140,16 @@ config = AutoKConfig(
     max_k=80,
 )
 
-selected = select_cefsplus(X, y, k="auto", auto_k_config=config, verbose=False)
+timestamps = np.arange(len(X))  # replace with the real chronological key
+
+selected = select_cefsplus(
+    X,
+    y,
+    k="auto",
+    time=timestamps,
+    auto_k_config=config,
+    verbose=False,
+)
 ```
 
 Function-style selectors use a prefix-only contract for auto-k: SIFT builds one
@@ -170,7 +187,16 @@ mrmr = select_cached(cache, y1, k=30, method="mrmr_quot")
 cefs = select_cached(cache, y2, k=30, method="cefsplus")
 ```
 
-Use a cache when many selectors or targets share the same feature matrix.
+Use a cache when many selectors or targets share the same feature matrix. A
+prebuilt cache is tied to the input row count and feature contract: named
+caches require the same DataFrame column names in exact order, while positional
+caches require a positional ndarray with the same row count and feature count.
+Rebuild a positional cache from a DataFrame to establish named-column
+alignment. Cache-backed filter-function calls reject call-time `sample_weight`
+and must omit `subsample` and construction `random_state`; the cache already
+fixes its sampled rows and weights. For `select_fdr`, `random_state` remains
+available because it seeds a fresh knockoff draw; `sample_weight` and
+`subsample` remain forbidden.
 
 ## Stability Selection
 
@@ -189,6 +215,11 @@ stable_features = selector.selected_feature_names_
 ```
 
 Pass both `groups` and `time` to use block bootstrap for ordered panel data.
+`selector.get_feature_names_out()` is the sklearn-compatible equivalent for
+retrieving the selected names after fitting.
+Block draws honor `sample_frac`; the rounded panel-wide draw budget is allocated
+proportionally across groups and block windows are sampled with replacement.
+Time values must be non-missing and orderable within each group.
 
 ## Time-aware Permutation Importance
 
@@ -212,7 +243,8 @@ time-aware permutations.
 
 ## Categorical Features
 
-Function-style selectors support `cat_features` and `cat_encoding`. Supervised
+Function-style selectors default to `cat_encoding="none"` and support
+`cat_features` and explicit encodings. Supervised
 categorical encodings are guarded against full-data target leakage by default;
 use them through train-only wrappers or opt in only when leakage is handled
 outside SIFT. CatBoost selectors handle categorical features natively.

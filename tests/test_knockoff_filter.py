@@ -9,6 +9,7 @@ from sklearn.base import clone
 
 import sift.selection.knockoff_filter as knockoff_filter_module
 from sift.estimators.copula import FeatureCache, build_cache
+from sift import select_cached, select_cefsplus
 from sift.estimators.knockoffs import fit_gaussian_knockoffs, sample_gaussian_knockoffs
 from sift.selection.knockoff_filter import (
     _KNOCKOFF_STAT_REGISTRY,
@@ -817,7 +818,7 @@ def test_knockoff_selector_rejects_sample_weight_with_cache():
         KnockoffSelector(q=0.4, verbose=False).fit(X, y, sample_weight=weights, cache=cache)
 
 
-def test_knockoff_selector_cache_subsample_sentinel_survives_clone_and_pickle():
+def test_knockoff_selector_cache_subsample_auto_survives_clone_and_pickle():
     X, y = _signal_frame(n=50, p=5, seed=36)
     cache = build_cache(X, compute_Rxx=True, random_state=0)
     selector = KnockoffSelector(q=0.4, offset=0, verbose=False, cache=cache)
@@ -825,11 +826,14 @@ def test_knockoff_selector_cache_subsample_sentinel_survives_clone_and_pickle():
     cloned = clone(selector)
     restored = pickle.loads(pickle.dumps(selector))
 
-    assert selector.subsample is _SUBSAMPLE_DEFAULT
-    assert cloned.subsample is _SUBSAMPLE_DEFAULT
-    assert restored.subsample is _SUBSAMPLE_DEFAULT
+    assert selector.subsample == "auto"
+    assert cloned.subsample == "auto"
+    assert restored.subsample == "auto"
     cloned.fit(X, y)
     restored.fit(X, y)
+    KnockoffSelector(q=0.4, offset=0, verbose=False, cache=cache).fit(
+        X, y, subsample="auto"
+    )
 
     with pytest.raises(ValueError, match="subsample"):
         KnockoffSelector(q=0.4, verbose=False, cache=cache, subsample=50_000).fit(X, y)
@@ -852,6 +856,86 @@ def test_knockoff_selector_cache_path_validates_x_matches_cache_columns():
     KnockoffSelector(q=0.4, offset=0, verbose=False, cache=synthetic_cache).fit(X_arr, y)
     with pytest.raises(ValueError, match="X has 4 columns"):
         KnockoffSelector(q=0.4, verbose=False, cache=synthetic_cache).fit(X_arr[:, :4], y)
+
+
+def test_knockoff_selector_cache_path_validates_x_and_y_rows():
+    X, y = _signal_frame(n=50, p=5, seed=38)
+    cache = build_cache(X, compute_Rxx=True, random_state=0)
+
+    with pytest.raises(ValueError, match="X has 51 rows but y has 50 rows"):
+        KnockoffSelector(q=0.4, verbose=False, cache=cache).fit(
+            pd.concat([X, X.iloc[:1]], ignore_index=True), y
+        )
+
+    with pytest.raises(ValueError, match="cache was built with 50 rows but X has 51 rows"):
+        KnockoffSelector(q=0.4, verbose=False, cache=cache).fit(
+            pd.concat([X, X.iloc[:1]], ignore_index=True), np.r_[y, y[:1]]
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda cache: setattr(cache, "valid_cols", np.array([-1, 0, 1, 2, 3])),
+        lambda cache: setattr(cache, "valid_cols", np.array([0, 0, 1, 2, 3])),
+        lambda cache: setattr(cache, "valid_cols", np.array([0.0, 1.0, 2.0, 3.0, 4.0])),
+        lambda cache: setattr(cache, "valid_cols", np.array([[0, 1, 2, 3, 4]])),
+        lambda cache: setattr(cache, "row_idx", np.array([0, 1, 2])),
+        lambda cache: setattr(cache, "row_idx", np.arange(50, dtype=np.float64)),
+        lambda cache: setattr(cache, "row_idx", np.r_[0, 0, np.arange(2, 50)]),
+        lambda cache: setattr(cache, "sample_weight", np.ones((50, 1))),
+        lambda cache: setattr(cache, "Rxx", np.eye(4, dtype=np.float32)),
+        lambda cache: setattr(cache, "Z", cache.Z.astype(object)),
+        lambda cache: setattr(cache, "feature_names_are_synthetic", "false"),
+        lambda cache: setattr(cache, "feature_names", "x0x1x2x3x4"),
+        lambda cache: setattr(cache, "feature_names", None),
+        lambda cache: (
+            setattr(cache, "feature_names_are_synthetic", True),
+            setattr(cache, "feature_names", ["a", "b", "c", "d", "e"]),
+        ),
+    ],
+)
+def test_select_fdr_rejects_malformed_prebuilt_cache(mutate):
+    X, y = _signal_frame(n=50, p=5, seed=39)
+    cache = build_cache(X, compute_Rxx=True, random_state=0)
+    mutate(cache)
+
+    with pytest.raises(ValueError):
+        select_fdr(cache=cache, y=y, verbose=False)
+
+
+@pytest.mark.parametrize("selector", [select_fdr, select_cefsplus])
+def test_prebuilt_cache_without_provenance_marker_requires_rebuild(selector):
+    X, y = _signal_frame(n=50, p=5, seed=40)
+    cache = build_cache(X, compute_Rxx=True, random_state=0)
+    delattr(cache, "feature_names_are_synthetic")
+
+    with pytest.raises(ValueError, match="feature_names_are_synthetic|rebuild"):
+        if selector is select_fdr:
+            selector(cache=cache, y=y, verbose=False)
+        else:
+            selector(X, y, k=1, cache=cache, verbose=False)
+
+
+def test_select_cached_without_provenance_marker_requires_rebuild():
+    X, y = _signal_frame(n=50, p=5, seed=41)
+    cache = build_cache(X, compute_Rxx=True, random_state=0)
+    delattr(cache, "feature_names_are_synthetic")
+
+    with pytest.raises(ValueError, match="feature_names_are_synthetic|rebuild"):
+        select_cached(cache, y, k=1)
+
+
+def test_array_cache_without_provenance_marker_requires_rebuild_before_name_checks():
+    X, y = _signal_frame(n=50, p=5, seed=42)
+    X_arr = X.to_numpy()
+    cache = build_cache(X_arr, compute_Rxx=True, random_state=0)
+    delattr(cache, "feature_names_are_synthetic")
+
+    with pytest.raises(ValueError, match="feature_names_are_synthetic|rebuild"):
+        select_cefsplus(X_arr, y, k=1, cache=cache, verbose=False)
+    with pytest.raises(ValueError, match="feature_names_are_synthetic|rebuild"):
+        KnockoffSelector(q=0.4, verbose=False, cache=cache).fit(X_arr, y)
 
 
 @pytest.mark.parametrize(

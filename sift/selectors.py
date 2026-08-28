@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import importlib.util
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,11 @@ from sift.selection.cefsplus_binary_common import (
 )
 from sift.selection.auto_k import AutoKConfig, resolve_auto_k_config
 from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
-from sift.selection.knockoff_filter import _SUBSAMPLE_DEFAULT
+from sift.selection.knockoff_filter import (
+    _SUBSAMPLE_DEFAULT,
+    _validate_prebuilt_cache_structure,
+)
+from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
 _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
@@ -173,6 +177,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
     """Sklearn-style compatibility layer for function-based selectors."""
 
     _selector_fn: Callable
+    _subsample_auto_is_cache_default = False
+    _random_state_auto_is_cache_default = False
 
     def _init_selector(self, selector_fn: Callable, params: dict) -> None:
         for name, value in params.items():
@@ -181,11 +187,33 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         self._selector_fn = selector_fn
 
     def _selector_params(self) -> dict:
-        return {
+        params = {
             name: getattr(self, name)
             for name in inspect.signature(self._selector_fn).parameters
             if name not in _SELECTOR_FORWARD_SKIP_PARAMS and hasattr(self, name)
         }
+        # sklearn estimator defaults must be immutable built-in values. Keep
+        # the private identity sentinels inside the function API and expose the
+        # literal ``"auto"`` as the estimator-facing omission marker.
+        return self._resolve_auto_selector_params(params)
+
+    def _resolve_auto_selector_params(self, params: dict) -> dict:
+        """Translate sklearn-facing auto tokens only for supporting selectors."""
+        subsample = params.get("subsample")
+        if (
+            self._subsample_auto_is_cache_default
+            and isinstance(subsample, str)
+            and subsample == "auto"
+        ):
+            params["subsample"] = _SUBSAMPLE_DEFAULT
+        random_state = params.get("random_state")
+        if (
+            self._random_state_auto_is_cache_default
+            and isinstance(random_state, str)
+            and random_state == "auto"
+        ):
+            params["random_state"] = _RANDOM_STATE_DEFAULT
+        return params
 
     def _clear_fit_state(self) -> None:
         for attr in (
@@ -319,6 +347,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                     f"{blocked_text}"
                 )
             call_params.update(fit_params)
+        self._resolve_auto_selector_params(call_params)
 
         feature_names = _feature_names_or_default(X)
         X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
@@ -568,8 +597,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             y,
             k=nested.selected_k,
             sample_weight=sample_weight,
-            groups=groups,
-            time=time,
+            # The selected k is now fixed; groups/time were used by the
+            # nested evaluator and must not be forwarded to the public fixed-k
+            # filter call, where they have no meaning.
+            groups=None,
+            time=None,
             cache=None,
             auto_k_config=None,
             fit_params=fit_params,
@@ -610,9 +642,28 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         mask[self.selected_indices_] = True
         return mask
 
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        """Return names of selected features following sklearn's transformer API."""
+        check_is_fitted(self, ["selected_indices_", "feature_names_in_", "n_features_in_"])
+        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        if input_features is not None:
+            input_names = np.asarray(input_features, dtype=object)
+            if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
+                raise ValueError(
+                    "input_features must have the same number of features as the fitted data"
+                )
+            if not np.array_equal(input_names, fitted_names):
+                raise ValueError(
+                    "input_features is not equal to feature_names_in_"
+                )
+        return fitted_names[self.selected_indices_]
+
 
 class MRMRSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_mrmr`."""
+
+    _subsample_auto_is_cache_default = True
+    _random_state_auto_is_cache_default = True
 
     def __init__(
         self,
@@ -626,8 +677,8 @@ class MRMRSelector(_BaseSelector):
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
         allow_full_data_target_encoding: bool = False,
-        subsample: int | None = 50_000,
-        random_state: int = 0,
+        subsample: int | None | Literal["auto"] = "auto",
+        random_state: int | Literal["auto"] = "auto",
         n_jobs: int = 1,
         mrmr_backend: str = "auto",
         verbose: bool = True,
@@ -640,6 +691,9 @@ class MRMRSelector(_BaseSelector):
 class JMISelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmi`."""
 
+    _subsample_auto_is_cache_default = True
+    _random_state_auto_is_cache_default = True
+
     def __init__(
         self,
         k: int | str = 10,
@@ -651,8 +705,8 @@ class JMISelector(_BaseSelector):
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
         allow_full_data_target_encoding: bool = False,
-        subsample: int | None = 50_000,
-        random_state: int = 0,
+        subsample: int | None | Literal["auto"] = "auto",
+        random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
@@ -663,6 +717,9 @@ class JMISelector(_BaseSelector):
 class JMIMSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_jmim`."""
 
+    _subsample_auto_is_cache_default = True
+    _random_state_auto_is_cache_default = True
+
     def __init__(
         self,
         k: int | str = 10,
@@ -674,8 +731,8 @@ class JMIMSelector(_BaseSelector):
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
         allow_full_data_target_encoding: bool = False,
-        subsample: int | None = 50_000,
-        random_state: int = 0,
+        subsample: int | None | Literal["auto"] = "auto",
+        random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
@@ -686,6 +743,9 @@ class JMIMSelector(_BaseSelector):
 class CEFSPlusSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_cefsplus`."""
 
+    _subsample_auto_is_cache_default = True
+    _random_state_auto_is_cache_default = True
+
     def __init__(
         self,
         k: int | str = 75,
@@ -695,8 +755,8 @@ class CEFSPlusSelector(_BaseSelector):
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
         allow_full_data_target_encoding: bool = False,
-        subsample: int | None = 50_000,
-        random_state: int = 0,
+        subsample: int | None | Literal["auto"] = "auto",
+        random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
@@ -796,6 +856,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
                     f"overrides: {blocked_text}"
                 )
             call_params.update(fit_params)
+        self._resolve_auto_selector_params(call_params)
 
         loss_eff = str(self.loss).lower()
         if (
@@ -847,9 +908,14 @@ class CEFSPlusBinarySelector(_BaseSelector):
 class KnockoffSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_fdr`.
 
-    ``subsample`` defaults to 50,000 rows when fitting from X. It is not valid
-    with a prebuilt cache unless left at the untouched default.
+    ``subsample="auto"`` resolves to 50,000 rows when fitting from X and acts
+    as an omitted construction option with a prebuilt cache. Explicit
+    subsample values are not valid with a cache. The stochastic knockoff
+    construction is sensitive to input row order, so this estimator is
+    explicitly marked non-deterministic for sklearn estimator checks.
     """
+
+    _subsample_auto_is_cache_default = True
 
     def __init__(
         self,
@@ -871,7 +937,7 @@ class KnockoffSelector(_BaseSelector):
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
         loo_clip_max: float = 1.0 - 1e-4,
-        subsample=_SUBSAMPLE_DEFAULT,
+        subsample: int | None | Literal["auto"] = "auto",
         random_state: int = 0,
         n_jobs: int = 1,
         verbose: bool = True,
@@ -881,6 +947,23 @@ class KnockoffSelector(_BaseSelector):
 
     def _supports_auto_k(self) -> bool:
         return False
+
+    def _more_tags(self):
+        # sklearn <1.6 returns a module-level default dict here.  Copy it
+        # before overriding one tag, otherwise instantiating this selector
+        # changes the non_deterministic tag for every BaseEstimator instance.
+        tags = dict(super()._more_tags())
+        tags["non_deterministic"] = True
+        return tags
+
+    def __sklearn_tags__(self):
+        """Expose the row-order sensitivity through sklearn's new tag API."""
+        parent_tags = getattr(super(), "__sklearn_tags__", None)
+        if parent_tags is None:  # sklearn <1.6 uses the dict API above.
+            return self._more_tags()
+        tags = parent_tags()
+        tags.non_deterministic = True
+        return tags
 
     def _clear_fit_state(self) -> None:
         super()._clear_fit_state()
@@ -937,6 +1020,7 @@ class KnockoffSelector(_BaseSelector):
                     f"fit-time overrides: {blocked_text}"
                 )
             call_params.update(fit_params)
+        self._resolve_auto_selector_params(call_params)
 
         feature_names = _feature_names_or_default(X)
         if resolved_cache is None:
@@ -950,7 +1034,30 @@ class KnockoffSelector(_BaseSelector):
         else:
             if sample_weight is not None:
                 raise ValueError("sample_weight cannot be passed with a prebuilt cache")
+            x_shape = X.shape if hasattr(X, "shape") else np.asarray(X).shape
+            if len(x_shape) != 2:
+                raise ValueError("X must be a 2D feature matrix")
+            n_rows, n_features = int(x_shape[0]), int(x_shape[1])
+            y_arr = np.asarray(y).reshape(-1)
+            if y_arr.size != n_rows:
+                raise ValueError(
+                    f"X has {n_rows} rows but y has {y_arr.size} rows"
+                )
+            # Validate provenance before deciding whether generated-looking
+            # cache names are positional placeholders or real DataFrame labels.
+            _validate_prebuilt_cache_structure(
+                resolved_cache,
+                original_n_features=n_features,
+                n_rows=n_rows,
+                validate_rxx=False,
+            )
             cache_names = resolved_cache.feature_names
+            if resolved_cache.feature_names_are_synthetic and isinstance(X, pd.DataFrame):
+                raise ValueError(
+                    "A cache built from unnamed/positional features requires X to be "
+                    "the compatible positional ndarray; rebuild the cache from this "
+                    "DataFrame to establish column names and order"
+                )
             if cache_names is not None and not resolved_cache.feature_names_are_synthetic:
                 if list(feature_names) != list(cache_names):
                     raise ValueError(

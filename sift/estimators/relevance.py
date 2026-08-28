@@ -9,6 +9,72 @@ from sift._numba import njit_optional_cache
 CLASSIFICATION_BLOCK_SIZE = 256
 
 
+def _prepare_random_forest_features(
+    X: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> np.ndarray:
+    """Impute and affinely normalize features before sklearn's float32 cast.
+
+    scikit-learn's tree implementation converts feature values to float32.
+    Centering and scaling in float64 first prevents a large offset from
+    erasing small, meaningful differences during that conversion.  The
+    transform is column-wise with a positive scale, so it preserves the
+    ordering (and therefore the candidate split locations) of every feature.
+    """
+    from sift._impute import mean_impute
+
+    X_arr = np.asarray(X, dtype=np.float64)
+    X_filled = mean_impute(X_arr, copy=True)
+
+    positive = None
+    if sample_weight is not None:
+        weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+        if weights.size != X_filled.shape[0]:
+            raise ValueError(
+                f"w has {weights.size} elements but X has {X_filled.shape[0]} rows"
+            )
+        if not np.isfinite(weights).all():
+            raise ValueError("w must be finite")
+        if np.any(weights < 0.0):
+            raise ValueError("w must be non-negative")
+        if not np.any(weights > 0.0):
+            raise ValueError("w must contain at least one positive value")
+        positive = weights > 0.0
+
+    reference = X_filled if positive is None else X_filled[positive]
+
+    # A median avoids a potentially overflowing sum for very large finite
+    # offsets.  All columns are finite after mean_impute, including all-NaN
+    # columns (which are filled with zero).
+    centers = np.median(reference, axis=0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        centered_reference = reference - centers
+        scales = np.max(np.abs(centered_reference), axis=0)
+    # If a finite input spans more than the float64 range, subtraction can
+    # overflow even though the values and the eventual normalized result are
+    # representable.  The max-absolute-value fallback below avoids that
+    # subtraction for those columns.
+    overflow = ~np.isfinite(scales)
+    fallback_scales = np.max(np.abs(reference), axis=0)
+    scales = np.where(overflow, fallback_scales, scales)
+    scales = np.where(np.isfinite(scales) & (scales > 0.0), scales, 1.0)
+
+    # Division before subtraction keeps centering finite for opposite-sign
+    # extreme values.  It is algebraically the same positive affine
+    # transform, but avoids evaluating ``X - centers`` at full magnitude.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        normalized = X_filled / scales - centers / scales
+
+    # A zero-weight row can be arbitrarily far outside the positive-weight
+    # reference range.  Keep it in the forest input, but prevent an otherwise
+    # finite transformed value from overflowing sklearn's float32 conversion.
+    float32_limit = np.finfo(np.float32).max
+    np.clip(normalized, -float32_limit, float32_limit, out=normalized)
+    if not np.isfinite(normalized).all():
+        raise ValueError("RF feature affine normalization produced non-finite values")
+    return normalized
+
+
 # Keep these kernels serial: CatBoost/OpenMP can crash when Numba's parallel
 # runtime is initialized after CatBoost has already been imported.
 @njit_optional_cache(cache=True)
@@ -219,16 +285,9 @@ def rf_regression(
     max_depth: int = 5,
 ) -> np.ndarray:
     """Random forest importance for regression."""
-    from sift._impute import mean_impute
     from sklearn.ensemble import RandomForestRegressor
 
-    X_arr = np.asarray(X)
-    if X_arr.dtype == np.float32:
-        X_arr = X_arr.astype(np.float32, copy=False)
-    elif X_arr.dtype != np.float64:
-        X_arr = X_arr.astype(np.float64, copy=False)
-
-    X_filled = mean_impute(X_arr, copy=True)
+    X_filled = _prepare_random_forest_features(X, sample_weight=w)
     rf = RandomForestRegressor(max_depth=max_depth, n_estimators=100, random_state=0)
     rf.fit(X_filled, y, sample_weight=w)
     importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)
@@ -246,16 +305,9 @@ def rf_classif(
     max_depth: int = 5,
 ) -> np.ndarray:
     """Random forest importance for classification."""
-    from sift._impute import mean_impute
     from sklearn.ensemble import RandomForestClassifier
 
-    X_arr = np.asarray(X)
-    if X_arr.dtype == np.float32:
-        X_arr = X_arr.astype(np.float32, copy=False)
-    elif X_arr.dtype != np.float64:
-        X_arr = X_arr.astype(np.float64, copy=False)
-
-    X_filled = mean_impute(X_arr, copy=True)
+    X_filled = _prepare_random_forest_features(X, sample_weight=w)
     rf = RandomForestClassifier(max_depth=max_depth, n_estimators=100, random_state=0)
     rf.fit(X_filled, y, sample_weight=w)
     importances = np.asarray(rf.feature_importances_, dtype=np.float64).reshape(-1)

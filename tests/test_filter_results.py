@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from sift import build_cache, select_cefsplus, select_jmi, select_jmim, select_mrmr
 from sift.selection.auto_k import AutoKConfig
@@ -67,18 +68,16 @@ def test_filter_selectors_return_result_has_indices_and_metadata_fixed_k():
         assert result.diagnostics_ is not None
 
 
-def test_gaussian_return_result_duplicate_names_keep_positional_indices():
+def test_gaussian_return_result_rejects_duplicate_names():
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.normal(size=(100, 3)), columns=["dup", "dup", "noise"])
     y = X.iloc[:, 0].to_numpy() + 0.01 * rng.normal(size=len(X))
 
-    result = select_cefsplus(X, y, k=1, verbose=False, return_result=True)
-
-    assert result.selected_features == ["dup"]
-    assert result.selected_indices == [0]
+    with pytest.raises(ValueError, match="Duplicate feature names"):
+        select_cefsplus(X, y, k=1, verbose=False, return_result=True)
 
 
-def test_gaussian_cache_ranking_maps_relevance_by_name_after_reorder():
+def test_gaussian_cache_ranking_requires_original_order_and_maps_relevance():
     rng = np.random.default_rng(3)
     X_cache = pd.DataFrame(
         {
@@ -91,18 +90,23 @@ def test_gaussian_cache_ranking_maps_relevance_by_name_after_reorder():
     cache = build_cache(X_cache, subsample=None)
     X_call = X_cache[["noise_b", "signal", "noise_a"]]
 
+    with pytest.raises(ValueError, match="names and order"):
+        select_cefsplus(
+            X_call,
+            y,
+            k=1,
+            cache=cache,
+            verbose=False,
+            return_result=True,
+        )
+
     result = select_cefsplus(
-        X_call,
-        y,
-        k=1,
-        cache=cache,
-        verbose=False,
-        return_result=True,
+        X_cache, y, k=1, cache=cache, verbose=False, return_result=True
     )
     ranking = result.get_feature_ranking().set_index("feature")
 
     assert result.selected_features == ["signal"]
-    assert result.selected_indices == [1]
+    assert result.selected_indices == [0]
     assert ranking.loc["signal", "relevance"] > ranking.loc["noise_a", "relevance"]
     assert ranking.loc["signal", "relevance"] > ranking.loc["noise_b", "relevance"]
 

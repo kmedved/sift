@@ -2,18 +2,40 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.exceptions import NotFittedError
+from sklearn.utils.estimator_checks import check_parameters_default_constructible
 
 from sift import (
+    BorutaSelector,
     CEFSPlusBinarySelector,
     CEFSPlusSelector,
     JMIMSelector,
     JMISelector,
+    KnockoffSelector,
     MRMRSelector,
+    StabilitySelector,
     build_cache,
 )
 import sift.selectors as selectors_mod
 import sift.selection.auto_k_nested as auto_k_nested_module
 from sift.selection.auto_k import AutoKConfig
+
+
+@pytest.mark.parametrize(
+    "selector_cls",
+    [
+        MRMRSelector,
+        JMISelector,
+        JMIMSelector,
+        CEFSPlusSelector,
+        CEFSPlusBinarySelector,
+        KnockoffSelector,
+        BorutaSelector,
+        StabilitySelector,
+    ],
+)
+def test_selector_parameters_are_default_constructible(selector_cls):
+    selector = selector_cls()
+    check_parameters_default_constructible(selector_cls.__name__, selector)
 
 
 def test_selector_classes_default_to_no_categorical_encoding():
@@ -204,26 +226,36 @@ def test_selector_dataframe_transform_rejects_reordered_columns():
         selector.transform(X[list(reversed(X.columns))])
 
 
-def test_gaussian_selector_keeps_unnamed_cache_selection_positional():
+def test_gaussian_selector_requires_positional_x_for_unnamed_cache():
     rng = np.random.default_rng(23)
     X = pd.DataFrame(rng.normal(size=(120, 5)), columns=[f"f{i}" for i in range(5)])
     y = X["f0"] + 0.3 * X["f2"] + rng.normal(size=120) * 0.05
     cache = build_cache(X.to_numpy(), subsample=None)
 
+    with pytest.raises(ValueError, match="unnamed/positional"):
+        MRMRSelector(
+            k=2,
+            task="regression",
+            estimator="gaussian",
+            cache=cache,
+            verbose=False,
+        ).fit(X, y)
+
+    X_arr = X.to_numpy()
     selector = MRMRSelector(
         k=2,
         task="regression",
         estimator="gaussian",
         cache=cache,
         verbose=False,
-    ).fit(X, y)
+    ).fit(X_arr, y)
 
     assert all(feature.startswith("x") for feature in selector.selected_features_)
     assert all(isinstance(index, (int, np.integer)) for index in selector.selected_indices_)
     assert selector.selected_features_ == [f"x{i}" for i in selector.selected_indices_]
-    transformed = selector.transform(X)
+    transformed = selector.transform(X_arr)
     assert transformed.shape[1] == 2
-    assert list(transformed.columns) == [X.columns[i] for i in selector.selected_indices_]
+    np.testing.assert_array_equal(transformed, X_arr[:, selector.selected_indices_])
 
 
 def test_selector_set_params_updates_fit_call():

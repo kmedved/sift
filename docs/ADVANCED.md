@@ -34,8 +34,12 @@ selected = select_mrmr(
 )
 ```
 
-The selector builds a supervised feature path, then evaluates prefixes on the
-last `val_frac` of rows after sorting by `time`.
+The selector builds a supervised feature path, then evaluates prefixes on
+approximately the requested `val_frac` of latest rows after sorting by `time`.
+The cut moves to the nearest boundary between distinct timestamps, so the exact
+row fraction can differ. Supply `time=timestamps` (or the equivalent array)
+whenever using `strategy="time_holdout"`; equal timestamps stay in the same
+split. Timestamps must be non-missing and mutually orderable.
 
 ### Stability Selection with Blocks
 
@@ -55,7 +59,9 @@ selector.fit(X, y, groups=entity_ids, time=timestamps)
 ```
 
 Block bootstrap samples contiguous windows within groups, preserving some local
-serial dependence.
+serial dependence. `sample_frac` controls the rounded total draw budget (with
+replacement); at `sample_frac=1.0` the historical full-panel budget is used.
+Time values must be non-missing and orderable within each group.
 
 ### Time-Aware Permutation Importance
 
@@ -268,9 +274,15 @@ third = select_cached(cache, y3, k=20, method="mrmr_quot")
 ```
 
 A cache stores row subsampling, weights, feature names, valid columns, and the
-rank-Gaussian representation. Do not pass new `sample_weight` values to a
-selector when using a prebuilt cache; rebuild the cache with the desired
-weights.
+rank-Gaussian representation. A named cache requires a DataFrame with the same
+row count and exact column order. A positional cache requires a positional
+ndarray with the same row count and feature count; rebuild it from a DataFrame
+to establish named-column alignment. Cache-backed filter functions reject new
+`sample_weight` values and explicit `subsample`/`random_state` overrides;
+rebuild the cache with the desired rows, weights, or construction seed.
+`select_fdr` is different only for `random_state`: with a cache it seeds the
+new knockoff draw, as in the example below. Its `subsample` argument must be
+omitted and its sample weights must already be stored in the cache.
 
 `select_fdr` also accepts a cache:
 
@@ -281,7 +293,7 @@ result = select_fdr(cache=cache, y=y, q=0.1, random_state=0, verbose=False)
 ```
 
 With a cache, `subsample` must be omitted and sample weights must already be in
-the cache.
+the cache. `random_state` controls this draw; it does not rebuild the cache.
 
 ## Knockoff Workflows
 
@@ -388,6 +400,11 @@ selector.result_.selector_metadata
 
 `KnockoffSelector` is q-based. It does not accept `k`, row `groups`, `time`, or
 `auto_k_config`.
+Because knockoff rows and noise are sampled stochastically, seeded results can
+still change when input row order changes; preserve row order for exact
+reproducibility. The narrow zero-weight guarantee is that zero-weight rows are
+removed before seeded knockoff RNG draws, so they do not consume that RNG
+stream.
 
 ## Categorical Features
 
@@ -416,7 +433,8 @@ Encoding options:
 | `james_stein` | Shrinkage encoding via `category_encoders` |
 | `loo_logit` | Built-in binary-target leave-one-out logit encoding |
 
-For selector classes, use `cat_encoding` on the estimator constructor. If a
+Selector classes default to `cat_encoding="none"`. For selector classes, use
+`cat_encoding` on the estimator constructor. If a
 class was fitted with supervised categorical encoding on a DataFrame,
 `transform` also requires a DataFrame so columns can be validated and encoded.
 

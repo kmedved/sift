@@ -216,7 +216,13 @@ def _warn_if_integer_multiclass_target(y: Any) -> None:
 
 
 def _validate_cache_rxx(Rxx: np.ndarray, p: int) -> np.ndarray:
-    R = np.asarray(Rxx, dtype=np.float64)
+    R_raw = np.asarray(Rxx)
+    if (
+        not np.issubdtype(R_raw.dtype, np.number)
+        or not np.isrealobj(R_raw)
+    ):
+        raise ValueError("cache.Rxx must contain only finite real numeric values")
+    R = np.asarray(R_raw, dtype=np.float64)
     if R.shape != (p, p):
         raise ValueError(f"cache.Rxx must have shape ({p}, {p})")
     if not np.isfinite(R).all():
@@ -334,6 +340,10 @@ def _resolve_cache(
             raise ValueError("sample_weight cannot be passed with a prebuilt cache")
         if subsample is not _SUBSAMPLE_DEFAULT:
             raise ValueError("subsample cannot be passed with a prebuilt cache")
+        # Knockoff consumers validate the active Rxx submatrix after dropping
+        # features with zero weighted variance. Inactive cache columns may
+        # legitimately have undefined correlations.
+        _validate_prebuilt_cache_structure(cache, validate_rxx=False)
         return cache
     resolved_subsample = 50_000 if subsample is _SUBSAMPLE_DEFAULT else subsample
     return build_cache(
@@ -345,6 +355,136 @@ def _resolve_cache(
         n_jobs=n_jobs,
         rank_backend="threads" if n_jobs != 1 else "serial",
     )
+
+
+def _validate_prebuilt_cache_structure(
+    cache: FeatureCache,
+    *,
+    original_n_features: int | None = None,
+    n_rows: int | None = None,
+    validate_rxx: bool = True,
+) -> None:
+    """Validate the structural contract of a prebuilt knockoff cache."""
+    try:
+        cache_vars = vars(cache)
+    except TypeError:
+        cache_vars = None
+    has_provenance_marker = (
+        "feature_names_are_synthetic" in cache_vars
+        if cache_vars is not None
+        else hasattr(cache, "feature_names_are_synthetic")
+    )
+    if not has_provenance_marker:
+        raise ValueError(
+            "prebuilt cache lacks feature_names_are_synthetic provenance; "
+            "rebuild the cache with the current SIFT version"
+        )
+    provenance = (
+        cache_vars["feature_names_are_synthetic"]
+        if cache_vars is not None
+        else getattr(cache, "feature_names_are_synthetic")
+    )
+    if not isinstance(provenance, (bool, np.bool_)):
+        raise ValueError("cache.feature_names_are_synthetic must be boolean")
+
+    try:
+        Z = np.asarray(cache.Z)
+        valid_cols_raw = np.asarray(cache.valid_cols)
+        row_idx_raw = np.asarray(cache.row_idx)
+        sample_weight = np.asarray(cache.sample_weight)
+        n_rows_original = cache.n_rows_original
+    except AttributeError as exc:
+        raise ValueError("prebuilt cache is missing required structural fields") from exc
+    if Z.ndim != 2:
+        raise ValueError("cache.Z must be a 2-D array")
+    if not np.issubdtype(Z.dtype, np.number) or not np.isrealobj(Z) or not np.isfinite(Z).all():
+        raise ValueError("cache.Z must contain only finite real numeric values")
+    if valid_cols_raw.ndim != 1 or not np.issubdtype(valid_cols_raw.dtype, np.integer):
+        raise ValueError("cache.valid_cols must be a 1-D integer array")
+    valid_cols = valid_cols_raw.astype(np.int64, copy=False)
+    p_valid = int(Z.shape[1])
+    if valid_cols.size != p_valid:
+        raise ValueError("cache.valid_cols length must match cache.Z columns")
+
+    feature_names = getattr(cache, "feature_names", None)
+    if feature_names is not None:
+        if isinstance(feature_names, (str, bytes)):
+            raise ValueError("cache.feature_names must be a one-dimensional sequence")
+        try:
+            feature_names_list = list(feature_names)
+            n_original = len(feature_names_list)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cache.feature_names must be a sized sequence") from exc
+        if any(not isinstance(name, Hashable) for name in feature_names_list):
+            raise ValueError("cache.feature_names values must be hashable")
+        if original_n_features is not None and n_original != int(original_n_features):
+            raise ValueError(
+                f"X has {int(original_n_features)} columns but the cache was built "
+                f"from {n_original}; cache feature names and order must match X"
+            )
+        original_n_features = n_original
+        if provenance:
+            expected_names = [f"x{i}" for i in range(n_original)]
+            if feature_names_list != expected_names:
+                raise ValueError(
+                    "synthetic cache.feature_names must use the canonical positional "
+                    "labels x0, x1, ...; rebuild the cache"
+                )
+    elif not provenance:
+        raise ValueError(
+            "a named prebuilt cache must include feature_names; rebuild the cache"
+        )
+    elif original_n_features is None:
+        raise ValueError(
+            "prebuilt cache must include feature_names to validate original column positions"
+        )
+
+    if (
+        np.any(valid_cols < 0)
+        or np.any(valid_cols >= int(original_n_features))
+        or np.unique(valid_cols).size != valid_cols.size
+    ):
+        raise ValueError("cache.valid_cols must be unique and in bounds for the original X")
+
+    if isinstance(n_rows_original, (bool, np.bool_)) or not isinstance(
+        n_rows_original, (int, np.integer)
+    ) or int(n_rows_original) < 1:
+        raise ValueError("cache.n_rows_original must be a positive integer")
+    n_rows_original = int(n_rows_original)
+    if n_rows is not None and n_rows_original != int(n_rows):
+        raise ValueError(
+            f"cache was built with {n_rows_original} rows but X has {int(n_rows)} rows"
+        )
+
+    if row_idx_raw.ndim != 1 or not np.issubdtype(row_idx_raw.dtype, np.integer):
+        raise ValueError("cache.row_idx must be a 1-D integer array")
+    row_idx = row_idx_raw.astype(np.int64, copy=False)
+    if (
+        row_idx.size != Z.shape[0]
+        or np.any(row_idx < 0)
+        or np.any(row_idx >= n_rows_original)
+        or np.unique(row_idx).size != row_idx.size
+    ):
+        raise ValueError("cache.row_idx is incompatible with cache rows")
+
+    if sample_weight.ndim != 1 or sample_weight.size != Z.shape[0]:
+        raise ValueError("cache.sample_weight must be 1-D and match cache rows")
+    try:
+        sample_weight_float = sample_weight.astype(np.float64, copy=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cache.sample_weight must be numeric") from exc
+    sample_weight_sum = float(sample_weight_float.sum())
+    if (
+        not np.isfinite(sample_weight_float).all()
+        or np.any(sample_weight_float < 0.0)
+        or not np.isfinite(sample_weight_sum)
+        or sample_weight_sum <= 0.0
+    ):
+        raise ValueError("cache.sample_weight must be finite, non-negative, and sum to > 0")
+
+    Rxx = getattr(cache, "Rxx", None)
+    if Rxx is not None and validate_rxx:
+        _validate_cache_rxx(Rxx, p_valid)
 
 
 def _build_active_rxx(cache: FeatureCache, active: np.ndarray, *, verbose: bool) -> np.ndarray:
@@ -982,6 +1122,7 @@ def sample_knockoffs(
 ) -> np.ndarray:
     """Fit and sample one Gaussian-copula knockoff draw for a cache."""
 
+    _validate_prebuilt_cache_structure(cache, validate_rxx=False)
     _reject_duplicate_feature_names(cache)
     w = np.asarray(cache.sample_weight, dtype=np.float64)
     if not np.isfinite(w).all() or np.any(w < 0.0) or float(w.sum()) <= 0.0:

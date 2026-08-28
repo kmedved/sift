@@ -14,6 +14,10 @@ from sift.estimators.copula import (
 )
 from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
+from sift.selection.knockoff_filter import (
+    _reject_duplicate_feature_names,
+    _validate_prebuilt_cache_structure,
+)
 
 CorrPrune = float | None | Literal["auto"]
 
@@ -352,6 +356,8 @@ def select_cached(
     from sift._preprocess import to_numpy, validate_k
 
     k = validate_k(k, allow_auto=False)
+    _validate_prebuilt_cache_structure(cache)
+    _reject_duplicate_feature_names(cache)
     y_arr = to_numpy(y, dtype=np.float64).ravel()
     if not np.isfinite(y_arr).all():
         raise ValueError("y contains non-finite values")

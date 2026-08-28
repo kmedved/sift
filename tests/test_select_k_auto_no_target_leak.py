@@ -1090,12 +1090,15 @@ def test_gaussian_auto_k_rejects_cache_built_for_different_row_count():
         )
 
 
-def test_gaussian_function_selector_maps_unnamed_cache_indices_to_feature_names():
+def test_gaussian_function_selector_keeps_unnamed_ndarray_cache_positional():
     X, y, _ = _numeric_auto_k_data()
-    cache = build_cache(X.to_numpy(), subsample=None)
+    X_arr = X.to_numpy()
+    cache = build_cache(X_arr, subsample=None)
 
-    selected = select_cefsplus(X, y, k=3, cache=cache, verbose=False)
-    result = select_cefsplus(X, y, k=3, cache=cache, return_result=True, verbose=False)
+    selected = select_cefsplus(X_arr, y, k=3, cache=cache, verbose=False)
+    result = select_cefsplus(
+        X_arr, y, k=3, cache=cache, return_result=True, verbose=False
+    )
 
     assert all(feature.startswith("x") for feature in selected)
     assert result.selected_features == selected
@@ -1144,28 +1147,25 @@ def test_gaussian_auto_k_with_unnamed_cache_accepts_positional_ndarray_evaluatio
     assert all(feature.startswith("x") for feature in selected)
 
 
-def test_gaussian_fixed_k_unnamed_cache_reordered_dataframe_stays_positional():
+def test_gaussian_fixed_k_unnamed_cache_rejects_named_dataframe():
     rng = np.random.default_rng(0)
     X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
     y = X_cache["d"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
     cache = build_cache(X_cache.to_numpy(), subsample=None)
     X_eval = X_cache[["d", "c", "b", "a"]].copy()
 
-    result = select_cefsplus(
-        X_eval,
-        y,
-        k=2,
-        cache=cache,
-        return_result=True,
-        verbose=False,
-    )
-
-    assert all(feature.startswith("x") for feature in result.selected_features)
-    assert result.selected_indices is not None
-    assert result.selected_features == [f"x{i}" for i in result.selected_indices]
+    with pytest.raises(ValueError, match="unnamed/positional"):
+        select_cefsplus(
+            X_eval,
+            y,
+            k=2,
+            cache=cache,
+            return_result=True,
+            verbose=False,
+        )
 
 
-def test_gaussian_auto_k_return_result_indices_follow_input_column_order():
+def test_gaussian_auto_k_named_cache_rejects_reordered_input_columns():
     rng = np.random.default_rng(0)
     X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
     y = X_cache["d"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
@@ -1173,22 +1173,20 @@ def test_gaussian_auto_k_return_result_indices_follow_input_column_order():
     X_eval = X_cache[["d", "c", "b", "a"]].copy()
     cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
 
-    result = select_cefsplus(
-        X_eval,
-        y,
-        k="auto",
-        auto_k_config=cfg,
-        cache=cache,
-        time=np.arange(len(X_eval)),
-        return_result=True,
-        verbose=False,
-    )
-
-    assert result.selected_indices is not None
-    assert [X_eval.columns[i] for i in result.selected_indices] == result.selected_features
+    with pytest.raises(ValueError, match="names and order"):
+        select_cefsplus(
+            X_eval,
+            y,
+            k="auto",
+            auto_k_config=cfg,
+            cache=cache,
+            time=np.arange(len(X_eval)),
+            return_result=True,
+            verbose=False,
+        )
 
 
-def test_gaussian_auto_k_named_x_columns_are_not_treated_as_synthetic():
+def test_gaussian_auto_k_named_x_columns_still_require_original_order():
     rng = np.random.default_rng(1)
     X_cache = pd.DataFrame(rng.normal(size=(80, 4)), columns=["x0", "x1", "x2", "x3"])
     y = X_cache["x3"].to_numpy() + 0.1 * rng.normal(size=len(X_cache))
@@ -1196,17 +1194,15 @@ def test_gaussian_auto_k_named_x_columns_are_not_treated_as_synthetic():
     X_eval = X_cache[["x3", "x2", "x1", "x0"]].copy()
     cfg = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=3)
 
-    result = select_cefsplus(
-        X_eval,
-        y,
-        k="auto",
-        auto_k_config=cfg,
-        cache=cache,
-        time=np.arange(len(X_eval)),
-        return_result=True,
-        verbose=False,
-    )
-
     assert not cache.feature_names_are_synthetic
-    assert result.selected_indices is not None
-    assert [X_eval.columns[i] for i in result.selected_indices] == result.selected_features
+    with pytest.raises(ValueError, match="names and order"):
+        select_cefsplus(
+            X_eval,
+            y,
+            k="auto",
+            auto_k_config=cfg,
+            cache=cache,
+            time=np.arange(len(X_eval)),
+            return_result=True,
+            verbose=False,
+        )

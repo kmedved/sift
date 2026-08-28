@@ -168,10 +168,10 @@ def test_binned_jmi_select_reuses_prebinned_selected_columns(monkeypatch):
     call_count = 0
     original_quantile_bin = jmi._quantile_bin
 
-    def wrapped_quantile_bin(x, n_bins):
+    def wrapped_quantile_bin(x, n_bins, weights=None):
         nonlocal call_count
         call_count += 1
-        return original_quantile_bin(x, n_bins)
+        return original_quantile_bin(x, n_bins, weights=weights)
 
     monkeypatch.setattr(jmi, "_quantile_bin", wrapped_quantile_bin)
 

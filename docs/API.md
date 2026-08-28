@@ -36,8 +36,20 @@ Most filter selectors support:
 
 - `sample_weight` for non-negative row weights.
 - `cat_features` and `cat_encoding` for categorical preprocessing.
-- `subsample` and `random_state` for Gaussian/cache-backed paths.
+- `subsample` and `random_state` for classic row sampling and uncached Gaussian
+  cache construction.
 - `return_result=True` for a `FilterSelectionResult` where supported.
+
+For fixed-k calls, `groups` and `time` are rejected because they define only
+auto-k evaluation splits. With a prebuilt Gaussian cache, a named cache
+requires a DataFrame with the same row count and exact column order; a
+positional cache requires a positional ndarray with the same row count and
+feature count. Named DataFrames are rejected for positional caches because
+column alignment cannot be proven. The
+cache-backed filter functions reject explicit cache-construction
+`subsample`/`random_state` overrides. In `select_fdr`, `random_state` instead
+seeds a fresh knockoff draw and remains meaningful with a cache; `subsample`
+must be omitted.
 
 Supervised categorical encodings are conservative by default. When a function
 selector would fit target encoders on the full dataset, pass
@@ -198,9 +210,10 @@ Important options:
 
 - `statistic="relevance"` is the fast default.
 - `statistic="lsm"` is the lasso signed-max from a Gram-form LARS path on the
-  analytic augmented correlation; exactly antisymmetric and markedly more
-  powerful than `relevance` on correlated designs
-  (`statistic_options={"max_steps": int}`).
+  analytic augmented correlation and is exactly antisymmetric
+  (`statistic_options={"max_steps": int}`). Its power relative to
+  `relevance` is data-dependent; no committed quality bakeoff establishes a
+  universal winner.
 - `statistic="ridge"` is the analytic ridge coefficient difference
   (`statistic_options={"ridge_lambda": float}`, default `0.5`).
 - `statistic="cefsplus"` enables the tie-safe greedy CEFS+ statistic. It accepts
@@ -289,6 +302,10 @@ selector.get_support(indices=True)
 `KnockoffSelector` is sklearn-style, but it is q-based and does not support
 `k` or `auto_k_config`. It rejects row `groups` and `time`; use
 `feature_groups` for grouped feature discoveries.
+It is tagged non-deterministic because changing row order can change seeded
+knockoff noise assignment and selection. Zero-weight rows are removed before
+RNG draws and do not consume that stream, but shuffled-row equality is not
+promised.
 
 ## Caching
 
@@ -309,7 +326,13 @@ cache = build_cache(
 
 `FeatureCache` stores Gaussianized features, valid columns, row indices, sample
 weights, feature names, and optionally the feature-feature correlation matrix.
-Use it when running many targets or cache-backed methods.
+Use it when running many targets or cache-backed methods. A named cache requires
+the same DataFrame column names in exact order. A positional cache requires a
+positional ndarray with the same row count and feature count. Rebuild rather
+than passing call-time `sample_weight` or new cache-construction `subsample` or
+`random_state` settings to a cache-backed filter function. `select_fdr` accepts
+`random_state` with a cache because it seeds the fresh knockoff draw; its
+`sample_weight` and `subsample` remain forbidden.
 
 ### `select_cached`
 
@@ -426,8 +449,16 @@ After fitting, selector classes expose:
 - `feature_names_in_`
 - `n_features_in_`
 - `k_` when automatic k resolved a value
+- `get_feature_names_out()`
 
 `KnockoffSelector` additionally exposes `result_`.
+
+The Gaussian/cache-backed selector classes expose sklearn-compatible automatic
+defaults: `subsample="auto"` and, except for `KnockoffSelector`,
+`random_state="auto"`. Without a cache they resolve at fit time to 50,000 rows
+and seed 0. With a prebuilt cache, `"auto"` means omitted, while explicit
+construction overrides are rejected. `KnockoffSelector.random_state` remains
+numeric because it controls each new knockoff draw even when a cache is reused.
 
 ## Stability Selection
 
@@ -462,6 +493,9 @@ selected_cls = stability_classif(X, y, k=20, random_state=0)
 
 Stability selection is a robust heuristic built on repeated sparse linear
 models. It does not provide the same q-calibrated API as `select_fdr`.
+After fitting, `StabilitySelector.get_feature_names_out()` returns the selected
+feature names and validates any supplied `input_features` against the fit-time
+feature order.
 
 ## Smart Sampling
 
@@ -524,6 +558,9 @@ selector.fit(X, y)
 
 Boruta is an all-relevant selector: it tries to keep every feature that beats
 shadow-feature importance, not a minimal subset.
+After fitting, `BorutaSelector.get_feature_names_out()` returns the accepted
+feature names and validates any supplied `input_features` against the fit-time
+feature order.
 
 ## CatBoost Selection
 

@@ -149,6 +149,35 @@ def extract_feature_names(X) -> Optional[List[str]]:
     return None
 
 
+def reject_datetime_like_features(X) -> None:
+    """Reject pandas datetime/timedelta features before numeric coercion."""
+    if hasattr(X, "dtypes"):
+        datetime_like = [
+            name
+            for name, column_dtype in X.dtypes.items()
+            if pd.api.types.is_datetime64_any_dtype(column_dtype)
+            or pd.api.types.is_timedelta64_dtype(column_dtype)
+        ]
+    else:
+        dtype = getattr(X, "dtype", None)
+        datetime_like = (
+            ["<array>"]
+            if dtype is not None
+            and (
+                pd.api.types.is_datetime64_any_dtype(dtype)
+                or pd.api.types.is_timedelta64_dtype(dtype)
+            )
+            else []
+        )
+    if datetime_like:
+        sample = datetime_like[:5]
+        suffix = "..." if len(datetime_like) > 5 else ""
+        raise ValueError(
+            "Datetime or timedelta feature columns are not supported: "
+            f"{sample}{suffix}. Convert them to numeric features explicitly."
+        )
+
+
 # --- Validation ---
 
 
@@ -224,20 +253,21 @@ def validate_k(k, *, allow_auto: bool = True) -> int | Literal["auto"]:
 
 
 def validate_inputs(
-    X, y, task: str, impute: bool = True, *, dtype=np.float32
+    X, y, task: str, impute: bool = True, *, dtype=np.float64
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Validate and convert inputs.
 
-    ``dtype`` controls the returned feature dtype. The classic filter paths
-    keep ``float32``; solvers that immediately work in double precision pass
-    ``np.float64`` to avoid a lossy round trip (large offsets or tiny scales
-    can otherwise collapse to constants).
+    ``dtype`` controls the returned feature dtype. The default is float64 so
+    classic filters do not lose distinctions between large-offset values (for
+    example, values near ``1e8``). Callers that have a deliberate lower
+    precision contract can opt into ``np.float32`` explicitly.
     """
     from sift._impute import mean_impute
 
     validate_task(task)
 
     feature_names = extract_feature_names(X)
+    reject_datetime_like_features(X)
     if hasattr(X, "select_dtypes"):
         non_numeric = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
         if non_numeric:

@@ -32,6 +32,7 @@ from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     ensure_weights,
     extract_feature_names,
+    reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
     to_numpy,
 )
@@ -439,6 +440,20 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         mask = self.status_ == 1
         return np.where(mask)[0] if indices else mask
 
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        """Return accepted feature names following sklearn's transformer API."""
+        check_is_fitted(self, ["status_", "feature_names_in_", "n_features_in_"])
+        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        if input_features is not None:
+            input_names = np.asarray(input_features, dtype=object)
+            if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
+                raise ValueError(
+                    "input_features must have the same number of features as the fitted data"
+                )
+            if not np.array_equal(input_names, fitted_names):
+                raise ValueError("input_features is not equal to feature_names_in_")
+        return fitted_names[self.get_support(indices=True)]
+
     def transform(self, X):
         check_is_fitted(self, ["status_"])
         if getattr(self, "_categorical_encoding_applied_", False):
@@ -508,6 +523,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             "categorical_features_",
             "_categorical_encoding_applied_",
             "feature_names_in_",
+            "n_features_in_",
             "status_",
             "hits_",
             "n_iter_",
@@ -539,6 +555,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         )
 
         feature_names = extract_feature_names(X)
+        reject_datetime_like_features(X)
         self.categorical_encoder_ = None
         self.categorical_features_ = []
         self._categorical_encoding_applied_ = False
@@ -892,6 +909,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         mean_importance,
     ) -> None:
         self.feature_names_in_ = feature_names
+        self.n_features_in_ = len(feature_names)
         self.status_ = status
         self.hits_ = hits
         self.n_iter_ = int(n_trials)

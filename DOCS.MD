@@ -164,13 +164,15 @@ Numeric requirements:
 - Gaussian/cache-based selectors require numeric features. Use categorical
   encoding before building a cache.
 - Regression targets must be finite numeric values.
-- Classification targets may be strings, categoricals, or numeric labels, but
-  missing labels are not allowed.
-- `select_fdr` treats `y` as a continuous numeric target; integer labels with
-  3-20 unique values warn because categorical multiclass workflows should use
-  one-vs-rest targets.
+- Classification targets must be sklearn-compatible labels: strings/categories
+  or integer-valued numeric labels. Missing labels are not allowed.
+- `select_fdr` treats `y` as a continuous numeric target; integer-valued labels
+  with 3-20 unique values warn because categorical multiclass workflows should
+  use one-vs-rest targets.
 - Feature matrices may contain non-finite values; the internal preprocessing
   mean-imputes them for most numeric selectors.
+- Datetime and timedelta feature columns are rejected. Convert calendar/time
+  information to explicit numeric features before selection.
 
 Sample weights:
 
@@ -219,6 +221,10 @@ can return fewer when fewer valid candidates remain after constant-feature
 filtering, non-positive relevance filtering, `top_m`, explicit correlation
 pruning, or other validity checks. CatBoost selectors document their own
 exact-`k` behavior separately.
+For fixed-k filter calls, `groups` and `time` are rejected because they only
+define auto-k evaluation splits; use `k="auto"` with an appropriate strategy
+or omit those arguments. `KnockoffSelector` likewise rejects row `groups` and
+`time`; use `feature_groups` for grouped feature discoveries.
 
 ### `select_mrmr`
 
@@ -264,8 +270,9 @@ Key options:
 - `mrmr_backend`: controls the mRMR redundancy/cache execution path. `"serial"`
   is the original Numba path, `"blas"` uses single-process vectorized
   correlation updates for classic mRMR, and `"processes"` uses joblib process
-  workers. `"auto"` resolves to `"blas"` (3-10x faster than serial and free of
-  process start-up costs); pass `"processes"` explicitly to opt into workers.
+  workers. `"auto"` resolves to `"blas"` (3-10x faster than serial in the
+  repository benchmark cases, not a universal guarantee, and free of process
+  start-up costs); pass `"processes"` explicitly to opt into workers.
 - `n_jobs`: worker count for `mrmr_backend="processes"`. `n_jobs=0` is invalid.
   For Gaussian mRMR, `n_jobs != 1` parallelizes rank-Gaussian cache
   construction with threads when no prebuilt `cache` is supplied; a prebuilt
@@ -355,7 +362,8 @@ Estimator behavior:
 - `estimator="auto"` resolves to `"r2"` for regression and `"binned"` for
   classification.
 - `estimator="binned"` supports classification and regression-style continuous
-  targets through quantile bins.
+  targets through quantile bins. With `sample_weight`, both bin edges and
+  entropy counts use the weights; zero-weight rows affect neither.
 - `estimator="r2"`, `"ksg"`, and `"gaussian"` are regression-only.
 - `estimator="ksg"` does not support `sample_weight`; weighted JMI/JMIM should
   use `"r2"` or `"binned"`.
@@ -451,15 +459,15 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff. It remains the compatibility default;
-  broader independent, correlated, and dense-weak panels did not show a single
-  statistic dominating, so compare `ridge` or `lsm` when conditional signal is
-  plausible.
+  original feature and its knockoff. It remains the compatibility default. No
+  committed quality bakeoff establishes a universal winner among statistics;
+  compare `ridge` or `lsm` when conditional signal is plausible.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
-  target correlations. It is exactly antisymmetric under swaps, needs no
-  tie handling, and is markedly more powerful than `relevance` on correlated
-  designs while keeping the same approximate plug-in validity framing.
+  target correlations. It is exactly antisymmetric under swaps and needs no
+  tie handling. Its power relative to `relevance` is data-dependent; no
+  committed bakeoff supports a universal advantage. It keeps the same
+  approximate plug-in validity framing.
   `statistic_options=
   {"max_steps": ...}` caps the LARS steps (columns that never enter get `W=0`).
 - `statistic="ridge"`: analytic ridge coefficient difference
@@ -637,10 +645,19 @@ Each class supports `fit`, `transform`, `fit_transform`, and
 - `selected_indices_`
 - `feature_names_in_`
 - `n_features_in_`
+- `get_feature_names_out()` for the selected columns
 - `result_` on `KnockoffSelector`
 
 For pandas inputs, `transform` validates that columns match the fitted columns
 and order before selecting by stored positions.
+
+For `MRMRSelector`, `JMISelector`, `JMIMSelector`, and `CEFSPlusSelector`, the
+sklearn-facing `subsample="auto"` and `random_state="auto"` defaults resolve to
+50,000 rows and seed 0 when building a cache from `X`. With a prebuilt cache,
+`"auto"` means the construction option was omitted; explicit integer/`None`
+overrides are rejected. `KnockoffSelector` uses the same `subsample="auto"`
+contract, while its numeric `random_state` continues to seed each fresh
+knockoff draw.
 
 Selector classes default to `cat_encoding="none"`. When you explicitly set
 `cat_encoding` to `"target"`, `"loo"`, `"james_stein"`, or `"loo_logit"`, the
@@ -653,6 +670,12 @@ These fitted encoders are not cross-fitted; use external cross-fitting or
 selector-class `auto_k_mode="nested"` when you need fold-local evaluation.
 Function-style selectors still reject supervised full-data categorical encoding
 by default unless `allow_full_data_target_encoding=True` is passed explicitly.
+
+`KnockoffSelector` is stochastic: even with a fixed seed, changing input row
+order can change the sampled rows/noise stream and therefore the result. Keep
+row order fixed for exact reproducibility. Its narrow zero-weight guarantee is
+that zero-weight rows are removed before seeded knockoff RNG draws, so they do
+not consume that RNG stream.
 
 ## Automatic `k` Selection
 
@@ -769,7 +792,9 @@ selected = select_mrmr(
 - `k_method="stability"` chooses from a bootstrap stability curve and reports
   per-feature selection frequencies in the summary. It is useful as a
   reproducibility diagnostic; automatic sizing from the stability curve remains
-  experimental after the Auto-K v2 benchmark gates.
+  experimental after the Auto-K v2 benchmark gates. Bootstrap paths are
+  compared only through the deepest prefix available in every run; short paths
+  are not padded with fabricated feature entries.
 - `k_method="consensus"` runs a configured subset of methods and returns the
   lower median `k`, with a disagreement diagnostic.
 - `auto_k_mode="prefix_only"` is the current public semantic. Selectors build
@@ -790,8 +815,9 @@ selected = select_mrmr(
   and explicit supervised categorical encoding together, because that would
   evaluate already target-encoded validation rows. Use nested mode or
   pre-encode/cross-fit categoricals outside the selector.
-- `strategy="time_holdout"` requires `time` and validates on the latest rows
-  for evaluate/fold-curve methods.
+- `strategy="time_holdout"` requires `time` and validates on approximately the
+  requested latest-row fraction after moving the cut to a boundary between
+  distinct timestamps for evaluate/fold-curve methods.
 - `strategy="group_cv"` requires `groups` and uses `GroupKFold`.
 - `strategy="kfold"` is available for `gaussian_cv` and `xfit_objective`.
 - If `auto_k_config` is omitted, CEFS+ and binary CEFS+ use
@@ -974,7 +1000,18 @@ or unpruned candidates remain.
   positional input instead of coming from a DataFrame.
 
 `FeatureCache` objects are bound to the feature matrix and naming contract used
-when they were built. If you persist or pickle caches across SIFT versions,
+when they were built: reuse requires the same row count and feature order/names
+in `X`. Cache-backed filter calls (`select_mrmr`, `select_jmi`, `select_jmim`,
+and `select_cefsplus`) reject call-time `sample_weight` and explicit
+`subsample` or `random_state` overrides; those values belong to cache
+construction. `select_fdr` still accepts `random_state` with a cache because
+there it seeds the new knockoff draw, not cache construction; its
+`sample_weight` and `subsample` arguments remain forbidden.
+An array-built positional cache is matched by row count and feature count and
+requires a positional ndarray at selection time; named DataFrames are rejected
+because the original column alignment cannot be proven. Rebuild the cache from
+that DataFrame to establish its names and order.
+If you persist or pickle caches across SIFT versions,
 rebuild or invalidate caches created before `feature_names_are_synthetic` was
 recorded; old objects cannot prove whether `x0`, `x1`, ... names were real
 DataFrame columns or generated positional names.
@@ -1076,12 +1113,15 @@ info = selector.get_feature_info()
 coef_stability = selector.get_coef_stability()
 mask = selector.get_support()
 X_reduced = selector.transform(X)
+# sklearn-compatible selected names:
+selected_names_out = selector.get_feature_names_out()
 ```
 
 Important options:
 
 - `n_bootstrap`: number of resamples.
-- `sample_frac`: fraction per i.i.d. bootstrap.
+- `sample_frac`: fraction per bootstrap; grouped time-block fits apply it to a
+  rounded panel-wide draw budget allocated across groups.
 - `threshold`: minimum selection frequency.
 - `alpha`: regularization strength. If `None`, Sift estimates it by CV.
 - `l1_ratio`: regression only; use values below `1.0` for ElasticNet.
@@ -1121,9 +1161,14 @@ selected = stability_regression(
     time=df["game_date"].to_numpy(),
     block_size="auto",
     block_method="moving",    # "moving", "circular", or "stationary"
+    sample_frac=0.5,
     verbose=False,
 )
 ```
+
+The grouped bootstrap allocates a rounded panel-wide draw budget across groups
+and samples contiguous windows with replacement. `sample_frac=1.0` retains the
+full-panel draw budget used by earlier releases.
 
 ## Smart Sampling
 
@@ -1304,6 +1349,7 @@ selector = BorutaSelector(
 selector.fit(X, y)
 
 selected = selector.selected_features_
+selected_names_out = selector.get_feature_names_out()
 mask = selector.get_support()
 X_reduced = selector.transform(X)
 result = selector.result_()
@@ -1942,9 +1988,9 @@ CatBoost:
   selecting against many targets.
 - Set `compute_Rxx=True` in `build_cache` when you will reuse the cache many
   times; it costs more up front but avoids repeated correlation construction.
-- For classic mRMR, compare `mrmr_backend="blas"` and
-  `mrmr_backend="processes"` on your data with `benchmarks/bench_mrmr.py`.
-  Defaults stay serial to avoid surprise process and memory overhead. Use
+- For classic mRMR, `mrmr_backend="auto"` resolves to the BLAS redundancy path;
+  compare it with the explicit `serial` and `processes` options on your data
+  with `benchmarks/bench_mrmr.py`. Use
   `--blas-threads 1,2,4` to sweep native BLAS thread limits; `n_jobs` controls
   only the process backend.
 - Use `StabilitySelector(store_coefs=False)` for very wide datasets when

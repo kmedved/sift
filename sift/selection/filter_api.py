@@ -66,6 +66,37 @@ from sift.selection.filter_payloads import (
 )
 from sift.selection.loops import MrmrBackend, resolve_mrmr_backend
 from sift.selection.result import FilterSelectionResult, build_selector_metadata
+from sift.selection.knockoff_filter import (
+    _SUBSAMPLE_DEFAULT,
+    _reject_duplicate_feature_names,
+    _validate_prebuilt_cache_structure,
+)
+
+
+class _FilterRandomStateDefaultType:
+    """Sentinel distinguishing an omitted cache-construction seed."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "<random_state default: 0>"
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return (_FilterRandomStateDefaultType, ())
+
+
+_RANDOM_STATE_DEFAULT = _FilterRandomStateDefaultType()
 
 
 def _single_threaded_binary_blas(func):
@@ -228,7 +259,7 @@ def select_mrmr(
     formula: Formula = "quotient", top_m: Optional[int] = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
-    subsample: Optional[int] = 50_000, random_state: int = 0, n_jobs: int = 1,
+    subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
     verbose: bool = True, return_result: bool = False,
 ) -> list[str] | FilterSelectionResult:
@@ -251,7 +282,7 @@ def select_jmi(
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
-    subsample: Optional[int] = 50_000, random_state: int = 0,
+    subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
 ) -> list[str] | FilterSelectionResult:
     """Joint Mutual Information feature selection."""
@@ -273,7 +304,7 @@ def select_jmim(
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
-    subsample: Optional[int] = 50_000, random_state: int = 0,
+    subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation."""
@@ -297,7 +328,7 @@ def select_cefsplus(
     top_m: Optional[int] = None, corr_prune: float | None = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
     allow_full_data_target_encoding: bool = False,
-    subsample: Optional[int] = 50_000, random_state: int = 0,
+    subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
 ) -> list[str] | FilterSelectionResult:
     """CEFS+ feature selection using log-det Gaussian MI proxy."""
@@ -341,6 +372,7 @@ def _select_filter(
     request: FilterRequest,
 ) -> list[str] | FilterSelectionResult:
     ctx = _build_context(spec, request)
+    _require_fixed_filter_metadata(ctx)
     if ctx.k == "auto":
         if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
             resolved_config = AutoKConfig(k_method="auto")
@@ -371,8 +403,15 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
     if len(x_shape) != 2:
         raise ValueError("X must be a 2D feature matrix")
     n_rows, n_features = int(x_shape[0]), int(x_shape[1])
+    if request.cache is not None and spec.estimator == "gaussian":
+        _validate_gaussian_cache_compatibility(request.X, request.cache, n_rows, n_features)
+        _validate_gaussian_cache_overrides(request)
     groups, time = _validate_groups_time(request.groups, request.time, n_rows)
     selector_kwargs = dict(request.selector_kwargs or {})
+    if selector_kwargs.get("subsample") is _SUBSAMPLE_DEFAULT:
+        selector_kwargs["subsample"] = 50_000
+    if selector_kwargs.get("random_state") is _RANDOM_STATE_DEFAULT:
+        selector_kwargs["random_state"] = 0
     n_jobs = int(selector_kwargs.get("n_jobs", 1))
     mrmr_backend = resolve_mrmr_backend(
         selector_kwargs.get("mrmr_backend", "auto"),
@@ -396,6 +435,83 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         mrmr_backend=mrmr_backend,
         rank_backend="threads" if n_jobs != 1 else "serial",
     )
+
+
+def _validate_gaussian_cache_compatibility(
+    X: XInput,
+    cache: FeatureCache,
+    n_rows: int,
+    n_features: int,
+) -> None:
+    """Validate a cache against the source matrix before any Gaussian work.
+
+    Named caches are tied to a DataFrame's labels and order.  Caches built from
+    arrays are positional and therefore only carry a feature-count contract.
+    In both cases the cache must describe the same number of source rows and
+    valid original feature positions; otherwise it could return features that
+    are not present in ``X``.
+    """
+    # Validate provenance before interpreting generated-looking names. An old
+    # array-built pickle can otherwise be mistaken for a cache whose real
+    # DataFrame labels happened to be ``x0``, ``x1``, ... .
+    _validate_prebuilt_cache_structure(
+        cache,
+        original_n_features=n_features,
+        n_rows=n_rows,
+    )
+    _reject_duplicate_feature_names(cache)
+    cache_names = getattr(cache, "feature_names", None)
+    synthetic = cache_names is None or bool(
+        getattr(cache, "feature_names_are_synthetic", False)
+    )
+    if synthetic:
+        if isinstance(X, pd.DataFrame):
+            raise ValueError(
+                "A cache built from unnamed/positional features requires X to be "
+                "the compatible positional ndarray; rebuild the cache from this "
+                "DataFrame to establish column names and order"
+            )
+        if cache_names is not None and len(cache_names) != n_features:
+            raise ValueError(
+                f"X has {n_features} columns but the positional cache was built from "
+                f"{len(cache_names)}"
+            )
+    else:
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError(
+                "A named Gaussian cache requires X to be a DataFrame with the "
+                "same column names and order used to build the cache"
+            )
+        if list(X.columns) != list(cache_names):
+            raise ValueError(
+                "X columns do not match cache.feature_names (names and order must "
+                "be identical); fit the cache from the same matrix"
+            )
+        if len(cache_names) != n_features:
+            raise ValueError(
+                f"X has {n_features} columns but the named cache was built from "
+                f"{len(cache_names)}"
+            )
+def _validate_gaussian_cache_overrides(request: FilterRequest) -> None:
+    kwargs = request.selector_kwargs or {}
+    if kwargs.get("subsample") is not _SUBSAMPLE_DEFAULT:
+        raise ValueError(
+            "subsample cannot be passed with a prebuilt cache; leave it omitted "
+            "when supplying cache"
+        )
+    if kwargs.get("random_state") is not _RANDOM_STATE_DEFAULT:
+        raise ValueError(
+            "random_state controls cache construction and cannot be passed with a "
+            "prebuilt cache; use the seed used to build the cache"
+        )
+
+
+def _require_fixed_filter_metadata(ctx: FilterContext) -> None:
+    if ctx.k != "auto" and (ctx.groups is not None or ctx.time is not None):
+        raise ValueError(
+            "groups and time are only meaningful for auto-k evaluation; "
+            "use k='auto' or omit them for a fixed-k filter call"
+        )
 
 
 def _format_payload(
@@ -486,6 +602,11 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
     groups, time = _validate_groups_time(request.groups, request.time, int(x_shape[0]))
     kw = (request.selector_kwargs or {}).get
     k_value = validate_k(request.k)
+    if k_value != "auto" and (groups is not None or time is not None):
+        raise ValueError(
+            "groups and time are only meaningful for auto-k evaluation; "
+            "use k='auto' or omit them for a fixed-k filter call"
+        )
     if k_value == "auto" and request.auto_k_config is not None:
         # With no explicit config, the delegated select_cefsplus call routes
         # k='auto' through the Auto-K router just like the logloss path.

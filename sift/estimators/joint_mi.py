@@ -11,6 +11,9 @@ from scipy.special import digamma
 from sift._numba import njit_optional_cache
 
 
+_MAX_EXACT_FLOAT_INTEGER = float(2**53 - 1)
+
+
 def _weighted_entropy_from_codes(
     codes: np.ndarray,
     w: np.ndarray,
@@ -42,6 +45,47 @@ def _weighted_entropy_from_codes(
     return float(-(p[mask] * np.log(p[mask])).sum())
 
 
+def _canonical_binned_weights(
+    weights: np.ndarray,
+    n: int,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return scale-free edge/entropy weights for one binned-MI call.
+
+    Continuous weights are max-normalized.  Frequency-like integer ratios are
+    converted to their primitive counts so entropy accumulation is stable and
+    agrees with the documented common-factor reduction policy.
+    """
+    raw = np.asarray(weights, dtype=np.float64).ravel()
+    if raw.size != n:
+        raise ValueError(f"weights has {raw.size} elements but expected {n}")
+    if not np.isfinite(raw).all() or np.any(raw < 0.0):
+        raise ValueError("weights must be finite and non-negative")
+    positive = raw > 0.0
+    if not np.any(positive):
+        return raw, raw, 0.0
+
+    edge_weights = raw / float(np.max(raw[positive]))
+    entropy_weights = edge_weights.copy()
+    atomic_mass = _frequency_atomic_mass(edge_weights[positive])
+    if atomic_mass is not None:
+        ratios = edge_weights[positive] / atomic_mass
+        nearest = np.rint(ratios)
+        counts_are_safe = (
+            np.isfinite(ratios).all()
+            and np.all(ratios >= 1.0)
+            and float(np.max(ratios)) <= _MAX_EXACT_FLOAT_INTEGER
+            and np.all(
+                np.abs(ratios - nearest)
+                <= 1e-7 * np.maximum(1.0, np.abs(ratios))
+            )
+            and float(nearest.sum()) <= _MAX_EXACT_FLOAT_INTEGER
+        )
+        if counts_are_safe:
+            entropy_weights[positive] = nearest
+
+    return edge_weights, entropy_weights, float(entropy_weights.sum())
+
+
 def binned_joint_mi(
     selected: np.ndarray,
     candidates: np.ndarray,
@@ -60,21 +104,20 @@ def binned_joint_mi(
         - "continuous": quantile-bin y
     """
     n, p = candidates.shape
-    w = np.asarray(w, dtype=np.float64).ravel()
-    w_sum = float(w.sum())
+    edge_w, entropy_w, w_sum = _canonical_binned_weights(w, n)
     if w_sum <= 0.0:
         return np.zeros(p, dtype=np.float64)
 
-    s_binned = _quantile_bin(selected, n_bins)
+    s_binned = _quantile_bin_for_weights(selected, n_bins, edge_w)
 
     if y_kind == "discrete":
         y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
-        y_binned = _quantile_bin(y, n_bins)
+        y_binned = _quantile_bin_for_weights(y, n_bins, edge_w)
         n_y_bins = n_bins
 
-    h_y = _weighted_entropy_from_codes(y_binned, w, n_states=n_y_bins, w_sum=w_sum)
+    h_y = _weighted_entropy_from_codes(y_binned, entropy_w, n_states=n_y_bins, w_sum=w_sum)
 
     fs_states = n_bins * n_bins
     fsy_states = fs_states * n_y_bins
@@ -82,13 +125,13 @@ def binned_joint_mi(
     scores = np.empty(p, dtype=np.float64)
 
     for j in range(p):
-        f_binned = _quantile_bin(candidates[:, j], n_bins)
+        f_binned = _quantile_bin_for_weights(candidates[:, j], n_bins, edge_w)
 
         fs_binned = f_binned * n_bins + s_binned
         fsy_binned = fs_binned * n_y_bins + y_binned
 
-        h_fs = _weighted_entropy_from_codes(fs_binned, w, n_states=fs_states, w_sum=w_sum)
-        h_fsy = _weighted_entropy_from_codes(fsy_binned, w, n_states=fsy_states, w_sum=w_sum)
+        h_fs = _weighted_entropy_from_codes(fs_binned, entropy_w, n_states=fs_states, w_sum=w_sum)
+        h_fsy = _weighted_entropy_from_codes(fsy_binned, entropy_w, n_states=fsy_states, w_sum=w_sum)
 
         scores[j] = max(0.0, h_fs + h_y - h_fsy)
 
@@ -406,21 +449,20 @@ def binned_joint_mi_indexed(
     if m == 0:
         return np.empty(0, dtype=np.float64)
 
-    w = np.asarray(w, dtype=np.float64).ravel()
-    w_sum = float(w.sum())
+    edge_w, entropy_w, w_sum = _canonical_binned_weights(w, X_full.shape[0])
     if w_sum <= 0.0:
         return np.zeros(m, dtype=np.float64)
 
-    s_binned = _quantile_bin(selected, n_bins)
+    s_binned = _quantile_bin_for_weights(selected, n_bins, edge_w)
 
     if y_kind == "discrete":
         y_binned = _compact_discrete_target_codes(y)
         n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
     else:
-        y_binned = _quantile_bin(y, n_bins)
+        y_binned = _quantile_bin_for_weights(y, n_bins, edge_w)
         n_y_bins = n_bins
 
-    h_y = _weighted_entropy_from_codes(y_binned, w, n_states=n_y_bins, w_sum=w_sum)
+    h_y = _weighted_entropy_from_codes(y_binned, entropy_w, n_states=n_y_bins, w_sum=w_sum)
 
     fs_states = n_bins * n_bins
     fsy_states = fs_states * n_y_bins
@@ -429,13 +471,13 @@ def binned_joint_mi_indexed(
 
     for ci in range(m):
         j = int(cand_idx[ci])
-        f_binned = _quantile_bin(X_full[:, j], n_bins)
+        f_binned = _quantile_bin_for_weights(X_full[:, j], n_bins, edge_w)
 
         fs_binned = f_binned * n_bins + s_binned
         fsy_binned = fs_binned * n_y_bins + y_binned
 
-        h_fs = _weighted_entropy_from_codes(fs_binned, w, n_states=fs_states, w_sum=w_sum)
-        h_fsy = _weighted_entropy_from_codes(fsy_binned, w, n_states=fsy_states, w_sum=w_sum)
+        h_fs = _weighted_entropy_from_codes(fs_binned, entropy_w, n_states=fs_states, w_sum=w_sum)
+        h_fsy = _weighted_entropy_from_codes(fsy_binned, entropy_w, n_states=fsy_states, w_sum=w_sum)
 
         scores[ci] = max(0.0, h_fs + h_y - h_fsy)
 
@@ -461,8 +503,9 @@ def binned_joint_mi_indexed_prebinned(
     if m == 0:
         return np.empty(0, dtype=np.float64)
 
-    w = np.asarray(w, dtype=np.float64).ravel()
-    w_sum = float(w.sum())
+    _edge_w, entropy_w, w_sum = _canonical_binned_weights(
+        w, X_binned.shape[0]
+    )
     if w_sum <= 0.0:
         return np.zeros(m, dtype=np.float64)
 
@@ -471,7 +514,7 @@ def binned_joint_mi_indexed_prebinned(
     if X_binned.shape[0] != s_binned.size or s_binned.size != y_binned.size:
         raise ValueError("Row mismatch between X_binned, s_binned, y_binned")
 
-    h_y = _weighted_entropy_from_codes(y_binned, w, n_states=n_y_bins, w_sum=w_sum)
+    h_y = _weighted_entropy_from_codes(y_binned, entropy_w, n_states=n_y_bins, w_sum=w_sum)
 
     fs_states = n_bins * n_bins
     fsy_states = fs_states * n_y_bins
@@ -485,23 +528,33 @@ def binned_joint_mi_indexed_prebinned(
         fs_binned = f_binned * n_bins + s_binned
         fsy_binned = fs_binned * n_y_bins + y_binned
 
-        h_fs = _weighted_entropy_from_codes(fs_binned, w, n_states=fs_states, w_sum=w_sum)
-        h_fsy = _weighted_entropy_from_codes(fsy_binned, w, n_states=fsy_states, w_sum=w_sum)
+        h_fs = _weighted_entropy_from_codes(fs_binned, entropy_w, n_states=fs_states, w_sum=w_sum)
+        h_fsy = _weighted_entropy_from_codes(fsy_binned, entropy_w, n_states=fsy_states, w_sum=w_sum)
 
         scores[ci] = max(0.0, h_fs + h_y - h_fsy)
 
     return scores
 
 
-def quantile_bin_matrix(X: np.ndarray, n_bins: int) -> np.ndarray:
-    """Quantile-bin each column of X into integer codes."""
+def quantile_bin_matrix(
+    X: np.ndarray,
+    n_bins: int,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
+    """Quantile-bin each column of X into integer codes.
+
+    If ``weights`` is provided, each column's edges are weighted quantiles;
+    zero-weight rows are excluded from edge computation.  Omitting weights
+    retains the original unweighted path.
+    """
     X = np.asarray(X)
     if X.ndim != 2:
         raise ValueError("X must be 2D")
     n, p = X.shape
+    w = _validate_bin_weights(weights, n) if weights is not None else None
     out = np.empty((n, p), dtype=np.int32)
     for j in range(p):
-        out[:, j] = _quantile_bin(X[:, j], n_bins)
+        out[:, j] = _quantile_bin_for_weights(X[:, j], n_bins, w)
     return out
 
 
@@ -509,6 +562,7 @@ def quantile_bin_matrix_indexed(
     X_full: np.ndarray,
     cand_idx: np.ndarray,
     n_bins: int,
+    weights: np.ndarray | None = None,
 ) -> np.ndarray:
     """Quantile-bin candidate columns into an (n, m) int32 matrix.
 
@@ -521,9 +575,10 @@ def quantile_bin_matrix_indexed(
     cand_idx = np.asarray(cand_idx, dtype=np.int64).ravel()
     n = X_full.shape[0]
     m = cand_idx.size
+    w = _validate_bin_weights(weights, n) if weights is not None else None
     out = np.empty((n, m), dtype=np.int32)
     for i, j in enumerate(cand_idx):
-        out[:, i] = _quantile_bin(X_full[:, int(j)], n_bins)
+        out[:, i] = _quantile_bin_for_weights(X_full[:, int(j)], n_bins, w)
     return out
 
 
@@ -577,13 +632,216 @@ def ksg_joint_mi(
     return scores
 
 
-def _quantile_bin(x: np.ndarray, n_bins: int) -> np.ndarray:
-    """Quantile-based binning."""
-    if x.size == 0 or np.ptp(x) == 0.0:
-        return np.zeros(len(x), dtype=np.int32)
-    percentiles = np.linspace(0, 100, n_bins + 1)
-    bins = np.percentile(x, percentiles)
-    return np.digitize(x, bins[1:-1]).astype(np.int32)
+def _validate_bin_weights(weights: np.ndarray, n: int) -> np.ndarray:
+    """Validate weights used only for weighted quantile edge construction."""
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if w.size != n:
+        raise ValueError(f"weights has {w.size} elements but expected {n}")
+    if not np.isfinite(w).all() or np.any(w < 0.0):
+        raise ValueError("weights must be finite and non-negative")
+    if not np.any(w > 0.0):
+        raise ValueError("weights must contain at least one positive value")
+    return w
+
+
+def _quantile_bin_for_weights(
+    x: np.ndarray,
+    n_bins: int,
+    weights: np.ndarray | None,
+) -> np.ndarray:
+    """Quantile-bin using weighted edges while retaining the unweighted fast path."""
+    if weights is None or np.all(weights == weights[0]):
+        return _quantile_bin(x, n_bins)
+    return _quantile_bin(x, n_bins, weights)
+
+
+def _weighted_percentile(
+    x: np.ndarray,
+    percentiles: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Scale-invariant weighted linear percentiles.
+
+    Frequency-like weights are reduced to a scale-free atomic mass and follow
+    NumPy's linear percentile semantics without physically repeating rows.
+    General continuous weights use weighted-CDF midpoint interpolation. Both
+    paths are invariant to multiplying every weight by the same positive
+    constant, and zero-weight observations are ignored entirely.
+    """
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    w_arr = np.asarray(weights, dtype=np.float64).ravel()
+    if x_arr.size != w_arr.size:
+        raise ValueError("x and weights must have the same length")
+    positive = w_arr > 0.0
+    if not np.any(positive):
+        raise ValueError("weights must contain at least one positive value")
+    x_pos = x_arr[positive]
+    w_pos = w_arr[positive]
+    order = np.argsort(x_pos, kind="mergesort")
+    values = x_pos[order]
+    sorted_weights = w_pos[order]
+    if values.size == 1 or np.ptp(values) == 0.0:
+        return np.full(np.asarray(percentiles).shape, values[0], dtype=np.float64)
+
+    quantiles = np.clip(np.asarray(percentiles, dtype=np.float64) / 100.0, 0.0, 1.0)
+
+    def stabilize_edges(result: np.ndarray) -> np.ndarray:
+        """Remove cumulative-sum reversals without changing query order."""
+        order = np.argsort(quantiles, kind="mergesort")
+        monotone = np.maximum.accumulate(result[order])
+        stabilized = np.empty_like(result)
+        stabilized[order] = monotone
+        return stabilized
+
+    # Normalize before cumulative arithmetic. Besides avoiding overflow, this
+    # makes multiplication of every sample weight by a positive constant a
+    # numerically stable no-op even when weights span many orders of magnitude.
+    normalized_weights = sorted_weights / float(np.max(sorted_weights))
+    total = float(normalized_weights.sum())
+    atomic_mass = _frequency_atomic_mass(normalized_weights)
+    if atomic_mass is None:
+        cdf_midpoints = (
+            np.cumsum(normalized_weights) - 0.5 * normalized_weights
+        ) / total
+        result = np.interp(
+            quantiles,
+            cdf_midpoints,
+            values,
+            left=values[0],
+            right=values[-1],
+        )
+        # Interpolation is mathematically monotone, but cumulative floating
+        # point arithmetic can leave adjacent edges a few ulps out of order.
+        # Binning requires a monotone edge vector.
+        result = stabilize_edges(result)
+        return np.where(
+            quantiles <= 0.0,
+            values[0],
+            np.where(quantiles >= 1.0, values[-1], result),
+        )
+
+    # For manageable primitive integer ratios, use integer rank arithmetic.
+    # This is exactly NumPy's linear percentile definition on the conceptual
+    # repeated rows, without expanding those rows or allowing cumulative
+    # floating-point ulps to move a tied observation across an edge.
+    ratios = normalized_weights / atomic_mass
+    nearest = np.rint(ratios)
+    counts_are_safe = (
+        np.isfinite(ratios).all()
+        and np.all(ratios >= 1.0)
+        and float(np.max(ratios)) <= _MAX_EXACT_FLOAT_INTEGER
+        and np.all(
+            np.abs(ratios - nearest)
+            <= 1e-7 * np.maximum(1.0, np.abs(ratios))
+        )
+    )
+    total_count_float = float(nearest.sum()) if counts_are_safe else np.inf
+    if counts_are_safe and total_count_float <= _MAX_EXACT_FLOAT_INTEGER:
+        counts = nearest.astype(np.int64)
+        total_count = int(counts.sum(dtype=np.int64))
+        ranks = np.clip(
+            quantiles * (total_count - 1),
+            0.0,
+            float(total_count - 1),
+        )
+        lower_rank = np.floor(ranks).astype(np.int64)
+        upper_rank = np.ceil(ranks).astype(np.int64)
+        cumulative_counts = np.cumsum(counts, dtype=np.int64)
+        lower_idx = np.searchsorted(cumulative_counts, lower_rank, side="right")
+        upper_idx = np.searchsorted(cumulative_counts, upper_rank, side="right")
+        result = values[lower_idx] + (ranks - lower_rank) * (
+            values[upper_idx] - values[lower_idx]
+        )
+        result = stabilize_edges(result)
+        return np.where(
+            quantiles <= 0.0,
+            values[0],
+            np.where(quantiles >= 1.0, values[-1], result),
+        )
+
+    positions = quantiles * max(total - atomic_mass, 0.0)
+    cumulative = np.cumsum(normalized_weights)
+    # Each observation contributes a constant run followed by one atomic-mass
+    # linear transition to the next value. This is the compact equivalent of
+    # expanding primitive integer frequency ratios (after removing a common
+    # global factor) and passing them to np.percentile(..., method="linear").
+    transition = cumulative - atomic_mass
+    # Select the latest transition that has started; ``-1`` handles the first
+    # run before its transition, which is clipped back to the first value.
+    idx = np.searchsorted(transition, positions, side="right") - 1
+    idx = np.clip(idx, 0, values.size - 1)
+    has_next = idx < values.size - 1
+    next_idx = np.minimum(idx + 1, values.size - 1)
+    fraction = np.zeros_like(positions)
+    fraction[has_next] = np.clip(
+        (positions[has_next] - transition[idx[has_next]]) / atomic_mass,
+        0.0,
+        1.0,
+    )
+    # A percentile landing exactly on a transition can be represented as a
+    # tiny positive/negative interpolation fraction after cumulative sums.
+    # Snap those boundary cases to the source value so tied observations are
+    # assigned to the same bin as in the equivalent replicated data.
+    boundary_tol = 64.0 * np.finfo(np.float64).eps
+    fraction = np.where(
+        np.abs(fraction) <= boundary_tol,
+        0.0,
+        np.where(np.abs(fraction - 1.0) <= boundary_tol, 1.0, fraction),
+    )
+    result = values[idx] + fraction * (values[next_idx] - values[idx])
+    result = stabilize_edges(result)
+    # Exact endpoints are part of the percentile contract. Explicitly pinning
+    # them also avoids a one-ULP cumulative-sum difference choosing the
+    # penultimate transition after an otherwise harmless weight rescaling.
+    return np.where(
+        quantiles <= 0.0,
+        values[0],
+        np.where(quantiles >= 1.0, values[-1], result),
+    )
+
+
+def _frequency_atomic_mass(weights: np.ndarray) -> float | None:
+    """Return a scale-free row quantum for simple rational weight ratios."""
+    minimum = float(np.min(weights))
+    if not np.isfinite(minimum) or minimum <= 0.0:
+        return None
+    ratios = np.asarray(weights, dtype=np.float64) / minimum
+    if not np.isfinite(ratios).all():
+        return None
+    for denominator in range(1, 65):
+        scaled = ratios * denominator
+        nearest = np.rint(scaled)
+        tolerance = 1e-7 * np.maximum(1.0, np.abs(scaled))
+        if np.all(np.abs(scaled - nearest) <= tolerance):
+            return minimum / denominator
+    return None
+
+
+def _quantile_bin(
+    x: np.ndarray,
+    n_bins: int,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
+    """Quantile-based binning, optionally using weighted edges."""
+    x_arr = np.asarray(x)
+    if x_arr.size == 0:
+        return np.zeros(len(x_arr), dtype=np.int32)
+    if weights is None:
+        if np.ptp(x_arr) == 0.0:
+            return np.zeros(len(x_arr), dtype=np.int32)
+        percentiles = np.linspace(0, 100, n_bins + 1)
+        bins = np.percentile(x_arr, percentiles)
+    else:
+        w = _validate_bin_weights(weights, len(x_arr))
+        positive = w > 0.0
+        if not np.any(positive):
+            return np.zeros(len(x_arr), dtype=np.int32)
+        x_positive = np.asarray(x_arr[positive], dtype=np.float64)
+        if x_positive.size == 1 or np.ptp(x_positive) == 0.0:
+            return np.zeros(len(x_arr), dtype=np.int32)
+        percentiles = np.linspace(0, 100, n_bins + 1)
+        bins = _weighted_percentile(x_arr, percentiles, w)
+    return np.digitize(x_arr, bins[1:-1]).astype(np.int32)
 
 
 def _factorize(x: np.ndarray) -> np.ndarray:
