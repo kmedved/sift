@@ -2,7 +2,67 @@
 
 ## Unreleased
 
-No changes yet.
+### Breaking changes and migration
+
+- Prebuilt Gaussian caches now enforce their full source contract. Named caches
+  require the same row count and exact DataFrame names/order; positional caches
+  require a positional ndarray with the same row and feature counts. Reordered,
+  renamed, or duplicate columns raise for named caches, and a DataFrame cannot
+  consume a positional cache. Positional caches cannot detect reordered ndarray
+  columns, so callers must preserve their original positions. Cached filter
+  calls reject call-time `sample_weight`, `subsample`, and construction
+  `random_state`; `select_fdr` still accepts `random_state` because it seeds a
+  fresh knockoff draw, while its `subsample` remains forbidden. Rebuild
+  persisted caches that predate `feature_names_are_synthetic`.
+- Fixed-k filter calls now reject `groups` and `time`; remove those arguments or
+  use `k="auto"` with the matching evaluation strategy. `KnockoffSelector`
+  rejects row `groups`/`time` in every mode; its `feature_groups` option groups
+  features, not observations.
+- Datetime and timedelta feature columns, including NumPy datetime/timedelta
+  arrays, now raise before numeric coercion in classic, cache, and Boruta paths.
+  Derive explicit numeric calendar or elapsed-time features before selection.
+- Function-style filters using `task="classification"` follow sklearn's
+  discrete-target contract. String, categorical, integer, and integer-valued
+  floating labels remain valid; non-integral numeric class codes such as
+  `0.5`/`1.5` are classified as continuous and rejected. Re-encode those values
+  as categories or integer IDs. `select_fdr` is separate: it requires a finite
+  numeric target and does not use the classification-task contract.
+- Time holdout moves the requested cut to the nearest boundary between distinct
+  timestamps, preferring the smaller boundary on an exact tie. `val_frac` is
+  therefore approximate and row counts can change. Fewer than two rows,
+  all-tied, missing, or mutually unorderable timestamps now raise.
+- Classic numeric filter feature matrices now stay in float64, preventing
+  large-offset signals from collapsing. Their core feature-array footprint is
+  therefore roughly twice the former float32 path, and peak memory can be
+  higher because of copies or solver workspaces. BLAS runtime and native-thread
+  contention remain workload-dependent; benchmark representative data when
+  choosing the mRMR backend.
+
+### Correctness, API, and documentation
+
+- Gaussian/cache-backed sklearn selector constructors use
+  `subsample="auto"`, resolving to 50,000 rows only at fit time. MRMR, JMI,
+  JMIM, and CEFS+ wrappers also use `random_state="auto"`, resolving to seed 0;
+  `KnockoffSelector.random_state` remains numeric because it seeds each fresh
+  draw. These literals preserve explicit cache-override rejection while
+  satisfying sklearn's default-constructible estimator parameter contract.
+- Weighted binned JMI/JMIM now use weighted quantile edges as well as weighted
+  entropy counts. Zero-weight rows do not affect binning, and multiplying all
+  weights by a positive constant does not change the estimand. Integer
+  frequency ratios are reduced by any common global factor rather than
+  treating that factor as extra replicated sample size.
+- Grouped time-block stability bootstrap now honors `sample_frac` with a rounded
+  panel-wide draw budget allocated across unequal groups. Moving, circular, and
+  stationary windows draw with replacement and preserve the full-panel budget
+  at `sample_frac=1.0`.
+- Documentation now records cache/X compatibility and rejected cache overrides,
+  fixed-k group/time rejection, the `cat_encoding="none"` default, and the
+  stochastic row-order sensitivity of `KnockoffSelector`. Knockoff statistic
+  power comparisons are intentionally left data-dependent pending a committed
+  quality bakeoff.
+- All sklearn-style selector wrappers now expose `get_feature_names_out()`.
+  `KnockoffSelector` is tagged and documented as row-order-sensitive despite a
+  fixed seed; zero-weight rows are still removed before knockoff RNG draws.
 
 ## 0.8.0
 
@@ -46,8 +106,9 @@ No changes yet.
   This prevents multiple OpenBLAS/OpenMP runtimes from oversubscribing one
   another; `threadpoolctl` is now a direct dependency.
 - `select_mrmr(mrmr_backend="auto")` now resolves to the BLAS redundancy path
-  for every `n_jobs` (3-10x faster than the serial Numba loop; the process
-  backend remains an explicit opt-in). The `f_regression`, `f_classif`, and
+  for every `n_jobs` (3-10x faster than the serial Numba loop in the repository
+  benchmark cases, not a universal guarantee; the process backend remains an
+  explicit opt-in). The `f_regression`, `f_classif`, and
   standardization kernels sweep rows instead of columns (about 10x faster).
   The row-order-preserving traversal itself is bitwise equivalent; separately,
   regression relevance and JMI/mRMR standardization use exact-constancy checks
@@ -63,10 +124,11 @@ No changes yet.
 - Added `statistic="lsm"` (lasso signed-max from a Gram-form LARS path on the
   analytic augmented correlation) and `statistic="ridge"` (analytic ridge
   coefficient difference). Both are exactly antisymmetric under original/
-  knockoff swaps; `lsm` is markedly more powerful than the marginal
-  `relevance` default on correlated designs while keeping the same approximate
-  plug-in validity framing. Options: `statistic_options={"max_steps": ...}`
-  for `lsm`, `{"ridge_lambda": ...}` for `ridge`.
+  knockoff swaps and keep the same approximate plug-in validity framing. Power
+  relative to the marginal `relevance` default is data-dependent; no universal
+  advantage is claimed without a committed quality bakeoff. Options:
+  `statistic_options={"max_steps": ...}` for `lsm`,
+  `{"ridge_lambda": ...}` for `ridge`.
 - Added `feature_groups="auto"` with `group_corr_threshold`: features are
   clustered by absolute correlation, knockoffs run on one representative per
   cluster, and selected clusters are expanded. This restores power for

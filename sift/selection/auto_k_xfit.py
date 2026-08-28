@@ -249,7 +249,14 @@ def _fold_score_arrays(
     method: str,
     score_kind: str,
 ) -> tuple[list[np.ndarray], dict]:
+    from sift.selection.knockoff_filter import (
+        _reject_duplicate_feature_names,
+        _validate_prebuilt_cache_structure,
+    )
+
     validate_auto_k_config(config)
+    _validate_prebuilt_cache_structure(cache)
+    _reject_duplicate_feature_names(cache)
     if config.xfit_mode != "shared_z":
         raise ValueError(
             f"{config.k_method} xfit_mode='exact' requires fold-local cache rebuilding; "

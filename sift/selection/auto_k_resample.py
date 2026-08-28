@@ -14,6 +14,10 @@ from sift.selection.cefsplus import (
     _gaussian_mrmr_select,
     cefsplus_loop_with_objective,
 )
+from sift.selection.knockoff_filter import (
+    _reject_duplicate_feature_names,
+    _validate_prebuilt_cache_structure,
+)
 from sift.selection.panel import build_candidate_panel, local_corr_panel
 
 _STABILITY_PHI_FLOOR = 0.5
@@ -71,6 +75,8 @@ def null_objective_paths(
     random_state: int,
 ) -> np.ndarray:
     """Build permutation-null CEFS+ objective paths, extended flat to max_k."""
+    _validate_prebuilt_cache_structure(cache)
+    _reject_duplicate_feature_names(cache)
     y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
     if y_arr.shape[0] != cache.n_rows_original:
         raise ValueError("y length must match the cache's original row count")
@@ -210,7 +216,14 @@ def bootstrap_paths(
     method: str = "cefsplus",
 ) -> list[np.ndarray]:
     """Return bootstrap CEFS+ paths in cache-valid feature coordinates."""
+    _validate_prebuilt_cache_structure(cache)
+    _reject_duplicate_feature_names(cache)
     y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    if y_arr.shape[0] != cache.n_rows_original:
+        raise ValueError(
+            f"y has {y_arr.shape[0]} rows but cache was built from "
+            f"{cache.n_rows_original} rows"
+        )
     y_cache = y_arr[np.asarray(cache.row_idx, dtype=np.int64)]
     seeds = np.random.SeedSequence(random_state).spawn(int(B))
     paths: list[np.ndarray] = []

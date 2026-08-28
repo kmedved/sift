@@ -20,12 +20,16 @@ from sift.selection.auto_k import AutoKConfig, validate_auto_k_config
 from sift.selection.knockoff_filter import (
     _build_active_rxx,
     _reject_duplicate_feature_names,
+    _validate_prebuilt_cache_structure,
     _weighted_variance,
 )
 
 
 def _prepare_knockoff_draw_state(cache, config: AutoKConfig):
     """Fit one cache-level knockoff model for all auto-k draws."""
+    # Inactive zero-weight-variance columns may have undefined cached
+    # correlations; the active submatrix is validated below.
+    _validate_prebuilt_cache_structure(cache, validate_rxx=False)
     _reject_duplicate_feature_names(cache)
     w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
     if not np.isfinite(w).all() or np.any(w < 0.0) or float(w.sum()) <= 0.0:

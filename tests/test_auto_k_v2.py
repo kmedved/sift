@@ -75,6 +75,125 @@ def test_candidate_panel_matches_select_cached_cefsplus_path():
     np.testing.assert_allclose(objective, panel_objective)
 
 
+def _call_direct_cache_auto_k_api(api, cache, y):
+    if api == "objective":
+        return auto_k_module.compute_objective_for_path(cache, y, ["x0"])
+    if api == "null":
+        return null_objective_paths(
+            cache,
+            y,
+            B=1,
+            max_k=2,
+            null="permute",
+            top_m=5,
+            corr_prune="auto",
+            random_state=0,
+        )
+    if api == "bootstrap":
+        return bootstrap_paths(
+            cache,
+            y,
+            B=1,
+            max_k=2,
+            boot_mode="bayes",
+            top_m=5,
+            corr_prune="auto",
+            random_state=0,
+        )
+    if api == "xfit":
+        return xfit_objective_curves(
+            cache,
+            y,
+            config=AutoKConfig(
+                k_method="xfit_objective",
+                strategy="kfold",
+                min_k=1,
+                max_k=2,
+                n_splits=2,
+            ),
+            top_m=5,
+            corr_prune="auto",
+            method="cefsplus",
+        )
+    if api == "cv":
+        return gaussian_cv_curves(
+            cache,
+            y,
+            config=AutoKConfig(
+                k_method="gaussian_cv",
+                strategy="kfold",
+                min_k=1,
+                max_k=2,
+                n_splits=2,
+            ),
+            top_m=5,
+            corr_prune="auto",
+            method="cefsplus",
+        )
+    raise AssertionError(f"unknown API: {api}")
+
+
+@pytest.mark.parametrize("api", ["objective", "null", "bootstrap", "xfit", "cv"])
+def test_direct_cache_auto_k_apis_require_provenance(api):
+    rng = np.random.default_rng(1201)
+    X = rng.normal(size=(40, 5))
+    y = X[:, 0] + rng.normal(scale=0.1, size=40)
+    cache = build_cache(X, subsample=None, compute_Rxx=True)
+    delattr(cache, "feature_names_are_synthetic")
+
+    with pytest.raises(ValueError, match="feature_names_are_synthetic|rebuild"):
+        _call_direct_cache_auto_k_api(api, cache, y)
+
+
+@pytest.mark.parametrize("api", ["objective", "null", "bootstrap", "xfit", "cv"])
+def test_direct_cache_auto_k_apis_reject_duplicate_feature_names(api):
+    rng = np.random.default_rng(1204)
+    X = pd.DataFrame(rng.normal(size=(40, 5)), columns=["x0", "x0", "x2", "x3", "x4"])
+    y = X.iloc[:, 0].to_numpy() + rng.normal(scale=0.1, size=40)
+    cache = build_cache(X, subsample=None, compute_Rxx=True)
+
+    with pytest.raises(ValueError, match="Duplicate feature names"):
+        _call_direct_cache_auto_k_api(api, cache, y)
+
+
+@pytest.mark.parametrize("mutation", ["duplicate_valid_cols", "duplicate_row_idx", "oob_row_idx"])
+@pytest.mark.parametrize("api", ["objective", "null", "bootstrap", "xfit", "cv"])
+def test_direct_cache_auto_k_apis_reject_malformed_indices(api, mutation):
+    rng = np.random.default_rng(1202)
+    X = rng.normal(size=(40, 5))
+    y = X[:, 0] + rng.normal(scale=0.1, size=40)
+    cache = build_cache(X, subsample=None, compute_Rxx=True)
+    if mutation == "duplicate_valid_cols":
+        cache.valid_cols = np.array([0, 0, 1, 2, 3])
+    elif mutation == "duplicate_row_idx":
+        cache.row_idx = np.r_[0, 0, np.arange(2, 40)]
+    else:
+        cache.row_idx = np.r_[np.arange(39), 40]
+
+    with pytest.raises(ValueError, match="valid_cols|row_idx"):
+        _call_direct_cache_auto_k_api(api, cache, y)
+
+
+def test_bootstrap_paths_reject_short_y_before_subsampled_row_indexing():
+    rng = np.random.default_rng(1203)
+    X = rng.normal(size=(100, 5))
+    y = X[:, 0] + rng.normal(scale=0.1, size=100)
+    cache = build_cache(X, subsample=20, compute_Rxx=True, random_state=0)
+    assert 99 not in cache.row_idx
+
+    with pytest.raises(ValueError, match="y has 99 rows.*100 rows"):
+        bootstrap_paths(
+            cache,
+            y[:-1],
+            B=1,
+            max_k=2,
+            boot_mode="bayes",
+            top_m=5,
+            corr_prune="auto",
+            random_state=0,
+        )
+
+
 def test_local_standardize_uses_local_weights_and_neutralizes_constant_columns():
     Z = np.array(
         [

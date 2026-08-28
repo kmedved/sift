@@ -14,6 +14,7 @@ from sift._preprocess import (
     Task,
     check_regression_only,
     encode_categoricals,
+    ensure_weights,
     subsample_xy,
     to_numpy,
     validate_inputs,
@@ -73,6 +74,7 @@ class ClassicPrepared:
     X_arr: np.ndarray
     y_arr: np.ndarray
     w: np.ndarray
+    mi_w: np.ndarray
     feature_names: list[str]
     row_idx: np.ndarray
 
@@ -386,7 +388,11 @@ def make_jmi_classic_path(*, aggregation: str, pass_sample_weight: bool) -> Clas
             aggregation=aggregation,
             top_m=top_m,
             y_kind="discrete" if ctx.request.task == "classification" else "continuous",
-            sample_weight=prep.w if pass_sample_weight else None,
+            sample_weight=(
+                prep.mi_w if pass_sample_weight and ctx.estimator == "binned" else prep.w
+            )
+            if pass_sample_weight
+            else None,
         )
 
     return jmi_classic_path
@@ -433,12 +439,15 @@ def _gaussian_payload_selection(
 
 
 def _gaussian_feature_names(ctx: "FilterContext", cache: FeatureCache) -> list[str]:
-    assert cache.feature_names is not None
-    return list(cache.feature_names)
+    if cache.feature_names is not None:
+        return list(cache.feature_names)
+    return [f"x{i}" for i in range(ctx.n_features_input)]
 
 
 def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
-    return bool(getattr(cache, "feature_names_are_synthetic", False))
+    return cache.feature_names is None or bool(
+        getattr(cache, "feature_names_are_synthetic", False)
+    )
 
 
 def validate_standard(ctx: "FilterContext") -> None:
@@ -651,8 +660,8 @@ def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] |
         build_cache(
             X_encoded,
             sample_weight=ctx.request.sample_weight,
-            subsample=_kw(ctx, "subsample"),
-            random_state=_kw(ctx, "random_state"),
+            subsample=_kw(ctx, "subsample", 50_000),
+            random_state=_kw(ctx, "random_state", 0),
             n_jobs=ctx.n_jobs,
             rank_backend=ctx.rank_backend,
         ),
@@ -741,7 +750,16 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         sample_weight=ctx.request.sample_weight,
         return_idx=True,
     )
-    return ClassicPrepared(X_arr, y_arr, w, feature_names, row_idx)
+    if ctx.request.sample_weight is None:
+        mi_w = np.ones(row_idx.size, dtype=np.float64)
+    else:
+        raw_weight = ensure_weights(
+            ctx.request.sample_weight,
+            ctx.n_rows,
+            normalize=False,
+        )
+        mi_w = raw_weight[row_idx]
+    return ClassicPrepared(X_arr, y_arr, w, mi_w, feature_names, row_idx)
 
 
 def _compute_relevance(

@@ -160,11 +160,24 @@ def test_category_encoder_backed_target_encoding_rejects_sample_weight():
 
 def test_gaussian_auto_k_with_prebuilt_cache_does_not_require_encoding_opt_in():
     X, y = _high_cardinality_data()
-    cache = build_cache(X[["signal", "noise_a", "noise_b"]], subsample=None)
+    X_cached = X[["signal", "noise_a", "noise_b"]]
+    cache = build_cache(X_cached, subsample=None)
     cfg = AutoKConfig(k_method="elbow", min_k=1, max_k=2)
 
+    with pytest.raises(ValueError, match="names and order"):
+        select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            cache=cache,
+            auto_k_config=cfg,
+            verbose=False,
+        )
+
     selected = select_mrmr(
-        X,
+        X_cached,
         y,
         k="auto",
         task="regression",
@@ -173,7 +186,6 @@ def test_gaussian_auto_k_with_prebuilt_cache_does_not_require_encoding_opt_in():
         auto_k_config=cfg,
         cat_features=["id"],
         cat_encoding="target",
-        subsample=None,
         verbose=False,
     )
 
@@ -182,16 +194,19 @@ def test_gaussian_auto_k_with_prebuilt_cache_does_not_require_encoding_opt_in():
 
 def test_cefsplus_with_prebuilt_cache_does_not_require_encoding_opt_in():
     X, y = _high_cardinality_data()
-    cache = build_cache(X[["signal", "noise_a", "noise_b"]], subsample=None)
+    X_cached = X[["signal", "noise_a", "noise_b"]]
+    cache = build_cache(X_cached, subsample=None)
+
+    with pytest.raises(ValueError, match="names and order"):
+        select_cefsplus(X, y, k=2, cache=cache, verbose=False)
 
     selected = select_cefsplus(
-        X,
+        X_cached,
         y,
         k=2,
         cache=cache,
         cat_features=["id"],
         cat_encoding="target",
-        subsample=None,
         verbose=False,
     )
 

@@ -1094,18 +1094,17 @@ def test_binary_selector_class_duplicate_columns_transform_selected_position():
     np.testing.assert_allclose(transformed.iloc[:, 0].to_numpy(), signal_dup)
 
 
-def test_binary_selector_class_ignores_irrelevant_split_metadata_for_fixed_k():
+def test_binary_selector_class_rejects_split_metadata_for_fixed_k():
     X, y = _classification_frame(seed=121)
 
     selector = CEFSPlusBinarySelector(k=2, verbose=False)
-    selector.fit(
-        X,
-        y,
-        groups=np.arange(len(y)) % 5,
-        time=np.arange(len(y)),
-    )
-
-    assert len(selector.selected_features_) == 2
+    with pytest.raises(ValueError, match="only meaningful for auto-k"):
+        selector.fit(
+            X,
+            y,
+            groups=np.arange(len(y)) % 5,
+            time=np.arange(len(y)),
+        )
 
 
 def test_binary_selector_class_rejects_return_result_fit_param():
@@ -1180,13 +1179,13 @@ def test_binary_selector_class_auto_k_and_cache_behavior():
     )
     assert 1 <= len(selector.selected_features_) <= 3
 
-    fixed_selector = CEFSPlusBinarySelector(k=2, verbose=False).fit(
-        X,
-        y,
-        auto_k_config=cfg,
-        time=np.arange(len(y)),
-    )
-    assert len(fixed_selector.selected_features_) == 2
+    with pytest.raises(ValueError, match="only meaningful for auto-k"):
+        CEFSPlusBinarySelector(k=2, verbose=False).fit(
+            X,
+            y,
+            auto_k_config=cfg,
+            time=np.arange(len(y)),
+        )
 
     with pytest.raises(ValueError, match="does not support prebuilt caches"):
         CEFSPlusBinarySelector(k=2, verbose=False).fit(X, y, cache=object())

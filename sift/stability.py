@@ -323,6 +323,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 y=y if self.task == "classification" else None,
                 task=self.task,
                 random_state=self.random_state,
+                sample_frac=self.sample_frac,
             )
         else:
             if self.verbose:
@@ -471,6 +472,20 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if isinstance(X, pd.DataFrame):
             return X[self.selected_feature_names_].values
         return np.asarray(X)[:, self.selected_features_]
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        """Return names of selected columns using sklearn's transformer contract."""
+        check_is_fitted(self, ["selected_features_", "selected_feature_names_", "feature_names_in_"])
+        if input_features is not None:
+            supplied = np.asarray(input_features, dtype=object)
+            if supplied.ndim != 1 or supplied.shape[0] != self.n_features_in_:
+                raise ValueError(
+                    "input_features must contain one name for each fitted feature"
+                )
+            fitted = np.asarray(self.feature_names_in_, dtype=object)
+            if not np.array_equal(supplied, fitted):
+                raise ValueError("input_features do not match feature_names_in_")
+        return np.asarray(self.selected_feature_names_, dtype=object)
 
     def fit_transform(
         self,

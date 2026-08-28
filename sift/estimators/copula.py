@@ -40,10 +40,16 @@ def build_cache(
 ) -> FeatureCache:
     """Build feature cache for multi-target selection."""
     from sift._impute import mean_impute
-    from sift._preprocess import ensure_weights, extract_feature_names, to_numpy
+    from sift._preprocess import (
+        ensure_weights,
+        extract_feature_names,
+        reject_datetime_like_features,
+        to_numpy,
+    )
 
     feature_names = extract_feature_names(X)
     feature_names_are_synthetic = feature_names is None
+    reject_datetime_like_features(X)
     if hasattr(X, "select_dtypes"):
         non_numeric = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
         if non_numeric:

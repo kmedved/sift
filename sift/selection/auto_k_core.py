@@ -90,12 +90,60 @@ def time_holdout_split(
     time_vals: np.ndarray,
     val_frac: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Split by time: train on past, validate on future."""
-    order = np.argsort(time_vals, kind="mergesort")
-    n = len(order)
-    cut = int(np.floor((1.0 - val_frac) * n))
-    cut = max(1, min(cut, n - 1))
-    return order[:cut], order[cut:]
+    """Split by time without separating equal timestamps.
+
+    Rows are stably sorted by ``time_vals`` and the cut is moved to the
+    nearest boundary between distinct timestamps. A holdout cannot be
+    defined for fewer than two rows or for an all-tied timestamp vector, so
+    those cases raise instead of silently leaking a timestamp across folds.
+    """
+    if not isinstance(val_frac, (int, float, np.integer, np.floating)) or isinstance(
+        val_frac, (bool, np.bool_)
+    ):
+        raise TypeError("val_frac must be a real number in (0, 1)")
+    val_frac = float(val_frac)
+    if not np.isfinite(val_frac) or not 0.0 < val_frac < 1.0:
+        raise ValueError("val_frac must be finite and in (0, 1)")
+
+    values = np.asarray(time_vals).reshape(-1)
+    n = values.size
+    if n < 2:
+        raise ValueError("time_holdout_split requires at least two rows")
+    try:
+        missing = np.asarray(pd.isna(values), dtype=bool)
+    except (TypeError, ValueError):
+        missing = np.zeros(n, dtype=bool)
+    if missing.any():
+        raise ValueError("time values must not contain missing values")
+
+    try:
+        order = np.argsort(values, kind="mergesort")
+        ordered = values[order]
+        # Native dtypes can verify the sorted result in one vectorized pass.
+        # Keep scalar comparisons for object arrays so mixed or exotic Python
+        # values retain their existing comparison and rejection semantics.
+        if values.dtype.kind == "O":
+            for previous, current in zip(ordered[:-1], ordered[1:]):
+                if bool(current < previous):
+                    raise TypeError("time values are not monotonically orderable")
+        elif np.asarray(ordered[1:] < ordered[:-1], dtype=bool).any():
+            raise TypeError("time values are not monotonically orderable")
+    except (TypeError, ValueError) as exc:
+        raise TypeError("time values must be orderable") from exc
+    try:
+        distinct = np.asarray(ordered[1:] != ordered[:-1], dtype=bool)
+    except Exception as exc:  # pragma: no cover - defensive for exotic objects
+        raise TypeError("time values must be orderable") from exc
+    boundaries = np.flatnonzero(distinct) + 1
+    if boundaries.size == 0:
+        raise ValueError("time_holdout_split requires at least two distinct timestamps")
+
+    desired_train = (1.0 - val_frac) * n
+    distance = np.abs(boundaries.astype(float) - desired_train)
+    # In an exact tie, choose the smaller boundary: validation is still wholly
+    # future and is not made implausibly smaller than requested.
+    cut = int(boundaries[np.flatnonzero(distance == distance.min())[0]])
+    return order[:cut].astype(np.int64, copy=False), order[cut:].astype(np.int64, copy=False)
 
 
 def numeric_train_val(X_train, X_val) -> tuple[np.ndarray, np.ndarray]:

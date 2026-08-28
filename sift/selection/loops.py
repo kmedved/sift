@@ -11,7 +11,7 @@ from joblib import Parallel, delayed, effective_n_jobs
 from threadpoolctl import threadpool_limits
 
 from sift._numba import njit_optional_cache
-from sift._preprocess import validate_k
+from sift._preprocess import ensure_weights, validate_k
 
 FLOOR = 1e-6
 MrmrBackend = Literal["auto", "serial", "blas", "processes"]
@@ -453,13 +453,43 @@ def jmi_select(
                 r2_w_sum,
             )
     elif mi_estimator == "binned":
-        X_binned = jmi_est.quantile_bin_matrix(X_cand, n_bins=10)
+        # Keep entropy and weighted-edge arithmetic on a bounded, scale-free
+        # representation.  The raw weights may span many orders of magnitude;
+        # their global scale is not part of the binned MI estimand and should
+        # not perturb greedy tie-breaking.
+        positive_w = w_arr[w_arr > 0.0]
+        edge_w = (
+            w_arr / float(np.max(positive_w))
+            if positive_w.size
+            else w_arr
+        )
+        entropy_w = ensure_weights(w_arr, n, normalize=True)
+        # When weights encode frequency counts, canonicalize the detected
+        # primitive ratios before entropy accumulation.  This makes the
+        # weighted path bit-stable with the equivalent row-replicated path,
+        # including ties, while retaining continuous weights as-is.
+        if positive_w.size:
+            atomic_mass = jmi_est._frequency_atomic_mass(
+                entropy_w[entropy_w > 0.0]
+            )
+            if atomic_mass is not None:
+                ratios = entropy_w / atomic_mass
+                entropy_w = np.where(
+                    entropy_w > 0.0,
+                    np.rint(ratios),
+                    0.0,
+                )
+        X_binned = jmi_est.quantile_bin_matrix(
+            X_cand,
+            n_bins=10,
+            weights=edge_w,
+        )
         if y_kind == "discrete":
             y_vals = np.asarray(y_arr)
             y_binned = jmi_est._factorize(y_vals)
             n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
         else:
-            y_binned = jmi_est._quantile_bin(y_arr, 10)
+            y_binned = jmi_est._quantile_bin(y_arr, 10, weights=edge_w)
             n_y_bins = 10
 
         def mi_func_indexed(last_idx, idx):
@@ -469,7 +499,7 @@ def jmi_select(
                 idx,
                 s_binned,
                 y_binned,
-                w_arr,
+                entropy_w,
                 n_bins=10,
                 n_y_bins=n_y_bins,
             )
