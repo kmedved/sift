@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from sift._preprocess import infer_higher_is_better
+from sift._preprocess import best_score_from_dict, infer_higher_is_better
 
 
 # =============================================================================
@@ -58,6 +58,64 @@ def _validate_stability_params(n_bootstrap: int, stability_threshold: float) -> 
         or not (0 <= float(stability_threshold) <= 1)
     ):
         raise ValueError("stability_threshold must be a finite float in the closed interval [0, 1]")
+
+
+def _validate_parsimony_params(
+    tolerance: float,
+    selection_patience: int,
+) -> tuple[float, int]:
+    """Validate the shared CatBoost score-curve parsimony parameters."""
+    if isinstance(tolerance, (bool, np.bool_)):
+        raise ValueError("tolerance must be a finite non-negative float")
+    try:
+        tolerance_float = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tolerance must be a finite non-negative float") from exc
+    if not np.isfinite(tolerance_float) or tolerance_float < 0.0:
+        raise ValueError("tolerance must be a finite non-negative float")
+    if (
+        isinstance(selection_patience, (bool, np.bool_))
+        or not isinstance(selection_patience, (int, np.integer))
+        or int(selection_patience) < 1
+    ):
+        raise ValueError("selection_patience must be a positive integer")
+    return tolerance_float, int(selection_patience)
+
+
+def _select_parsimonious_k(
+    scores_by_k: Dict[int, float],
+    *,
+    best_k: int,
+    best_score: float,
+    higher_is_better: bool,
+    tolerance: float,
+    selection_patience: int,
+) -> int:
+    """Walk down from the optimum while honoring the consecutive-miss limit."""
+    tolerance_float, patience = _validate_parsimony_params(
+        tolerance,
+        selection_patience,
+    )
+    delta = abs(float(best_score)) * tolerance_float
+    parsimonious_k = int(best_k)
+    misses = 0
+    for kk in sorted((kk for kk in scores_by_k if kk < best_k), reverse=True):
+        score = float(scores_by_k[kk])
+        if not np.isfinite(score):
+            continue
+        within = (
+            score >= best_score - delta
+            if higher_is_better
+            else score <= best_score + delta
+        )
+        if within:
+            parsimonious_k = int(kk)
+            misses = 0
+        else:
+            misses += 1
+            if misses >= patience:
+                break
+    return parsimonious_k
 
 
 def _validate_group_splitter_groups(cv: Any, groups: Optional[np.ndarray]) -> None:
@@ -161,6 +219,8 @@ class CatBoostSelectionResult:
         Whether higher metric values are better.
     all_scores : dict, optional
         Raw scores per split per k: {k: [score1, score2, ...]}.
+    selection_patience : int
+        Consecutive out-of-tolerance counts allowed by the parsimony walk.
     """
     selected_features: List[str]
     best_k: int
@@ -173,6 +233,7 @@ class CatBoostSelectionResult:
     metric: str = "RMSE"
     higher_is_better: bool = False
     all_scores: Optional[Dict[int, List[float]]] = None
+    selection_patience: int = 3
 
     def score_at_k(self, k: int) -> Tuple[float, float]:
         """Return (mean, std) score at given k."""
@@ -180,25 +241,32 @@ class CatBoostSelectionResult:
 
     def features_within_tolerance(self, tolerance: float = 0.01) -> List[str]:
         """
-        Get smallest feature set within tolerance of best score.
+        Apply the fit-time patience walk using a new tolerance band.
 
-        Uses stored features_by_k when available (exact), falls back to
-        top-k by importance otherwise.
+        Starting at the best-scoring count, walk toward smaller feature sets
+        and stop after ``selection_patience`` consecutive counts outside the
+        requested band. Uses stored features_by_k when available (exact), and
+        falls back to top-k by importance otherwise.
         """
-        best_score = (max if self.higher_is_better else min)(self.scores_by_k.values())
-        delta = abs(best_score) * float(tolerance)
-
-        if self.higher_is_better:
-            threshold = best_score - delta
-            valid_ks = [k for k, v in self.scores_by_k.items() if v >= threshold]
-        else:
-            threshold = best_score + delta
-            valid_ks = [k for k, v in self.scores_by_k.items() if v <= threshold]
-
-        if not valid_ks:
-            return self.selected_features
-
-        min_k = min(valid_ks)
+        finite_scores = {
+            k: float(score)
+            for k, score in self.scores_by_k.items()
+            if np.isfinite(score)
+        }
+        if not finite_scores:
+            raise RuntimeError("No finite scores stored in this selection result")
+        best_k, best_score = best_score_from_dict(
+            finite_scores,
+            self.higher_is_better,
+        )
+        min_k = _select_parsimonious_k(
+            finite_scores,
+            best_k=best_k,
+            best_score=best_score,
+            higher_is_better=self.higher_is_better,
+            tolerance=tolerance,
+            selection_patience=self.selection_patience,
+        )
 
         # Use stored features if available
         if min_k in self.features_by_k:

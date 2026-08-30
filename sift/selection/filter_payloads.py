@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
@@ -478,6 +479,27 @@ def validate_cefsplus(ctx: "FilterContext") -> None:
         raise ValueError(f"X has {ctx.n_rows} rows but y has {len(y_arr)}")
     if not np.isfinite(y_arr).all():
         raise ValueError("Non-finite values in y are not allowed for regression.")
+    if ctx.spec.selector == "cefsplus":
+        # select_cefsplus has no task parameter, so unlike the task-aware
+        # selectors nothing else flags a labels-shaped target here.
+        _warn_if_multiclass_labels_as_regression_target(y_arr)
+
+
+def _warn_if_multiclass_labels_as_regression_target(y_arr: np.ndarray) -> None:
+    """Warn when a continuous-target selector receives labels-shaped y."""
+    if y_arr.size == 0 or not np.all(y_arr == np.rint(y_arr)):
+        return
+    n_unique = int(np.unique(y_arr).size)
+    if 3 <= n_unique <= 20:
+        warnings.warn(
+            "select_cefsplus treats y as a continuous regression target, but y "
+            f"contains only {n_unique} distinct integer-valued levels and looks "
+            "like multiclass labels. Use a task='classification' selector (or "
+            "one-vs-rest targets with select_cefsplus_binary) for categorical "
+            "targets; ignore this warning if y is a genuine numeric target.",
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 def standard_extra(aggregation: str | None = None) -> Callable[["FilterContext"], dict]:

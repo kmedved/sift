@@ -23,8 +23,10 @@ from sift.catboost_common import (
     _prefilter_features,
     _resolve_loss_function,
     _resolve_metric_and_direction,
+    _select_parsimonious_k,
     _validate_choice,
     _validate_group_splitter_groups,
+    _validate_parsimony_params,
     _validate_stability_params,
     _validate_step_function,
 )
@@ -445,21 +447,7 @@ def _validate_selection_params(
     tolerance: float,
     selection_patience: int,
 ) -> tuple[float, int]:
-    if isinstance(tolerance, (bool, np.bool_)):
-        raise ValueError("tolerance must be a finite non-negative float")
-    try:
-        tolerance_float = float(tolerance)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("tolerance must be a finite non-negative float") from exc
-    if not np.isfinite(tolerance_float) or tolerance_float < 0.0:
-        raise ValueError("tolerance must be a finite non-negative float")
-    if (
-        isinstance(selection_patience, (bool, np.bool_))
-        or not isinstance(selection_patience, (int, np.integer))
-        or int(selection_patience) < 1
-    ):
-        raise ValueError("selection_patience must be a positive integer")
-    return tolerance_float, int(selection_patience)
+    return _validate_parsimony_params(tolerance, selection_patience)
 
 
 def _choose_catboost_target_k(
@@ -501,24 +489,14 @@ def _choose_catboost_target_k(
     # Global arg-best over all evaluated counts; exact ties prefer fewer features.
     best_k, best_score = best_score_from_dict(scores_mean, resolved_hib)
 
-    # Parsimony walk: accept smaller counts within the tolerance band of the best.
-    delta = abs(best_score) * tolerance_float
-    parsimonious_k = best_k
-    misses = 0
-    for kk in sorted((kk for kk in scores_mean if kk < best_k), reverse=True):
-        score = scores_mean[kk]
-        within = (
-            score >= best_score - delta
-            if resolved_hib
-            else score <= best_score + delta
-        )
-        if within:
-            parsimonious_k = kk
-            misses = 0
-        else:
-            misses += 1
-            if misses >= patience:
-                break
+    parsimonious_k = _select_parsimonious_k(
+        scores_mean,
+        best_k=best_k,
+        best_score=best_score,
+        higher_is_better=resolved_hib,
+        tolerance=tolerance_float,
+        selection_patience=patience,
+    )
 
     if verbose:
         print(
@@ -842,6 +820,7 @@ def catboost_select(
         metric=resolved_metric,
         higher_is_better=resolved_hib,
         all_scores=dict(all_scores),
+        selection_patience=selection_patience,
     )
 
 

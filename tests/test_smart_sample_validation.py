@@ -2,7 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sift.sampling.smart import SmartSamplerConfig, smart_sample
+import sift.sampling.smart as smart_module
+from sift.sampling.smart import (
+    SmartSamplerConfig,
+    _compute_residual_scores,
+    _prepare_smart_arrays,
+    smart_sample,
+)
 
 
 def _sample_frame(n: int = 12) -> pd.DataFrame:
@@ -126,3 +132,229 @@ def test_smart_sample_dense_probabilities_are_deterministic():
 
     pd.testing.assert_frame_equal(out1.reset_index(drop=True), out2.reset_index(drop=True))
     assert out1["time"].is_monotonic_increasing
+
+
+def test_smart_sample_residual_enabled_is_deterministic_with_nonpilot_rows():
+    df = _sample_frame(240)
+    config = SmartSamplerConfig(
+        sample_frac=0.35,
+        pilot_sample_size=100,
+        residual_weight_cap=0.4,
+        min_per_group=2,
+        group_col="group",
+        random_state=8,
+        verbose=False,
+    )
+
+    out1 = smart_sample(df, ["f0", "f1"], "y", config=config)
+    out2 = smart_sample(df, ["f0", "f1"], "y", config=config)
+
+    pd.testing.assert_frame_equal(out1.reset_index(drop=True), out2.reset_index(drop=True))
+
+
+def test_prepare_smart_arrays_preserves_large_offset_target_precision():
+    df = pd.DataFrame(
+        {
+            "f0": np.arange(128, dtype=float),
+            "y": 1e12 + np.arange(128, dtype=float),
+        }
+    )
+    config = SmartSamplerConfig(residual_weight_cap=0.4, verbose=False)
+
+    arrays = _prepare_smart_arrays(df, ["f0"], "y", config)
+
+    assert arrays.y is not None
+    assert arrays.y.dtype == np.float64
+    assert np.unique(arrays.y).size == len(df)
+
+
+def test_residual_scores_are_invariant_to_large_target_offset():
+    rng = np.random.default_rng(21)
+    n = 240
+    signal = np.tile(np.arange(12, dtype=float), n // 12)
+    X = np.column_stack([signal, rng.normal(size=n)]).astype(np.float32)
+    config = SmartSamplerConfig(
+        pilot_sample_size=200,
+        residual_weight_cap=0.4,
+        random_state=7,
+        verbose=False,
+    )
+
+    scores, beta = _compute_residual_scores(
+        X,
+        signal,
+        config,
+        np.random.default_rng(22),
+    )
+    shifted_scores, shifted_beta = _compute_residual_scores(
+        X,
+        1e12 + signal,
+        config,
+        np.random.default_rng(22),
+    )
+
+    assert beta > 0.0
+    assert np.std(scores) > 0.0
+    np.testing.assert_allclose(shifted_scores, scores, rtol=0.0, atol=1e-12)
+    assert shifted_beta == pytest.approx(beta, abs=1e-12)
+
+
+def test_residual_pilot_cross_fits_every_prediction(monkeypatch):
+    class RecordingRegressor:
+        instances = []
+        overlap_seen = False
+
+        def __init__(self, **_kwargs):
+            self.train_ids = set()
+            self.offset = 0.0
+            self.instances.append(self)
+
+        def fit(self, X, y):
+            ids = np.asarray(X[:, 0], dtype=int)
+            self.train_ids = set(ids.tolist())
+            self.offset = float(np.mean(np.asarray(y) - 2.0 * ids))
+            return self
+
+        def predict(self, X):
+            ids = np.asarray(X[:, 0], dtype=int)
+            if self.train_ids.intersection(ids.tolist()):
+                type(self).overlap_seen = True
+            return 2.0 * ids + self.offset
+
+    monkeypatch.setattr(
+        smart_module,
+        "HistGradientBoostingRegressor",
+        RecordingRegressor,
+    )
+    row_ids = np.arange(120, dtype=np.float32)
+    X = np.column_stack([row_ids, np.ones_like(row_ids)])
+    y = 2.0 * row_ids.astype(np.float64) + (row_ids % 3)
+    config = SmartSamplerConfig(
+        pilot_sample_size=100,
+        residual_weight_cap=0.4,
+        random_state=0,
+        verbose=False,
+    )
+
+    scores, beta = _compute_residual_scores(
+        X,
+        y,
+        config,
+        np.random.default_rng(0),
+    )
+
+    assert len(RecordingRegressor.instances) == 2
+    assert RecordingRegressor.overlap_seen is False
+    assert np.isfinite(scores).all()
+    assert beta > 0.0
+
+
+def test_nonpilot_rows_use_one_model_residuals_on_the_same_scale(monkeypatch):
+    class SymmetricErrorRegressor:
+        instances = []
+
+        def __init__(self, **_kwargs):
+            self.offset = 1.0 if not self.instances else -1.0
+            self.center = 0.0
+            self.instances.append(self)
+
+        def fit(self, X, y):
+            self.center = float(np.mean(np.asarray(y) - X[:, 0]))
+            return self
+
+        def predict(self, X):
+            return X[:, 0] + self.center + self.offset
+
+    monkeypatch.setattr(
+        smart_module,
+        "HistGradientBoostingRegressor",
+        SymmetricErrorRegressor,
+    )
+    n = 240
+    pilot_size = 100
+    seed = 32
+    row_ids = np.arange(n, dtype=np.float32)
+    X = np.column_stack([row_ids, np.ones_like(row_ids)])
+    y = row_ids.astype(np.float64)
+    config = SmartSamplerConfig(
+        pilot_sample_size=pilot_size,
+        residual_weight_cap=0.4,
+        random_state=9,
+        verbose=False,
+    )
+
+    scores, beta = _compute_residual_scores(
+        X,
+        y,
+        config,
+        np.random.default_rng(seed),
+    )
+    pilot = np.random.default_rng(seed).choice(n, size=pilot_size, replace=False)
+    nonpilot_mask = np.ones(n, dtype=bool)
+    nonpilot_mask[pilot] = False
+
+    assert len(SymmetricErrorRegressor.instances) == 2
+    assert beta > 0.0
+    assert np.mean(scores[pilot]) == pytest.approx(1.0, abs=1e-12)
+    assert np.mean(scores[nonpilot_mask]) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_residual_pilot_centers_on_robust_pilot_location(monkeypatch):
+    class RecordingRegressor:
+        median_abs_targets = []
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self, X, y):
+            self.median_abs_targets.append(float(np.median(np.abs(y))))
+            return self
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=np.float64)
+
+    monkeypatch.setattr(
+        smart_module,
+        "HistGradientBoostingRegressor",
+        RecordingRegressor,
+    )
+    n = 120
+    seed = 31
+    pilot_order = np.random.default_rng(seed).choice(n, size=100, replace=False)
+    y = 1e12 + np.arange(n, dtype=np.float64)
+    y[pilot_order[0]] = 0.0
+    X = np.column_stack(
+        [np.arange(n, dtype=np.float32), np.ones(n, dtype=np.float32)]
+    )
+    config = SmartSamplerConfig(
+        pilot_sample_size=100,
+        residual_weight_cap=0.4,
+        random_state=0,
+        verbose=False,
+    )
+
+    _compute_residual_scores(X, y, config, np.random.default_rng(seed))
+
+    assert len(RecordingRegressor.median_abs_targets) == 2
+    assert max(RecordingRegressor.median_abs_targets) < 100.0
+
+
+def test_constant_target_disables_residual_blend():
+    rng = np.random.default_rng(23)
+    X = rng.normal(size=(120, 3)).astype(np.float32)
+    config = SmartSamplerConfig(
+        pilot_sample_size=100,
+        residual_weight_cap=0.4,
+        random_state=0,
+        verbose=False,
+    )
+
+    scores, beta = _compute_residual_scores(
+        X,
+        np.full(120, 1e12),
+        config,
+        np.random.default_rng(0),
+    )
+
+    assert beta == 0.0
+    np.testing.assert_array_equal(scores, np.ones(120, dtype=np.float32))

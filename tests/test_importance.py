@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import make_scorer, mean_squared_error
 from sklearn.tree import DecisionTreeClassifier
 
 import sift.scoring as scoring_module
@@ -482,6 +484,146 @@ def test_permutation_importance_honors_lower_is_better_scoring(monkeypatch):
 
     assert result.iloc[0]["feature"] == "signal"
     assert result.loc[result["feature"] == "signal", "importance_mean"].iloc[0] > 0
+
+
+def test_permutation_importance_accepts_sklearn_scorer_with_weights():
+    rng = np.random.default_rng(151)
+    n = 120
+    X = pd.DataFrame(
+        {"signal": rng.normal(size=n), "noise": rng.normal(size=n)}
+    )
+    y = 3.0 * X["signal"].to_numpy() + rng.normal(scale=0.05, size=n)
+    weights = np.linspace(0.5, 2.0, n)
+    model = LinearRegression().fit(X, y, sample_weight=weights)
+
+    result = permutation_importance(
+        model,
+        X,
+        y,
+        sample_weight=weights,
+        scoring=make_scorer(mean_squared_error, greater_is_better=False),
+        n_repeats=5,
+        n_jobs=1,
+        random_state=0,
+    )
+
+    assert result.iloc[0]["feature"] == "signal"
+    assert result.iloc[0]["importance_mean"] > 0.0
+
+
+def test_permutation_importance_sklearn_scorer_does_not_invent_weights():
+    def two_argument_mse(y_true, y_pred):
+        return float(np.mean((y_true - y_pred) ** 2))
+
+    rng = np.random.default_rng(154)
+    X = pd.DataFrame(
+        {"signal": rng.normal(size=100), "noise": rng.normal(size=100)}
+    )
+    y = 2.0 * X["signal"].to_numpy()
+    model = LinearRegression().fit(X, y)
+
+    result = permutation_importance(
+        model,
+        X,
+        y,
+        scoring=make_scorer(two_argument_mse, greater_is_better=False),
+        n_repeats=4,
+        n_jobs=1,
+        random_state=0,
+    )
+
+    assert result.iloc[0]["feature"] == "signal"
+    assert result.iloc[0]["importance_mean"] > 0.0
+
+
+def test_permutation_importance_raw_loss_accepts_explicit_direction():
+    def weighted_mse(y_true, y_pred, sample_weight):
+        return float(np.average((y_true - y_pred) ** 2, weights=sample_weight))
+
+    rng = np.random.default_rng(152)
+    X = pd.DataFrame(
+        {"signal": rng.normal(size=100), "noise": rng.normal(size=100)}
+    )
+    y = 2.0 * X["signal"].to_numpy()
+    model = LinearRegression().fit(X, y)
+
+    result = permutation_importance(
+        model,
+        X,
+        y,
+        scoring=weighted_mse,
+        higher_is_better=False,
+        n_repeats=4,
+        n_jobs=1,
+        random_state=0,
+    )
+
+    assert result.iloc[0]["feature"] == "signal"
+    assert result.iloc[0]["importance_mean"] > 0.0
+
+
+def test_permutation_importance_dispatches_scoring_spec_with_its_direction():
+    def mse_spec(model, X, y, w):
+        pred = model.predict(X)
+        return float(np.average((y - pred) ** 2, weights=w))
+
+    rng = np.random.default_rng(153)
+    X = rng.normal(size=(100, 2))
+    y = 2.5 * X[:, 0]
+    model = LinearRegression().fit(X, y)
+    result = permutation_importance(
+        model,
+        X,
+        y,
+        scoring=ScoringSpec("mse", mse_spec, higher_is_better=False),
+        n_repeats=4,
+        n_jobs=1,
+        random_state=0,
+    )
+
+    assert result.iloc[0]["feature"] == 0
+    assert result.iloc[0]["importance_mean"] > 0.0
+
+
+def test_permutation_importance_validates_direction_override():
+    X = np.arange(20.0).reshape(10, 2)
+    y = X[:, 0]
+    model = LinearRegression().fit(X, y)
+
+    with pytest.raises(ValueError, match="higher_is_better"):
+        permutation_importance(
+            model,
+            X,
+            y,
+            higher_is_better="yes",
+            n_repeats=2,
+            n_jobs=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "scoring",
+    [
+        "neg_mse",
+        make_scorer(mean_squared_error, greater_is_better=False),
+        ScoringSpec("mse", lambda model, X, y, w: 0.0, higher_is_better=False),
+    ],
+)
+def test_permutation_importance_rejects_direction_override_for_signed_scorers(scoring):
+    X = np.arange(20.0).reshape(10, 2)
+    y = X[:, 0]
+    model = LinearRegression().fit(X, y)
+
+    with pytest.raises(ValueError, match="only supported for legacy"):
+        permutation_importance(
+            model,
+            X,
+            y,
+            scoring=scoring,
+            higher_is_better=False,
+            n_repeats=2,
+            n_jobs=1,
+        )
 
 
 def test_permutation_importance_rejects_plain_error_scoring():

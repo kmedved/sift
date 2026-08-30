@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
 from functools import wraps
 from typing import Any, Callable, Literal, Optional, Union
@@ -394,7 +395,23 @@ def _select_filter(
         handler = spec.fixed_handler
 
     spec.validate(ctx)
-    return _format_payload(ctx, handler(ctx))
+    payload = handler(ctx)
+    if (
+        ctx.k == "auto"
+        and ctx.auto_k_config is not None
+        and ctx.auto_k_config.k_method == "auto"
+        and not payload.selected_features
+    ):
+        warnings.warn(
+            "k='auto' selected 0 features: the routed criterion found no "
+            "supportable feature, which is a real answer on noise-like data. "
+            "Pass return_result=True and inspect diagnostics_['auto_k'], or "
+            "pass an explicit AutoKConfig(k_method=..., min_k=1) for a hard "
+            "non-empty floor.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return _format_payload(ctx, payload)
 
 
 def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:

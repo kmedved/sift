@@ -444,7 +444,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def _finalize_stability_selection(self, sel_count, sum_abs_coef, bootstrap_idx: int, feature_names) -> None:
         p = len(feature_names)
-        self.selection_frequencies_ = (sel_count / bootstrap_idx).astype(np.float32)
+        self.selection_frequencies_ = (sel_count / bootstrap_idx).astype(np.float64)
         self.mean_abs_coef_ = (sum_abs_coef / bootstrap_idx).astype(np.float32)
 
         # Select features
@@ -471,7 +471,15 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         check_is_fitted(self, ["selected_features_", "selected_feature_names_"])
         if isinstance(X, pd.DataFrame):
             return X[self.selected_feature_names_].values
-        return np.asarray(X)[:, self.selected_features_]
+        X_arr = np.asarray(X)
+        if X_arr.ndim != 2:
+            raise ValueError("X must be a 2-dimensional array-like object")
+        if X_arr.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X_arr.shape[1]} features, but StabilitySelector was fitted "
+                f"with {self.n_features_in_} features"
+            )
+        return X_arr[:, self.selected_features_]
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return names of selected columns using sklearn's transformer contract."""
@@ -953,7 +961,16 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             feature_names = feature_names or [c for c in X.columns if c not in exclude]
             X = X[feature_names].values
         else:
+            X = np.asarray(X)
+            if X.ndim != 2:
+                raise ValueError("X must be a 2-dimensional array-like object")
             feature_names = feature_names or [f"x{i}" for i in range(X.shape[1])]
+
+        if len(feature_names) != X.shape[1]:
+            raise ValueError(
+                f"feature_names has {len(feature_names)} entries but X has "
+                f"{X.shape[1]} features"
+            )
 
         if isinstance(y, pd.Series):
             y = y.values
@@ -1254,14 +1271,6 @@ def _stability_task_features(
 
     selector = StabilitySelector(**kwargs)
     selector.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
-    target_k = min(int(k), len(selector.selection_frequencies_))
-    if selector.n_features_selected_ < target_k:
-        top_idx = np.argsort(-selector.selection_frequencies_, kind="mergesort")[:target_k]
-        selector.selected_features_ = top_idx
-        selector.selected_feature_names_ = [
-            selector.feature_names_in_[i] for i in selector.selected_features_
-        ]
-        selector.n_features_selected_ = len(selector.selected_features_)
 
     if return_indices is None:
         return_indices = not isinstance(X, pd.DataFrame)
@@ -1276,7 +1285,12 @@ def stability_regression(
     k: int,
     **kwargs,
 ) -> Union[List[str], List[int]]:
-    """Stability selection for regression."""
+    """Stability selection for regression.
+
+    Returns up to ``k`` features whose selection frequency clears ``threshold``
+    (``k`` caps the count via ``max_features``; it is not an exact-size
+    guarantee). Never-selected features are not used to pad the result.
+    """
     return _stability_task_features("regression", X, y, k, **kwargs)
 
 
@@ -1286,5 +1300,10 @@ def stability_classif(
     k: int,
     **kwargs,
 ) -> Union[List[str], List[int]]:
-    """Stability selection for classification."""
+    """Stability selection for classification.
+
+    Returns up to ``k`` features whose selection frequency clears ``threshold``
+    (``k`` caps the count via ``max_features``; it is not an exact-size
+    guarantee). Never-selected features are not used to pad the result.
+    """
     return _stability_task_features("classification", X, y, k, **kwargs)

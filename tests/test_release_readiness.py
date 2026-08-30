@@ -1,4 +1,5 @@
 import inspect
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -454,3 +455,111 @@ def test_cefsplus_knockoff_default_adapts_beyond_ten_discoveries():
     assert result.selector_metadata["path_depth"] > 20
     assert result.selector_metadata["path_depth_adaptive"]
     assert not result.selector_metadata["path_depth_saturated"]
+
+
+@pytest.mark.parametrize(
+    "make_selector",
+    [
+        lambda: __import__("sift").MRMRSelector(k=2, task="regression", verbose=False),
+        lambda: __import__("sift").CEFSPlusSelector(k=2, verbose=False),
+        lambda: __import__("sift").KnockoffSelector(q=0.5, verbose=False),
+    ],
+)
+def test_selector_classes_reject_one_dimensional_x(make_selector):
+    rng = np.random.default_rng(21)
+    x = rng.normal(size=60)
+
+    with pytest.raises(ValueError, match="2D feature matrix"):
+        make_selector().fit(x, x)
+
+
+def test_routed_auto_k_accepts_auto_dense_fields_without_unused_warnings():
+    from sift import AutoKConfig
+
+    rng = np.random.default_rng(22)
+    X = pd.DataFrame(rng.normal(size=(300, 30)), columns=[f"f{i}" for i in range(30)])
+    y = X["f0"].to_numpy() + 0.1 * rng.normal(size=len(X))
+    config = AutoKConfig(
+        k_method="auto",
+        auto_dense_check=True,
+        auto_dense_min_k=2,
+        auto_dense_min_frac=0.05,
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        select_cefsplus(X, y, k="auto", auto_k_config=config, verbose=False)
+
+    unused = [w for w in caught if "does not use it" in str(w.message)]
+    assert unused == []
+
+
+def test_auto_router_time_context_routes_to_best_without_one_se_fallback_warning():
+    from sift import AutoKConfig
+
+    rng = np.random.default_rng(23)
+    X = pd.DataFrame(rng.normal(size=(240, 20)), columns=[f"f{i}" for i in range(20)])
+    y = X["f0"].to_numpy() + 0.1 * rng.normal(size=len(X))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = select_mrmr(
+            X,
+            y,
+            k="auto",
+            task="regression",
+            estimator="gaussian",
+            auto_k_config=AutoKConfig(k_method="auto"),
+            time=np.arange(len(X)),
+            verbose=False,
+            return_result=True,
+        )
+
+    fallbacks = [w for w in caught if "falling back" in str(w.message)]
+    assert fallbacks == []
+    assert result.diagnostics_["auto_k"]["selection_rule"] == "best"
+
+
+def test_auto_router_warns_when_zero_features_are_selected():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(2000, 100)))
+    y = rng.normal(size=len(X))
+
+    with pytest.warns(UserWarning, match="selected 0 features"):
+        selected = select_cefsplus(X, y, k="auto", verbose=False)
+    assert selected == []
+
+
+def test_cefsplus_warns_on_integer_multiclass_looking_target():
+    rng = np.random.default_rng(25)
+    X = pd.DataFrame(rng.normal(size=(200, 8)), columns=[f"f{i}" for i in range(8)])
+    y_labels = rng.integers(0, 6, size=len(X)).astype(float)
+
+    with pytest.warns(UserWarning, match="looks\\s+like multiclass labels"):
+        select_cefsplus(X, y_labels, k=2, verbose=False)
+
+    y_binary = (X["f0"] > 0).to_numpy().astype(float)
+    y_continuous = X["f0"].to_numpy() + 0.1 * rng.normal(size=len(X))
+    for safe_target in (y_binary, y_continuous):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            select_cefsplus(X, safe_target, k=2, verbose=False)
+        assert [w for w in caught if "multiclass labels" in str(w.message)] == []
+
+
+def test_stability_selection_frequencies_are_float64():
+    from sift import StabilitySelector
+
+    rng = np.random.default_rng(26)
+    X = rng.normal(size=(120, 5))
+    y = X[:, 0] + 0.1 * rng.normal(size=len(X))
+    selector = StabilitySelector(
+        n_bootstrap=4,
+        alpha=0.5,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+        store_coefs=False,
+    ).fit(X, y)
+
+    assert np.asarray(selector.selection_frequencies_).dtype == np.float64

@@ -15,7 +15,7 @@ from sift._permute import (
     resolve_permutation_method,
 )
 from sift._preprocess import ensure_weights
-from sift.scoring import get_scoring
+from sift.scoring import ScoringSpec, get_scoring
 
 
 ParallelBackend = Literal["threads", "processes"]
@@ -30,7 +30,8 @@ def permutation_importance(
     groups: np.ndarray | None = None,
     time: np.ndarray | None = None,
     *,
-    scoring: str | Callable = "neg_mse",
+    scoring: str | Callable | ScoringSpec = "neg_mse",
+    higher_is_better: bool | None = None,
     n_repeats: int = 10,
     permute_method: PermutationMethod = "auto",
     block_size: int | str = "auto",
@@ -56,11 +57,18 @@ def permutation_importance(
     time : array, optional
         Time values. Enables block/circular_shift. If provided without groups,
         the full dataset is treated as one ordered group.
-    scoring : str or callable
+    scoring : str, callable, or ScoringSpec
         "neg_mse", "neg_rmse", "neg_mae", "r2", "accuracy",
         "balanced_accuracy", "neg_error", "neg_logloss", or
-        callable(y, y_pred, w) -> float. Built-in scoring strings are
-        higher-is-better.
+        a scorer object returned by sklearn's ``make_scorer``/``get_scorer``.
+        Legacy ``callable(y, y_pred, w) -> float`` callbacks remain supported;
+        wrap custom estimator-style scoring in ``ScoringSpec`` to make its
+        ``(model, X, y, w)`` contract explicit.
+    higher_is_better : bool, optional
+        Score direction for legacy callbacks only. Named, ``ScoringSpec``, and
+        sklearn scorers already carry direction metadata and reject this
+        override. Legacy callbacks default to higher-is-better for
+        compatibility; pass ``False`` for loss functions.
     n_repeats : int
         Permutation repeats per feature.
     permute_method : str
@@ -88,6 +96,7 @@ def permutation_importance(
     if n_repeats < 1:
         raise ValueError("n_repeats must be a positive integer")
     parallel_backend = _validate_parallel_backend(parallel_backend)
+    sample_weight_supplied = sample_weight is not None
 
     n = len(y)
     X_arr = None
@@ -113,7 +122,7 @@ def permutation_importance(
     group_info = (
         build_group_info(groups, time, n_samples=n) if permute_method != "global" else None
     )
-    higher_is_better = _higher_is_better(scoring)
+    score_higher_is_better = _higher_is_better(scoring, higher_is_better)
 
     if isinstance(X, pd.DataFrame):
         return _permutation_importance_dataframe(
@@ -127,8 +136,16 @@ def permutation_importance(
             block_size,
             group_info,
             seeds,
-            baseline=_score(model, X, y, w, scoring),
-            higher_is_better=higher_is_better,
+            baseline=_score(
+                model,
+                X,
+                y,
+                w,
+                scoring,
+                sample_weight_supplied=sample_weight_supplied,
+            ),
+            higher_is_better=score_higher_is_better,
+            sample_weight_supplied=sample_weight_supplied,
             n_jobs=n_jobs,
             parallel_backend=parallel_backend,
         )
@@ -145,8 +162,16 @@ def permutation_importance(
         block_size,
         group_info,
         seeds,
-        baseline=_score(model, X_arr, y, w, scoring),
-        higher_is_better=higher_is_better,
+        baseline=_score(
+            model,
+            X_arr,
+            y,
+            w,
+            scoring,
+            sample_weight_supplied=sample_weight_supplied,
+        ),
+        higher_is_better=score_higher_is_better,
+        sample_weight_supplied=sample_weight_supplied,
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
     )
@@ -157,7 +182,7 @@ def _permutation_importance_dataframe(
     X: pd.DataFrame,
     y: np.ndarray,
     w: np.ndarray,
-    scoring: str | Callable,
+    scoring: str | Callable | ScoringSpec,
     n_repeats: int,
     permute_method: PermutationMethod,
     block_size: int | str,
@@ -166,6 +191,7 @@ def _permutation_importance_dataframe(
     *,
     baseline: float,
     higher_is_better: bool,
+    sample_weight_supplied: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
 ) -> pd.DataFrame:
@@ -194,7 +220,14 @@ def _permutation_importance_dataframe(
                 permuted.index = X_work.index
                 X_work.iloc[:, feat_idx] = permuted
                 try:
-                    score = _score(model, X_work, y, w, scoring)
+                    score = _score(
+                        model,
+                        X_work,
+                        y,
+                        w,
+                        scoring,
+                        sample_weight_supplied=sample_weight_supplied,
+                    )
                 finally:
                     X_work.iloc[:, feat_idx] = orig_col
                 drops.append(
@@ -229,7 +262,7 @@ def _permutation_importance_array(
     X_arr: np.ndarray,
     y: np.ndarray,
     w: np.ndarray,
-    scoring: str | Callable,
+    scoring: str | Callable | ScoringSpec,
     n_repeats: int,
     permute_method: PermutationMethod,
     block_size: int | str,
@@ -238,6 +271,7 @@ def _permutation_importance_array(
     *,
     baseline: float,
     higher_is_better: bool,
+    sample_weight_supplied: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
 ) -> pd.DataFrame:
@@ -263,7 +297,14 @@ def _permutation_importance_array(
                 )
                 X_work[:, feat_idx] = permuted
                 try:
-                    score = _score(model, X_work, y, w, scoring)
+                    score = _score(
+                        model,
+                        X_work,
+                        y,
+                        w,
+                        scoring,
+                        sample_weight_supplied=sample_weight_supplied,
+                    )
                 finally:
                     X_work[:, feat_idx] = orig_col
                 drops.append(
@@ -332,18 +373,66 @@ def _score(
     X: pd.DataFrame | np.ndarray,
     y: np.ndarray,
     w: np.ndarray,
-    scoring: str | Callable,
+    scoring: str | Callable | ScoringSpec,
+    *,
+    sample_weight_supplied: bool,
 ) -> float:
+    if isinstance(scoring, ScoringSpec):
+        return scoring(model, X, y, w)
+    if isinstance(scoring, str):
+        return get_scoring(scoring)(model, X, y, w)
+    if _is_sklearn_scorer(scoring):
+        if sample_weight_supplied:
+            return float(scoring(model, X, y, sample_weight=w))
+        return float(scoring(model, X, y))
     if callable(scoring):
         y_pred = model.predict(X)
         return float(scoring(y, y_pred, w))
-    return get_scoring(scoring)(model, X, y, w)
+    raise TypeError("scoring must be a scorer name, ScoringSpec, or callable")
 
 
-def _higher_is_better(scoring: str | Callable) -> bool:
-    if callable(scoring):
+def _is_sklearn_scorer(scoring: object) -> bool:
+    # Arbitrary three-argument callables are ambiguous with SIFT's legacy
+    # (y, y_pred, w) contract, so only sklearn-created scorer objects are
+    # detected here. ScoringSpec is the explicit estimator-style alternative.
+    scorer_type = type(scoring)
+    return (
+        callable(scoring)
+        and scorer_type.__module__.startswith("sklearn.metrics._scorer")
+        and hasattr(scoring, "_score_func")
+        and hasattr(scoring, "_sign")
+    )
+
+
+def _higher_is_better(
+    scoring: str | Callable | ScoringSpec,
+    override: bool | None = None,
+) -> bool:
+    if isinstance(scoring, ScoringSpec):
+        if override is not None:
+            raise ValueError(
+                "higher_is_better is only supported for legacy score callbacks"
+            )
+        return bool(scoring.higher_is_better)
+    if isinstance(scoring, str):
+        if override is not None:
+            raise ValueError(
+                "higher_is_better is only supported for legacy score callbacks"
+            )
+        return bool(get_scoring(scoring).higher_is_better)
+    if _is_sklearn_scorer(scoring):
+        if override is not None:
+            raise ValueError(
+                "higher_is_better is only supported for legacy score callbacks"
+            )
         return True
-    return bool(get_scoring(scoring).higher_is_better)
+    if callable(scoring):
+        if override is None:
+            return True
+        if not isinstance(override, (bool, np.bool_)):
+            raise ValueError("higher_is_better must be a boolean or None")
+        return bool(override)
+    raise TypeError("scoring must be a scorer name, ScoringSpec, or callable")
 
 
 __all__ = ["permutation_importance"]

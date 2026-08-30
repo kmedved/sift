@@ -747,7 +747,10 @@ selected = select_mrmr(
 - `k_method="elbow"` chooses where objective gains flatten out. It requires an
   objective path and is currently supported by Gaussian/cache-backed filter
   paths such as CEFS+ and Gaussian mRMR, plus binary CEFS+ log-loss paths using
-  cumulative score-test gains. Classic MRMR/JMI/JMIM auto-k paths use
+  cumulative score-test gains. Once `patience` consecutive low gains confirm
+  the elbow, the returned prefix ends before the first low-gain feature unless
+  retaining it is required by the `min_k` floor.
+  Classic MRMR/JMI/JMIM auto-k paths use
   `k_method="evaluate"`; requesting elbow there raises.
 - `k_method="penalized_objective"` chooses from a CEFS+ proxy objective without
   validation context. Gaussian CEFS+ uses `n_eff * O_k - penalty * k`, where
@@ -1069,6 +1072,9 @@ selected_cls = stability_classif(
 
 For DataFrame inputs, wrappers return feature names by default. For ndarray
 inputs, they return integer indices unless `return_indices=False` is passed.
+`k` caps the count via `max_features`; only features whose selection frequency
+clears `threshold` are returned, so wrappers can return fewer than `k`
+features (including zero) instead of padding with never-selected features.
 
 When `alpha=None`, the default `alpha_rule="one_se"` chooses the strongest
 regularization within one standard error of the best CV score. This is a
@@ -1208,6 +1214,12 @@ sampled = smart_sample(
 - `anchor_fn`: callable that marks rows to keep preferentially.
 - `anchor_max_share`: cap on anchor share within each group quota.
 - `random_state`, `verbose`: reproducibility and logging.
+
+Residual-enabled sampling keeps regression targets in float64 and estimates
+row difficulty with a two-fold cross-fitted pilot, so no row receives a
+residual from a model trained on that row. Non-pilot rows are assigned to one
+unseen fold model so their residual scale matches the pilot rows; predictions
+are not ensembled. Constant pilot targets disable the residual blend.
 
 Advanced helper:
 
@@ -1449,6 +1461,16 @@ Scoring options:
 - `"neg_logloss"`
 - callable with signature `scoring(y_true, y_pred, sample_weight) -> float`
 
+Sklearn scorer objects are accepted directly and are treated as
+higher-is-better, matching sklearn's scorer convention. Legacy callbacks with
+the signature `callback(y_true, y_pred, sample_weight)` remain supported and
+default to higher-is-better; pass `higher_is_better=False` when the callback
+returns a loss such as positive MSE. Named scorers, sklearn scorer objects, and
+`ScoringSpec` use their own direction metadata and reject that override.
+Custom estimator-style callbacks should be wrapped in `ScoringSpec`; bare
+three-argument callables retain the legacy `(y_true, y_pred, sample_weight)`
+contract because that signature is otherwise ambiguous.
+
 All built-in scoring strings are higher-is-better; classification error rate
 and log loss are therefore exposed as `"neg_error"` and `"neg_logloss"` rather
 than `"error"` or `"logloss"`.
@@ -1528,7 +1550,8 @@ Choosing `k` automatically (`k=None`):
   `0.01`) of the best, giving up after `selection_patience` consecutive counts
   outside that band. `tolerance=0` selects the best-scoring count unless
   smaller counts tie it exactly. `result.features_within_tolerance(...)` applies
-  the same band to the stored per-`k` feature lists after the fact.
+  the requested band and the fit-time `selection_patience` to the stored per-`k`
+  feature lists after the fact.
 
 Prefiltering:
 
@@ -1621,6 +1644,7 @@ selected_cls = sift.catboost_classif(
 - `metric`
 - `higher_is_better`
 - `all_scores`
+- `selection_patience`
 
 Methods:
 

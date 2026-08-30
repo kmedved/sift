@@ -832,6 +832,7 @@ class TestCatBoostSelect:
             X, y, k=None,
             task='regression',
             min_features=3,
+            selection_patience=2,
             n_splits=2,
             prefilter_k=None,
             n_estimators=50,
@@ -844,6 +845,7 @@ class TestCatBoostSelect:
         assert result.best_k in result.scores_by_k
         assert isinstance(result.feature_importances, pd.Series)
         assert result.higher_is_better is False  # RMSE
+        assert result.selection_patience == 2
 
         mean, std = result.score_at_k(result.best_k)
         assert np.isfinite(mean)
@@ -995,6 +997,71 @@ class TestResultMethods:
         )
 
         assert result.features_within_tolerance(tolerance=0.0) == ["b", "a"]
+
+    @pytest.mark.parametrize(
+        ("selection_patience", "expected"),
+        [(1, [f"f{i}" for i in range(20)]), (3, [f"f{i}" for i in range(5)])],
+    )
+    def test_features_within_tolerance_honors_selection_patience(
+        self,
+        selection_patience,
+        expected,
+    ):
+        features = [f"f{i}" for i in range(20)]
+        result = CatBoostSelectionResult(
+            selected_features=features,
+            best_k=20,
+            scores_by_k={20: 0.30, 15: 0.31, 10: 0.305, 5: 0.302, 3: 0.60},
+            scores_std_by_k={},
+            feature_importances=pd.Series(
+                np.arange(20, 0, -1, dtype=float),
+                index=features,
+            ),
+            features_by_k={k: features[:k] for k in (20, 15, 10, 5, 3)},
+            higher_is_better=False,
+            selection_patience=selection_patience,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.01) == expected
+
+    @pytest.mark.parametrize("tolerance", [-0.1, np.nan, True])
+    def test_features_within_tolerance_validates_tolerance(self, tolerance):
+        result = CatBoostSelectionResult(
+            selected_features=["f0"],
+            best_k=1,
+            scores_by_k={1: 1.0},
+            scores_std_by_k={},
+            feature_importances=pd.Series({"f0": 1.0}),
+        )
+
+        with pytest.raises(ValueError, match="tolerance"):
+            result.features_within_tolerance(tolerance=tolerance)
+
+    def test_features_within_tolerance_rejects_all_nonfinite_scores(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0"],
+            best_k=1,
+            scores_by_k={1: np.nan, 2: np.inf},
+            scores_std_by_k={},
+            feature_importances=pd.Series({"f0": 1.0}),
+        )
+
+        with pytest.raises(RuntimeError, match="No finite scores"):
+            result.features_within_tolerance()
+
+    def test_features_within_tolerance_skips_nonfinite_gaps(self):
+        result = CatBoostSelectionResult(
+            selected_features=["f0", "f1", "f2"],
+            best_k=3,
+            scores_by_k={3: 0.30, 2: np.nan, 1: 0.302},
+            scores_std_by_k={},
+            feature_importances=pd.Series({"f0": 1.0, "f1": 0.5, "f2": 0.25}),
+            features_by_k={1: ["f0"], 3: ["f0", "f1", "f2"]},
+            higher_is_better=False,
+            selection_patience=1,
+        )
+
+        assert result.features_within_tolerance(tolerance=0.01) == ["f0"]
 
     def test_score_at_k(self):
         result = CatBoostSelectionResult(

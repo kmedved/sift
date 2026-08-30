@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from sift import cross_section_config, panel_config, select_k_elbow, smart_sample
 from sift.sampling.anchors import first_and_last_per_group
@@ -10,7 +11,7 @@ def test_select_k_elbow_stops_after_plateau_patience():
 
     best_k, diag = select_k_elbow(path, min_k=2, max_k=20, min_rel_gain=0.02, patience=3)
 
-    assert best_k == 6
+    assert best_k == 5
     assert not diag.empty
     assert diag["k"].is_monotonic_increasing
 
@@ -28,6 +29,55 @@ def test_select_k_elbow_empty_path():
 
     assert best_k == 0
     assert diag.empty
+
+
+def test_select_k_elbow_accepts_integer_paths_and_excludes_first_flat_gain():
+    best_k, diag = select_k_elbow(
+        np.array([1, 2, 3, 4, 5, 5, 5, 5]),
+        min_k=1,
+        max_k=8,
+        min_rel_gain=0.02,
+        patience=3,
+    )
+
+    assert best_k == 5
+    assert diag[["objective", "delta", "rel_gain"]].dtypes.eq(np.dtype("float64")).all()
+
+
+def test_select_k_elbow_counts_a_plateau_beginning_at_minimum_k():
+    path = np.array([1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0, 10.0, 20.0, 30.0])
+
+    best_k, _ = select_k_elbow(
+        path,
+        min_k=5,
+        max_k=10,
+        min_rel_gain=0.02,
+        patience=3,
+    )
+
+    assert best_k == 5
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"min_k": -1}, "min_k"),
+        ({"max_k": 0}, "max_k"),
+        ({"min_k": 3, "max_k": 2}, "min_k"),
+        ({"min_rel_gain": np.nan}, "min_rel_gain"),
+        ({"patience": 0}, "patience"),
+    ],
+)
+def test_select_k_elbow_validates_direct_arguments(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        select_k_elbow(np.array([1.0, 2.0, 3.0]), **kwargs)
+
+
+def test_select_k_elbow_rejects_nonfinite_or_nonvector_paths():
+    with pytest.raises(ValueError, match="finite"):
+        select_k_elbow(np.array([1.0, np.nan]))
+    with pytest.raises(ValueError, match="one-dimensional"):
+        select_k_elbow(np.array([[1.0, 2.0]]))
 
 
 def test_panel_config_wires_fields_and_anchors():
