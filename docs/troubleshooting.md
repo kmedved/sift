@@ -139,9 +139,10 @@ frequency meets `threshold`, capped at `max_features`. If too few features clear
 the threshold you may get fewer than `max_features`, including zero.
 
 The convenience wrappers `stability_regression(..., k=10)` and
-`stability_classif(..., k=10)` fill short selections from the top selection
-frequencies so they return `k` features when at least `k` features exist. To do
-the same manually with the estimator class:
+`stability_classif(..., k=10)` follow the same contract: `k` caps the count and
+only features whose frequency clears `threshold` are returned, so they can
+return fewer than `k` features (including zero). If you want a fixed-size
+ranking regardless of `threshold`, take the top frequencies yourself:
 
 ```python
 selector = StabilitySelector(task="regression", threshold=0.6, max_features=None)

@@ -936,18 +936,57 @@ def select_k_elbow(
     min_rel_gain: float = 0.02,
     patience: int = 3,
 ) -> Tuple[int, pd.DataFrame]:
-    """Select k via elbow detection on an objective path."""
-    obj = np.asarray(objective_path).ravel()
-    max_k = min(max_k, len(obj))
+    """Select the prefix before a patience-confirmed run of small gains.
+
+    ``k`` is the number of retained features. Consequently, the first feature
+    in a confirmed low-gain run is excluded from the selected prefix unless
+    retaining it is required by the ``min_k`` floor.
+    """
+    raw_obj = np.asarray(objective_path)
+    if raw_obj.ndim != 1:
+        raise ValueError("objective_path must be a one-dimensional numeric array")
+    try:
+        obj = raw_obj.astype(np.float64, copy=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("objective_path must be a one-dimensional numeric array") from exc
+
+    for name, value, allow_zero in (
+        ("min_k", min_k, True),
+        ("max_k", max_k, False),
+        ("patience", patience, False),
+    ):
+        lower = 0 if allow_zero else 1
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < lower
+        ):
+            qualifier = "a non-negative" if allow_zero else "a positive"
+            raise ValueError(f"{name} must be {qualifier} integer")
+    if int(min_k) > int(max_k):
+        raise ValueError("min_k must be <= max_k")
+    if (
+        isinstance(min_rel_gain, (bool, np.bool_))
+        or not isinstance(min_rel_gain, (int, float, np.integer, np.floating))
+        or not np.isfinite(float(min_rel_gain))
+        or float(min_rel_gain) < 0.0
+    ):
+        raise ValueError("min_rel_gain must be finite and non-negative")
+    if obj.size and not np.isfinite(obj).all():
+        raise ValueError("objective_path must contain only finite values")
+
+    max_k = min(int(max_k), len(obj))
 
     if max_k <= 0:
         return 0, pd.DataFrame()
 
-    delta = np.zeros_like(obj)
+    min_k_eff = min(int(min_k), max_k)
+
+    delta = np.zeros_like(obj, dtype=np.float64)
     delta[0] = obj[0]
     delta[1:] = obj[1:] - obj[:-1]
 
-    rel_gain = np.zeros_like(obj)
+    rel_gain = np.zeros_like(obj, dtype=np.float64)
     rel_gain[0] = np.inf
     denom = np.maximum(np.abs(obj[:-1]), 1.0)
     rel_gain[1:] = delta[1:] / denom
@@ -955,11 +994,11 @@ def select_k_elbow(
     best_k = max_k
     run = 0
 
-    for k in range(max(min_k, 2), max_k + 1):
+    for k in range(max(min_k_eff, 2), max_k + 1):
         if rel_gain[k - 1] < min_rel_gain:
             run += 1
             if run >= patience:
-                best_k = k - patience + 1
+                best_k = max(min_k_eff, k - int(patience))
                 break
         else:
             run = 0
@@ -1179,7 +1218,10 @@ def select_k_penalized_objective(
     delta_map = dict(zip(np.arange(1, effective_max_k + 1, dtype=np.int64), full_delta))
     delta = np.array([0.0 if k == 0 else delta_map[int(k)] for k in ks], dtype=np.float64)
     objective_nonmonotone_steps = int(np.sum(full_delta[1:] < -1e-12))
-    path_exhausted_before_max_k = bool(effective_max_k < int(config.max_k))
+    path_exhausted_before_max_k = bool(path_length < int(config.max_k))
+    evaluation_limited_before_path_end = bool(
+        effective_max_k < min(path_length, int(config.max_k))
+    )
     selected_at_effective_max_k = bool(best_k == effective_max_k)
     selected_at_config_max_k = bool(best_k == int(config.max_k))
     selected_at_min_k = bool(best_k == min_k_eff)
@@ -1213,6 +1255,7 @@ def select_k_penalized_objective(
             "selected_at_effective_max_k": selected_at_effective_max_k,
             "selected_at_config_max_k": selected_at_config_max_k,
             "path_exhausted_before_max_k": path_exhausted_before_max_k,
+            "evaluation_limited_before_path_end": evaluation_limited_before_path_end,
             "selected_at_min_k": selected_at_min_k,
         }
     )

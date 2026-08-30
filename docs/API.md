@@ -397,8 +397,13 @@ now work. Router branches use method-specific effective floors (`0` for EBIC
 and permutation-gap stops, at least `1` for Gaussian CV curves), so use an
 explicit `AutoKConfig(k_method=...)` when you need a hard `min_k`. If the
 selected k hits the effective maximum, the router emits a `UserWarning` and
-sets `auto_routing["saturated"] = True`; treat that result as censored until
-you raise `max_k` or inspect the risk/objective curve. For dense weak-signal
+sets `auto_routing["saturated"] = True`; treat that result as censored. When
+`saturation_reason="configured_max_k"`, raise `max_k` or inspect the curve.
+When `saturation_reason="candidate_path_exhausted"`, increasing `max_k` alone
+cannot help; inspect valid candidates and `corr_prune`/`top_m`. When
+`saturation_reason="evaluation_curve_limited"`, the candidate path still has
+features but a fold/statistical limit ended the risk curve; inspect fold sample
+sizes and evaluation diagnostics. For dense weak-signal
 domains, set `auto_dense_check=True` on `AutoKConfig(k_method="auto")` to run
 an opt-in `gaussian_cv` cross-check with `selection_rule="best"` after large
 EBIC picks; the router warns when EBIC's detectable-feature count and the

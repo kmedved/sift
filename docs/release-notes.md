@@ -4,6 +4,21 @@
 
 ### Breaking changes and migration
 
+- `stability_regression(..., k=…)` and `stability_classif(..., k=…)` no longer
+  pad short selections with never-selected features: `k` caps the count and
+  `threshold` gates membership, so wrappers can now return fewer than `k`
+  features (including zero). Rank by `selection_frequencies_` yourself if you
+  need a fixed-size list.
+- `k='auto'` (router) calls now emit a `UserWarning` when they select zero
+  features, and `select_cefsplus` warns when `y` contains only 3-20 distinct
+  integer-valued levels (labels-shaped targets). Selector classes reject 1-D
+  `X` with a `ValueError` instead of an `IndexError`. The no-config router
+  routes time-context non-CEFS+ Gaussian selectors to
+  `gaussian_cv/time_holdout` with `selection_rule="best"` (previously the
+  `one_se` request fell back to `best` with a warning), no longer re-warns
+  about `auto_dense_*` fields it already consumed, and
+  `StabilitySelector.selection_frequencies_` is now float64.
+
 - Prebuilt Gaussian caches now enforce their full source contract. Named caches
   require the same row count and exact DataFrame names/order; positional caches
   require a positional ndarray with the same row and feature counts. Reordered,
@@ -40,6 +55,23 @@
 
 ### Correctness, API, and documentation
 
+- Smart-sampler regression targets now remain float64, are robustly centered
+  on the pilot median, and use two-fold cross-fitted predictions for every row.
+  This prevents large-offset target collapse and in-sample residual optimism;
+  non-pilot rows use one unseen fold model to preserve a comparable residual
+  scale, and constant pilot targets now disable the residual blend.
+- Stability selectors now reject one-dimensional inputs with a clear
+  `ValueError`. Elbow selection accepts integer objective paths, validates its
+  direct arguments, and stops before the first feature in a patience-confirmed
+  flat-gain run rather than retaining that zero-gain feature, subject to the
+  configured `min_k` floor.
+- `permutation_importance` accepts sklearn scorer objects and `ScoringSpec`, and
+  exposes `higher_is_better` only for legacy loss callbacks, avoiding a second
+  direction flip for signed scorers. CatBoost result objects
+  persist `selection_patience`, so `features_within_tolerance()` uses the same
+  consecutive-miss rule as fit-time selection. Auto-k saturation warnings now
+  distinguish a configured `max_k` cap, exhaustion of the candidate path, and
+  a fold/statistical limit that ends an evaluation curve before the path.
 - Gaussian/cache-backed sklearn selector constructors use
   `subsample="auto"`, resolving to 50,000 rows only at fit time. MRMR, JMI,
   JMIM, and CEFS+ wrappers also use `random_state="auto"`, resolving to seed 0;

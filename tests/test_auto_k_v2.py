@@ -47,6 +47,26 @@ from scipy.special import digamma
 from scipy.stats import f, kstest
 
 
+def test_filter_elbow_clamps_minimum_to_short_candidate_path():
+    config = AutoKConfig(k_method="elbow", min_k=5, max_k=100)
+
+    selected_k, diagnostics = filter_auto_k._select_elbow_count(
+        np.array([1.0, 2.0, 2.5]),
+        config,
+        path_length=3,
+    )
+    empty_k, empty_diagnostics = filter_auto_k._select_elbow_count(
+        np.array([], dtype=np.float64),
+        config,
+        path_length=0,
+    )
+
+    assert selected_k == 3
+    assert len(diagnostics) == 3
+    assert empty_k == 0
+    assert empty_diagnostics.empty
+
+
 def test_candidate_panel_matches_select_cached_cefsplus_path():
     rng = np.random.default_rng(123)
     X = pd.DataFrame(rng.normal(size=(120, 12)), columns=[f"x{i}" for i in range(12)])
@@ -2201,12 +2221,13 @@ def test_auto_k_auto_router_warns_and_records_saturation(monkeypatch):
         return ["x0", "x1", "x2"], [0, 1, 2], pd.DataFrame(), {
             "selected_k": 3,
             "effective_max_k": 3,
+            "path_length": 3,
             "selected_at_effective_max_k": True,
         }
 
     monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
 
-    with pytest.warns(UserWarning, match="selected the effective max_k"):
+    with pytest.warns(UserWarning, match="configured max_k was reached"):
         selected, indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
             cache=DummyCache(),
             y=np.zeros(20),
@@ -2221,6 +2242,72 @@ def test_auto_k_auto_router_warns_and_records_saturation(monkeypatch):
     assert indices == [0, 1, 2]
     assert summary["auto_routing"]["chosen"] == "penalized_objective"
     assert summary["auto_routing"]["saturated"] is True
+    assert summary["auto_routing"]["saturation_reason"] == "configured_max_k"
+
+
+def test_auto_k_auto_router_reports_candidate_path_exhaustion_accurately(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(20, dtype=np.float64)
+        valid_cols = np.arange(3, dtype=np.int64)
+
+    def fake_runner(_routed_config, **_kwargs):
+        return ["x0", "x1", "x2"], [0, 1, 2], pd.DataFrame(), {
+            "selected_k": 3,
+            "effective_max_k": 3,
+            "path_length": 3,
+            "selected_at_effective_max_k": True,
+            "path_exhausted_before_max_k": True,
+        }
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+
+    with pytest.warns(UserWarning, match="candidate path was exhausted") as warning_record:
+        _selected, _indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+            cache=DummyCache(),
+            y=np.zeros(20),
+            method="cefsplus",
+            max_k=5,
+            top_m=10,
+            auto_k_config=AutoKConfig(k_method="auto", min_k=0, max_k=5),
+            verbose=False,
+        )
+
+    assert "Increase max_k or" not in str(warning_record[0].message)
+    assert "Increasing max_k alone cannot" in str(warning_record[0].message)
+    assert summary["auto_routing"]["saturation_reason"] == "candidate_path_exhausted"
+
+
+def test_auto_k_auto_router_distinguishes_evaluation_curve_limit(monkeypatch):
+    class DummyCache:
+        sample_weight = np.ones(20, dtype=np.float64)
+        valid_cols = np.arange(5, dtype=np.int64)
+
+    def fake_runner(_routed_config, **_kwargs):
+        return ["x0", "x1", "x2"], [0, 1, 2], pd.DataFrame(), {
+            "selected_k": 3,
+            "effective_max_k": 3,
+            "path_length": 5,
+            "selected_at_effective_max_k": True,
+            "path_exhausted_before_max_k": False,
+        }
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+
+    with pytest.warns(UserWarning, match="evaluation curve ended") as warning_record:
+        _selected, _indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+            cache=DummyCache(),
+            y=np.zeros(20),
+            method="mrmr",
+            max_k=5,
+            top_m=10,
+            auto_k_config=AutoKConfig(k_method="auto", min_k=0, max_k=5),
+            verbose=False,
+        )
+
+    assert "corr_prune/top_m" not in str(warning_record[0].message)
+    assert summary["path_exhausted_before_max_k"] is False
+    assert summary["evaluation_limited_before_path_end"] is True
+    assert summary["auto_routing"]["saturation_reason"] == "evaluation_curve_limited"
 
 
 def test_auto_k_auto_router_dense_check_warns_on_large_ebic_disagreement(monkeypatch):

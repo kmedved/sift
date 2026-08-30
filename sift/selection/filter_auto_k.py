@@ -52,19 +52,26 @@ def auto_k_summary(
 ) -> dict:
     if effective_min_k is None:
         effective_min_k = max(1, min(int(config.min_k), int(effective_max_k)))
+    configured_max_k = int(config.max_k)
+    path_length = int(path_length)
+    effective_max_k = int(effective_max_k)
     summary = {
         "method": config.k_method,
         "selection_rule": config.selection_rule,
         "selected_k": int(selected_k),
         "min_k": int(config.min_k),
-        "max_k": int(config.max_k),
+        "max_k": configured_max_k,
         "effective_min_k": int(effective_min_k),
-        "effective_max_k": int(effective_max_k),
-        "path_length": int(path_length),
+        "effective_max_k": effective_max_k,
+        "path_length": path_length,
         "selected_at_min_k": bool(selected_k == int(effective_min_k)),
         "selected_at_effective_max_k": bool(selected_k == effective_max_k),
-        "selected_at_config_max_k": bool(selected_k == int(config.max_k)),
-        "path_exhausted_before_max_k": bool(effective_max_k < int(config.max_k)),
+        "selected_at_config_max_k": bool(selected_k == configured_max_k),
+        "selected_at_path_end": bool(selected_k == path_length),
+        "path_exhausted_before_max_k": bool(path_length < configured_max_k),
+        "evaluation_limited_before_path_end": bool(
+            effective_max_k < min(path_length, configured_max_k)
+        ),
     }
     if diagnostics is not None and not diagnostics.empty:
         for column, cast in (
@@ -169,6 +176,25 @@ def _auto_route_facts(cache, *, method: str, groups, time) -> dict:
     }
 
 
+_AUTOK_FIELD_DEFAULTS = AutoKConfig()
+
+
+def _strip_router_only_fields(config: AutoKConfig) -> AutoKConfig:
+    """Reset fields consumed by the router itself before dispatching a routed method.
+
+    The dense-check knobs are read from the caller's original ``auto`` config;
+    leaving them on the routed copy makes the routed method's unused-field
+    validation warn about options the router already honored.
+    """
+    return replace(
+        config,
+        auto_dense_check=_AUTOK_FIELD_DEFAULTS.auto_dense_check,
+        auto_dense_min_k=_AUTOK_FIELD_DEFAULTS.auto_dense_min_k,
+        auto_dense_min_frac=_AUTOK_FIELD_DEFAULTS.auto_dense_min_frac,
+        auto_dense_disagreement_ratio=_AUTOK_FIELD_DEFAULTS.auto_dense_disagreement_ratio,
+    )
+
+
 def _auto_route_config(config: AutoKConfig, facts: dict) -> tuple[AutoKConfig, str]:
     if facts["selector_method"] != "cefsplus":
         strategy = config.strategy
@@ -176,45 +202,43 @@ def _auto_route_config(config: AutoKConfig, facts: dict) -> tuple[AutoKConfig, s
             strategy = "kfold"
         if strategy == "group_cv" and not facts["has_groups"]:
             strategy = "kfold"
-        return (
-            replace(
-                config,
-                k_method="gaussian_cv",
-                strategy=strategy,
-                selection_rule="one_se",
-                min_k=max(1, int(config.min_k)),
-            ),
-            "non_cefsplus_gaussian_selector",
+        # A time holdout is a single split, so the one-SE rule has no split
+        # spread to work with and would immediately fall back to "best" with a
+        # warning. Route that case to "best" explicitly.
+        selection_rule = "best" if strategy == "time_holdout" else "one_se"
+        routed = replace(
+            config,
+            k_method="gaussian_cv",
+            strategy=strategy,
+            selection_rule=selection_rule,
+            min_k=max(1, int(config.min_k)),
         )
-    if facts["p_valid"] > facts["n_eff_kish"]:
-        return (
-            replace(
-                config,
-                k_method="penalized_objective",
-                objective_penalty="ebic",
-                min_k=0,
-            ),
-            "p_valid_exceeds_kish_n_eff",
-        )
-    if facts["weight_skew_ratio"] < 0.8:
-        return (
-            replace(
-                config,
-                k_method="perm_gap",
-                min_k=0,
-                perm_null="auto",
-            ),
-            "heavy_weight_skew",
-        )
-    return (
-        replace(
+        reason = "non_cefsplus_gaussian_selector"
+    elif facts["p_valid"] > facts["n_eff_kish"]:
+        routed = replace(
             config,
             k_method="penalized_objective",
             objective_penalty="ebic",
             min_k=0,
-        ),
-        "measured_default_ebic",
-    )
+        )
+        reason = "p_valid_exceeds_kish_n_eff"
+    elif facts["weight_skew_ratio"] < 0.8:
+        routed = replace(
+            config,
+            k_method="perm_gap",
+            min_k=0,
+            perm_null="auto",
+        )
+        reason = "heavy_weight_skew"
+    else:
+        routed = replace(
+            config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        )
+        reason = "measured_default_ebic"
+    return _strip_router_only_fields(routed), reason
 
 
 def _run_gaussian_routed_path(routed_config: AutoKConfig, **kwargs) -> GaussianAutoKResult:
@@ -381,9 +405,11 @@ def _select_elbow_count(
     config: AutoKConfig,
     path_length: int,
 ) -> tuple[int, pd.DataFrame]:
+    if path_length <= 0:
+        return 0, pd.DataFrame()
     best_k, diagnostics = auto_k_module.select_k_elbow(
         objective,
-        min_k=config.min_k,
+        min_k=min(int(config.min_k), int(path_length)),
         max_k=path_length,
         min_rel_gain=config.elbow_min_rel_gain,
         patience=config.elbow_patience,
@@ -1204,16 +1230,47 @@ def select_gaussian_auto_path(
     summary["method"] = "auto"
     summary["routed_method"] = route["chosen"]
     saturated = bool(summary.get("selected_at_effective_max_k", False))
+    configured_max_k = int(summary.get("max_k", routed_config.max_k))
+    effective_max_k = int(summary.get("effective_max_k", configured_max_k))
+    path_length = int(summary.get("path_length", len(selected)))
+    selected_k = int(summary.get("selected_k", len(selected)))
+    path_exhausted = bool(path_length < configured_max_k)
+    evaluation_limited = bool(
+        effective_max_k < min(path_length, configured_max_k)
+    )
+    summary["path_exhausted_before_max_k"] = path_exhausted
+    summary["evaluation_limited_before_path_end"] = evaluation_limited
+    summary["selected_at_path_end"] = bool(selected_k == path_length)
     route["saturated"] = saturated
     if saturated:
-        warnings.warn(
-            "Auto-K router selected the effective max_k; the result is censored "
-            "and should be interpreted as at least that many features. Increase "
-            "max_k or inspect the objective/risk curve before treating this as "
-            "an interior automatic-k optimum.",
-            UserWarning,
-            stacklevel=2,
-        )
+        if evaluation_limited:
+            route["saturation_reason"] = "evaluation_curve_limited"
+            message = (
+                "Auto-K router selected the effective max_k because the evaluation "
+                "curve ended before the available candidate path; the result is "
+                "censored at a fold/statistical limit. Increasing max_k alone "
+                "cannot extend this curve; inspect fold sample sizes and evaluation "
+                "diagnostics."
+            )
+        elif path_exhausted and selected_k >= path_length:
+            route["saturation_reason"] = "candidate_path_exhausted"
+            message = (
+                "Auto-K router selected the effective max_k because the candidate "
+                "path was exhausted before configured max_k; the result is censored "
+                "at the available path boundary. Increasing max_k alone cannot "
+                "extend this path; inspect valid candidates and corr_prune/top_m "
+                "settings."
+            )
+        else:
+            route["saturation_reason"] = "configured_max_k"
+            message = (
+                "Auto-K router selected the effective max_k; the configured max_k "
+                "was reached, so the result is censored and should be interpreted "
+                "as at least that many features. Increase max_k or inspect the "
+                "objective/risk curve before treating this as an interior "
+                "automatic-k optimum."
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
     _run_auto_dense_check(
         config=auto_k_config,
         summary=summary,

@@ -145,6 +145,52 @@ def test_stability_regression_wrapper():
     assert all(isinstance(f, str) for f in selected)
 
 
+@pytest.mark.parametrize("X", [np.arange(20.0), list(np.arange(20.0))])
+def test_stability_selector_rejects_one_dimensional_X_cleanly(X):
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.01,
+        n_jobs=1,
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="2-dimensional"):
+        selector.fit(X, np.arange(20.0))
+
+
+def test_stability_transform_rejects_one_dimensional_or_wrong_width_X():
+    rng = np.random.default_rng(16)
+    X = rng.normal(size=(40, 3))
+    y = X[:, 0] + rng.normal(scale=0.1, size=40)
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.01,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+
+    with pytest.raises(ValueError, match="2-dimensional"):
+        selector.transform(X[:, 0])
+    with pytest.raises(ValueError, match="fitted with 3 features"):
+        selector.transform(X[:, :2])
+
+
+def test_stability_selector_validates_feature_name_count():
+    X = np.arange(60.0).reshape(20, 3)
+    y = np.arange(20.0)
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.01,
+        n_jobs=1,
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="feature_names has 2 entries"):
+        selector.fit(X, y, feature_names=["a", "b"])
+
+
 def test_stability_classif_wrapper():
     """Test the stability_classif convenience function."""
     from sift import stability_classif
@@ -710,27 +756,37 @@ def test_stability_regression_returns_features_ordered_by_frequency():
     assert len(selected) >= 2, "Should select at least 2 features"
 
 
-def test_stability_regression_wrapper_fills_to_requested_k_when_threshold_high():
+def test_stability_regression_wrapper_returns_up_to_k_without_padding():
     from sift import stability_regression
+    from sift.stability import StabilitySelector
 
     rng = np.random.default_rng(123)
     n, p = 160, 12
     X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
     y = X["f0"] + 0.2 * X["f1"] + rng.normal(size=n) * 0.8
 
-    selected = stability_regression(
-        X,
-        y,
-        k=6,
-        threshold=0.999,
+    options = dict(
         n_bootstrap=8,
         alpha=0.05,
         n_jobs=1,
         random_state=5,
         verbose=False,
     )
+    selected = stability_regression(X, y, k=6, threshold=0.999, **options)
 
-    assert len(selected) == 6
+    # k caps the count; threshold gates membership. Never-selected features
+    # must not be used as padding, so an unattainable threshold yields fewer
+    # than k features (possibly zero).
+    reference = StabilitySelector(threshold=0.999, max_features=6, **options).fit(X, y)
+    assert selected == reference.selected_feature_names_
+    assert len(selected) <= 6
+    frequencies = np.asarray(reference.selection_frequencies_)
+    name_to_idx = {name: i for i, name in enumerate(X.columns)}
+    assert all(frequencies[name_to_idx[name]] >= 0.999 for name in selected)
+
+    # A clearable threshold still honors the k cap.
+    capped = stability_regression(X, y, k=1, threshold=0.3, **options)
+    assert len(capped) <= 1
 
 
 def test_stability_alpha_cv_uses_group_splits_without_group_overlap():

@@ -247,7 +247,7 @@ def _prepare_smart_arrays(
     Xs = _prepare_scaled_matrix(df_reset, feature_cols)
     y = None
     if config.residual_weight_cap > 0:
-        y = df_reset[y_col].to_numpy(dtype=np.float32)
+        y = df_reset[y_col].to_numpy(dtype=np.float64, copy=True)
         if not np.isfinite(y).all():
             raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
     return SmartSampleArrays(
@@ -336,23 +336,69 @@ def _compute_residual_scores(
     assert y is not None
     if len(pilot_train) >= 50 and len(pilot_val) >= 20:
         try:
-            pilot = HistGradientBoostingRegressor(
+            y_float = np.asarray(y, dtype=np.float64)
+            target_origin = float(np.median(y_float[pilot_all]))
+            y_centered = y_float - target_origin
+            var_y = float(np.var(y_centered[pilot_all]))
+            if not np.isfinite(var_y) or var_y <= 0.0:
+                return res_scores, beta
+
+            pilot_train_model = HistGradientBoostingRegressor(
                 max_iter=50,
                 max_depth=4,
                 learning_rate=0.1,
                 random_state=config.random_state,
             )
-            pilot.fit(Xs[pilot_train], y[pilot_train])
+            pilot_val_model = HistGradientBoostingRegressor(
+                max_iter=50,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=config.random_state,
+            )
+            pilot_train_model.fit(Xs[pilot_train], y_centered[pilot_train])
+            pilot_val_model.fit(Xs[pilot_val], y_centered[pilot_val])
 
-            val_pred = pilot.predict(Xs[pilot_val])
-            val_resid = y[pilot_val] - val_pred
-            val_mse = float(np.mean(val_resid ** 2))
-            var_y = float(np.var(y[pilot_val])) + 1e-12
-            r2 = max(0.0, min(1.0, 1.0 - val_mse / var_y))
+            # Two-fold cross-fitting: neither pilot fold is scored by a model
+            # trained on that fold.
+            preds = np.empty(n, dtype=np.float64)
+            preds[pilot_val] = pilot_train_model.predict(Xs[pilot_val])
+            preds[pilot_train] = pilot_val_model.predict(Xs[pilot_train])
+            nonpilot_mask = np.ones(n, dtype=bool)
+            nonpilot_mask[pilot_all] = False
+            nonpilot = np.flatnonzero(nonpilot_mask)
+            if nonpilot.size:
+                # Assign each non-pilot row to exactly one unseen model. An
+                # ensemble prediction would have lower residual variance than
+                # the one-model OOF predictions used for pilot rows, making
+                # pilot membership itself affect sampling scores.
+                assignment_rng = np.random.default_rng(config.random_state)
+                use_train_model = assignment_rng.integers(
+                    0,
+                    2,
+                    size=nonpilot.size,
+                    dtype=np.int8,
+                ).astype(bool)
+                train_model_rows = nonpilot[use_train_model]
+                val_model_rows = nonpilot[~use_train_model]
+                if train_model_rows.size:
+                    preds[train_model_rows] = pilot_train_model.predict(
+                        Xs[train_model_rows]
+                    )
+                if val_model_rows.size:
+                    preds[val_model_rows] = pilot_val_model.predict(Xs[val_model_rows])
+            if not np.isfinite(preds).all():
+                raise ValueError("pilot model produced non-finite predictions")
 
-            preds = pilot.predict(Xs)
-            resid_all = np.abs(y - preds).astype(np.float32)
-            res_scores = np.maximum(resid_all, 1e-12)
+            pilot_resid = y_centered[pilot_all] - preds[pilot_all]
+            pilot_mse = float(np.mean(pilot_resid ** 2))
+            r2 = max(0.0, min(1.0, 1.0 - pilot_mse / var_y))
+
+            resid_all = np.abs(y_centered - preds)
+            mean_resid = float(np.mean(resid_all))
+            if not np.isfinite(mean_resid) or mean_resid <= 0.0:
+                return res_scores, beta
+            res_scores = resid_all / mean_resid
+            res_scores = np.maximum(res_scores, np.finfo(np.float64).tiny)
             res_scores /= res_scores.mean()
 
             beta = min(config.residual_weight_cap, r2)

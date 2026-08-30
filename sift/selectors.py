@@ -100,6 +100,17 @@ def _coerce_selection_indices(
     return np.asarray(indices, dtype=np.int64)
 
 
+def _require_2d_x(X) -> None:
+    """Reject non-2D feature input with a clear error instead of an IndexError."""
+    x_shape = X.shape if hasattr(X, "shape") else np.asarray(X).shape
+    if len(x_shape) != 2:
+        raise ValueError(
+            "X must be a 2D feature matrix; got an array with "
+            f"{len(x_shape)} dimension(s). Reshape your data (e.g. "
+            "X.reshape(-1, 1) for a single feature)."
+        )
+
+
 def _feature_names_or_default(X) -> list[str]:
     feature_names = extract_feature_names(X)
     if feature_names is not None:
@@ -399,6 +410,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         capture_training_output: bool = False,
         **fit_params,
     ):
+        _require_2d_x(X)
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         resolved_auto_k = auto_k_config
         if resolved_auto_k is None:
@@ -983,6 +995,7 @@ class KnockoffSelector(_BaseSelector):
         capture_training_output: bool = False,
         **fit_params,
     ):
+        _require_2d_x(X)
         if groups is not None:
             raise ValueError(
                 "KnockoffSelector does not support row groups. Use feature_groups "
