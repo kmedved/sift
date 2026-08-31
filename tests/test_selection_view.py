@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from dataclasses import fields
 import json
 import pickle
@@ -11,6 +12,7 @@ import pandas as pd
 import pytest
 
 import sift
+from sift.catboost_common import CatBoostSelectionResult
 from sift.selection.view import CURVE_COLUMNS
 
 
@@ -568,6 +570,20 @@ def test_as_result_rejects_legacy_lists_and_tuples(legacy):
         sift.as_result(legacy)
 
 
+def test_non_catboost_result_dispatch_does_not_import_optional_catboost(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "sift.catboost_common":
+            raise AssertionError("unrelated result dispatch imported CatBoost")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    view = sift.as_result(_full_filter_result(["a"], selected_indices=[0]))
+
+    assert view.features == ["a"]
+
+
 def _boruta_result(**overrides) -> sift.BorutaResult:
     values = {
         "feature_names": ["dup", "dup", "noise", "tentative"],
@@ -1011,3 +1027,264 @@ def test_feature_path_legacy_shape_and_pickle_remain_unchanged():
     assert restored.scores == result.scores
     assert restored.best_k == result.best_k
     pd.testing.assert_frame_equal(restored.diagnostics, result.diagnostics)
+
+
+def _catboost_result(**overrides) -> CatBoostSelectionResult:
+    values = {
+        "selected_features": ["b", "a"],
+        "best_k": 2,
+        "scores_by_k": {1: 0.62, 2: 0.58, 3: 0.57},
+        "scores_std_by_k": {1: 0.02, 2: 0.02, 3: 0.02},
+        "feature_importances": pd.Series({"b": 0.8, "a": 0.4}),
+        "features_by_k": {
+            1: ["b"],
+            2: ["b", "a"],
+            3: ["b", "a", "c"],
+        },
+        "stability_scores": pd.Series({"b": 1.0, "a": 0.75, "c": 0.25}),
+        "prefilter_features": ["b", "a", "c", "d"],
+        "metric": "RMSE",
+        "higher_is_better": False,
+        "all_scores": {
+            1: [0.60, 0.64],
+            2: [0.56, 0.60],
+            3: [0.55, 0.59],
+        },
+        "selection_patience": 3,
+    }
+    values.update(overrides)
+    return CatBoostSelectionResult(**values)
+
+
+def test_catboost_result_view_is_partial_without_input_identity():
+    result = _catboost_result()
+    view = sift.as_result(result)
+
+    _assert_five_accessor_lines(view)
+    assert view.features == ["b", "a"]
+    assert view.indices is None
+    assert view.support_ is None
+    assert view.raw_features is None
+    assert view.table["feature"].tolist() == ["b", "a", "c", "d"]
+    assert view.table["selected_index"].isna().all()
+    assert view.table["path_rank"].tolist() == [1, 2, pd.NA, pd.NA]
+    assert view.table["selected"].tolist() == [True, True, False, False]
+    np.testing.assert_allclose(
+        view.table["gain"].to_numpy(),
+        [0.8, 0.4, np.nan, np.nan],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        view.table["selection_frequency"].to_numpy(),
+        [1.0, 0.75, 0.25, np.nan],
+        equal_nan=True,
+    )
+    assert view.table["prefiltered_first_split"].tolist() == [True] * 4
+    assert view.metadata["adapter"] == "CatBoostSelectionResult"
+    assert view.metadata["table_complete"] is False
+    assert view.metadata["criterion_direction"] == "minimize"
+    assert view.metadata["target_k"] == 2
+    assert view.metadata["selected_feature_count"] == 2
+    assert view.metadata["best_scoring_k"] == 3
+    assert view.metadata["gain_source"] == "final_model_feature_importance"
+    assert view.curve["k"].tolist() == [1, 2, 3]
+    assert view.curve["criterion"].tolist() == [0.62, 0.58, 0.57]
+    np.testing.assert_allclose(view.curve["criterion_se"], [0.02, 0.02, 0.02])
+    assert view.curve["selected"].tolist() == [False, True, False]
+    assert view.diagnostics["prefilter_scope"] == "first_split_only"
+    assert view.diagnostics["stability_scope"] == "target_k_split_frequency"
+    assert result.result_view().to_dict() == view.to_dict()
+    json.dumps(view.to_dict(), allow_nan=False)
+
+
+def test_catboost_result_view_maps_explicit_raw_identity_without_guessing_provenance():
+    result = _catboost_result()
+    raw_features = ["d", "a", "unused", "b", "c"]
+    view = sift.as_result(result, input_features=raw_features)
+
+    assert view.features == ["b", "a"]
+    assert view.indices == [3, 1]
+    np.testing.assert_array_equal(view.support_, [False, True, False, True, False])
+    assert view.raw_features == raw_features
+    assert view.table["feature"].tolist() == raw_features
+    assert view.table["selected_index"].tolist() == [0, 1, 2, 3, 4]
+    assert view.table["path_rank"].tolist() == [pd.NA, 2, pd.NA, 1, pd.NA]
+    assert view.metadata["table_complete"] is True
+    assert view.metadata["input_kind"] == "unknown"
+    assert view.metadata["raw_columns_hash"] is not None
+    assert result.result_view(input_features=raw_features).to_dict() == view.to_dict()
+
+
+def test_catboost_result_view_allows_duplicate_unobserved_raw_labels_positionally():
+    raw_features = ["unused", "unused", "a", "b", "c", "d"]
+    view = sift.as_result(_catboost_result(), input_features=raw_features)
+
+    assert view.indices == [3, 2]
+    assert view.table["selected_index"].tolist() == list(range(len(raw_features)))
+    assert view.metadata["table_complete"] is True
+
+
+@pytest.mark.parametrize(
+    "input_features",
+    [
+        ["a", "b", "c"],
+        ["a", "b", "b", "c", "d"],
+    ],
+)
+def test_catboost_result_view_rejects_missing_or_ambiguous_known_features(
+    input_features,
+):
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        sift.as_result(_catboost_result(), input_features=input_features)
+
+
+def test_catboost_curve_preserves_higher_is_better_direction_and_missing_se():
+    result = _catboost_result(
+        best_k=2,
+        scores_by_k={1: 0.7, 2: 0.8},
+        scores_std_by_k={},
+        all_scores=None,
+        metric="AUC",
+        higher_is_better=True,
+    )
+    view = sift.as_result(result)
+
+    assert view.curve["criterion"].tolist() == [0.7, 0.8]
+    assert view.curve["criterion_se"].isna().all()
+    assert view.curve["selected"].tolist() == [False, True]
+    assert view.metadata["criterion_direction"] == "maximize"
+    assert view.metadata["best_scoring_k"] == 2
+
+
+def test_catboost_curve_filters_failed_split_scores_before_standard_error():
+    result = _catboost_result(
+        scores_by_k={2: 0.60},
+        scores_std_by_k={2: 0.02},
+        all_scores={2: [0.58, np.nan, np.inf, -np.inf, 0.62]},
+    )
+    view = sift.as_result(result)
+
+    assert view.curve["criterion"].tolist() == [0.60]
+    np.testing.assert_allclose(view.curve["criterion_se"], [0.02])
+
+
+def test_catboost_curve_leaves_one_finite_split_standard_error_missing():
+    result = _catboost_result(
+        scores_by_k={2: 0.60},
+        scores_std_by_k={2: 0.0},
+        all_scores={2: [np.nan, 0.60, np.inf]},
+    )
+    view = sift.as_result(result)
+
+    assert view.curve["criterion_se"].isna().all()
+
+
+def test_catboost_target_k_can_exceed_actual_stable_feature_count():
+    result = _catboost_result(
+        selected_features=["b"],
+        feature_importances=pd.Series({"b": 0.8}),
+    )
+    view = sift.as_result(result)
+
+    assert view.k == 1
+    assert view.metadata["target_k"] == 2
+    assert view.metadata["selected_feature_count"] == 1
+    assert view.curve.loc[view.curve["selected"], "k"].tolist() == [2]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"selected_features": ["b", "b"]}, "unique feature identities"),
+        ({"selected_features": []}, "must be non-empty"),
+        ({"best_k": True}, "best_k must be an integer"),
+        ({"best_k": 1}, "more than best_k"),
+        ({"best_k": 4}, "present in scores_by_k"),
+        ({"scores_by_k": {}}, "at least one finite score"),
+        ({"scores_by_k": {0: 1.0}}, ">= 1"),
+        ({"scores_by_k": {2: True}}, "real non-boolean"),
+        ({"scores_by_k": {2: np.inf}}, "must be finite"),
+        ({"scores_by_k": {2: 1.0 + 2.0j}}, "real non-boolean"),
+        (
+            {"scores_std_by_k": {2: -0.1}},
+            "scores_std_by_k values must be non-negative",
+        ),
+        (
+            {"scores_std_by_k": {1: 0.02, 2: 0.02, 3: 0.02, 4: 0.0}},
+            "unexpected",
+        ),
+        (
+            {"all_scores": {2: [0.50, 0.70]}},
+            "must match the finite all_scores mean",
+        ),
+        (
+            {"all_scores": {2: [np.nan, np.inf]}},
+            "finite observation",
+        ),
+        (
+            {"features_by_k": {2: ["b"]}},
+            "exactly 2 features",
+        ),
+        (
+            {"feature_importances": [0.8, 0.4]},
+            "feature_importances must be a pandas Series",
+        ),
+        (
+            {"feature_importances": pd.Series([0.8, 0.4], index=["b", "b"])},
+            "unique feature identities",
+        ),
+        (
+            {"feature_importances": pd.Series({"b": 0.8})},
+            "cover selected_features exactly",
+        ),
+        (
+            {"stability_scores": pd.Series({"b": 1.2, "a": 0.5})},
+            "between 0 and 1",
+        ),
+        (
+            {"stability_scores": pd.Series({"b": 1.0, "c": 0.5})},
+            "present in stability_scores",
+        ),
+        ({"prefilter_features": ["b", "b"]}, "unique feature identities"),
+        ({"metric": ""}, "metric must be a non-empty string"),
+        ({"higher_is_better": 1}, "higher_is_better must be boolean"),
+        ({"selection_patience": 0}, "selection_patience must be >= 1"),
+    ],
+)
+def test_catboost_adapter_rejects_malformed_result_states(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        sift.as_result(_catboost_result(**overrides))
+
+
+def test_catboost_legacy_shape_and_pickle_remain_unchanged():
+    expected_fields = [
+        "selected_features",
+        "best_k",
+        "scores_by_k",
+        "scores_std_by_k",
+        "feature_importances",
+        "features_by_k",
+        "stability_scores",
+        "prefilter_features",
+        "metric",
+        "higher_is_better",
+        "all_scores",
+        "selection_patience",
+    ]
+    result = _catboost_result()
+    restored = pickle.loads(pickle.dumps(result))
+
+    assert [field.name for field in fields(CatBoostSelectionResult)] == expected_fields
+    assert type(restored) is CatBoostSelectionResult
+    assert restored.selected_features == result.selected_features
+    assert restored.best_k == result.best_k
+    assert restored.scores_by_k == result.scores_by_k
+    assert restored.scores_std_by_k == result.scores_std_by_k
+    pd.testing.assert_series_equal(restored.feature_importances, result.feature_importances)
+    assert restored.features_by_k == result.features_by_k
+    pd.testing.assert_series_equal(restored.stability_scores, result.stability_scores)
+    assert restored.prefilter_features == result.prefilter_features
+    assert restored.metric == result.metric
+    assert restored.higher_is_better == result.higher_is_better
+    assert restored.all_scores == result.all_scores
+    assert restored.selection_patience == result.selection_patience

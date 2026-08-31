@@ -14,11 +14,16 @@
   positional table and maps mean importance to `gain`; feature-path views leave
   discarded raw positions unknown unless explicit input names resolve uniquely,
   and expose the tested lower-is-better score as a normalized curve.
+- The A2b slice adds the same non-replacing adapter and `.result_view()` method
+  for `CatBoostSelectionResult`. It preserves the target-k versus returned-count
+  distinction, normalizes the direction-aware score curve, derives standard
+  errors only when raw split scores provide a denominator, and keeps raw
+  identity partial unless the caller supplies it explicitly.
 - A1 views serialize to JSON-safe schema version `"1"`, preserve positional
   identity in `selected_index`, report incomplete tables explicitly, and use
   `input_kind="unknown"` when a legacy result cannot prove whether its source
   was named or positional. Result-only transform, inverse-transform, proxy
-  storage, route-level Auto-K curves, and the other three adapter families remain
+  storage, route-level Auto-K curves, and the other two adapter families remain
   pending; Workstream A is not complete.
 
 ## 0.9.0a1 (2026-08-31)

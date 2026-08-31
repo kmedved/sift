@@ -30,13 +30,13 @@ handlers when configured. Use `sift.set_verbosity("debug")`,
 `sift.set_verbosity("info")`, or `sift.set_verbosity(None)` to select debug,
 normal progress, or silence globally; per-call `verbose=False` remains silent.
 
-## Normalized Result Views (A2a)
+## Normalized Result Views (A2b)
 
 `sift.as_result(result, input_features=None)` returns a `SelectionView` without
-changing the legacy result object. The current A2a implementation supports
-`FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, and
-`FeaturePathEvaluationResult`; adapters for CatBoost, fitted stability
-selection, and permutation importance are still pending.
+changing the legacy result object. The current A2b implementation supports
+`FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
+`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`; adapters for
+fitted stability selection and permutation importance are still pending.
 
 ```python
 view = sift.as_result(result, input_features=X.columns)
@@ -50,11 +50,12 @@ view.metadata
 
 Result-only views report `metadata["input_kind"] == "unknown"`, because the
 legacy objects cannot prove whether their source was named or positional.
-Feature-path results expose a normalized lower-is-better evaluation curve;
-Boruta maps mean importance to `gain` while preserving original positional
-order. Transforms, inverse transforms, and proxy lookup are not available in
-A2a. See [Reading Results](results.md) for the completeness matrix, versioned
-JSON format, and partial-table rules.
+Feature-path and CatBoost results expose normalized evaluation curves. Boruta
+maps mean importance to `gain` while preserving original positional order;
+CatBoost maps its retained final-model importance to `gain` and records the
+source explicitly. Transforms, inverse transforms, and proxy lookup are not
+available in A2b. See [Reading Results](results.md) for the completeness matrix,
+versioned JSON format, and partial-table rules.
 
 ## Shared Selector Behavior
 

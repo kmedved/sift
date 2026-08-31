@@ -2,9 +2,9 @@
 
 SIFT 0.9 introduces an additive `SelectionView` without replacing any legacy
 result type. Existing functions still return the same lists, tuples, DataFrames,
-or result classes by default. The current A2a slice supports
-`FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, and
-`FeaturePathEvaluationResult`.
+or result classes by default. The current A2b slice supports
+`FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
+`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`.
 
 ## The common five accessors
 
@@ -26,7 +26,7 @@ result = sift.select_mrmr(
 view = sift.as_result(result, input_features=X.columns)
 ```
 
-The same five accessor lines work for all four adapters shipped through A2a:
+The same five accessor lines work for all five adapters shipped through A2b:
 
 ```python
 view.features
@@ -49,12 +49,12 @@ selected features. `table` is a defensive-copy alias for `raw_table`.
 | `FilterSelectionResult` | supported | complete when the ranking covers every raw position; otherwise available rows only | empty standardized table | unavailable |
 | `KnockoffSelectionResult` | supported | contains valid knockoff features; complete only when those positions cover the supplied raw identity | empty standardized table | unavailable |
 | `BorutaResult` | supported | complete from the result's full positional feature arrays | empty standardized table | unavailable |
-| `CatBoostSelectionResult` | planned | not implemented | not implemented | not implemented |
+| `CatBoostSelectionResult` | supported | complete with an explicit identity that uniquely resolves every known feature; otherwise known feature rows only | normalized direction-aware score curve | unavailable |
 | `FeaturePathEvaluationResult` | supported | complete when `input_features` uniquely resolves the path; otherwise path rows only | normalized evaluation curve | unavailable |
 | fitted `StabilitySelector` | planned | not implemented | not implemented | not implemented |
 | permutation-importance DataFrame | planned | not implemented | not implemented | not implemented |
 
-Workstream A is therefore still in progress. Passing one of the three planned
+Workstream A is therefore still in progress. Passing one of the two planned
 families currently raises `TypeError`; it is not silently interpreted as
 another result family. Passing an existing `SelectionView` is an identity operation.
 Bare legacy list or tuple returns are also rejected with guidance to rerun the
@@ -70,18 +70,20 @@ the positions form a complete identity; `path_rank` preserves selection order.
 Boruta tables retain original input order and map mean importance to `gain`,
 with `hits` and `boruta_status` as diagnostics. Feature-path tables add
 `feature_path_rank`; without explicit input identity they deliberately leave
-raw positions unknown. Unavailable metric columns are omitted rather than
-synthesized.
+raw positions unknown. CatBoost tables map the retained final-model importance
+to `gain`, identify its source in metadata, and retain target-k stability and
+first-split prefilter diagnostics without treating either as a raw column list.
+Unavailable metric columns are omitted rather than synthesized.
 
 Legacy result objects do not reliably record whether their original matrix was
-a DataFrame or a positional ndarray. A result-only A2a view therefore reports
+a DataFrame or a positional ndarray. A result-only A2b view therefore reports
 `metadata["input_kind"] == "unknown"`. Passing `input_features` establishes an
 ordered raw identity and `raw_columns_hash`, but it does not rewrite that
 historical provenance as known. `metadata["table_complete"]` says whether every
 raw input position is represented by row-level information.
 
 `selected_index` is the positional authority when labels repeat. The raw table
-retains positions instead of collapsing duplicate labels. The A2a result-only
+retains positions instead of collapsing duplicate labels. The A2b result-only
 adapters do not enable name-based transforms or proxy lookup, so callers should
 use `indices` and `support_` for positional work.
 
@@ -92,7 +94,12 @@ stable columns `k`, `criterion`, `criterion_se`, and `selected` because those
 legacy objects retain no route-level curve. Feature-path views normalize their
 tested grid and lower-is-better score into those columns. Their producer stores
 population fold SD, so `criterion_se` is `std / sqrt(n_finite - 1)` when every
-fold is finite and at least two folds exist; otherwise it is missing.
+fold is finite and at least two folds exist; otherwise it is missing. CatBoost
+views preserve the raw metric and publish `criterion_direction` as `minimize` or
+`maximize`. Their `selected` curve row is the returned target/parsimony count,
+which can exceed the number of features that pass stability thresholding;
+standard error is derived only when retained per-split scores establish the
+finite-split count.
 
 `view.to_dict()` returns a JSON-safe payload. Both the top-level payload and its
 metadata carry `schema_version="1"`; tables use pandas `orient="split"` form.
@@ -105,11 +112,11 @@ metric. Matplotlib is imported only when `plot()` is called.
 
 ## Transform and proxy limitations
 
-The four A2a adapters wrap result objects, not fitted selector state. They do not
+The five A2b adapters wrap result objects, not fitted selector state. They do not
 retain encoders or the source matrix, so `transform()` and `inverse_transform()`
 raise `NotImplementedError` and `metadata["transform_available"]` is false.
 
-Likewise, A2a does not yet add selection-time `store_proxies` plumbing.
+Likewise, A2b does not yet add selection-time `store_proxies` plumbing.
 `proxies()` raises `NotImplementedError`; it never captures `X` implicitly.
 Proxy-correlation storage, its explicit option, and its memory cap remain part
 of the unfinished Workstream A scope.

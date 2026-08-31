@@ -110,6 +110,18 @@ def test_catboost_result_contract(
     assert result.selection_patience == 3
     assert list(result.feature_importances.index) == ["signal", "proxy"]
 
+    view = sift.as_result(result, input_features=X.columns)
+    assert view.features == result.selected_features
+    assert view.indices == [0, 1]
+    np.testing.assert_array_equal(view.support_, [True, True, False, False])
+    assert view.table["feature"].tolist() == X.columns.tolist()
+    assert view.metadata["adapter"] == "CatBoostSelectionResult"
+    assert view.metadata["table_complete"] is True
+    assert view.metadata["metric"] == "RMSE"
+    assert view.curve["k"].tolist() == [2]
+    assert view.curve["selected"].tolist() == [True]
+    assert result.result_view(input_features=X.columns).to_dict() == view.to_dict()
+
 
 def test_catboost_omitted_task_matches_explicit_regression_default(
     catboost_contract_data: tuple[pd.DataFrame, pd.Series, pd.Series],

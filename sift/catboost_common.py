@@ -236,6 +236,12 @@ class CatBoostSelectionResult:
     all_scores: Optional[Dict[int, List[float]]] = None
     selection_patience: int = 3
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
     def score_at_k(self, k: int) -> Tuple[float, float]:
         """Return (mean, std) score at given k."""
         return self.scores_by_k.get(k, np.nan), self.scores_std_by_k.get(k, np.nan)
