@@ -253,9 +253,9 @@ outside SIFT. CatBoost selectors handle categorical features natively.
 
 Many selectors can return richer metadata through `return_result=True` or
 selector-specific diagnostics. `sift.as_result(...)` now provides an additive
-common view for `FilterSelectionResult` and `KnockoffSelectionResult`; the
-remaining result families are still planned. The legacy result types and
-defaults are unchanged.
+common view for `FilterSelectionResult`, `KnockoffSelectionResult`,
+`BorutaResult`, and `FeaturePathEvaluationResult`; three result families remain
+planned. The legacy result types and defaults are unchanged.
 
 ```python
 from sift import select_cefsplus_binary
@@ -273,7 +273,7 @@ print(result.selected_features)
 print(result.selector_metadata)
 ```
 
-The common A1 access pattern is:
+The common A2a access pattern is:
 
 ```python
 view = sift.as_result(result, input_features=X.columns)

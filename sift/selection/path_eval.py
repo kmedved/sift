@@ -34,6 +34,12 @@ class FeaturePathEvaluationResult:
     best_k: int
     diagnostics: pd.DataFrame
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
 
 def _split_weights(weights: np.ndarray, idx: np.ndarray, *, label: str) -> np.ndarray:
     """Return fold-local mean-one weights."""

@@ -9,11 +9,16 @@
   `FilterSelectionResult` and `KnockoffSelectionResult`, and adds matching
   `.result_view()` methods. The same five accessors expose selected names,
   positions, count, the available raw table, and copied metadata.
+- The A2a slice adds non-replacing adapters and `.result_view()` methods for
+  `BorutaResult` and `FeaturePathEvaluationResult`. Boruta retains a complete
+  positional table and maps mean importance to `gain`; feature-path views leave
+  discarded raw positions unknown unless explicit input names resolve uniquely,
+  and expose the tested lower-is-better score as a normalized curve.
 - A1 views serialize to JSON-safe schema version `"1"`, preserve positional
   identity in `selected_index`, report incomplete tables explicitly, and use
   `input_kind="unknown"` when a legacy result cannot prove whether its source
   was named or positional. Result-only transform, inverse-transform, proxy
-  storage, normalized Auto-K curves, and the other five adapter families remain
+  storage, route-level Auto-K curves, and the other three adapter families remain
   pending; Workstream A is not complete.
 
 ## 0.9.0a1 (2026-08-31)

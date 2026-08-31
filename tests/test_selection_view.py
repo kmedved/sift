@@ -566,3 +566,448 @@ def test_columns_hash_distinguishes_numpy_temporal_nat_types():
 def test_as_result_rejects_legacy_lists_and_tuples(legacy):
     with pytest.raises(TypeError, match="return_result=True"):
         sift.as_result(legacy)
+
+
+def _boruta_result(**overrides) -> sift.BorutaResult:
+    values = {
+        "feature_names": ["dup", "dup", "noise", "tentative"],
+        "status": np.array([-1, 1, -1, 0], dtype=np.int8),
+        "hits": np.array([0, 3, 1, 2], dtype=np.int64),
+        "n_iter": 3,
+        "shadow_thresholds": np.array([0.4, 0.5, 0.6]),
+        "mean_importance": np.array([0.1, 1.5, np.nan, 0.3]),
+    }
+    values.update(overrides)
+    return sift.BorutaResult(**values)
+
+
+def _path_result(**overrides) -> sift.FeaturePathEvaluationResult:
+    diagnostics = pd.DataFrame(
+        {
+            "k": [1, 3],
+            "score": [1.0, 2.0],
+            "std": [0.2, 0.4],
+            "n_finite": [4, 4],
+            "n_splits": [4, 4],
+            "best_score": [1.0, 1.0],
+        }
+    )
+    values = {
+        "feature_path": ["b", "a", "c"],
+        "k": [1, 3],
+        "features": ["b"],
+        "scores": {1: 1.0, 3: 2.0},
+        "best_k": 1,
+        "diagnostics": diagnostics,
+    }
+    values.update(overrides)
+    return sift.FeaturePathEvaluationResult(**values)
+
+
+def _single_path_result(
+    *,
+    score,
+    std,
+    n_finite,
+    n_splits,
+    best_k,
+) -> sift.FeaturePathEvaluationResult:
+    best_score = score if best_k else np.nan
+    return sift.FeaturePathEvaluationResult(
+        feature_path=["a"],
+        k=[1],
+        features=["a"] if best_k else [],
+        scores={1: score},
+        best_k=best_k,
+        diagnostics=pd.DataFrame(
+            {
+                "k": [1],
+                "score": pd.Series([score], dtype=object),
+                "std": pd.Series([std], dtype=object),
+                "n_finite": [n_finite],
+                "n_splits": [n_splits],
+                "best_score": pd.Series([best_score], dtype=object),
+            }
+        ),
+    )
+
+
+def test_boruta_result_view_is_complete_and_positionally_preserves_duplicates():
+    result = _boruta_result()
+    view = sift.as_result(result)
+
+    _assert_five_accessor_lines(view)
+    assert view.features == ["dup"]
+    assert view.indices == [1]
+    assert view.k == 1
+    assert view.raw_features == ["dup", "dup", "noise", "tentative"]
+    np.testing.assert_array_equal(view.support_, [False, True, False, False])
+    assert view.table["selected_index"].tolist() == [0, 1, 2, 3]
+    assert view.table["path_rank"].tolist() == [pd.NA, 1, pd.NA, pd.NA]
+    assert view.table["boruta_status"].tolist() == [
+        "rejected",
+        "accepted",
+        "rejected",
+        "tentative",
+    ]
+    np.testing.assert_allclose(
+        view.table["gain"].to_numpy(),
+        result.mean_importance,
+        equal_nan=True,
+    )
+    assert view.table["hits"].tolist() == [0, 3, 1, 2]
+    assert view.metadata["adapter"] == "BorutaResult"
+    assert view.metadata["table_complete"] is True
+    assert view.metadata["input_kind"] == "unknown"
+    assert view.curve.empty
+    assert view.diagnostics["n_iter"] == 3
+    np.testing.assert_array_equal(
+        view.diagnostics["shadow_thresholds"],
+        result.shadow_thresholds,
+    )
+    assert result.result_view().to_dict() == view.to_dict()
+    json.dumps(view.to_dict(), allow_nan=False)
+
+
+def test_real_boruta_and_feature_path_results_adapt(selection_data):
+    X, y = selection_data
+    boruta_result = sift.select_boruta(
+        X,
+        y,
+        n_estimators=20,
+        max_iter=3,
+        random_state=19,
+        verbose=False,
+        return_result=True,
+    )
+    path_result = sift.evaluate_feature_path(
+        X,
+        y,
+        feature_path=["f2", "f0", "f1"],
+        k_grid=[1, 2, 3],
+        random_state=19,
+    )
+
+    boruta_view = sift.as_result(boruta_result, input_features=X.columns)
+    path_view = sift.as_result(path_result, input_features=X.columns)
+
+    _assert_five_accessor_lines(boruta_view)
+    _assert_five_accessor_lines(path_view)
+    assert boruta_view.metadata["table_complete"] is True
+    assert path_view.metadata["table_complete"] is True
+    assert path_view.indices == [X.columns.get_loc(name) for name in path_view.features]
+    assert path_view.curve["selected"].sum() == 1
+    assert path_view.curve["criterion_se"].isna().all()
+
+
+@pytest.mark.parametrize(
+    ("input_features", "match"),
+    [
+        (["dup", "dup", "noise"], "length"),
+        (["dup", "noise", "dup", "tentative"], "exact order"),
+        (["dup", "dup", "noise", 1], "exact order"),
+    ],
+)
+def test_boruta_adapter_rejects_incompatible_explicit_identity(
+    input_features,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        sift.as_result(_boruta_result(), input_features=input_features)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"status": np.array([1, -1])}, "status.*length"),
+        ({"status": np.array([1.0, -1.0, -1.0, 0.0])}, "status values.*integer"),
+        ({"status": np.array([1, -1, 2, 0])}, "-1, 0, or 1"),
+        ({"hits": np.array([0, -1, 1, 2])}, "hits values.*>= 0"),
+        ({"hits": np.array([0, 4, 1, 2])}, "cannot exceed"),
+        ({"hits": [0, 2**100, 1, 2]}, "signed 64-bit integer"),
+        ({"n_iter": True}, "n_iter must be an integer"),
+        ({"shadow_thresholds": np.array([0.4])}, "shadow_thresholds.*length 3"),
+        ({"mean_importance": np.array([0.1, 0.2])}, "mean_importance.*length 4"),
+        (
+            {"mean_importance": np.array([1.0 + 2.0j, 0.2, 0.1, 0.0])},
+            "real non-boolean numeric values",
+        ),
+        (
+            {"mean_importance": np.array([10**1000, 0.2, 0.1, 0.0], dtype=object)},
+            "representable as float64",
+        ),
+    ],
+)
+def test_boruta_adapter_rejects_malformed_result_arrays(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        sift.as_result(_boruta_result(**overrides))
+
+
+def test_boruta_legacy_shape_and_pickle_remain_unchanged():
+    expected_fields = [
+        "feature_names",
+        "status",
+        "hits",
+        "n_iter",
+        "shadow_thresholds",
+        "mean_importance",
+    ]
+    result = _boruta_result()
+    restored = pickle.loads(pickle.dumps(result))
+
+    assert [field.name for field in fields(sift.BorutaResult)] == expected_fields
+    assert callable(result.selected_features)
+    assert result.selected_features() == ["dup"]
+    assert type(restored) is sift.BorutaResult
+    assert restored.feature_names == result.feature_names
+    np.testing.assert_array_equal(restored.status, result.status)
+    np.testing.assert_array_equal(restored.hits, result.hits)
+    np.testing.assert_array_equal(restored.shadow_thresholds, result.shadow_thresholds)
+    np.testing.assert_allclose(
+        restored.mean_importance,
+        result.mean_importance,
+        equal_nan=True,
+    )
+
+
+def test_feature_path_view_is_partial_without_input_identity():
+    result = _path_result()
+    view = sift.as_result(result)
+
+    _assert_five_accessor_lines(view)
+    assert view.features == ["b"]
+    assert view.indices is None
+    assert view.support_ is None
+    assert view.raw_features is None
+    assert view.table["feature"].tolist() == ["b", "a", "c"]
+    assert view.table["selected_index"].isna().all()
+    assert view.table["path_rank"].tolist() == [1, pd.NA, pd.NA]
+    assert view.table["feature_path_rank"].tolist() == [1, 2, 3]
+    assert view.metadata["table_complete"] is False
+    assert result.result_view().to_dict() == view.to_dict()
+
+
+def test_feature_path_view_maps_unique_explicit_identity_and_curve():
+    result = _path_result()
+    view = sift.as_result(result, input_features=["a", "b", "c", "unused"])
+
+    assert view.features == ["b"]
+    assert view.indices == [1]
+    np.testing.assert_array_equal(view.support_, [False, True, False, False])
+    assert view.table["feature"].tolist() == ["a", "b", "c", "unused"]
+    assert view.table["path_rank"].tolist() == [pd.NA, 1, pd.NA, pd.NA]
+    assert view.table["feature_path_rank"].tolist() == [2, 1, 3, pd.NA]
+    assert view.metadata["table_complete"] is True
+    assert view.metadata["criterion_direction"] == "minimize"
+    assert view.curve["k"].tolist() == [1, 3]
+    assert view.curve["criterion"].tolist() == [1.0, 2.0]
+    np.testing.assert_allclose(
+        view.curve["criterion_se"],
+        np.array([0.2, 0.4]) / np.sqrt(3.0),
+    )
+    assert view.curve["selected"].tolist() == [True, False]
+    json.dumps(view.to_dict(), allow_nan=False)
+
+
+def test_feature_path_all_failed_result_has_empty_selection_and_no_curve_winner():
+    diagnostics = pd.DataFrame(
+        {
+            "k": [1, 2],
+            "score": [np.inf, np.inf],
+            "std": [np.nan, np.nan],
+            "n_finite": [0, 0],
+            "n_splits": [2, 2],
+            "best_score": [np.nan, np.nan],
+        }
+    )
+    result = _path_result(
+        feature_path=["a", "b"],
+        k=[1, 2],
+        features=[],
+        scores={1: np.inf, 2: np.inf},
+        best_k=0,
+        diagnostics=diagnostics,
+    )
+    view = sift.as_result(result, input_features=["a", "b", "unused"])
+
+    assert view.features == []
+    assert view.indices == []
+    assert view.k == 0
+    np.testing.assert_array_equal(view.support_, [False, False, False])
+    assert not view.curve["selected"].any()
+    assert view.curve["criterion_se"].isna().all()
+    json.dumps(view.to_dict(), allow_nan=False)
+
+
+def test_feature_path_duplicate_labels_remain_partial_but_cannot_claim_positions():
+    result = _path_result(
+        feature_path=["dup", "dup", "z"],
+        features=["dup"],
+    )
+
+    view = sift.as_result(result)
+    assert view.table["feature"].tolist() == ["dup", "dup", "z"]
+    assert view.indices is None
+
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        sift.as_result(result, input_features=["dup", "dup", "z"])
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"k": [1, 1]}, "unique positions"),
+        ({"k": [True, 3]}, "integer positions"),
+        ({"scores": {1: 1.0}}, "score keys"),
+        ({"best_k": 3, "features": ["b", "a", "c"]}, "best_k does not match"),
+        ({"features": ["a"]}, r"feature_path\[:best_k\]"),
+        (
+            {
+                "diagnostics": _path_result()
+                .diagnostics.iloc[::-1]
+                .reset_index(drop=True)
+            },
+            "diagnostics k order",
+        ),
+    ],
+)
+def test_feature_path_adapter_rejects_inconsistent_results(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        sift.as_result(_path_result(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("result", "match"),
+    [
+        (
+            _single_path_result(
+                score=np.nan,
+                std=np.nan,
+                n_finite=0,
+                n_splits=1,
+                best_k=0,
+            ),
+            "finite or positive infinity",
+        ),
+        (
+            _single_path_result(
+                score=-np.inf,
+                std=np.nan,
+                n_finite=0,
+                n_splits=1,
+                best_k=0,
+            ),
+            "finite or positive infinity",
+        ),
+        (
+            _single_path_result(
+                score=np.inf,
+                std=0.0,
+                n_finite=1,
+                n_splits=1,
+                best_k=0,
+            ),
+            "infinite.*at least one failed split",
+        ),
+        (
+            _single_path_result(
+                score=1.0,
+                std=np.nan,
+                n_finite=1,
+                n_splits=1,
+                best_k=1,
+            ),
+            "finite.*std to be finite",
+        ),
+        (
+            _path_result(
+                diagnostics=pd.DataFrame(
+                    {
+                        "k": [1, 3],
+                        "score": ["1.0", "2.0"],
+                        "std": ["0.2", "0.4"],
+                        "n_finite": [4, 4],
+                        "n_splits": [4, 4],
+                        "best_score": ["1.0", "1.0"],
+                    }
+                )
+            ),
+            "real non-boolean numeric values",
+        ),
+        (
+            _path_result(scores={1: np.complex64(1.0 + 2.0j), 3: 2.0}),
+            "real non-boolean numbers",
+        ),
+        (
+            _single_path_result(
+                score=10**1000,
+                std=0.0,
+                n_finite=1,
+                n_splits=1,
+                best_k=1,
+            ),
+            "representable as float64",
+        ),
+        (
+            _single_path_result(
+                score=1.0,
+                std=123.0,
+                n_finite=1,
+                n_splits=1,
+                best_k=1,
+            ),
+            "single-split.*std 0",
+        ),
+    ],
+)
+def test_feature_path_adapter_rejects_impossible_producer_states(result, match):
+    with pytest.raises(ValueError, match=match):
+        sift.as_result(result)
+
+
+def test_feature_path_adapter_rejects_inconsistent_split_count():
+    diagnostics = _path_result().diagnostics.copy()
+    diagnostics["n_splits"] = [4, 5]
+    diagnostics["n_finite"] = [4, 5]
+
+    with pytest.raises(ValueError, match="n_splits must be constant"):
+        sift.as_result(_path_result(diagnostics=diagnostics))
+
+
+@pytest.mark.parametrize(
+    "input_features",
+    [
+        ["a", "c", "unused"],
+        ["a", "b", "c", "b"],
+        ["a", 1, "c", "unused"],
+    ],
+)
+def test_feature_path_adapter_rejects_missing_or_ambiguous_explicit_identity(
+    input_features,
+):
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        sift.as_result(_path_result(), input_features=input_features)
+
+
+def test_feature_path_legacy_shape_and_pickle_remain_unchanged():
+    expected_fields = [
+        "feature_path",
+        "k",
+        "features",
+        "scores",
+        "best_k",
+        "diagnostics",
+    ]
+    result = _path_result()
+    restored = pickle.loads(pickle.dumps(result))
+
+    assert [
+        field.name for field in fields(sift.FeaturePathEvaluationResult)
+    ] == expected_fields
+    assert type(restored) is sift.FeaturePathEvaluationResult
+    assert restored.feature_path == result.feature_path
+    assert restored.k == result.k
+    assert restored.features == result.features
+    assert restored.scores == result.scores
+    assert restored.best_k == result.best_k
+    pd.testing.assert_frame_equal(restored.diagnostics, result.diagnostics)

@@ -343,8 +343,9 @@ metadata = result.selector_metadata
 ranking = result.get_feature_ranking()
 ```
 
-The additive A1 result view supports `FilterSelectionResult` and
-`KnockoffSelectionResult` without replacing either class:
+The additive A2a result view supports `FilterSelectionResult`,
+`KnockoffSelectionResult`, `BorutaResult`, and
+`FeaturePathEvaluationResult` without replacing any class:
 
 ```python
 view = as_result(result, input_features=X.columns)
@@ -363,12 +364,13 @@ indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
 
-The A1 adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
-transform and inverse-transform are unavailable, proxy correlations are not
-stored, and Auto-K curve normalization is still pending. Adapters for Boruta,
-CatBoost, feature-path evaluation, fitted stability selection, and permutation
-importance remain unfinished. See [Reading Results](docs/results.md) for the
-current completeness matrix and versioned JSON contract.
+The A2a adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
+transform and inverse-transform are unavailable, and proxy correlations are
+not stored. Feature-path evaluation supplies a normalized score curve; the
+other supported legacy results have no retained route-level curve. Adapters for
+CatBoost, fitted stability selection, and permutation importance remain
+unfinished. See [Reading Results](docs/results.md) for the current completeness
+matrix and versioned JSON contract.
 
 ### `select_jmi`
 
