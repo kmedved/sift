@@ -27,12 +27,19 @@
   coefficient matrices. New fits record DataFrame-versus-positional provenance;
   no constructor parameter, legacy fitted attribute, return type, or default
   changes.
+- The A2d slice completes the seven-family core adapter coverage. The default
+  `permutation_importance` return remains its exact four-column DataFrame;
+  `return_result=True` opts into module-scoped `ImportanceResult`, whose
+  defensive-copy repeat matrix is aligned to original feature positions.
+  Its complete view preserves duplicate labels positionally and marks every
+  evaluated feature as a `ranking_only` report rather than inventing a subset
+  threshold.
 - A1 views serialize to JSON-safe schema version `"1"`, preserve positional
   identity in `selected_index`, report incomplete tables explicitly, and use
   `input_kind="unknown"` when a legacy result cannot prove whether its source
-  was named or positional. Result-only transform, inverse-transform, proxy
-  storage, route-level Auto-K curves, and the permutation-importance adapter
-  remain pending; Workstream A is not complete.
+  was named or positional. The core adapter acceptance is complete; result-only
+  transforms, inverse-transform, proxy storage, and route-level Auto-K curves
+  remain advanced follow-up work.
 
 ## 0.9.0a1 (2026-08-31)
 

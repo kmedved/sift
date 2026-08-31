@@ -343,9 +343,10 @@ metadata = result.selector_metadata
 ranking = result.get_feature_ranking()
 ```
 
-The additive A2c result view supports `FilterSelectionResult`,
+The additive A2d result view supports `FilterSelectionResult`,
 `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, and
-`CatBoostSelectionResult` without replacing any class. A fitted
+`CatBoostSelectionResult` without replacing any class. It also supports the
+opt-in `ImportanceResult` from `permutation_importance`; a fitted
 `StabilitySelector` exposes the same view through `selector.result_view_`:
 
 ```python
@@ -365,7 +366,8 @@ indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
 
-The five legacy-result adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
+The five legacy selection-result adapters are result-only:
+`metadata["input_kind"]` is `"unknown"`,
 transform and inverse-transform are unavailable, and proxy correlations are
 not stored. Feature-path evaluation and CatBoost supply normalized score curves;
 the other supported legacy results have no retained route-level curve. CatBoost
@@ -373,7 +375,8 @@ views remain partial without an explicit raw feature identity and distinguish
 the target curve count from the number of stable features actually returned.
 The fitted stability adapter has a complete candidate-feature table and a
 frozen fitted column-subset transform; inverse transform remains unavailable.
-The permutation-importance adapter remains unfinished. See
+`ImportanceResult` records named-versus-positional provenance and retains
+repeat-level score drops without retaining the model or input matrix. See
 [Reading Results](docs/results.md) for the current completeness
 matrix and versioned JSON contract.
 
@@ -1518,6 +1521,18 @@ importance = permutation_importance(
     time=df["game_date"].to_numpy(),
     random_state=0,
 )
+
+rich_importance = permutation_importance(
+    model,
+    X,
+    y,
+    scoring="neg_rmse",
+    n_repeats=20,
+    random_state=0,
+    return_result=True,
+)
+repeat_drops = rich_importance.importances_  # raw feature positions × repeats
+view = rich_importance.result_view()
 ```
 
 Output columns:
@@ -1526,6 +1541,13 @@ Output columns:
 - `importance_mean`
 - `importance_std`
 - `baseline_score`
+
+The four-column DataFrame remains the default return. With
+`return_result=True`, `ImportanceResult.ranking_` is exactly that summary and
+`ImportanceResult.importances_` retains each normalized score drop in original
+feature-position order. `result_view()` exposes all evaluated features in
+importance order with `selection_semantics="ranking_only"`; it does not invent
+a cutoff or retain the fitted model or input matrix.
 
 Scoring options:
 

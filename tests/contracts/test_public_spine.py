@@ -91,6 +91,7 @@ def test_high_risk_function_defaults():
     assert _default(sift.permutation_importance, "n_repeats") == 10
     assert _default(sift.permutation_importance, "n_jobs") == -1
     assert _default(sift.permutation_importance, "random_state") is None
+    assert _default(sift.permutation_importance, "return_result") is False
     assert _default(sift.select_cached, "method") == "cefsplus"
     assert _default(sift.select_cached, "corr_prune") == "auto"
     assert _default(sift.select_cached, "return_objective") is False

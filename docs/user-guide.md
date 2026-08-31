@@ -236,10 +236,24 @@ importance = permutation_importance(
     scoring="neg_rmse",
     n_repeats=10,
 )
+
+rich_importance = permutation_importance(
+    fitted_model,
+    X,
+    y,
+    groups=group_ids,
+    time=dates,
+    n_repeats=10,
+    return_result=True,
+)
+repeat_drops = rich_importance.importances_
+view = rich_importance.result_view()
 ```
 
 With `time` but no `groups`, SIFT treats the dataset as one ordered group for
-time-aware permutations.
+time-aware permutations. The historical DataFrame remains the default;
+`return_result=True` adds the repeat-level matrix and a complete ranking view
+without applying an arbitrary selection threshold.
 
 ## Categorical Features
 
@@ -255,8 +269,8 @@ Many selectors can return richer metadata through `return_result=True` or
 selector-specific diagnostics. `sift.as_result(...)` now provides an additive
 common view for `FilterSelectionResult`, `KnockoffSelectionResult`,
 `BorutaResult`, `FeaturePathEvaluationResult`, and `CatBoostSelectionResult`,
-plus fitted `StabilitySelector`; permutation importance remains planned. The
-legacy result types and defaults are unchanged.
+plus fitted `StabilitySelector` and the opt-in `ImportanceResult` from
+`permutation_importance`. Legacy result types and default returns are unchanged.
 
 ```python
 from sift import select_cefsplus_binary
@@ -274,7 +288,7 @@ print(result.selected_features)
 print(result.selector_metadata)
 ```
 
-The common A2c access pattern is:
+The common A2d access pattern is:
 
 ```python
 view = sift.as_result(result, input_features=X.columns)

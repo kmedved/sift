@@ -2,10 +2,11 @@
 
 SIFT 0.9 introduces an additive `SelectionView` without replacing any legacy
 result type. Existing functions still return the same lists, tuples, DataFrames,
-or result classes by default. The current A2c slice supports
+or result classes by default. The completed core adapter slice supports
 `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
-`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`. It also adapts a
-fitted `StabilitySelector` through its dynamic `result_view_` property.
+`FeaturePathEvaluationResult`, `CatBoostSelectionResult`, and the opt-in
+`ImportanceResult`. It also adapts a fitted `StabilitySelector` through its
+dynamic `result_view_` property.
 
 ## The common five accessors
 
@@ -27,7 +28,7 @@ result = sift.select_mrmr(
 view = sift.as_result(result, input_features=X.columns)
 ```
 
-The same five accessor lines work for all six adapters shipped through A2c:
+The same five accessor lines work for all seven entry-point families:
 
 ```python
 view.features
@@ -53,13 +54,14 @@ selected features. `table` is a defensive-copy alias for `raw_table`.
 | `CatBoostSelectionResult` | supported | complete with an explicit identity that uniquely resolves every known feature; otherwise known feature rows only | normalized direction-aware score curve | unavailable |
 | `FeaturePathEvaluationResult` | supported | complete when `input_features` uniquely resolves the path; otherwise path rows only | normalized evaluation curve | unavailable |
 | fitted `StabilitySelector` | supported | complete over the fitted candidate-feature namespace | empty standardized table | frozen fitted column subset; inverse unavailable |
-| permutation-importance DataFrame | planned | not implemented | not implemented | not implemented |
+| `ImportanceResult` from `permutation_importance(..., return_result=True)` | supported | complete in original feature-position order | empty standardized table | unavailable |
 
-Workstream A is therefore still in progress. Passing the remaining planned
-permutation-importance family currently raises `TypeError`; it is not silently
-interpreted as another result family. Passing an existing `SelectionView` is an identity operation.
-Bare legacy list or tuple returns are also rejected with guidance to rerun the
-selector with `return_result=True`.
+The seven-family core adapter acceptance criterion is complete. The historical
+permutation-importance DataFrame remains the default return and is deliberately
+not guessed by `as_result`, because it lacks repeat-level positional
+provenance; request `return_result=True` to obtain `ImportanceResult`. Passing
+an existing `SelectionView` is an identity operation. Bare legacy list or tuple
+returns are also rejected with guidance to request the corresponding result.
 
 ## Tables and partial identity
 
@@ -74,7 +76,11 @@ with `hits` and `boruta_status` as diagnostics. Feature-path tables add
 raw positions unknown. CatBoost tables map the retained final-model importance
 to `gain`, identify its source in metadata, and retain target-k stability and
 first-split prefilter diagnostics without treating either as a raw column list.
-Unavailable metric columns are omitted rather than synthesized.
+Importance tables retain raw position order, map the per-repeat population mean
+to `gain`, and use importance order as `path_rank`. Every evaluated feature is
+present with `selected=True`; metadata labels this `selection_semantics` as
+`ranking_only`, so it is not mistaken for a thresholded subset. Unavailable
+metric columns are omitted rather than synthesized.
 
 Stability tables retain fitted candidate order, bootstrap selection frequency,
 mean absolute coefficient, and that same coefficient magnitude as `gain`.
@@ -86,8 +92,8 @@ the original DataFrame; the view records this as
 `raw_namespace="fitted_candidate_features"` rather than claiming positions for
 columns the selector did not fit.
 
-Legacy result objects do not reliably record whether their original matrix was
-a DataFrame or a positional ndarray. A result-only A2c view therefore reports
+Legacy selection-result objects do not reliably record whether their original
+matrix was a DataFrame or a positional ndarray. Those result-only views therefore report
 `metadata["input_kind"] == "unknown"`. Passing `input_features` establishes an
 ordered raw identity and `raw_columns_hash`, but it does not rewrite that
 historical provenance as known. `metadata["table_complete"]` says whether every
@@ -101,7 +107,8 @@ DataFrame label from an older generated positional label.
 
 `selected_index` is the positional authority when labels repeat. The raw table
 retains positions instead of collapsing duplicate labels. The five result-only
-adapters do not enable name-based transforms or proxy lookup, so callers should
+selection adapters and the importance result do not enable name-based
+transforms or proxy lookup, so callers should
 use `indices` and `support_` for positional work.
 
 ## Curves, serialization, and plotting
@@ -118,6 +125,11 @@ which can exceed the number of features that pass stability thresholding;
 standard error is derived only when retained per-split scores establish the
 finite-split count.
 
+`ImportanceResult.importances_` is a defensive-copy matrix with raw feature
+positions on rows and permutation repeats on columns. Its mean and population
+standard deviation (`ddof=0`) reproduce the legacy summary exactly. The repeat
+matrix is diagnostic data, not a feature-count curve.
+
 `view.to_dict()` returns a JSON-safe payload. Both the top-level payload and its
 metadata carry `schema_version="1"`; tables use pandas `orient="split"` form.
 Consumers should ignore unknown keys so later schema additions remain
@@ -129,7 +141,7 @@ metric. Matplotlib is imported only when `plot()` is called.
 
 ## Transform and proxy limitations
 
-The five result-only adapters wrap result objects, not fitted selector state.
+The six result-only adapters wrap result objects, not fitted selector state.
 They do not retain encoders or the source matrix, so `transform()` and
 `inverse_transform()` raise `NotImplementedError` and
 `metadata["transform_available"]` is false.
@@ -141,7 +153,7 @@ does not retain training rows or coefficient matrices, and does not change if
 the original selector is refit or its threshold is changed later. Stability has
 no inverse transform, so `inverse_transform()` remains unavailable.
 
-Likewise, A2c does not yet add selection-time `store_proxies` plumbing.
+Likewise, the core adapter slice does not add selection-time `store_proxies` plumbing.
 `proxies()` raises `NotImplementedError`; it never captures `X` implicitly.
 Proxy-correlation storage, its explicit option, and its memory cap remain part
 of the unfinished Workstream A scope.

@@ -30,13 +30,13 @@ handlers when configured. Use `sift.set_verbosity("debug")`,
 `sift.set_verbosity("info")`, or `sift.set_verbosity(None)` to select debug,
 normal progress, or silence globally; per-call `verbose=False` remains silent.
 
-## Normalized Result Views (A2c)
+## Normalized Result Views (A2d)
 
 `sift.as_result(result, input_features=None)` returns a `SelectionView` without
-changing the legacy result object. The current A2c implementation supports
+changing the legacy result object. The current implementation supports
 `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
-`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`, plus a fitted
-`StabilitySelector`; permutation importance is still pending.
+`FeaturePathEvaluationResult`, `CatBoostSelectionResult`, and the opt-in
+`ImportanceResult`, plus a fitted `StabilitySelector`.
 
 ```python
 view = sift.as_result(result, input_features=X.columns)
@@ -48,14 +48,16 @@ view.table
 view.metadata
 ```
 
-Result-only views report `metadata["input_kind"] == "unknown"`, because the
-legacy objects cannot prove whether their source was named or positional.
+Legacy result-only views report `metadata["input_kind"] == "unknown"`, because
+those objects cannot prove whether their source was named or positional.
 Feature-path and CatBoost results expose normalized evaluation curves. Boruta
 maps mean importance to `gain` while preserving original positional order;
 CatBoost maps its retained final-model importance to `gain` and records the
-source explicitly. The five result-only adapters do not transform. A fitted
+source explicitly. `ImportanceResult` exposes a complete positional ranking
+and repeat matrix with explicit `ranking_only` semantics. The six result-only
+adapters do not transform. A fitted
 stability view exposes a frozen column-subset transform while leaving inverse
-transform unavailable. Proxy lookup is not available in A2c. See
+transform unavailable. Proxy lookup is not yet available. See
 [Reading Results](results.md) for the completeness matrix,
 versioned JSON format, and partial-table rules.
 
@@ -614,11 +616,24 @@ importance = permutation_importance(
     block_size="auto",
     random_state=0,
 )
+
+rich_importance = permutation_importance(
+    model,
+    X,
+    y,
+    n_repeats=10,
+    random_state=0,
+    return_result=True,
+)
+view = rich_importance.result_view()
 ```
 
-The result is a DataFrame with mean/std importance and per-repeat diagnostics.
-Use grouped or time-aware permutation methods when ordinary global shuffling
-would break the data-generating structure.
+The default result remains a DataFrame with mean/std importance. Opting into
+`ImportanceResult` adds `importances_`, a defensive-copy matrix with raw feature
+positions on rows and repeats on columns, plus the normalized result view. Its
+table is a complete ranking rather than a thresholded selection. Use grouped or
+time-aware permutation methods when ordinary global shuffling would break the
+data-generating structure.
 
 ## Boruta
 
