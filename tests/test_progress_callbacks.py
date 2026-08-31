@@ -221,6 +221,27 @@ def test_stability_callback_counts_fresh_info_and_preserves_result():
     )
 
 
+def test_stability_tune_threshold_keeps_fold_local_callbacks_silent():
+    X, y = _regression_frame(2)
+    events = []
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.25,
+        alpha=0.02,
+        random_state=2,
+        n_jobs=1,
+        verbose=False,
+        callback=lambda step, total, info: events.append((step, total, info)),
+    ).fit(X, y)
+
+    assert [step for step, _, _ in events] == [1, 2]
+    events.clear()
+
+    selector.tune_threshold(X, y, thresholds=(0.5,), cv=2)
+
+    assert events == []
+
+
 def test_stability_wrapper_forwards_callback_and_callback_errors_propagate():
     X, y = _regression_frame(1)
     events = []

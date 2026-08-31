@@ -645,7 +645,9 @@ classes), stability, Boruta, and CatBoost selectors accept
 completed greedy-path step, bootstrap, Boruta iteration, or CatBoost split,
 respectively. Each call receives a fresh snapshot dictionary; callback
 exceptions propagate, and callbacks supplement rather than replace `verbose`
-logging. The default `callback=None` makes no calls.
+logging. The default `callback=None` makes no calls. Internal cross-validation
+fits used by `StabilitySelector.tune_threshold()` do not re-fire the selector's
+public bootstrap callback.
 
 ## Low-Level Estimators
 

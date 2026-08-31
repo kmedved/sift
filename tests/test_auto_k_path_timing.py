@@ -111,7 +111,11 @@ def test_path_timing_artifacts_bind_strict_csv_to_provenance(monkeypatch, tmp_pa
         assert [int(row["seed"]) for row in reader] == [0, 1]
 
     # The strict runner output is accepted directly by the gate summarizer.
-    parsed = _read_path_timing_csv(csv_path)
+    parsed = _read_path_timing_csv(
+        csv_path,
+        require_clean=False,
+        verify_source_hashes=False,
+    )
     assert [(row.seed, row.runtime_s) for row in parsed] == [(0, 0.25), (1, 1.25)]
 
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))

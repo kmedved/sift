@@ -1,14 +1,19 @@
 import csv
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from benchmarks.summarize_auto_k_gates import (
     PATH_TIMING_COLUMNS,
+    PATH_TIMING_PROVENANCE_SCHEMA,
     RAW_COLUMNS,
     GateSummaryError,
     regenerate_gate_csv,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _raw_row(design, seed, method, *, k_hat, k_oracle, regret, runtime=0.01):
@@ -38,6 +43,38 @@ def _write_csv(path, columns, rows):
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_path_timing_provenance(path, *, full=True, dirty=False, source_hashes=None):
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if source_hashes is None:
+        source_relative = Path("benchmarks/summarize_auto_k_gates.py")
+        source_hashes = {str(source_relative): _sha256(REPO_ROOT / source_relative)}
+    provenance = {
+        "schema": PATH_TIMING_PROVENANCE_SCHEMA,
+        "artifact": {
+            "sha256": _sha256(path),
+            "columns": list(PATH_TIMING_COLUMNS),
+            "row_count": len(rows),
+        },
+        "configuration": {
+            "design": "D9",
+            "full": full,
+            "seeds": [int(row["seed"]) for row in rows],
+            "benchmark": "fixed_k_select_cached",
+        },
+        "git": {"commit": "fixture", "dirty": dirty},
+        "source_sha256": source_hashes,
+    }
+    path.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance),
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture
@@ -145,6 +182,7 @@ def gate_campaign(tmp_path):
             for seed in (0, 1)
         ],
     )
+    _write_path_timing_provenance(path_timing_path)
     return main_path, null_path, timing_path, path_timing_path
 
 
@@ -197,6 +235,98 @@ def test_gate_summary_rejects_missing_provenance(gate_campaign, tmp_path):
             oracle_aggregation=None,
         )
     assert not (tmp_path / "out.csv").exists()
+
+
+def test_gate_summary_rejects_missing_or_untrusted_path_timing_sidecar(
+    gate_campaign,
+    tmp_path,
+):
+    main_path, null_path, timing_path, path_timing_path = gate_campaign
+    output_path = tmp_path / "out.csv"
+    sidecar_path = path_timing_path.with_suffix(".provenance.json")
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    original_csv = path_timing_path.read_bytes()
+
+    sidecar_path.unlink()
+    with pytest.raises(GateSummaryError, match="cannot read fixed-k path timing provenance"):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            output_path,
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
+
+    sidecar["configuration"]["full"] = False
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    with pytest.raises(GateSummaryError, match="quick runs cannot feed release gates"):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            output_path,
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
+
+    sidecar["configuration"]["full"] = True
+    sidecar["git"]["dirty"] = True
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    with pytest.raises(GateSummaryError, match="clean git provenance is required"):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            output_path,
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
+
+    sidecar["git"]["dirty"] = False
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    path_timing_path.write_bytes(original_csv + b"\n")
+    with pytest.raises(GateSummaryError, match="artifact checksum does not match"):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            output_path,
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
+
+    path_timing_path.write_bytes(original_csv)
+    sidecar["source_sha256"] = {"benchmarks/summarize_auto_k_gates.py": "0" * 64}
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    with pytest.raises(GateSummaryError, match="source checksum no longer matches"):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            output_path,
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
+
+    assert not output_path.exists()
+
+
+def test_committed_dated_gate_is_bound_to_its_full_clean_provenance(tmp_path):
+    results = REPO_ROOT / "benchmarks/results"
+    output_path = tmp_path / "gates.csv"
+    regenerate_gate_csv(
+        results / "auto_k_v2_main.csv",
+        results / "auto_k_v2_null.csv",
+        results / "auto_k_v2_d9.csv",
+        output_path,
+        path_timing_path=(
+            results / "auto_k_v2_d9_fixed_k_path_2026-08-31.csv"
+        ),
+        oracle_aggregation="mean",
+    )
+    expected = results / "auto_k_v2_gates_mean_oracle_2026-08-31.csv"
+    assert output_path.read_bytes() == expected.read_bytes()
 
 
 def test_gate_summary_rejects_raw_schema_drift(gate_campaign, tmp_path):

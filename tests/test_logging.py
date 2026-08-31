@@ -108,6 +108,59 @@ def test_default_progress_is_visible_and_none_suppresses_it_without_logging_conf
     assert completed.stderr.count("mRMR classic: selecting 1 feature") == 1
 
 
+@pytest.mark.parametrize(
+    "handler_level",
+    [
+        pytest.param("logging.WARNING", id="warning-fallback"),
+        pytest.param("logging.INFO", id="info-external"),
+    ],
+)
+def test_external_handler_level_preserves_exactly_one_progress_message(handler_level):
+    script = textwrap.dedent(
+        f"""
+        import logging
+        import numpy as np
+        import sift
+
+        root = logging.getLogger()
+        handler = logging.StreamHandler()
+        handler.setLevel({handler_level})
+        root.addHandler(handler)
+
+        X = np.arange(48, dtype=np.float64).reshape(16, 3)
+        X[:, 1] = np.sin(X[:, 0])
+        X[:, 2] = np.cos(X[:, 0])
+        y = 2.0 * X[:, 0] - X[:, 1]
+        sift.select_mrmr(
+            X,
+            y,
+            k=1,
+            task="regression",
+            estimator="classic",
+            mrmr_backend="serial",
+            subsample=None,
+            verbose=True,
+        )
+        """
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(repo_root), env.get("PYTHONPATH")) if part
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert completed.stderr.count("mRMR classic: selecting 1 feature") == 1
+
+
 def test_verbose_false_is_silent(caplog):
     caplog.set_level(logging.DEBUG)
     sift.set_verbosity("debug")

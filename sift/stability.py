@@ -841,7 +841,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         fold_sizes = {value: [] for value in threshold_values}
 
         for train_idx, val_idx in split_iter:
-            fold_selector = clone(self).set_params(store_coefs=False, verbose=False)
+            fold_selector = clone(self).set_params(
+                store_coefs=False,
+                verbose=False,
+                callback=None,
+            )
             X_selector_train = (
                 X_selector_source.iloc[train_idx]
                 if isinstance(X_selector_source, pd.DataFrame)

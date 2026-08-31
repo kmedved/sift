@@ -90,10 +90,14 @@
   accept an additive `callback(step, total, info)` hook. Calls are one-based,
   happen after completed units, receive fresh metadata dictionaries, and
   propagate callback exceptions. `callback=None` retains the original kernels,
-  selections, return types, defaults, and logging behavior.
+  selections, return types, defaults, and logging behavior. Fold-local fits
+  inside `StabilitySelector.tune_threshold()` remain silent instead of
+  restarting the public bootstrap callback sequence for every fold.
 - Progress output now uses the `sift` package logger at INFO instead of direct
   `print` calls. Existing `verbose` defaults and silence behavior are unchanged;
-  `sift.set_verbosity("debug"|"info"|None)` is an additive global control.
+  `sift.set_verbosity("debug"|"info"|None)` is an additive global control. An
+  application handler whose level rejects INFO no longer suppresses the
+  default fallback progress stream.
   Every package warning now declares its category and a caller-facing stack
   level without changing warning counts or categories, and CEFS+ path-depth
   saturation reports the effective depth actually used.
@@ -104,7 +108,9 @@
   and permutation importance. Internal deprecation helpers have exact
   warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
   dedicated D9 fixed-path timing runner with checksum-bound environment/source
-  provenance. The clean `88a8705` run is committed as
+  provenance. The summarizer now requires the sidecar and verifies its full-run
+  mode, clean state, artifact checksum, seed set, and current source hashes. The
+  clean `88a8705` run is committed as
   `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` with
   `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`, and the explicit
   mean-oracle recomputation is
@@ -115,10 +121,11 @@
   matmul ufunc path, avoiding false divide/overflow warnings observed with
   NumPy 2.2 while preserving selections and statistics.
 - Distribution metadata now uses the SPDX `MIT` license expression and ships
-  the `py.typed` marker declared by PEP 561. Release CI builds and installs a
-  clean wheel, verifies its license and typed-package metadata, and rejects
-  leaked repository-only packages. GitHub releases retain build artifacts but
-  do not publish them to PyPI.
+  the `py.typed` marker declared by PEP 561. Release CI builds and metadata-checks
+  source and wheel distributions, clean-installs the exact wheel, verifies its
+  license and typed-package metadata, and rejects leaked repository-only packages.
+  The exact distributions are attached to the GitHub Release but are not published
+  to PyPI.
 
 - Smart-sampler regression targets now remain float64, are robustly centered
   on the pilot median, and use two-fold cross-fitted predictions for every row.
@@ -338,9 +345,10 @@
   Numba is a required dependency and remains covered by every base matrix job.
 - The built distribution is named `sift-feature-selection` while the import
   remains `sift`, avoiding a distribution-name clash with the occupied `Sift`
-  project. Wheels exclude benchmark packages, and release automation retains
-  verified build artifacts without publishing them to PyPI. Critical Ruff
-  checks and a scheduled quick benchmark promotion gate run in CI.
+  project. Wheels exclude benchmark packages, and release automation verifies
+  the exact wheel before attaching the source and wheel distributions to the
+  GitHub Release without publishing them to PyPI. Critical Ruff checks and a
+  scheduled quick benchmark promotion gate run in CI.
 
 ## 0.7.0
 

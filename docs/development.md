@@ -106,8 +106,9 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus optional CatBoost
 coverage, a clean-wheel installation smoke test, and a scheduled quick benchmark
-gate. GitHub releases build and retain verified source and wheel artifacts. This
-project does not publish those artifacts to PyPI.
+gate. Published GitHub releases build and metadata-check source and wheel
+distributions, clean-install the exact wheel, and attach those distributions to
+the GitHub Release. This project does not publish those artifacts to PyPI.
 
 Before release-oriented promotion, run:
 
@@ -125,9 +126,9 @@ python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Release tags must match `v` plus `sift.__version__`. The release workflow builds
-artifacts for GitHub Releases only; adding an external package index is a future
-owner decision rather than an implicit release step.
+Release tags must match `v` plus `sift.__version__`. The release workflow verifies
+the exact wheel it attaches to the existing GitHub Release; adding an external
+package index is a future owner decision rather than an implicit release step.
 
 For the 0.8.0 release bundle, the focused smoke is:
 

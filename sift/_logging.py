@@ -18,7 +18,7 @@ class _FallbackStderrHandler(logging.Handler):
     """Show progress by default, but defer to application logging handlers."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        if _has_external_handler():
+        if _has_external_handler(record):
             return
         try:
             message = self.format(record)
@@ -28,11 +28,14 @@ class _FallbackStderrHandler(logging.Handler):
             self.handleError(record)
 
 
-def _has_external_handler() -> bool:
+def _has_external_handler(record: logging.LogRecord) -> bool:
     current: logging.Logger | None = logger
     while current is not None:
         for handler in current.handlers:
-            if not getattr(handler, _HANDLER_MARKER, False):
+            if (
+                not getattr(handler, _HANDLER_MARKER, False)
+                and record.levelno >= handler.level
+            ):
                 return True
         if not current.propagate:
             break

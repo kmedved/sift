@@ -5,7 +5,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -28,9 +28,20 @@ jobs:
         run: python -m build
       - name: Check package metadata
         run: python -m twine check dist/*
-      - name: Upload distributions
+      - name: Verify clean wheel install
+        run: |
+          smoke_dir="$(mktemp -d)"
+          python -m venv "$smoke_dir/venv"
+          "$smoke_dir/venv/bin/python" -m pip install dist/*.whl
+          (cd "$smoke_dir" && "$smoke_dir/venv/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel_install.py")
+      - name: Upload workflow copy of distributions
         uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
           if-no-files-found: error
+      - name: Attach distributions to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber

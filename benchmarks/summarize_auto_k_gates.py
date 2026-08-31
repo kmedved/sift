@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
+import json
 import math
 import statistics
 from dataclasses import dataclass
@@ -35,6 +37,8 @@ RAW_COLUMNS = (
 
 PATH_TIMING_COLUMNS = ("design", "seed", "benchmark", "runtime_s")
 PATH_TIMING_BENCHMARK = "fixed_k_select_cached"
+PATH_TIMING_PROVENANCE_SCHEMA = "sift-auto-k-path-timing-provenance-v1"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 GATE_COLUMNS = (
     "method",
@@ -234,7 +238,115 @@ def _read_benchmark_csv(path: Path) -> list[BenchmarkRow]:
     return rows
 
 
-def _read_path_timing_csv(path: Path | None) -> list[PathTimingRow]:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_path_timing_provenance(
+    path: Path,
+    rows: Sequence[PathTimingRow],
+    *,
+    require_clean: bool,
+    verify_source_hashes: bool,
+) -> None:
+    provenance_path = path.with_suffix(".provenance.json")
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise GateSummaryError(
+            f"cannot read fixed-k path timing provenance {provenance_path}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise GateSummaryError(
+            f"{provenance_path}: invalid JSON provenance: {exc}"
+        ) from exc
+    if not isinstance(provenance, dict):
+        raise GateSummaryError(f"{provenance_path}: provenance must be a JSON object")
+    if provenance.get("schema") != PATH_TIMING_PROVENANCE_SCHEMA:
+        raise GateSummaryError(
+            f"{provenance_path}: unsupported provenance schema; expected "
+            f"{PATH_TIMING_PROVENANCE_SCHEMA!r}"
+        )
+
+    artifact = provenance.get("artifact")
+    if not isinstance(artifact, dict):
+        raise GateSummaryError(f"{provenance_path}: artifact provenance is required")
+    if artifact.get("sha256") != _sha256(path):
+        raise GateSummaryError(
+            f"{provenance_path}: artifact checksum does not match {path}"
+        )
+    if artifact.get("columns") != list(PATH_TIMING_COLUMNS):
+        raise GateSummaryError(f"{provenance_path}: artifact columns do not match the CSV schema")
+    if artifact.get("row_count") != len(rows):
+        raise GateSummaryError(f"{provenance_path}: artifact row_count does not match the CSV")
+
+    configuration = provenance.get("configuration")
+    if not isinstance(configuration, dict):
+        raise GateSummaryError(f"{provenance_path}: configuration provenance is required")
+    if configuration.get("full") is not True:
+        raise GateSummaryError(
+            f"{provenance_path}: full-size path timing provenance is required; quick runs "
+            "cannot feed release gates"
+        )
+    if configuration.get("design") != "D9":
+        raise GateSummaryError(f"{provenance_path}: configuration design must be D9")
+    if configuration.get("benchmark") != PATH_TIMING_BENCHMARK:
+        raise GateSummaryError(
+            f"{provenance_path}: configuration benchmark must be "
+            f"{PATH_TIMING_BENCHMARK!r}"
+        )
+    expected_seeds = [row.seed for row in rows]
+    if configuration.get("seeds") != expected_seeds:
+        raise GateSummaryError(
+            f"{provenance_path}: configuration seeds do not match the CSV rows"
+        )
+
+    git = provenance.get("git")
+    if not isinstance(git, dict):
+        raise GateSummaryError(f"{provenance_path}: git provenance is required")
+    if not isinstance(git.get("commit"), str) or not git["commit"]:
+        raise GateSummaryError(f"{provenance_path}: git commit provenance is required")
+    if require_clean and git.get("dirty") is not False:
+        raise GateSummaryError(
+            f"{provenance_path}: clean git provenance is required for release gates"
+        )
+
+    source_hashes = provenance.get("source_sha256")
+    if not isinstance(source_hashes, dict) or not source_hashes:
+        raise GateSummaryError(f"{provenance_path}: non-empty source_sha256 is required")
+    if verify_source_hashes:
+        for relative, expected_hash in source_hashes.items():
+            if not isinstance(relative, str) or not isinstance(expected_hash, str):
+                raise GateSummaryError(
+                    f"{provenance_path}: source_sha256 must map paths to checksums"
+                )
+            relative_path = Path(relative)
+            source_path = (REPO_ROOT / relative_path).resolve()
+            if relative_path.is_absolute() or not source_path.is_relative_to(REPO_ROOT):
+                raise GateSummaryError(
+                    f"{provenance_path}: recorded source path must stay inside the repository: "
+                    f"{relative}"
+                )
+            if not source_path.is_file():
+                raise GateSummaryError(
+                    f"{provenance_path}: recorded source file is missing: {relative}"
+                )
+            if _sha256(source_path) != expected_hash:
+                raise GateSummaryError(
+                    f"{provenance_path}: recorded source checksum no longer matches: {relative}"
+                )
+
+
+def _read_path_timing_csv(
+    path: Path | None,
+    *,
+    require_clean: bool = True,
+    verify_source_hashes: bool = True,
+) -> list[PathTimingRow]:
     if path is None:
         raise GateSummaryError(
             "fixed-k path timing provenance is required; the post-path "
@@ -273,6 +385,12 @@ def _read_path_timing_csv(path: Path | None) -> list[PathTimingRow]:
             rows.append(PathTimingRow(design="D9", seed=seed, runtime_s=runtime))
     if not rows:
         raise GateSummaryError(f"{path}: fixed-k path timing input is empty")
+    _read_path_timing_provenance(
+        path,
+        rows,
+        require_clean=require_clean,
+        verify_source_hashes=verify_source_hashes,
+    )
     return rows
 
 
