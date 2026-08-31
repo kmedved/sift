@@ -8,6 +8,27 @@ import pytest
 import sift
 
 
+def test_select_cached_omitted_defaults_match_explicit_current_defaults(contract_data):
+    cache = sift.build_cache(contract_data.X.copy(), subsample=None)
+
+    omitted = sift.select_cached(cache, contract_data.y.copy(), k=2)
+    explicit = sift.select_cached(
+        cache,
+        contract_data.y.copy(),
+        k=2,
+        method="cefsplus",
+        top_m=None,
+        corr_prune="auto",
+        return_objective=False,
+        return_indices=False,
+        warn_noise_floor=True,
+        callback=None,
+    )
+
+    assert type(omitted) is type(explicit) is list
+    assert omitted == explicit == ["signal", "weak"]
+
+
 @pytest.mark.parametrize(
     "method",
     ("cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"),

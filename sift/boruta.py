@@ -21,6 +21,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
 from sift._logging import logger
+from sift._progress import ProgressCallback, report_progress
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
@@ -180,6 +181,9 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         Random seed.
     verbose : bool
         Print progress.
+    callback : callable, optional
+        Called after each completed Boruta iteration as
+        ``callback(step, total, info)``.
 
     Attributes
     ----------
@@ -217,6 +221,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         early_stop_rounds: int = 5,
         random_state: int = 0,
         verbose: bool = True,
+        callback: ProgressCallback | None = None,
     ):
         self.estimator = estimator
         self.n_estimators = n_estimators
@@ -239,6 +244,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.early_stop_rounds = early_stop_rounds
         self.random_state = random_state
         self.verbose = verbose
+        self.callback = callback
 
     def _get_default_estimator(self, y: np.ndarray | None = None):
         """Get default estimator based on importance backend and task."""
@@ -822,10 +828,11 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     status[j] = -1
                     decided_this_round += 1
 
-            if self.verbose:
+            if self.verbose or self.callback is not None:
                 n_acc = int((status == 1).sum())
                 n_rej = int((status == -1).sum())
                 n_ten = int((status == 0).sum())
+            if self.verbose:
                 if iter_n_estimators is not None:
                     logger.info(
                         "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
@@ -838,6 +845,19 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                             it + 1, thr, n_acc, n_rej, n_ten
                         )
                     )
+
+            if self.callback is not None:
+                report_progress(
+                    self.callback,
+                    n_trials,
+                    self.max_iter,
+                    stage="iteration",
+                    accepted=n_acc,
+                    rejected=n_rej,
+                    tentative=n_ten,
+                    shadow_threshold=thr,
+                    n_estimators=iter_n_estimators,
+                )
 
             if decided_this_round == 0 and n_trials >= decision_horizon:
                 no_progress_count += 1
@@ -967,6 +987,7 @@ def select_boruta(
     random_state: int = 0,
     verbose: bool = True,
     return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
     """
     Boruta feature selection.
@@ -1004,6 +1025,9 @@ def select_boruta(
     early_stop_rounds : int
     random_state : int
     verbose : bool
+    callback : callable, optional
+        Called after each completed iteration as
+        ``callback(step, total, info)``.
     return_result : bool
         If True, return BorutaResult instead of feature list.
 
@@ -1055,6 +1079,7 @@ def select_boruta(
         early_stop_rounds=early_stop_rounds,
         random_state=random_state,
         verbose=verbose,
+        callback=callback,
     )
     sel.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
 
@@ -1093,6 +1118,7 @@ def select_boruta_shap(
     random_state: int = 0,
     verbose: bool = True,
     return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
     """
     Boruta-Shap feature selection (convenience wrapper for importance='shap').
@@ -1133,6 +1159,7 @@ def select_boruta_shap(
         early_stop_rounds=early_stop_rounds,
         random_state=random_state,
         verbose=verbose,
+        callback=callback,
         return_result=return_result,
     )
 

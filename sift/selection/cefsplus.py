@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 
 from sift._numba import njit_optional_cache
+from sift._progress import ProgressCallback, report_progress
 from sift.estimators.copula import (
     FeatureCache,
     gaussian_mi_from_corr,
@@ -28,6 +29,7 @@ def _gaussian_mrmr_select(
     k: int,
     use_quotient: bool,
     floor: float = 1e-6,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     m = len(rel)
     k = min(k, m)
@@ -39,6 +41,14 @@ def _gaussian_mrmr_select(
     selected[0] = j0
     is_sel[j0] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="mrmr_quot" if use_quotient else "mrmr_diff",
+        )
 
     for t in range(1, k):
         last = selected[t - 1]
@@ -60,6 +70,14 @@ def _gaussian_mrmr_select(
         selected[t] = j
         is_sel[j] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                k,
+                stage="path",
+                selector="mrmr_quot" if use_quotient else "mrmr_diff",
+            )
 
     return selected[:count]
 
@@ -70,6 +88,7 @@ def _gaussian_jmi_select(
     rel: np.ndarray,
     k: int,
     use_min: bool,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     m = len(r_y)
     k = min(k, m)
@@ -81,6 +100,14 @@ def _gaussian_jmi_select(
     selected[0] = j0
     is_sel[j0] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="jmim" if use_min else "jmi",
+        )
 
     # Scratch buffers to avoid per-iteration allocations.
     r2 = np.empty(m, dtype=np.float64)
@@ -120,6 +147,14 @@ def _gaussian_jmi_select(
         selected[t] = j
         is_sel[j] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                k,
+                stage="path",
+                selector="jmim" if use_min else "jmi",
+            )
 
     return selected[:count]
 
@@ -239,6 +274,149 @@ def _cefsplus_loop_core(
 
 
 @njit_optional_cache(cache=True)
+def _cefsplus_callback_step(
+    R: np.ndarray,
+    tie_break_rel: np.ndarray,
+    scale: float,
+    eps: float,
+    t: int,
+    L: np.ndarray,
+    Ly: np.ndarray,
+    d: np.ndarray,
+    c: np.ndarray,
+    remaining: np.ndarray,
+    score: np.ndarray,
+    s1: np.ndarray,
+    s2: np.ndarray,
+    dy: float,
+) -> tuple[int, float, float, float]:
+    """Advance one CEFS+ step while keeping the callback in Python space."""
+    m = len(c)
+    if t == 0:
+        j = 0
+        best_rel = tie_break_rel[0]
+        for jj in range(1, m):
+            if tie_break_rel[jj] > best_rel:
+                best_rel = tie_break_rel[jj]
+                j = jj
+        s1_best = 1.0
+        s2_best = max(1.0 - c[j] * c[j], eps)
+    else:
+        best_pos = -1
+        best_score = -np.inf
+        for jj in range(m):
+            if not remaining[jj]:
+                continue
+            s1_j = max(d[jj], eps)
+            s2_j = max(d[jj] - c[jj] * c[jj] / dy, eps)
+            s1[jj] = s1_j
+            s2[jj] = s2_j
+            sc = np.log(s1_j) - np.log(s2_j)
+            score[jj] = sc
+            if best_pos < 0 or sc > best_score:
+                best_score = sc
+                best_pos = jj
+        if best_pos < 0:
+            return -1, dy, 0.0, 0.0
+        j = best_pos
+        best_rel = tie_break_rel[j]
+        for jj in range(m):
+            if remaining[jj] and np.abs(score[jj] - best_score) < 1e-12:
+                if tie_break_rel[jj] > best_rel:
+                    best_rel = tie_break_rel[jj]
+                    j = jj
+        s1_best = s1[j]
+        s2_best = s2[j]
+
+    sq = np.sqrt(s1_best)
+    ly = c[j] / sq
+    Ly[t] = ly
+    dy -= ly * ly
+    for i in range(m):
+        if not remaining[i] or i == j:
+            continue
+        acc = R[i, j] * scale
+        for a in range(t):
+            acc -= L[i, a] * L[j, a]
+        lij = acc / sq
+        L[i, t] = lij
+        d[i] -= lij * lij
+        c[i] -= lij * ly
+
+    remaining[j] = False
+    return j, dy, np.log(s1_best), np.log(s2_best)
+
+
+def _cefsplus_loop_with_callback(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    callback: ProgressCallback,
+    *,
+    want_objective: bool,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run the compiled CEFS+ state machine one step at a time for callbacks."""
+    m = len(r)
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    k = min(k, m)
+
+    scale = 1.0 - shrink
+    selected = np.empty(k, dtype=np.int64)
+    objective = np.empty(k if want_objective else 0, dtype=np.float64)
+    remaining = np.ones(m, dtype=np.bool_)
+    L = np.zeros((m, k), dtype=np.float64)
+    Ly = np.zeros(k, dtype=np.float64)
+    d = np.ones(m, dtype=np.float64)
+    c = scale * np.asarray(r, dtype=np.float64)
+    score = np.empty(m, dtype=np.float64)
+    s1 = np.empty(m, dtype=np.float64)
+    s2 = np.empty(m, dtype=np.float64)
+    dy = 1.0
+    logdet_S = 0.0
+    logdet_yS = 0.0
+    count = 0
+
+    while count < k:
+        j, dy, log_s1, log_s2 = _cefsplus_callback_step(
+            R,
+            tie_break_rel,
+            scale,
+            eps,
+            count,
+            L,
+            Ly,
+            d,
+            c,
+            remaining,
+            score,
+            s1,
+            s2,
+            dy,
+        )
+        if j < 0:
+            break
+        selected[count] = j
+        logdet_S += log_s1
+        logdet_yS += log_s2
+        if want_objective:
+            objective[count] = logdet_S - logdet_yS
+        count += 1
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="cefsplus",
+        )
+
+    return selected[:count], objective[:count]
+
+
+@njit_optional_cache(cache=True)
 def cefsplus_loop(
     R: np.ndarray,
     r: np.ndarray,
@@ -342,6 +520,7 @@ def select_cached(
     return_objective: bool = False,
     return_indices: bool = False,
     warn_noise_floor: bool = True,
+    callback: ProgressCallback | None = None,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
 ]:
@@ -377,7 +556,18 @@ def select_cached(
 
     objective = None
     if method == "cefsplus":
-        if return_objective:
+        if callback is not None:
+            sel_local, callback_objective = _cefsplus_loop_with_callback(
+                R_cand,
+                r_cand,
+                k_actual,
+                rel_cand,
+                callback,
+                want_objective=return_objective,
+            )
+            if return_objective:
+                objective = callback_objective
+        elif return_objective:
             sel_local, objective = cefsplus_loop_with_objective(R_cand, r_cand, k_actual, rel_cand)
         else:
             sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
@@ -387,6 +577,7 @@ def select_cached(
             rel_cand,
             k_actual,
             use_quotient=method == "mrmr_quot",
+            callback=callback,
         )
         if warn_noise_floor:
             _warn_gaussian_mrmr_noise_floor(panel, sel_local, method)
@@ -397,6 +588,7 @@ def select_cached(
             rel_cand,
             k_actual,
             use_min=method == "jmim",
+            callback=callback,
         )
     else:
         raise ValueError(f"Unknown method: {method}")

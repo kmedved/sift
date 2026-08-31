@@ -317,8 +317,12 @@ def _weighted_variance(Z: np.ndarray, w: np.ndarray, *, batch_size: int = 50_000
         stop = min(Z_arr.shape[0], start + batch_size)
         Zb = np.asarray(Z_arr[start:stop], dtype=np.float64)
         wb = w64[start:stop]
-        sums += wb @ Zb
-        sq_sums += wb @ (Zb * Zb)
+        # ``np.matmul`` can emit spurious floating-point warnings for finite
+        # vector-matrix products with some NumPy 2.x/BLAS combinations.  Dot
+        # has the same BLAS-backed reduction semantics without that ufunc
+        # warning path.
+        sums += np.dot(wb, Zb)
+        sq_sums += np.dot(wb, Zb * Zb)
     mean = sums / w_sum
     var = sq_sums / w_sum - mean * mean
     np.maximum(var, 0.0, out=var)

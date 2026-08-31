@@ -205,6 +205,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 corr_prune=_kw(ctx, "corr_prune", "auto"),
                 return_indices=True,
                 return_objective=True,
+                callback=ctx.request.callback,
             )
         else:
             selected, selected_indices = select_cached(
@@ -215,6 +216,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 top_m=top_m,
                 corr_prune=_kw(ctx, "corr_prune", "auto"),
                 return_indices=True,
+                callback=ctx.request.callback,
             )
             objective = None
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
@@ -297,6 +299,7 @@ def make_auto_gaussian(
             corr_prune=_kw(ctx, "corr_prune", "auto"),
             feature_names=ctx.feature_names,
             verbose=_kw(ctx, "verbose"),
+            callback=ctx.request.callback,
         )
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
             ctx,
@@ -426,6 +429,7 @@ def make_jmi_classic_path(*, aggregation: str, pass_sample_weight: bool) -> Clas
             )
             if pass_sample_weight
             else None,
+            callback=ctx.request.callback,
         )
 
     return jmi_classic_path
@@ -589,6 +593,7 @@ def _build_binary_run(ctx: "FilterContext") -> tuple[BinaryProblem, BinaryOption
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         random_state=_kw(ctx, "random_state"),
         verbose=_kw(ctx, "verbose"),
+        callback=ctx.request.callback,
     )
     return problem, options, run
 
@@ -734,6 +739,7 @@ def _mrmr_classic_path(ctx: "FilterContext", prep: ClassicPrepared, k: int, top_
         sample_weight=prep.w,
         n_jobs=ctx.n_jobs,
         mrmr_backend=ctx.mrmr_backend,
+        callback=ctx.request.callback,
     )
 
 

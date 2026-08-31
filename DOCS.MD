@@ -1691,6 +1691,16 @@ small_set = result.features_within_tolerance(tolerance=0.01)
 fig, ax = result.plot_scores_vs_k()
 ```
 
+### Progress callbacks
+
+Long-running filter paths (including `select_cached` and the filter selector
+classes), stability, Boruta, and CatBoost selectors accept
+`callback(step, total, info)`. Steps are one-based and are reported after each
+completed greedy-path step, bootstrap, Boruta iteration, or CatBoost split,
+respectively. Each call receives a fresh snapshot dictionary; callback
+exceptions propagate, and callbacks supplement rather than replace `verbose`
+logging. The default `callback=None` makes no calls.
+
 ## Low-Level Selection Utilities
 
 Advanced utilities are available from `sift.selection`.

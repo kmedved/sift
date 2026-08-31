@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import numpy as np
 import pandas as pd
@@ -125,6 +125,40 @@ def test_arrow_duration_feature_columns_are_rejected_everywhere(unit):
     X = pd.DataFrame(
         {
             "temporal": duration,
+            "legitimate_numeric": np.arange(4, dtype=np.float64),
+        }
+    )
+    y = np.arange(4, dtype=np.float64)
+
+    for call in (
+        lambda: validate_inputs(X, y, task="regression"),
+        lambda: build_cache(X, subsample=None),
+        lambda: BorutaSelector(max_iter=1, verbose=False).fit(X, y),
+        lambda: StabilitySelector(
+            n_bootstrap=1,
+            alpha=0.1,
+            n_jobs=1,
+            verbose=False,
+        ).fit(X, y),
+    ):
+        with pytest.raises(ValueError, match="Datetime or timedelta"):
+            call()
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    ["time32[s][pyarrow]", "time64[us][pyarrow]"],
+    ids=["time32", "time64"],
+)
+def test_arrow_time_feature_columns_are_rejected_everywhere(dtype):
+    pytest.importorskip("pyarrow")
+    temporal = pd.Series(
+        [time(hour) for hour in range(4)],
+        dtype=dtype,
+    )
+    X = pd.DataFrame(
+        {
+            "temporal": temporal,
             "legitimate_numeric": np.arange(4, dtype=np.float64),
         }
     )

@@ -6,7 +6,7 @@ import pytest
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import KFold
 
-from sift.selection.path_eval import evaluate_feature_path
+from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 
 
 
@@ -35,6 +35,7 @@ def test_evaluate_feature_path_explicit_grid_returns_expected_fields():
         random_state=1,
     )
 
+    assert type(result) is FeaturePathEvaluationResult
     assert result.k == [1, 3]
     assert result.best_k in {1, 3}
     assert result.features == (["x0"] if result.best_k == 1 else ["x0", "x1", "x2"])

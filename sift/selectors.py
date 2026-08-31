@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
+from sift._progress import ProgressCallback
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     ensure_weights,
@@ -546,6 +547,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             params["cache"] = None
         if "verbose" in params:
             params["verbose"] = False
+        if "callback" in params:
+            # Nested folds each build their own local path. Keep the public
+            # callback sequence reserved for the final refit instead of
+            # emitting several unrelated 1..max_k sequences.
+            params["callback"] = None
         return self.__class__(**params)
 
     def _fit_nested_auto_k(
@@ -573,6 +579,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             else None
         )
         eval_w_arr = self._nested_eval_sample_weight(y, sample_weight)
+        fold_fit_params = dict(fit_params or {})
+        # A fit-time callback override belongs to the public fit, just like a
+        # constructor callback. Fold-local paths restart at step one, so keep
+        # them silent and report only the final full-data refit below.
+        fold_fit_params.pop("callback", None)
 
         def build_fold_path(train_idx: np.ndarray, val_idx: np.ndarray, max_k: int):
             fold_selector = self._clone_for_nested_path(max_k)
@@ -581,7 +592,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 train_X,
                 y_arr[train_idx],
                 sample_weight=fit_w_arr[train_idx] if fit_w_arr is not None else None,
-                **(fit_params or {}),
+                **fold_fit_params,
             )
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
             return NestedAutoKFold(
@@ -696,6 +707,7 @@ class MRMRSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
     ):
         self._init_selector(select_mrmr, locals())
 
@@ -722,6 +734,7 @@ class JMISelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
     ):
         self._init_selector(select_jmi, locals())
 
@@ -748,6 +761,7 @@ class JMIMSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
     ):
         self._init_selector(select_jmim, locals())
 
@@ -772,6 +786,7 @@ class CEFSPlusSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
     ):
         self._init_selector(select_cefsplus, locals())
 
@@ -802,6 +817,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         random_state: int = 0,
         verbose: bool = True,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
     ):
         self._init_selector(select_cefsplus_binary, locals())
 

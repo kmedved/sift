@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
 from sift._logging import logger
+from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import best_score_from_dict, infer_higher_is_better
 from sift.catboost_common import (
     CatBoostClassifier,
@@ -323,6 +324,7 @@ def _run_catboost_split_evaluation(
     steps: int,
     k_req: Optional[int],
     verbose: bool,
+    callback: ProgressCallback | None = None,
 ) -> tuple[Dict[int, List[float]], Dict[int, List[List[str]]], Optional[List[str]]]:
     all_scores: Dict[int, List[float]] = defaultdict(list)
     all_features_by_k: Dict[int, List[List[str]]] = defaultdict(list)
@@ -449,6 +451,28 @@ def _run_catboost_split_evaluation(
                 )
             else:
                 logger.info(f"  Split {fold_idx + 1}/{len(splits)}: no valid scores")
+
+        if callback is not None:
+            if scores:
+                callback_best_k, callback_best_score = best_score_from_dict(
+                    scores, resolved_hib
+                )
+                callback_best_k = int(callback_best_k)
+                callback_best_score = float(callback_best_score)
+            else:
+                callback_best_k, callback_best_score = None, None
+            report_progress(
+                callback,
+                fold_idx + 1,
+                len(splits),
+                stage="split",
+                train_rows=int(len(train_idx)),
+                validation_rows=int(len(val_idx)),
+                candidate_features=int(len(features)),
+                evaluated_counts=int(len(scores)),
+                best_k=callback_best_k,
+                best_score=callback_best_score,
+            )
 
     return all_scores, all_features_by_k, prefilter_features_first
 
@@ -684,8 +708,12 @@ def catboost_select(
     higher_is_better: Optional[bool] = None,
     random_state: Optional[int] = None,
     verbose: bool = True,
+    callback: ProgressCallback | None = None,
 ) -> CatBoostSelectionResult:
-    """Run CatBoost feature selection and return scores, paths, and final importances."""
+    """Run CatBoost feature selection and return scores, paths, and final importances.
+
+    ``callback(step, total, info)`` is called after each completed split.
+    """
     k_req = k
     if CatBoostRegressor is None:
         raise ImportError(
@@ -788,6 +816,7 @@ def catboost_select(
         steps=steps,
         k_req=k_req,
         verbose=verbose,
+        callback=callback,
     )
     target_k, best_k, best_score, scores_mean, scores_std = _choose_catboost_target_k(
         all_scores,
@@ -854,14 +883,32 @@ def _catboost_task_features(
     return catboost_select(X, y, k=k, task=task, **kwargs).selected_features
 
 
-def catboost_regression(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+def catboost_regression(
+    X: pd.DataFrame,
+    y: pd.Series,
+    k: int,
+    *,
+    callback: ProgressCallback | None = None,
+    **kwargs,
+) -> List[str]:
     """CatBoost feature selection for regression."""
-    return _catboost_task_features(X, y, k, task='regression', **kwargs)
+    return _catboost_task_features(
+        X, y, k, task='regression', callback=callback, **kwargs
+    )
 
 
-def catboost_classif(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+def catboost_classif(
+    X: pd.DataFrame,
+    y: pd.Series,
+    k: int,
+    *,
+    callback: ProgressCallback | None = None,
+    **kwargs,
+) -> List[str]:
     """CatBoost feature selection for classification."""
-    return _catboost_task_features(X, y, k, task='classification', **kwargs)
+    return _catboost_task_features(
+        X, y, k, task='classification', callback=callback, **kwargs
+    )
 
 
 __all__ = [

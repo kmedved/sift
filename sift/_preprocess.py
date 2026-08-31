@@ -152,17 +152,25 @@ def extract_feature_names(X) -> Optional[List[str]]:
 
 def _is_temporal_feature_dtype(dtype) -> bool:
     """Recognize NumPy, pandas, and Arrow-backed datetime/duration dtypes."""
+    arrow_dtype = getattr(dtype, "pyarrow_dtype", None)
+    arrow_kind = (
+        str(arrow_dtype).partition("[")[0]
+        if arrow_dtype is not None
+        else None
+    )
     return (
         pd.api.types.is_datetime64_any_dtype(dtype)
         or pd.api.types.is_timedelta64_dtype(dtype)
         # pandas 2.2 does not classify Arrow duration dtypes as timedelta,
         # but they retain NumPy's temporal dtype kind.
         or getattr(dtype, "kind", None) in {"M", "m"}
+        # Arrow time-of-day dtypes instead report object kind.
+        or arrow_kind in {"date32", "date64", "duration", "time32", "time64", "timestamp"}
     )
 
 
 def reject_datetime_like_features(X) -> None:
-    """Reject pandas datetime/timedelta features before numeric coercion."""
+    """Reject NumPy, pandas, and Arrow temporal features before coercion."""
     temporal_object_types = (
         date,
         datetime,
@@ -215,7 +223,8 @@ def reject_datetime_like_features(X) -> None:
         sample = datetime_like[:5]
         suffix = "..." if len(datetime_like) > 5 else ""
         raise ValueError(
-            "Datetime or timedelta feature columns are not supported: "
+            "Datetime or timedelta feature columns (including time-of-day values) "
+            "are not supported: "
             f"{sample}{suffix}. Convert them to numeric features explicitly."
         )
 

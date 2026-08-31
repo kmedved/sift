@@ -518,6 +518,7 @@ def select_gaussian_evaluate_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
@@ -560,6 +561,7 @@ def select_gaussian_elbow_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_elbow_count(objective, auto_k_config, len(path))
     _print_selected_k("Elbow", selected_count, verbose)
@@ -589,6 +591,7 @@ def select_gaussian_penalized_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_penalized_count(
         objective,
@@ -636,6 +639,7 @@ def select_gaussian_posterior_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_posterior_count(
         objective,
@@ -686,6 +690,7 @@ def select_gaussian_chi2_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -739,6 +744,7 @@ def select_gaussian_forward_stop_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -792,6 +798,7 @@ def select_gaussian_changepoint_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     selected_count, auto_diag = select_k_changepoint(
@@ -848,6 +855,7 @@ def select_gaussian_perm_gap_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     nulls = null_objective_paths(
         cache,
@@ -902,6 +910,7 @@ def select_gaussian_xfit_objective_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     curves = xfit_objective_curves(
         cache,
@@ -962,6 +971,7 @@ def select_gaussian_cv_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     curves = gaussian_cv_curves(
         cache,
@@ -1031,6 +1041,7 @@ def select_gaussian_knockoff_path(
             corr_prune=corr_prune,
             want_indices=True,
             return_objective=False,
+            callback=_unused.get("callback"),
         )
         selected_count = min(selected_count, len(path))
         selected = path[:selected_count]
@@ -1103,6 +1114,7 @@ def select_gaussian_stability_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     boot = bootstrap_paths(
         cache,
@@ -1226,7 +1238,13 @@ def select_gaussian_auto_path(
         }
         selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
             fallback_config,
-            **{**runner_kwargs, "auto_k_config": fallback_config},
+            **{
+                **runner_kwargs,
+                "auto_k_config": fallback_config,
+                # The fallback rebuilds the same greedy path under a different
+                # stopping rule. Do not duplicate/reset path progress events.
+                "callback": None,
+            },
         )
 
     summary = dict(summary)
@@ -1495,6 +1513,7 @@ def select_gaussian_consensus_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     rows = []
     for name in auto_k_config.consensus_methods:
@@ -1582,7 +1601,7 @@ def select_gaussian_consensus_path(
 
 def _cached_filter_path(
     cache, y, k: int, *, method: str, top_m: int, corr_prune,
-    want_indices: bool, return_objective: bool,
+    want_indices: bool, return_objective: bool, callback=None,
 ) -> tuple[list[str], list[int], np.ndarray | None]:
     from sift.selection.cefsplus import select_cached
 
@@ -1596,6 +1615,7 @@ def _cached_filter_path(
         return_indices=want_indices,
         return_objective=return_objective,
         warn_noise_floor=False,
+        callback=callback,
     )
     if return_objective and want_indices:
         path, indices, objective = result

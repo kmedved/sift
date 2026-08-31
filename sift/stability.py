@@ -29,6 +29,7 @@ from joblib import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
 from sift._logging import logger
+from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, reject_datetime_like_features
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
 
@@ -166,6 +167,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         Random seed for reproducibility.
     verbose : bool, default=True
         Print progress information.
+    callback : callable, optional
+        Called after each completed bootstrap as
+        ``callback(step, total, info)``.
 
     Attributes
     ----------
@@ -202,7 +206,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         n_jobs: int = -1,
         parallel_backend: str = 'threads',
         random_state: Optional[int] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        callback: ProgressCallback | None = None,
     ):
         self.n_bootstrap = n_bootstrap
         self.sample_frac = sample_frac
@@ -222,6 +227,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.parallel_backend = parallel_backend
         self.random_state = random_state
         self.verbose = verbose
+        self.callback = callback
 
     def fit(
         self,
@@ -535,6 +541,15 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 if self.store_coefs:
                     self.coef_bootstrap_[bootstrap_idx] = coef_summary
                 bootstrap_idx += 1
+                if self.callback is not None:
+                    report_progress(
+                        self.callback,
+                        bootstrap_idx,
+                        self.n_bootstrap,
+                        stage="bootstrap",
+                        task=self.task,
+                        selected_features=int(np.count_nonzero(selected)),
+                    )
 
             # chunk_results goes out of scope here, memory freed
 
@@ -1460,12 +1475,15 @@ def stability_select(
     y: Union[np.ndarray, pd.Series],
     threshold: float = 0.6,
     n_bootstrap: int = 50,
+    *,
+    callback: ProgressCallback | None = None,
     **kwargs,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Quick stability selection returning selected indices and frequencies."""
     selector = StabilitySelector(
         threshold=threshold,
         n_bootstrap=n_bootstrap,
+        callback=callback,
         **kwargs,
     )
     selector.fit(X, y)
@@ -1500,6 +1518,8 @@ def stability_regression(
     X: Union[np.ndarray, pd.DataFrame],
     y: Union[np.ndarray, pd.Series],
     k: int,
+    *,
+    callback: ProgressCallback | None = None,
     **kwargs,
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for regression.
@@ -1508,13 +1528,17 @@ def stability_regression(
     (``k`` caps the count via ``max_features``; it is not an exact-size
     guarantee). Never-selected features are not used to pad the result.
     """
-    return _stability_task_features("regression", X, y, k, **kwargs)
+    return _stability_task_features(
+        "regression", X, y, k, callback=callback, **kwargs
+    )
 
 
 def stability_classif(
     X: Union[np.ndarray, pd.DataFrame],
     y: Union[np.ndarray, pd.Series],
     k: int,
+    *,
+    callback: ProgressCallback | None = None,
     **kwargs,
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for classification.
@@ -1523,4 +1547,6 @@ def stability_classif(
     (``k`` caps the count via ``max_features``; it is not an exact-size
     guarantee). Never-selected features are not used to pad the result.
     """
-    return _stability_task_features("classification", X, y, k, **kwargs)
+    return _stability_task_features(
+        "classification", X, y, k, callback=callback, **kwargs
+    )

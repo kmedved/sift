@@ -637,6 +637,16 @@ cls_features = sift.catboost_classif(X, y, k=20, algorithm="forward")
 Install with `python -m pip install -e ".[catboost]"` before using these
 helpers.
 
+### Progress callbacks
+
+Long-running filter paths (including `select_cached` and the filter selector
+classes), stability, Boruta, and CatBoost selectors accept
+`callback(step, total, info)`. Steps are one-based and are reported after each
+completed greedy-path step, bootstrap, Boruta iteration, or CatBoost split,
+respectively. Each call receives a fresh snapshot dictionary; callback
+exceptions propagate, and callbacks supplement rather than replace `verbose`
+logging. The default `callback=None` makes no calls.
+
 ## Low-Level Estimators
 
 Advanced users can import submodules directly:

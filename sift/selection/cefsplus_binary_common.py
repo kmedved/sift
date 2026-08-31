@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from sift._logging import logger
+from sift._progress import ProgressCallback
 from sift._preprocess import (
     encode_categoricals,
     ensure_weights,
@@ -205,6 +206,7 @@ def build_binary_logloss_path(
     allow_full_data_target_encoding: bool,
     random_state: int,
     verbose: bool,
+    callback: ProgressCallback | None = None,
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
@@ -248,6 +250,7 @@ def build_binary_logloss_path(
         corr_prune=options.corr_prune,
         ridge=options.ridge,
         refit_every=options.refit_every,
+        callback=callback,
     )
     return BinaryPathRun(
         path=path,

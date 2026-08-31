@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## 0.9.0a1 (2026-08-31)
 
 ### Breaking changes and migration
 
@@ -62,9 +62,10 @@
   rejects row `groups`/`time` in every mode; its `feature_groups` option groups
   features, not observations.
 - Datetime and timedelta feature columns, including native and object-typed
-  NumPy arrays, now raise before numeric coercion in classic, cache, Boruta,
-  and stability-selection paths. Derive explicit numeric calendar or
-  elapsed-time features before selection.
+  NumPy arrays and Arrow date, duration, timestamp, and time-of-day dtypes,
+  now raise before numeric coercion in classic, cache, Boruta, and
+  stability-selection paths. Derive explicit numeric calendar or elapsed-time
+  features before selection.
 - Function-style filters using `task="classification"` follow sklearn's
   discrete-target contract. String, categorical, integer, and integer-valued
   floating labels remain valid; non-integral numeric class codes such as
@@ -84,19 +85,30 @@
 
 ### Correctness, API, and documentation
 
+- Long-running fixed and Auto-K filter paths, `select_cached`, filter selector
+  classes, stability bootstraps, Boruta iterations, and CatBoost splits now
+  accept an additive `callback(step, total, info)` hook. Calls are one-based,
+  happen after completed units, receive fresh metadata dictionaries, and
+  propagate callback exceptions. `callback=None` retains the original kernels,
+  selections, return types, defaults, and logging behavior.
 - Progress output now uses the `sift` package logger at INFO instead of direct
   `print` calls. Existing `verbose` defaults and silence behavior are unchanged;
   `sift.set_verbosity("debug"|"info"|None)` is an additive global control.
   Every package warning now declares its category and a caller-facing stack
   level without changing warning counts or categories, and CEFS+ path-depth
   saturation reports the effective depth actually used.
-- The first 0.9 compatibility matrix now covers fixed-k functions, cache tuple
-  shapes, five sklearn-style filter wrappers, stability, Boruta, knockoffs, and
-  permutation importance across named/positional and weighted/unweighted calls.
-  Internal deprecation helpers have exact warn-and-forward tests. A deterministic
-  Auto-K gate summarizer is available, but the legacy gate artifact remains
-  unreproducible until its missing fixed-k path timing and mixed oracle-aggregation
-  provenance are resolved; the existing CSV is intentionally unchanged.
+- The 0.9 compatibility matrix now covers every public export behaviorally and
+  expands the high-risk cross-products across fixed/Auto-K filters, cache tuple
+  shapes and defaults, group/time contexts, categoricals, smart sampling,
+  `select_fdr`, CatBoost, sklearn-style wrappers, stability, Boruta, knockoffs,
+  and permutation importance. Internal deprecation helpers have exact
+  warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
+  dedicated D9 fixed-path timing runner with checksum-bound environment/source
+  provenance; the mixed-convention legacy gate CSV remains intentionally
+  unchanged.
+- Finite weighted knockoff-variance reductions use `np.dot` instead of NumPy's
+  matmul ufunc path, avoiding false divide/overflow warnings observed with
+  NumPy 2.2 while preserving selections and statistics.
 - Distribution metadata now uses the SPDX `MIT` license expression and ships
   the `py.typed` marker declared by PEP 561. Release CI builds and installs a
   clean wheel, verifies its license and typed-package metadata, and rejects

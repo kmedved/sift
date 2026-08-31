@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from sift._progress import ProgressCallback, report_progress
+
 
 @dataclass
 class BinaryCEFSPlusPath:
@@ -415,6 +417,7 @@ def select_binary_logistic_path(
     corr_prune: float | None,
     ridge: float,
     refit_every: int,
+    callback: ProgressCallback | None = None,
 ) -> BinaryCEFSPlusPath:
     Z, valid_mask, _, _ = weighted_standardize(X, w)
     valid_original = np.flatnonzero(valid_mask)
@@ -557,6 +560,14 @@ def select_binary_logistic_path(
         selected.append(best_local)
         selected_mask[best_local] = True
         path_scores.append(float(scores[best_pos]))
+        if callback is not None:
+            report_progress(
+                callback,
+                len(selected),
+                min(int(k), int(Z_work.shape[1])),
+                stage="path",
+                selector="cefsplus_binary",
+            )
 
     selected_original = [int(work_to_original[i]) for i in selected]
     selected_features = [feature_names[i] for i in selected_original]

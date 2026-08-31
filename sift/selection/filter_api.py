@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
+from sift._progress import ProgressCallback
 from sift._preprocess import (
     CatEncoding,
     EstimatorJMI,
@@ -129,6 +130,7 @@ class FilterRequest:
     sample_weight: np.ndarray | None = None
     return_result: bool = False
     selector_kwargs: dict[str, Any] | None = None
+    callback: ProgressCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,7 @@ _COMMON_REQUEST_LOCAL_NAMES = frozenset(
         "time",
         "auto_k_config",
         "sample_weight",
+        "callback",
         "return_result",
     }
 )
@@ -245,6 +248,7 @@ def _request_from_public_locals(
         time=values.get("time"),
         auto_k_config=values.get("auto_k_config"),
         sample_weight=values.get("sample_weight"),
+        callback=values.get("callback"),
         return_result=bool(values.get("return_result", False)),
         selector_kwargs={name: values[name] for name in selector_names},
     )
@@ -263,6 +267,7 @@ def select_mrmr(
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
     verbose: bool = True, return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Minimum Redundancy Maximum Relevance feature selection."""
     request = _request_from_public_locals(
@@ -285,6 +290,7 @@ def select_jmi(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Joint Mutual Information feature selection."""
     request = _request_from_public_locals(
@@ -307,6 +313,7 @@ def select_jmim(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation."""
     request = _request_from_public_locals(
@@ -331,6 +338,7 @@ def select_cefsplus(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """CEFS+ feature selection using log-det Gaussian MI proxy."""
     request = _request_from_public_locals(
@@ -356,6 +364,7 @@ def select_cefsplus_binary(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = None, random_state: int = 0,
     verbose: bool = True, return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy."""
     request = _request_from_public_locals(
@@ -670,6 +679,7 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         subsample=options.subsample,
         random_state=kw("random_state"),
         verbose=kw("verbose"),
+        callback=request.callback,
         return_result=request.return_result,
     )
     if not request.return_result:
