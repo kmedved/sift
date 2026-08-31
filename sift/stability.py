@@ -263,6 +263,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         """
         self._clear_fit_state()
         try:
+            self._fit_input_kind_ = (
+                "dataframe" if isinstance(X, pd.DataFrame) else "positional"
+            )
             self._fit_used_sample_weight_ = sample_weight is not None
             self._fit_used_groups_ = groups is not None
             self._fit_used_time_ = time is not None
@@ -331,6 +334,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             "_alpha_ref_weight_",
             "_target_center_",
             "_fit_feature_names_generated_",
+            "_fit_input_kind_",
             "_fit_used_groups_",
             "_fit_used_sample_weight_",
             "_fit_used_time_",
@@ -584,6 +588,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             logger.info(f"Selected {self.n_features_selected_} / {p} features")
 
         return self
+
+    @property
+    def result_view_(self):
+        """Return a normalized, non-cached view of this fitted selector."""
+        from sift.selection.view import as_result
+
+        return as_result(self)
 
     def _select_dataframe_columns(
         self,

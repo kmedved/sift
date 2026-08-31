@@ -19,12 +19,20 @@
   distinction, normalizes the direction-aware score curve, derives standard
   errors only when raw split scores provide a denominator, and keeps raw
   identity partial unless the caller supplies it explicitly.
+- The A2c slice adds a dynamic `StabilitySelector.result_view_` and
+  `sift.as_result(fitted_selector)` adapter. Its complete table uses fitted
+  candidate order, maps mean absolute coefficient to `gain`, preserves capped
+  selection membership from the legacy integer indices, and exposes a frozen
+  column-subset transform without retaining training rows or bootstrap
+  coefficient matrices. New fits record DataFrame-versus-positional provenance;
+  no constructor parameter, legacy fitted attribute, return type, or default
+  changes.
 - A1 views serialize to JSON-safe schema version `"1"`, preserve positional
   identity in `selected_index`, report incomplete tables explicitly, and use
   `input_kind="unknown"` when a legacy result cannot prove whether its source
   was named or positional. Result-only transform, inverse-transform, proxy
-  storage, route-level Auto-K curves, and the other two adapter families remain
-  pending; Workstream A is not complete.
+  storage, route-level Auto-K curves, and the permutation-importance adapter
+  remain pending; Workstream A is not complete.
 
 ## 0.9.0a1 (2026-08-31)
 

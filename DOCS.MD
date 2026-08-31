@@ -343,9 +343,10 @@ metadata = result.selector_metadata
 ranking = result.get_feature_ranking()
 ```
 
-The additive A2b result view supports `FilterSelectionResult`,
+The additive A2c result view supports `FilterSelectionResult`,
 `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, and
-`CatBoostSelectionResult` without replacing any class:
+`CatBoostSelectionResult` without replacing any class. A fitted
+`StabilitySelector` exposes the same view through `selector.result_view_`:
 
 ```python
 view = as_result(result, input_features=X.columns)
@@ -364,14 +365,16 @@ indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
 
-The A2b adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
+The five legacy-result adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
 transform and inverse-transform are unavailable, and proxy correlations are
 not stored. Feature-path evaluation and CatBoost supply normalized score curves;
 the other supported legacy results have no retained route-level curve. CatBoost
 views remain partial without an explicit raw feature identity and distinguish
 the target curve count from the number of stable features actually returned.
-Adapters for fitted stability selection and permutation importance remain
-unfinished. See [Reading Results](docs/results.md) for the current completeness
+The fitted stability adapter has a complete candidate-feature table and a
+frozen fitted column-subset transform; inverse transform remains unavailable.
+The permutation-importance adapter remains unfinished. See
+[Reading Results](docs/results.md) for the current completeness
 matrix and versioned JSON contract.
 
 ### `select_jmi`
@@ -1163,6 +1166,8 @@ mask = selector.get_support()
 X_reduced = selector.transform(X)
 # sklearn-compatible selected names:
 selected_names_out = selector.get_feature_names_out()
+# normalized, non-cached fitted view:
+view = selector.result_view_
 ```
 
 `StabilitySelector.transform` always returns an ndarray. A selector fitted on
@@ -1176,6 +1181,13 @@ generated `x0`, `x1`, ... names cannot establish column identity. Keep using
 same-width ndarrays, provide explicit names when fitting the ndarray, or refit
 on a DataFrame. Ndarray transforms are positional and must retain the fit-time
 feature count.
+
+The fitted view's `features` are names while `indices` preserve the legacy
+integer positions. Its complete table is over `feature_names_in_`, which is the
+fitted candidate-feature namespace when an explicit subset or smart sampler is
+used. `view.transform(X)` freezes the selected identity at view creation,
+preserves the selector's `set_output` configuration, and does not retain
+training rows or the bootstrap coefficient matrix.
 
 Important options:
 

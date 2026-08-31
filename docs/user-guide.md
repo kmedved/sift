@@ -254,9 +254,9 @@ outside SIFT. CatBoost selectors handle categorical features natively.
 Many selectors can return richer metadata through `return_result=True` or
 selector-specific diagnostics. `sift.as_result(...)` now provides an additive
 common view for `FilterSelectionResult`, `KnockoffSelectionResult`,
-`BorutaResult`, `FeaturePathEvaluationResult`, and `CatBoostSelectionResult`;
-two result families remain planned. The legacy result types and defaults are
-unchanged.
+`BorutaResult`, `FeaturePathEvaluationResult`, and `CatBoostSelectionResult`,
+plus fitted `StabilitySelector`; permutation importance remains planned. The
+legacy result types and defaults are unchanged.
 
 ```python
 from sift import select_cefsplus_binary
@@ -274,7 +274,7 @@ print(result.selected_features)
 print(result.selector_metadata)
 ```
 
-The common A2b access pattern is:
+The common A2c access pattern is:
 
 ```python
 view = sift.as_result(result, input_features=X.columns)
@@ -294,3 +294,16 @@ current adapter-completeness matrix and serialization contract, and
 Sklearn-style selector classes always keep their transform contract stable; pass
 inspection options to the function-style selectors when you need full result
 objects.
+
+A fitted stability selector supplies the same accessors and a frozen transform:
+
+```python
+from sift import StabilitySelector
+
+selector = StabilitySelector(random_state=0, verbose=False).fit(X, y)
+view = selector.result_view_
+X_stable = view.transform(X)
+```
+
+Its table covers the selector's fitted candidate features; `view.indices`
+keeps the existing integer positions and `view.features` supplies names.

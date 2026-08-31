@@ -30,13 +30,13 @@ handlers when configured. Use `sift.set_verbosity("debug")`,
 `sift.set_verbosity("info")`, or `sift.set_verbosity(None)` to select debug,
 normal progress, or silence globally; per-call `verbose=False` remains silent.
 
-## Normalized Result Views (A2b)
+## Normalized Result Views (A2c)
 
 `sift.as_result(result, input_features=None)` returns a `SelectionView` without
-changing the legacy result object. The current A2b implementation supports
+changing the legacy result object. The current A2c implementation supports
 `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
-`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`; adapters for
-fitted stability selection and permutation importance are still pending.
+`FeaturePathEvaluationResult`, and `CatBoostSelectionResult`, plus a fitted
+`StabilitySelector`; permutation importance is still pending.
 
 ```python
 view = sift.as_result(result, input_features=X.columns)
@@ -53,8 +53,10 @@ legacy objects cannot prove whether their source was named or positional.
 Feature-path and CatBoost results expose normalized evaluation curves. Boruta
 maps mean importance to `gain` while preserving original positional order;
 CatBoost maps its retained final-model importance to `gain` and records the
-source explicitly. Transforms, inverse transforms, and proxy lookup are not
-available in A2b. See [Reading Results](results.md) for the completeness matrix,
+source explicitly. The five result-only adapters do not transform. A fitted
+stability view exposes a frozen column-subset transform while leaving inverse
+transform unavailable. Proxy lookup is not available in A2c. See
+[Reading Results](results.md) for the completeness matrix,
 versioned JSON format, and partial-table rules.
 
 ## Shared Selector Behavior
@@ -527,6 +529,7 @@ selector = StabilitySelector(
 
 selector.fit(X, y, sample_weight=None, groups=None, time=None)
 info = selector.get_feature_info()
+view = selector.result_view_
 ```
 
 Convenience wrappers:
@@ -552,6 +555,13 @@ DataFrame column identity and therefore rejects DataFrame input to either
 method; keep using same-width ndarrays, provide explicit names when fitting the
 ndarray, or refit on a DataFrame. Ndarray transforms are positional and must
 have the fit-time feature count.
+
+`selector.result_view_` is a dynamic, non-cached `SelectionView` over the
+fitted candidate-feature namespace. It preserves selected names in
+`view.features`, legacy integer positions in `view.indices`, frequencies and
+mean absolute coefficients in a complete table, and exposes a frozen
+`view.transform(...)`. The frozen transform retains sklearn `set_output`
+configuration but not training rows or bootstrap coefficient matrices.
 
 ## Smart Sampling
 
