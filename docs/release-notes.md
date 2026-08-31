@@ -104,8 +104,13 @@
   and permutation importance. Internal deprecation helpers have exact
   warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
   dedicated D9 fixed-path timing runner with checksum-bound environment/source
-  provenance; the mixed-convention legacy gate CSV remains intentionally
-  unchanged.
+  provenance. The clean `88a8705` run is committed as
+  `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` with
+  `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`, and the explicit
+  mean-oracle recomputation is
+  `auto_k_v2_gates_mean_oracle_2026-08-31.csv`. The mixed-convention legacy gate
+  CSV remains intentionally unchanged; the dated G5 ratio is labeled cross-run
+  evidence rather than a reconstruction of the missing July denominator.
 - Finite weighted knockoff-variance reductions use `np.dot` instead of NumPy's
   matmul ufunc path, avoiding false divide/overflow warnings observed with
   NumPy 2.2 while preserving selections and statistics.

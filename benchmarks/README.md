@@ -80,6 +80,11 @@ promotion campaign. The full result files are committed under
 - `auto_k_v2_catboost.csv`: guarded CatBoost transfer run, D1-D3, 10 seeds.
 - `auto_k_v2_summary.csv`, `auto_k_v2_gates.csv`, and
   `auto_k_v2_catboost_summary.csv`: derived aggregate tables.
+- `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` and
+  `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`: fresh full-size
+  fixed-k path evidence from clean commit `88a8705`.
+- `auto_k_v2_gates_mean_oracle_2026-08-31.csv`: dated canonical recomputation
+  using the explicit mean-`k_oracle` convention and the fresh denominator.
 
 `summarize_auto_k_gates.py` provides the schema-validated, deterministic G1-G6
 aggregation path. The original 2026-07-08 run did not commit its fixed-k path
@@ -90,7 +95,7 @@ timing input, so that value must not be reconstructed from the post-path
 python benchmarks/bench_auto_k_path_timing.py \
   --full --seeds 2 --seed-start 0 \
   --timing-repeats 5 --warmup-runs 1 --thread-limit 1 \
-  --output benchmarks/results/auto_k_v2_d9_fixed_k_path_YYYY-MM-DD.csv
+  --output benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv
 ```
 
 The runner uses the same D9 path construction as `bench_auto_k.py`: on the full
@@ -113,34 +118,39 @@ python benchmarks/summarize_auto_k_gates.py \
   --main benchmarks/results/auto_k_v2_main.csv \
   --null benchmarks/results/auto_k_v2_null.csv \
   --timing benchmarks/results/auto_k_v2_d9.csv \
-  --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_YYYY-MM-DD.csv \
+  --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
   --oracle-aggregation mean \
-  --output benchmarks/results/auto_k_v2_gates_mean_oracle_YYYY-MM-DD.csv
+  --output benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
 ```
 
 The path-timing seeds must exactly match the D9 method-timing CSV. `mean` is the
-declared convention for the dated canonical recomputation. The resulting table
-is reproducible from its named inputs, but its G5 path-only ratios combine the
-legacy July method timings with a newly measured denominator; it is not a
-retroactive measurement of the missing July denominator or a same-run hardware
-comparison. The mixed-convention `auto_k_v2_gates.csv` therefore remains an
+declared convention for the dated canonical recomputation. The clean full run
+recorded 0.1373203751 s for seed 0 and 0.1353520839 s for seed 1 (mean
+0.1363362295 s). Its sidecar binds those medians and all ten raw measured calls
+to commit `88a8705`, reports `dirty=false`, and verifies the CSV checksum. The
+resulting table is reproducible from its named inputs, but its G5 path-only
+ratios combine the legacy July method timings with a newly measured denominator;
+it is not a retroactive measurement of the missing July denominator or a
+same-run hardware comparison. The dated EBIC ratio is 0.0040772362 and remains
+well inside G5. The mixed-convention `auto_k_v2_gates.csv` therefore remains an
 unchanged legacy artifact. Do not replace it with the dated table unless a
 complete contemporaneous campaign justifies that migration.
 
 The 2026 campaign recorded `penalized/ebic` as the measured default for CEFS+
 `k="auto"`. It passes the program-level bar, is calibrated on D5, is
 recorded as effectively free relative to the CEFS+ path build on D9, and works
-for binary CEFS+ without a fold-scoring bridge. The exact G5 path ratio is the
-non-reproducible field described above. `gaussian_cv` stays a useful power-user
-predictive curve but missed the D9 runtime target and D3 accuracy gate in this
-campaign. The additional `gaussian_cv/best` row is a dense-regime sizing
-variant: it improves D4 dense-weak behavior and D3 relative to
-`gaussian_cv/one_se`, but it still does not replace EBIC as the zero-config
-default. `changepoint`, `stability`, `xfit_objective`, and `knockoff_path`
-remain experimental or failed-gate for automatic sizing.
+for binary CEFS+ without a fold-scoring bridge. The legacy G5 ratio remains
+historically non-reproducible; the dated cross-run ratio is the separately
+labeled value above. `gaussian_cv` stays a useful power-user predictive curve
+but missed the D9 runtime target and D3 accuracy gate in this campaign. The
+additional `gaussian_cv/best` row is a dense-regime sizing variant: it improves
+D4 dense-weak behavior and D3 relative to `gaussian_cv/one_se`, but it still
+does not replace EBIC as the zero-config default. `changepoint`, `stability`,
+`xfit_objective`, and `knockoff_path` remain experimental or failed-gate for
+automatic sizing.
 
-Legacy published program-level gate summary (retained unchanged pending the
-missing provenance):
+Legacy published program-level gate summary (retained unchanged; its historical
+path denominator cannot be recovered):
 
 | method | mean regret D1-D3+D7 | std(k)/oracle | D5 P(k>3) | D5 max k | D9 runtime ratio | program |
 | --- | --- | --- | --- | --- | --- | --- |
