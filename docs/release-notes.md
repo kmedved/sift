@@ -1,5 +1,21 @@
 # Release Notes
 
+## 0.9.0b1 (in progress)
+
+### Additive result views
+
+- Added `SelectionView` and `sift.as_result(...)` without changing legacy return
+  types, constructors, or defaults. The first A1 slice adapts
+  `FilterSelectionResult` and `KnockoffSelectionResult`, and adds matching
+  `.result_view()` methods. The same five accessors expose selected names,
+  positions, count, the available raw table, and copied metadata.
+- A1 views serialize to JSON-safe schema version `"1"`, preserve positional
+  identity in `selected_index`, report incomplete tables explicitly, and use
+  `input_kind="unknown"` when a legacy result cannot prove whether its source
+  was named or positional. Result-only transform, inverse-transform, proxy
+  storage, normalized Auto-K curves, and the other five adapter families remain
+  pending; Workstream A is not complete.
+
 ## 0.9.0a1 (2026-08-31)
 
 ### Breaking changes and migration

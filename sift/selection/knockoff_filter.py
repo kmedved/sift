@@ -115,6 +115,12 @@ class KnockoffSelectionResult:
         )
         return ranking[columns]
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
 
 @dataclass(frozen=True)
 class KnockoffStatContext:

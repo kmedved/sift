@@ -148,8 +148,13 @@ from sift import (
     catboost_regression,
     catboost_classif,
     set_verbosity,
+    SelectionView,
+    as_result,
 )
 ```
+
+The 0.9 surface currently contains 58 top-level exports: the 55 legacy names,
+`set_verbosity`, `SelectionView`, and `as_result`.
 
 ## Logging
 
@@ -338,12 +343,32 @@ metadata = result.selector_metadata
 ranking = result.get_feature_ranking()
 ```
 
+The additive A1 result view supports `FilterSelectionResult` and
+`KnockoffSelectionResult` without replacing either class:
+
+```python
+view = as_result(result, input_features=X.columns)
+
+view.features
+view.indices
+view.k
+view.table
+view.metadata
+```
+
 `return_result=True` is available on `select_mrmr`, `select_jmi`,
 `select_jmim`, and `select_cefsplus`. The default remains `list[str]`. The
 result object currently contains selected feature names, best-effort input-column
 indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
+
+The A1 adapters are result-only: `metadata["input_kind"]` is `"unknown"`,
+transform and inverse-transform are unavailable, proxy correlations are not
+stored, and Auto-K curve normalization is still pending. Adapters for Boruta,
+CatBoost, feature-path evaluation, fitted stability selection, and permutation
+importance remain unfinished. See [Reading Results](docs/results.md) for the
+current completeness matrix and versioned JSON contract.
 
 ### `select_jmi`
 

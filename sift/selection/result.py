@@ -62,6 +62,12 @@ class FilterSelectionResult:
             }
         )
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
 
 def build_selector_metadata(
     selector: str,

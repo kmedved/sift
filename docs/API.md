@@ -1,6 +1,6 @@
 # SIFT API Reference
 
-This page is a standalone reference for the public SIFT API in the 0.8.0
+This page is a standalone reference for the public SIFT API in the 0.9
 surface. For deeper examples and option notes, see the canonical manual in
 [`DOCS.MD`](../DOCS.MD).
 
@@ -19,6 +19,7 @@ surface. For deeper examples and option notes, see the canonical manual in
 | Boruta | `BorutaSelector`, `BorutaResult`, `select_boruta`, `select_boruta_shap` |
 | Optional CatBoost | `catboost_select`, `catboost_regression`, `catboost_classif` |
 | Logging | `set_verbosity` |
+| Normalized result views | `SelectionView`, `as_result` |
 
 CatBoost entry points are lazy exports from `sift`; importing `sift` does not
 require the `catboost` extra.
@@ -28,6 +29,30 @@ logger. It remains visible by default and propagates to application logging
 handlers when configured. Use `sift.set_verbosity("debug")`,
 `sift.set_verbosity("info")`, or `sift.set_verbosity(None)` to select debug,
 normal progress, or silence globally; per-call `verbose=False` remains silent.
+
+## Normalized Result Views (A1)
+
+`sift.as_result(result, input_features=None)` returns a `SelectionView` without
+changing the legacy result object. The current A1 implementation supports
+`FilterSelectionResult` and `KnockoffSelectionResult`; adapters for Boruta,
+CatBoost, path evaluation, fitted stability selection, and permutation
+importance are still pending.
+
+```python
+view = sift.as_result(result, input_features=X.columns)
+
+view.features
+view.indices
+view.k
+view.table
+view.metadata
+```
+
+Result-only views report `metadata["input_kind"] == "unknown"`, because the
+legacy objects cannot prove whether their source was named or positional.
+Transforms, inverse transforms, and proxy lookup are not available in A1. See
+[Reading Results](results.md) for the completeness matrix, versioned JSON
+format, and partial-table rules.
 
 ## Shared Selector Behavior
 

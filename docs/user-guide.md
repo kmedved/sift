@@ -252,8 +252,10 @@ outside SIFT. CatBoost selectors handle categorical features natively.
 ## Diagnostics
 
 Many selectors can return richer metadata through `return_result=True` or
-selector-specific diagnostics. The detailed behavior is documented in
-[DOCS.MD](../DOCS.MD).
+selector-specific diagnostics. `sift.as_result(...)` now provides an additive
+common view for `FilterSelectionResult` and `KnockoffSelectionResult`; the
+remaining result families are still planned. The legacy result types and
+defaults are unchanged.
 
 ```python
 from sift import select_cefsplus_binary
@@ -270,6 +272,23 @@ result = select_cefsplus_binary(
 print(result.selected_features)
 print(result.selector_metadata)
 ```
+
+The common A1 access pattern is:
+
+```python
+view = sift.as_result(result, input_features=X.columns)
+
+view.features
+view.indices
+view.k
+view.table
+view.metadata
+```
+
+These result-only views do not retain fitted preprocessing state, so transform
+and proxy operations are unavailable. See [Reading Results](results.md) for the
+current adapter-completeness matrix and serialization contract, and
+[DOCS.MD](../DOCS.MD) for selector-specific diagnostics.
 
 Sklearn-style selector classes always keep their transform contract stable; pass
 inspection options to the function-style selectors when you need full result

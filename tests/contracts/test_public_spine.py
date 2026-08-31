@@ -66,7 +66,7 @@ LEGACY_EXPECTED_ALL = [
     "catboost_regression",
     "catboost_classif",
 ]
-EXPECTED_ALL = [*LEGACY_EXPECTED_ALL, "set_verbosity"]
+EXPECTED_ALL = [*LEGACY_EXPECTED_ALL, "set_verbosity", "SelectionView", "as_result"]
 
 
 def _default(callable_, name):
@@ -77,8 +77,8 @@ def test_version_and_ordered_public_exports():
     assert sift.__version__ == "0.9.0a1"
     assert sift.__all__ == EXPECTED_ALL
     assert sift.__all__[:55] == LEGACY_EXPECTED_ALL
-    assert sift.__all__[55:] == ["set_verbosity"]
-    assert len(sift.__all__) == 56
+    assert sift.__all__[55:] == ["set_verbosity", "SelectionView", "as_result"]
+    assert len(sift.__all__) == 58
 
 
 @pytest.mark.parametrize("name", EXPECTED_ALL)
