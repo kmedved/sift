@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed, effective_n_jobs
 
+from sift._deprecate import warn_random_state_none
+from sift._metadata import resolve_row_metadata
 from sift._permute import (
     PermutationMethod,
     build_group_info,
@@ -376,6 +378,16 @@ def permutation_importance(
         The default DataFrame has columns ``feature``, ``importance_mean``,
         ``importance_std``, and ``baseline_score``.
     """
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    time = metadata.time
+    sample_weight = metadata.sample_weight
     if isinstance(n_repeats, (bool, np.bool_)) or not isinstance(n_repeats, (int, np.integer)):
         raise ValueError("n_repeats must be a positive integer")
     n_repeats = int(n_repeats)
@@ -402,6 +414,8 @@ def permutation_importance(
         n_features = X_arr.shape[1]
 
     w = ensure_weights(sample_weight, n, normalize=True)
+    if random_state is None:
+        warn_random_state_none("permutation_importance")
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, 2**31, size=(n_features, n_repeats))
 

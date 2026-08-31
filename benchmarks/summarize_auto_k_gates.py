@@ -10,6 +10,7 @@ import io
 import json
 import math
 import statistics
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -246,6 +247,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _git_blob_sha256(commit: str, relative: Path) -> str:
+    """Hash a recorded source file from its provenance commit."""
+
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{relative.as_posix()}"],
+        cwd=REPO_ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise GateSummaryError(
+            "cannot verify recorded source at provenance commit "
+            f"{commit!r}: {relative.as_posix()}"
+            + (f" ({detail})" if detail else "")
+        )
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
 def _read_path_timing_provenance(
     path: Path,
     rows: Sequence[PathTimingRow],
@@ -319,6 +340,7 @@ def _read_path_timing_provenance(
     if not isinstance(source_hashes, dict) or not source_hashes:
         raise GateSummaryError(f"{provenance_path}: non-empty source_sha256 is required")
     if verify_source_hashes:
+        commit = git["commit"]
         for relative, expected_hash in source_hashes.items():
             if not isinstance(relative, str) or not isinstance(expected_hash, str):
                 raise GateSummaryError(
@@ -331,13 +353,10 @@ def _read_path_timing_provenance(
                     f"{provenance_path}: recorded source path must stay inside the repository: "
                     f"{relative}"
                 )
-            if not source_path.is_file():
+            if _git_blob_sha256(commit, relative_path) != expected_hash:
                 raise GateSummaryError(
-                    f"{provenance_path}: recorded source file is missing: {relative}"
-                )
-            if _sha256(source_path) != expected_hash:
-                raise GateSummaryError(
-                    f"{provenance_path}: recorded source checksum no longer matches: {relative}"
+                    f"{provenance_path}: recorded source checksum does not match "
+                    f"provenance commit {commit}: {relative}"
                 )
 
 

@@ -2,6 +2,30 @@
 
 ## 0.9.0b1 (in progress)
 
+### Additive conventions
+
+- DataFrame callers may use `groups="column"` and `time="column"` wherever
+  those row arrays are accepted. SIFT extracts the metadata positionally and
+  removes it from the feature namespace; direct arrays remain positional, and
+  fixed-k filters continue to reject row context.
+- CatBoost selection adds trailing `groups`, `time`, and `sample_weight`
+  arrays while retaining `group_col` and `sample_weight_col` aliases. Alias
+  conflicts raise, supplied time values are validated and stably order aligned
+  rows before the configured splitter, and translated-parameter collisions
+  emit a `UserWarning` while preserving the 0.9 `catboost_params`-wins rule.
+- `StabilitySelector(penalty=...)` is an additive alias for `alpha`; unequal
+  simultaneous values raise. Threshold tuning, explicit feature-path
+  evaluation, and auto-k evaluation accept estimator-style sklearn scorer
+  objects. Path and auto-k routes negate signed scorer output into their
+  historical lower-is-better curves.
+- `select_cached(..., return_result=True)` returns a complete `SelectionView`
+  with cache provenance, selected positions, relevance, and objective-path
+  diagnostics. Its four legacy list/tuple forms and default remain unchanged.
+- The existing `None` defaults on Stability, permutation importance, and
+  CatBoost now emit a caller-facing `FutureWarning` when used; they remain
+  nondeterministic in 0.9 and will resolve to seed 0 in 1.0. Literal-42
+  defaults and all existing `n_jobs` defaults remain unchanged in 0.9.
+
 ### Additive result views
 
 - Added `SelectionView` and `sift.as_result(...)` without changing legacy return
@@ -150,7 +174,8 @@
   warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
   dedicated D9 fixed-path timing runner with checksum-bound environment/source
   provenance. The summarizer now requires the sidecar and verifies its full-run
-  mode, clean state, artifact checksum, seed set, and current source hashes. The
+  mode, clean state, artifact checksum, seed set, and source hashes against the
+  recorded Git commit rather than the later working tree. The
   clean `88a8705` run is committed as
   `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` with
   `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`, and the explicit

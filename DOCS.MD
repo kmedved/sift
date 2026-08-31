@@ -871,12 +871,18 @@ selected = select_mrmr(
   distinct timestamps for evaluate/fold-curve methods.
 - `strategy="group_cv"` requires `groups` and uses `GroupKFold`.
 - `strategy="kfold"` is available for `gaussian_cv` and `xfit_objective`.
+- Wherever the route accepts row context, DataFrame callers may use
+  `groups="column_name"` or `time="column_name"`. SIFT extracts that column
+  positionally and removes it from the feature matrix; direct arrays remain
+  positional and fixed-k filter calls still reject row context.
 - If `auto_k_config` is omitted, CEFS+ and binary CEFS+ use
   `k_method="auto"`. Other selectors keep the legacy inference:
   `strategy="time_holdout"` when `time` is supplied and `strategy="group_cv"`
   when only `groups` is supplied.
 - `metric="auto"` resolves to RMSE for regression and log loss for
-  classification.
+  classification. `metric=` also accepts estimator-style sklearn scorer
+  objects; their signed higher-is-better output is negated into SIFT's
+  historical lower-is-better curve.
 - `min_k` may be zero for discovery/error-controlled methods. Mean-one weight
   normalization makes `n_eff_mode="weight_sum"` equal to the row count even
   under skewed weights; v2 inference methods use Kish effective sample size
@@ -993,7 +999,7 @@ path_result = evaluate_feature_path(
     feature_path=selected_path,
     k_grid=[5, 10, 20, 40],
     estimator=Ridge(alpha=1.0),
-    scoring="rmse",           # "rmse", "mae", or callable
+    scoring="rmse",           # "rmse", "mae", sklearn scorer, or callable
     splitter=(train_idx, val_idx),
     sample_weight=weights,
 )
@@ -1009,6 +1015,11 @@ explicit train/validation split, sklearn-style splitter objects, or a random
 holdout controlled by `val_frac` and `random_state`. It returns
 `FeaturePathEvaluationResult` with the resolved path, tested `k` values, average
 scores, best `k`, best-prefix features, and diagnostics.
+Estimator-style sklearn scorers are evaluated against the fitted estimator and
+negated into the result's historical lower-is-better score convention. A
+weighted evaluation requires a scorer whose score function accepts
+`sample_weight`; incompatible scorers raise instead of producing an all-infinite
+curve.
 
 ## Gaussian Feature Cache
 
@@ -1082,6 +1093,10 @@ filtering. Pass a float such as `corr_prune=0.95` to opt into duplicate-oriented
 pruning for any cached method.
 
 `select_cached(..., return_objective=True)` returns `(features, objective_path)`.
+`select_cached(..., return_result=True)` instead returns a complete
+`SelectionView` with selected positions, cache provenance, relevance, and the
+objective path. It cannot be combined with `return_objective` or
+`return_indices`; all four historical list/tuple shapes remain the default.
 
 ## Stability Selection
 
@@ -1199,6 +1214,7 @@ Important options:
   rounded panel-wide draw budget allocated across groups.
 - `threshold`: minimum selection frequency.
 - `alpha`: regularization strength. If `None`, Sift estimates it by CV.
+- `penalty`: additive alias for `alpha`; pass one or give both the same value.
 - `l1_ratio`: regression only; use values below `1.0` for ElasticNet.
 - `max_features`: hard cap after thresholding.
 - `store_coefs=False`: lowers memory use but disables coefficient stability
@@ -1221,6 +1237,10 @@ fig, axes = selector.plot_coef_distributions(top_n=12)
 original `fit` used `sample_weight`, `groups`, or `time`, pass those same arrays
 to `tune_threshold`; it requires the fit-time context, uses group-disjoint or
 time-ordered outer folds, and forwards the context to each fold-local selector.
+Its `scoring=` argument accepts sklearn scorer objects as well as scorer names.
+With DataFrames, `groups="column"` and `time="column"` are equivalent to
+passing the corresponding positional arrays while excluding those columns from
+the fitted feature namespace.
 
 ### Block bootstrap for panels/time series
 
@@ -1500,7 +1520,9 @@ has already been fit.
 
 For pandas inputs, Sift preserves the DataFrame path when calling
 `model.predict`, so feature names and categorical/object dtypes remain available
-to models that require them. NumPy inputs keep the ndarray path.
+to models that require them. NumPy inputs keep the ndarray path. DataFrame
+callers may pass `groups="column"` and `time="column"`; those metadata columns
+are removed before prediction. Direct arrays remain positional.
 
 ```python
 from sklearn.ensemble import RandomForestRegressor
@@ -1621,6 +1643,9 @@ result = sift.catboost_select(
     eval_metric="RMSE",
     random_state=0,
     verbose=True,
+    groups=None,
+    time=None,
+    sample_weight=None,
 )
 
 selected = result.selected_features
@@ -1666,11 +1691,18 @@ Prefiltering:
 Cross-validation:
 
 - Pass any sklearn-compatible splitter via `cv=`.
-- If `group_col` is set, that column is extracted from `X`, dropped from the
-  feature matrix, and passed as groups to supported splitters.
+- `groups`, `time`, and `sample_weight` accept direct positional arrays.
+- DataFrame `groups="column"` and `time="column"` extract and remove those
+  columns. `group_col` and `sample_weight_col` remain compatibility aliases;
+  direct-plus-alias combinations raise.
+- Supplied `time` is validated and stably orders every aligned row before the
+  configured splitter. Use an explicitly time-aware splitter for chronological
+  validation; the default remains the legacy random split.
 - `sample_weight_col` is extracted and used as CatBoost weights.
 - Misspelled `group_col` or `sample_weight_col` names raise `ValueError`
   instead of silently disabling groups or weights.
+- `catboost_params` collisions with translated SIFT arguments emit one
+  `UserWarning` while retaining the 0.9 dictionary-wins precedence.
 
 ```python
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
@@ -2149,6 +2181,17 @@ Set `random_state` wherever available:
 
 For exact comparisons, also keep `subsample`, `top_m`, `n_bootstrap`,
 `feature_counts`, and CV splitters fixed.
+
+In 0.9, omitted/`None` `random_state` values on `StabilitySelector`,
+`permutation_importance`, and CatBoost selectors emit a `FutureWarning` but
+remain nondeterministic. SIFT 1.0 will resolve those defaults to seed 0. The
+literal-42 defaults on `AutoKConfig`, `SmartSamplerConfig`, and
+`evaluate_feature_path` remain unchanged and warning-free in 0.9.
+
+Parallel defaults also remain unchanged in 0.9: filter/cache entry points use
+`n_jobs=1`, while Stability, permutation importance, and CatBoost use
+`n_jobs=-1`. CatBoost GPU execution does not translate `n_jobs` into a CPU
+thread count.
 
 ## Development
 

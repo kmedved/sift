@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -49,12 +50,32 @@ def _sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _git_blob(commit, relative):
+    return subprocess.run(
+        ["git", "show", f"{commit}:{relative.as_posix()}"],
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+
 def _write_path_timing_provenance(path, *, full=True, dirty=False, source_hashes=None):
     with path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     if source_hashes is None:
         source_relative = Path("benchmarks/summarize_auto_k_gates.py")
-        source_hashes = {str(source_relative): _sha256(REPO_ROOT / source_relative)}
+        source_hashes = {
+            str(source_relative): hashlib.sha256(
+                _git_blob(commit, source_relative)
+            ).hexdigest()
+        }
     provenance = {
         "schema": PATH_TIMING_PROVENANCE_SCHEMA,
         "artifact": {
@@ -68,7 +89,7 @@ def _write_path_timing_provenance(path, *, full=True, dirty=False, source_hashes
             "seeds": [int(row["seed"]) for row in rows],
             "benchmark": "fixed_k_select_cached",
         },
-        "git": {"commit": "fixture", "dirty": dirty},
+        "git": {"commit": commit, "dirty": dirty},
         "source_sha256": source_hashes,
     }
     path.with_suffix(".provenance.json").write_text(
@@ -299,7 +320,7 @@ def test_gate_summary_rejects_missing_or_untrusted_path_timing_sidecar(
     path_timing_path.write_bytes(original_csv)
     sidecar["source_sha256"] = {"benchmarks/summarize_auto_k_gates.py": "0" * 64}
     sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
-    with pytest.raises(GateSummaryError, match="source checksum no longer matches"):
+    with pytest.raises(GateSummaryError, match="source checksum does not match"):
         regenerate_gate_csv(
             main_path,
             null_path,
@@ -327,6 +348,30 @@ def test_committed_dated_gate_is_bound_to_its_full_clean_provenance(tmp_path):
     )
     expected = results / "auto_k_v2_gates_mean_oracle_2026-08-31.csv"
     assert output_path.read_bytes() == expected.read_bytes()
+
+
+def test_gate_summary_rejects_unavailable_provenance_commit(
+    gate_campaign,
+    tmp_path,
+):
+    main_path, null_path, timing_path, path_timing_path = gate_campaign
+    sidecar_path = path_timing_path.with_suffix(".provenance.json")
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["git"]["commit"] = "f" * 40
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    with pytest.raises(
+        GateSummaryError,
+        match="cannot verify recorded source at provenance commit",
+    ):
+        regenerate_gate_csv(
+            main_path,
+            null_path,
+            timing_path,
+            tmp_path / "out.csv",
+            path_timing_path=path_timing_path,
+            oracle_aggregation="mean",
+        )
 
 
 def test_gate_summary_rejects_raw_schema_drift(gate_campaign, tmp_path):

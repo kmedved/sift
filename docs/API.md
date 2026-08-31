@@ -90,6 +90,23 @@ cache-backed filter functions reject explicit cache-construction
 seeds a fresh knockoff draw and remains meaningful with a cache; `subsample`
 must be omitted.
 
+Where an entry point accepts row-context arrays, DataFrame callers may pass
+`groups="column_name"` or `time="column_name"`. SIFT copies that column as
+positional row metadata and removes it from the candidate feature matrix.
+Column-name shorthand requires a DataFrame and rejects missing or ambiguous
+labels; direct arrays remain positional and are never aligned by pandas index.
+Fixed-k filter calls reject both the array and column-name forms.
+
+0.9 preserves the existing parallelism defaults:
+
+| Entry point | `n_jobs` default |
+| --- | --- |
+| Filter functions and cache construction | `1` |
+| `StabilitySelector`, `permutation_importance`, CatBoost selectors | `-1` (all available workers) |
+
+CatBoost does not translate `n_jobs` into `thread_count` when GPU execution is
+enabled. SIFT 1.0 is expected to standardize these defaults; 0.9 does not.
+
 Supervised categorical encodings are conservative by default. When a function
 selector would fit target encoders on the full dataset, pass
 `allow_full_data_target_encoding=True` only if leakage is handled outside SIFT.
@@ -387,11 +404,15 @@ selected = select_cached(
     corr_prune="auto",
     return_objective=False,
     return_indices=False,
+    return_result=False,
 )
 ```
 
 `select_cached` reuses the cache transform and correlation work for repeated
-selection against new numeric targets.
+selection against new numeric targets. `return_result=True` returns a complete
+`SelectionView` carrying selected positions, cache provenance, relevance, and
+the objective path. It cannot be combined with `return_objective` or
+`return_indices`; the four historical list/tuple forms remain unchanged.
 
 ## Automatic K
 
@@ -419,6 +440,13 @@ selected = select_mrmr(
     auto_k_config=config,
 )
 ```
+
+`AutoKConfig.metric` also accepts an estimator-style sklearn scorer object.
+Sklearn scorers report a signed higher-is-better value; SIFT negates that value
+into its historical lower-is-better auto-k curve. SIFT metric names retain
+their existing definitions and scale. When `sample_weight` is supplied, the
+scorer must accept it; SIFT raises clearly rather than silently recording a
+non-finite curve.
 
 Function-style selectors use `auto_k_mode="prefix_only"`: they build one
 supervised feature path and evaluate prefixes. Selector classes also implement a
@@ -519,6 +547,7 @@ selector = StabilitySelector(
     sample_frac=0.5,
     threshold=0.6,
     alpha=None,
+    penalty=None,             # additive alias for alpha
     alpha_rule="one_se",
     l1_ratio=1.0,
     task="regression",
@@ -533,6 +562,12 @@ selector.fit(X, y, sample_weight=None, groups=None, time=None)
 info = selector.get_feature_info()
 view = selector.result_view_
 ```
+
+Set either `alpha` or `penalty`; if both are supplied they must be equal.
+`tune_threshold(..., scoring=...)` accepts sklearn scorer objects as well as
+scorer names. Weighted tuning requires a weight-aware scorer. A fit with
+`random_state=None` emits a `FutureWarning`: it remains
+nondeterministic in 0.9, while SIFT 1.0 will default to seed 0.
 
 Convenience wrappers:
 
@@ -675,6 +710,9 @@ result = sift.catboost_select(
     group_col=None,
     sample_weight_col=None,
     random_state=0,
+    groups=None,
+    time=None,
+    sample_weight=None,
 )
 
 features = result.selected_features
@@ -689,6 +727,20 @@ cls_features = sift.catboost_classif(X, y, k=20, algorithm="forward")
 
 Install with `python -m pip install -e ".[catboost]"` before using these
 helpers.
+
+`groups`, `time`, and `sample_weight` accept positional row arrays. For a
+DataFrame, `groups="column"` and `time="column"` extract and remove the named
+columns. `group_col` and `sample_weight_col` remain compatibility aliases;
+supplying a direct value and its alias together raises. When `time` is
+provided, SIFT validates it and stably orders all aligned rows before the
+configured CV or stability splitter. Use an explicitly time-aware splitter
+when chronological validation is required; the default splitter is still the
+legacy random split. Missing or mutually unorderable time values raise.
+
+If `catboost_params` overrides a translated SIFT model argument, 0.9 emits one
+`UserWarning` and preserves the existing `catboost_params`-wins precedence.
+`random_state=None` likewise warns about the planned deterministic seed-0
+default in 1.0.
 
 ### Progress callbacks
 

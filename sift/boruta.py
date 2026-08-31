@@ -21,6 +21,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
 from sift._logging import logger
+from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._permute import (
     PermutationAxis,
@@ -469,6 +470,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         check_is_fitted(self, ["status_"])
+        X = drop_fitted_metadata_columns(
+            X,
+            getattr(self, "_row_metadata_columns_", ()),
+        )
         if getattr(self, "_categorical_encoding_applied_", False):
             if not isinstance(X, pd.DataFrame):
                 raise ValueError(
@@ -510,6 +515,11 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         """
         self._clear_fit_state()
         try:
+            metadata = resolve_row_metadata(X, groups=groups, time=time)
+            X = metadata.X
+            groups = metadata.groups
+            time = metadata.time
+            self._row_metadata_columns_ = metadata.extracted_columns
             fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
             loop_result = self._run_boruta_iterations(fit_data)
             status = self._resolve_boruta_final_status(
@@ -543,6 +553,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             "shadow_thresholds_",
             "mean_importance_",
             "selected_features_",
+            "_row_metadata_columns_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -1041,27 +1052,23 @@ def select_boruta(
     -------
     list[str] or BorutaResult
     """
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
+        group_col=group_col,
+        time_col=time_col,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    time = metadata.time
+    sample_weight = metadata.sample_weight
     if isinstance(X, pd.DataFrame):
-        X = X.copy()
-        if group_col is not None:
-            if groups is not None:
-                raise ValueError("Cannot specify both groups and group_col")
-            groups = X[group_col].values
-            X = X.drop(columns=[group_col])
-        if time_col is not None:
-            if time is not None:
-                raise ValueError("Cannot specify both time and time_col")
-            time = X[time_col].values
-            X = X.drop(columns=[time_col])
         if cat_features is not None:
             cat_features = [c for c in cat_features if c in X.columns]
-    else:
-        if group_col is not None:
-            raise ValueError("group_col requires X to be a pandas DataFrame")
-        if time_col is not None:
-            raise ValueError("time_col requires X to be a pandas DataFrame")
-        if cat_features:
-            raise ValueError("cat_features requires X to be a pandas DataFrame")
+    elif cat_features:
+        raise ValueError("cat_features requires X to be a pandas DataFrame")
 
     sel = BorutaSelector(
         estimator=estimator,

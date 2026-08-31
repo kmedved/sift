@@ -114,4 +114,60 @@ def get_scoring(scoring: str) -> ScoringSpec:
     return _SCORING_REGISTRY[scoring]
 
 
+def is_sklearn_scorer(scoring: object) -> bool:
+    """Return whether ``scoring`` is an estimator-style sklearn scorer."""
+
+    scorer_type = type(scoring)
+    return (
+        callable(scoring)
+        and scorer_type.__module__.startswith("sklearn.metrics._scorer")
+        and hasattr(scoring, "_score_func")
+        and hasattr(scoring, "_sign")
+    )
+
+
+def sklearn_scorer_label(scoring: object) -> str:
+    """Return a stable, address-free label for an sklearn scorer object."""
+
+    if not is_sklearn_scorer(scoring):
+        raise TypeError("scoring must be an sklearn scorer object")
+    score_func = getattr(scoring, "_score_func")
+    module = getattr(score_func, "__module__", type(score_func).__module__)
+    name = getattr(score_func, "__qualname__", type(score_func).__qualname__)
+    sign = int(getattr(scoring, "_sign"))
+    return f"sklearn:{module}.{name}:sign={sign}"
+
+
+class UnsupportedScorerSampleWeightError(TypeError):
+    """An sklearn scorer cannot honor a caller-supplied sample weight."""
+
+
+def score_with_sklearn_scorer(
+    scoring: object,
+    model: object,
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    sample_weight: np.ndarray | None,
+) -> float:
+    """Evaluate an sklearn scorer, preserving its signed maximize convention."""
+
+    if not is_sklearn_scorer(scoring):
+        raise TypeError("scoring must be an sklearn scorer object")
+    if sample_weight is None:
+        return float(scoring(model, X, y))
+    try:
+        return float(scoring(model, X, y, sample_weight=sample_weight))
+    except TypeError as weighted_error:
+        try:
+            scoring(model, X, y)
+        except Exception:
+            raise weighted_error
+        raise UnsupportedScorerSampleWeightError(
+            "The sklearn scorer does not accept sample_weight, but this "
+            "evaluation received sample_weight. Use a weight-aware scorer or "
+            "omit sample_weight."
+        ) from weighted_error
+
+
 __all__ = ["ScoringSpec", "VALID_SCORERS", "get_scoring"]

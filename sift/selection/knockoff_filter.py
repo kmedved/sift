@@ -246,13 +246,10 @@ def _validate_cache_rxx(Rxx: np.ndarray, p: int) -> np.ndarray:
 def _reject_duplicate_feature_names(cache: FeatureCache) -> None:
     if cache.feature_names is None or cache.feature_names_are_synthetic:
         return
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for name in cache.feature_names:
-        if name in seen:
-            duplicates.append(name)
-        seen.add(name)
-    if duplicates:
+    names = pd.Index(cache.feature_names, dtype=object, tupleize_cols=False)
+    duplicate_mask = names.duplicated(keep="first")
+    if duplicate_mask.any():
+        duplicates = names[duplicate_mask].tolist()
         sample = duplicates[:5]
         suffix = "..." if len(duplicates) > 5 else ""
         raise ValueError(f"Duplicate feature names are not supported: {sample}{suffix}")

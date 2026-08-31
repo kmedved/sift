@@ -185,6 +185,9 @@ from sift import build_cache, select_cached
 cache = build_cache(X, subsample=None, compute_Rxx=True)
 mrmr = select_cached(cache, y1, k=30, method="mrmr_quot")
 cefs = select_cached(cache, y2, k=30, method="cefsplus")
+cefs_view = select_cached(
+    cache, y2, k=30, method="cefsplus", return_result=True
+)
 ```
 
 Use a cache when many selectors or targets share the same feature matrix. A
@@ -197,6 +200,9 @@ and must omit `subsample` and construction `random_state`; the cache already
 fixes its sampled rows and weights. For `select_fdr`, `random_state` remains
 available because it seeds a fresh knockoff draw; `sample_weight` and
 `subsample` remain forbidden.
+The opt-in cached `SelectionView` includes selected positions, the objective
+path, relevance, and cache provenance. `return_result=True` is mutually
+exclusive with the legacy `return_objective` and `return_indices` tuple flags.
 
 ## Stability Selection
 
@@ -207,6 +213,7 @@ selector = StabilitySelector(
     task="regression",
     n_bootstrap=50,
     threshold=0.6,
+    penalty=None,              # additive alias for alpha
     random_state=0,
     verbose=False,
 )
@@ -215,11 +222,45 @@ stable_features = selector.selected_feature_names_
 ```
 
 Pass both `groups` and `time` to use block bootstrap for ordered panel data.
+With DataFrames, `groups="column"` and `time="column"` extract and exclude the
+metadata columns; direct arrays remain positional. `penalty` is an alias for
+`alpha`, and both may be supplied only when equal. Threshold tuning accepts
+sklearn scorer objects as well as scorer names.
 `selector.get_feature_names_out()` is the sklearn-compatible equivalent for
 retrieving the selected names after fitting.
 Block draws honor `sample_frac`; the rounded panel-wide draw budget is allocated
 proportionally across groups and block windows are sampled with replacement.
 Time values must be non-missing and orderable within each group.
+
+Leaving `random_state=None` on Stability, permutation importance, or CatBoost
+emits a `FutureWarning`: 0.9 remains nondeterministic, while 1.0 will default to
+seed 0. Their existing `n_jobs=-1` defaults are also unchanged in 0.9.
+
+## CatBoost Row Context
+
+```python
+from sklearn.model_selection import TimeSeriesSplit
+import sift
+
+result = sift.catboost_select(
+    X,
+    y,
+    k=20,
+    groups=group_ids,
+    time=dates,
+    sample_weight=weights,
+    cv=TimeSeriesSplit(n_splits=5),
+    random_state=0,
+)
+```
+
+CatBoost accepts direct positional `groups`, `time`, and `sample_weight`
+arrays. DataFrame callers may instead use `groups="group_column"` or
+`time="date_column"`; `group_col` and `sample_weight_col` remain compatibility
+aliases. A direct value and its alias cannot be combined. Supplied time values
+must be non-missing and mutually orderable and stably order aligned rows before
+the configured splitter. Use a time-aware splitter when chronological
+validation is required; the default splitter remains random.
 
 ## Time-aware Permutation Importance
 

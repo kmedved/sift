@@ -592,9 +592,15 @@ def test_callback_parameters_are_appended_without_rebinding_legacy_positionals()
         sift.CEFSPlusSelector,
         sift.CEFSPlusBinarySelector,
     ]
+    additive_suffixes = {
+        sift.StabilitySelector: ["penalty"],
+        sift.catboost_select: ["groups", "time", "sample_weight"],
+        sift.select_cached: ["return_result"],
+    }
     for callable_ in callback_last:
         parameters = inspect.signature(callable_).parameters
-        assert list(parameters)[-1] == "callback"
+        expected_suffix = ["callback", *additive_suffixes.get(callable_, [])]
+        assert list(parameters)[-len(expected_suffix):] == expected_suffix
         assert parameters["callback"].default is None
 
     callback_before_kwargs = [
@@ -610,17 +616,17 @@ def test_callback_parameters_are_appended_without_rebinding_legacy_positionals()
         assert parameters[-2].default is None
         assert parameters[-1].kind is inspect.Parameter.VAR_KEYWORD
 
-    stability_params = list(inspect.signature(sift.StabilitySelector).parameters)
-    bound = inspect.signature(sift.StabilitySelector).bind_partial(
-        *range(len(stability_params) - 1)
-    )
-    assert "callback" not in bound.arguments
-
-    catboost_params = list(inspect.signature(sift.catboost_select).parameters)
-    bound = inspect.signature(sift.catboost_select).bind_partial(
-        *range(len(catboost_params) - 1)
-    )
-    assert "callback" not in bound.arguments
+    callback_positions = {
+        sift.StabilitySelector: 18,
+        sift.catboost_select: 36,
+        sift.select_cached: 9,
+    }
+    for callable_, callback_position in callback_positions.items():
+        signature = inspect.signature(callable_)
+        names = list(signature.parameters)
+        assert names.index("callback") == callback_position
+        bound = signature.bind_partial(*range(callback_position))
+        assert "callback" not in bound.arguments
 
 
 def _run_fake_catboost_splits(monkeypatch, callback):

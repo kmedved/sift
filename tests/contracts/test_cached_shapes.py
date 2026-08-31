@@ -23,6 +23,7 @@ def test_select_cached_omitted_defaults_match_explicit_current_defaults(contract
         return_indices=False,
         warn_noise_floor=True,
         callback=None,
+        return_result=False,
     )
 
     assert type(omitted) is type(explicit) is list

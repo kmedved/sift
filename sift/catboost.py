@@ -9,7 +9,9 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
+from sift._deprecate import warn_external, warn_random_state_none
 from sift._logging import logger
+from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import best_score_from_dict, infer_higher_is_better
 from sift.catboost_common import (
@@ -50,29 +52,55 @@ def _normalize_catboost_target(y, index: pd.Index) -> pd.Series:
     return y
 
 
-def _extract_weight_and_group_columns(
-    X: pd.DataFrame,
+def _catboost_row_series(
+    values: Any,
+    index: pd.Index,
     *,
-    sample_weight_col: Optional[str],
-    group_col: Optional[str],
-) -> tuple[pd.DataFrame, Optional[pd.Series], Optional[pd.Series]]:
-    X_work = X.copy()
-    sample_weights = None
-    groups = None
+    argument: str,
+) -> Optional[pd.Series]:
+    if values is None:
+        return None
+    array = np.asarray(values)
+    if array.ndim != 1:
+        raise ValueError(f"{argument} must be a one-dimensional row array")
+    if array.shape[0] != len(index):
+        raise ValueError(
+            f"{argument} has {array.shape[0]} rows but X has {len(index)}"
+        )
+    return pd.Series(array, index=index, copy=True)
 
-    if sample_weight_col is not None:
-        if sample_weight_col not in X_work.columns:
-            raise ValueError(f"sample_weight_col={sample_weight_col!r} not found in X")
-        sample_weights = X_work[sample_weight_col]
-        X_work = X_work.drop(columns=[sample_weight_col])
 
-    if group_col is not None:
-        if group_col not in X_work.columns:
-            raise ValueError(f"group_col={group_col!r} not found in X")
-        groups = X_work[group_col]
-        X_work = X_work.drop(columns=[group_col])
-
-    return X_work, sample_weights, groups
+def _sort_catboost_rows_by_time(
+    X: pd.DataFrame,
+    y: pd.Series,
+    sample_weight: Optional[pd.Series],
+    groups: Optional[pd.Series],
+    time: Optional[pd.Series],
+) -> tuple[
+    pd.DataFrame,
+    pd.Series,
+    Optional[pd.Series],
+    Optional[pd.Series],
+]:
+    if time is None:
+        return X, y, sample_weight, groups
+    if pd.isna(time).any():
+        raise ValueError("time must not contain missing values")
+    try:
+        order = np.argsort(time.to_numpy(), kind="mergesort")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("time values must be mutually orderable") from exc
+    X_sorted = X.iloc[order].reset_index(drop=True)
+    y_sorted = y.iloc[order].reset_index(drop=True)
+    weight_sorted = (
+        None
+        if sample_weight is None
+        else sample_weight.iloc[order].reset_index(drop=True)
+    )
+    groups_sorted = (
+        None if groups is None else groups.iloc[order].reset_index(drop=True)
+    )
+    return X_sorted, y_sorted, weight_sorted, groups_sorted
 
 
 def _resolve_catboost_feature_types(
@@ -174,6 +202,14 @@ def _build_catboost_model_params(
         model_params['thread_count'] = n_jobs
 
     if catboost_params:
+        collisions = sorted(set(model_params).intersection(catboost_params))
+        if collisions:
+            warn_external(
+                "catboost_params overrides translated SIFT arguments for: "
+                f"{collisions}. The catboost_params values continue to win in "
+                "SIFT 0.9; conflicting values will be rejected in SIFT 1.0.",
+                UserWarning,
+            )
         model_params.update(catboost_params)
         if 'eval_metric' in catboost_params:
             resolved_metric = str(catboost_params['eval_metric'])
@@ -263,7 +299,7 @@ def _build_catboost_splits(
         )
         if groups_array is not None and not accepts_groups:
             raise TypeError(
-                "group_col was provided, but custom cv.split does not accept groups"
+                "groups were provided, but custom cv.split does not accept groups"
             )
         splits = list(
             cv.split(X_work, y, groups=groups_array)
@@ -709,6 +745,9 @@ def catboost_select(
     random_state: Optional[int] = None,
     verbose: bool = True,
     callback: ProgressCallback | None = None,
+    groups: Any = None,
+    time: Any = None,
+    sample_weight: Any = None,
 ) -> CatBoostSelectionResult:
     """Run CatBoost feature selection and return scores, paths, and final importances.
 
@@ -730,11 +769,39 @@ def catboost_select(
 
     y = _normalize_catboost_target(y, X.index)
     n_samples, n_features_orig = X.shape
-    X_work, sample_weights, groups = _extract_weight_and_group_columns(
+    metadata = resolve_row_metadata(
         X,
-        sample_weight_col=sample_weight_col,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
         group_col=group_col,
+        sample_weight_col=sample_weight_col,
     )
+    X_work = metadata.X
+    sample_weights = _catboost_row_series(
+        metadata.sample_weight,
+        X.index,
+        argument="sample_weight",
+    )
+    groups = _catboost_row_series(
+        metadata.groups,
+        X.index,
+        argument="groups",
+    )
+    time_values = _catboost_row_series(
+        metadata.time,
+        X.index,
+        argument="time",
+    )
+    X_work, y, sample_weights, groups = _sort_catboost_rows_by_time(
+        X_work,
+        y,
+        sample_weights,
+        groups,
+        time_values,
+    )
+    if random_state is None:
+        warn_random_state_none("catboost_select")
     all_features = list(X_work.columns)
 
     model_params, resolved_metric, resolved_hib = _build_catboost_model_params(

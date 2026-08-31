@@ -28,10 +28,18 @@ from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
+from sift._deprecate import warn_random_state_none
 from sift._logging import logger
+from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, reject_datetime_like_features
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
+from sift.scoring import (
+    UnsupportedScorerSampleWeightError,
+    is_sklearn_scorer,
+    score_with_sklearn_scorer,
+    sklearn_scorer_label,
+)
 
 
 def _coerce_feature_names(feature_names, *, argument: str = "feature_names") -> list[Hashable]:
@@ -208,6 +216,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         random_state: Optional[int] = None,
         verbose: bool = True,
         callback: ProgressCallback | None = None,
+        penalty: Optional[float] = None,
     ):
         self.n_bootstrap = n_bootstrap
         self.sample_frac = sample_frac
@@ -228,6 +237,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.random_state = random_state
         self.verbose = verbose
         self.callback = callback
+        self.penalty = penalty
 
     def fit(
         self,
@@ -263,6 +273,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         """
         self._clear_fit_state()
         try:
+            metadata = resolve_row_metadata(X, groups=groups, time=time)
+            X = metadata.X
+            groups = metadata.groups
+            time = metadata.time
+            self._row_metadata_columns_ = metadata.extracted_columns
             self._fit_input_kind_ = (
                 "dataframe" if isinstance(X, pd.DataFrame) else "positional"
             )
@@ -338,6 +353,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             "_fit_used_groups_",
             "_fit_used_sample_weight_",
             "_fit_used_time_",
+            "_row_metadata_columns_",
             "alpha_",
             "alpha_rule_effective_",
             "classes_",
@@ -357,6 +373,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
     def _prepare_stability_fit(self, X, y, sample_weight, groups, time, feature_names):
         # Input validation
         self._validate_runtime_params()
+        if self.random_state is None:
+            warn_random_state_none("StabilitySelector.fit")
         if self.use_smart_sampler and (groups is not None or time is not None):
             raise ValueError("groups/time are not supported when use_smart_sampler=True.")
         if self.use_smart_sampler:
@@ -393,7 +411,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         # Tune alpha on raw rows so every CV fold owns its imputation and scale
         # statistics. Full-data preprocessing below is only for final fits.
         self._alpha_ref_weight_ = None
-        if self.alpha is None:
+        configured_alpha = self.penalty if self.penalty is not None else self.alpha
+        if configured_alpha is None:
             self.alpha_ = self._find_alpha(
                 X,
                 y,
@@ -403,7 +422,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             )
             self.alpha_rule_effective_ = self.alpha_rule
         else:
-            self.alpha_ = self.alpha
+            self.alpha_ = configured_alpha
             self.alpha_rule_effective_ = "fixed"
 
         # Impute and standardize the final fit data after alpha is chosen.
@@ -734,7 +753,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         y: Union[np.ndarray, pd.Series],
         thresholds: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7, 0.8),
         cv: int = 3,
-        scoring: Optional[str] = None,
+        scoring: object | None = None,
         sample_weight: Optional[np.ndarray] = None,
         groups: np.ndarray | None = None,
         time: np.ndarray | None = None,
@@ -750,6 +769,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if not hasattr(self, 'selection_frequencies_'):
             raise ValueError("Must call fit() before tune_threshold()")
         self._validate_runtime_params()
+
+        metadata = resolve_row_metadata(X, groups=groups, time=time)
+        X = metadata.X
+        groups = metadata.groups
+        time = metadata.time
 
         if not isinstance(cv, numbers.Integral) or cv <= 1:
             raise ValueError("cv must be an integer greater than 1.")
@@ -825,7 +849,16 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 weight_values = weight_values[order]
 
         scoring = scoring or ('accuracy' if self.task == 'classification' else 'r2')
-        scorer = get_scorer(scoring)
+        if isinstance(scoring, str):
+            scorer = get_scorer(scoring)
+            scoring_label = scoring
+        elif is_sklearn_scorer(scoring):
+            scorer = scoring
+            scoring_label = sklearn_scorer_label(scoring)
+        else:
+            raise TypeError(
+                "scoring must be a scorer name or an sklearn scorer object"
+            )
         if groups_values is not None:
             n_groups = len(np.unique(groups_values))
             if n_groups < 2:
@@ -914,17 +947,24 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                             y_values[train_idx],
                             **downstream_fit_kwargs,
                         )
-                        score_kwargs = {}
-                        if weight_values is not None:
-                            score_kwargs["sample_weight"] = weight_values[val_idx]
-                        score = float(
-                            scorer(
+                        X_score = X_values[val_idx][:, selected]
+                        y_score = y_values[val_idx]
+                        if is_sklearn_scorer(scorer):
+                            score = score_with_sklearn_scorer(
+                                scorer,
                                 model,
-                                X_values[val_idx][:, selected],
-                                y_values[val_idx],
-                                **score_kwargs,
+                                X_score,
+                                y_score,
+                                sample_weight=(
+                                    None
+                                    if weight_values is None
+                                    else weight_values[val_idx]
+                                ),
                             )
-                        )
+                        else:
+                            score = float(scorer(model, X_score, y_score))
+                except UnsupportedScorerSampleWeightError:
+                    raise
                 except Exception as exc:
                     warnings.warn(
                         "Threshold tuning failed on one outer fold and recorded "
@@ -959,7 +999,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         valid = results.dropna(subset=['mean_score'])
         best_thresh = threshold_values[0] if valid.empty else valid.loc[valid['mean_score'].idxmax(), 'threshold']
         if self.verbose:
-            logger.info(f"Threshold tuning results (scoring={scoring}):")
+            logger.info(f"Threshold tuning results (scoring={scoring_label}):")
             logger.info(results.to_string(index=False))
             logger.info(f"Best threshold: {best_thresh}")
         return best_thresh, results
@@ -1113,6 +1153,19 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             not isinstance(self.alpha, numbers.Real) or self.alpha <= 0
         ):
             raise ValueError("alpha must be positive when provided.")
+        if self.penalty is not None and (
+            not isinstance(self.penalty, numbers.Real) or self.penalty <= 0
+        ):
+            raise ValueError("penalty must be positive when provided.")
+        if (
+            self.alpha is not None
+            and self.penalty is not None
+            and float(self.alpha) != float(self.penalty)
+        ):
+            raise ValueError(
+                "alpha and penalty specify the same regularization strength; "
+                "pass only one or give them equal values"
+            )
 
         if self.alpha_rule not in {"one_se", "best"}:
             raise ValueError("alpha_rule must be 'one_se' or 'best'.")

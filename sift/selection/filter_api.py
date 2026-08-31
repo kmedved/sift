@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
+from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback
 from sift._preprocess import (
     CatEncoding,
@@ -238,16 +239,22 @@ def _request_from_public_locals(
     task: Task,
     selector_names: tuple[str, ...],
 ) -> FilterRequest:
-    return FilterRequest(
+    metadata = resolve_row_metadata(
         values["X"],
+        groups=values.get("groups"),
+        time=values.get("time"),
+        sample_weight=values.get("sample_weight"),
+    )
+    return FilterRequest(
+        metadata.X,
         values["y"],
         values["k"],
         task,
         cache=values.get("cache"),
-        groups=values.get("groups"),
-        time=values.get("time"),
+        groups=metadata.groups,
+        time=metadata.time,
         auto_k_config=values.get("auto_k_config"),
-        sample_weight=values.get("sample_weight"),
+        sample_weight=metadata.sample_weight,
         callback=values.get("callback"),
         return_result=bool(values.get("return_result", False)),
         selector_kwargs={name: values[name] for name in selector_names},

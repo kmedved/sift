@@ -110,7 +110,9 @@ raw timing sample, the effective config and shapes, the command, commit and
 dirty state, package/BLAS environment, source hashes, and the CSV checksum.
 The summarizer requires that sidecar, rejects quick or dirty runs, verifies the
 CSV checksum and seed set, and refuses evidence whose recorded source files no
-longer match their captured hashes.
+longer match their captured hashes at the recorded Git commit. Later worktree
+edits do not invalidate immutable historical evidence; an unavailable commit
+or missing blob fails closed.
 Use `--quick --seeds 1` only for smoke testing, and never feed a quick artifact
 to a release gate.
 

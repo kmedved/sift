@@ -96,6 +96,7 @@ def test_high_risk_function_defaults():
     assert _default(sift.select_cached, "corr_prune") == "auto"
     assert _default(sift.select_cached, "return_objective") is False
     assert _default(sift.select_cached, "return_indices") is False
+    assert _default(sift.select_cached, "return_result") is False
 
     stability_defaults = inspect.signature(sift.StabilitySelector).parameters
     assert stability_defaults["n_bootstrap"].default == 50
@@ -103,6 +104,7 @@ def test_high_risk_function_defaults():
     assert stability_defaults["n_jobs"].default == -1
     assert stability_defaults["random_state"].default is None
     assert stability_defaults["verbose"].default is True
+    assert stability_defaults["penalty"].default is None
 
     defaults = {field.name: field.default for field in fields(sift.AutoKConfig)}
     assert {

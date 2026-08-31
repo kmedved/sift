@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
+import pandas as pd
 
 from sift._numba import njit_optional_cache
 from sift._progress import ProgressCallback, report_progress
@@ -21,6 +22,9 @@ from sift.selection.knockoff_filter import (
 )
 
 CorrPrune = float | None | Literal["auto"]
+
+if TYPE_CHECKING:
+    from sift.selection.view import SelectionView
 
 
 def _gaussian_mrmr_select(
@@ -521,9 +525,10 @@ def select_cached(
     return_indices: bool = False,
     warn_noise_floor: bool = True,
     callback: ProgressCallback | None = None,
+    return_result: bool = False,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
-]:
+] | "SelectionView":
     """Select features using pre-built cache.
 
     corr_prune="auto" resolves to no pruning for every method. Pass a float to
@@ -534,6 +539,13 @@ def select_cached(
     """
     from sift._preprocess import to_numpy, validate_k
 
+    if not isinstance(return_result, (bool, np.bool_)):
+        raise ValueError("return_result must be a boolean")
+    if return_result and (return_objective or return_indices):
+        raise ValueError(
+            "return_result=True cannot be combined with return_objective or "
+            "return_indices; the normalized result already carries both"
+        )
     k = validate_k(k, allow_auto=False)
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
@@ -563,11 +575,11 @@ def select_cached(
                 k_actual,
                 rel_cand,
                 callback,
-                want_objective=return_objective,
+                want_objective=return_objective or return_result,
             )
-            if return_objective:
+            if return_objective or return_result:
                 objective = callback_objective
-        elif return_objective:
+        elif return_objective or return_result:
             sel_local, objective = cefsplus_loop_with_objective(R_cand, r_cand, k_actual, rel_cand)
         else:
             sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
@@ -599,6 +611,76 @@ def select_cached(
         out = [cache.feature_names[i] for i in selected_original]
     else:
         out = selected_original.tolist()
+
+    if return_result:
+        if objective is None:
+            R_path = R_cand[np.ix_(sel_local, sel_local)]
+            r_path = r_cand[sel_local]
+            objective = objective_from_corr_path(R_path, r_path)
+        if cache.feature_names is None:
+            raise ValueError(
+                "return_result=True requires cache.feature_names so the normalized "
+                "view can prove the complete input feature identity"
+            )
+        feature_names = list(cache.feature_names)
+        selected_indices = selected_original.astype(np.int64).tolist()
+        selected_rank = {
+            position: rank
+            for rank, position in enumerate(selected_indices, start=1)
+        }
+        rank = pd.array(
+            [selected_rank.get(position, pd.NA) for position in range(len(feature_names))],
+            dtype="Int64",
+        )
+        relevance = np.full(len(feature_names), np.nan, dtype=np.float64)
+        relevance[np.asarray(panel.original, dtype=np.int64)] = np.asarray(
+            panel.rel,
+            dtype=np.float64,
+        )
+        ranking = pd.DataFrame(
+            {
+                "feature": feature_names,
+                "rank": rank,
+                "selected": [position in selected_rank for position in range(len(feature_names))],
+                "selected_index": pd.array(
+                    range(len(feature_names)),
+                    dtype="Int64",
+                ),
+                "relevance": relevance,
+                "selector": f"cached_{method}",
+            }
+        )
+        from sift.selection.result import FilterSelectionResult, build_selector_metadata
+        from sift.selection.view import as_result
+
+        result = FilterSelectionResult(
+            selected_features=list(out),
+            selected_indices=selected_indices,
+            selector_metadata=build_selector_metadata(
+                f"cached_{method}",
+                k=len(out),
+                k_requested=k,
+                top_m=top_m,
+                n_features=len(feature_names),
+                auto_k=False,
+                extra={
+                    "cache_backed": True,
+                    "method": method,
+                    "corr_prune": corr_prune,
+                    "n_rows_original": int(cache.n_rows_original),
+                    "n_rows_cached": int(len(cache.row_idx)),
+                },
+            ),
+            ranking_=ranking,
+            diagnostics_={
+                "objective": np.asarray(objective, dtype=np.float64).copy(),
+                "candidate_indices": np.asarray(
+                    panel.original,
+                    dtype=np.int64,
+                ).copy(),
+            },
+        )
+        return as_result(result, input_features=feature_names)
 
     if return_objective:
         if objective is None:

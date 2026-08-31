@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import importlib.util
-from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
+from typing import Any, TYPE_CHECKING, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -12,6 +12,7 @@ import pandas as pd
 from scipy.special import gammaln, logsumexp
 from sklearn.model_selection import GroupKFold
 
+from sift._metadata import resolve_row_metadata
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     ensure_weights,
@@ -25,6 +26,7 @@ from sift.selection.auto_k_core import (
     split_weights,
     time_holdout_split,
 )
+from sift.scoring import is_sklearn_scorer, sklearn_scorer_label
 
 if TYPE_CHECKING:
     from sift.estimators.copula import FeatureCache
@@ -60,7 +62,7 @@ class AutoKConfig:
         "auto",
     ] = "evaluate"
     strategy: Literal["time_holdout", "group_cv", "kfold"] = "time_holdout"
-    metric: Literal["rmse", "mae", "logloss", "error", "auto"] = "auto"
+    metric: Any = "auto"
     max_k: int = 100
     min_k: int = 5
     val_frac: float = 0.2
@@ -738,8 +740,9 @@ def _evaluate_prefix_split(
     train_idx: np.ndarray,
     val_idx: np.ndarray,
     task: Literal["regression", "classification"],
-    metric: str,
+    metric: object,
     k_grid: list[int],
+    sample_weight_supplied: bool,
     cat_features: Optional[List[str]],
     cat_encoding: Literal["none", "target", "loo", "james_stein", "loo_logit"],
     loo_smoothing: float,
@@ -810,6 +813,7 @@ def _evaluate_prefix_split(
         metric=metric,
         k_grid=k_grid,
         ridge_alpha_strategy="full_path",
+        sample_weight_supplied=sample_weight_supplied,
     )
 
 
@@ -829,6 +833,16 @@ def select_k_auto(
     loo_clip_max: float = 1.0 - 1e-4,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    time = metadata.time
+    sample_weight = metadata.sample_weight
     _ensure_supported_auto_k_mode(config)
     if config.k_method != "evaluate":
         raise ValueError(
@@ -850,6 +864,7 @@ def select_k_auto(
         )
 
     y_arr = np.asarray(y).ravel()
+    sample_weight_supplied = sample_weight is not None
     w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
     max_k = min(config.max_k, len(feature_path))
     min_k = max(1, min(config.min_k, max_k))
@@ -874,6 +889,7 @@ def select_k_auto(
         "task": task,
         "metric": metric,
         "k_grid": k_grid,
+        "sample_weight_supplied": sample_weight_supplied,
         "cat_features": cat_features,
         "cat_encoding": cat_encoding,
         "loo_smoothing": loo_smoothing,
@@ -925,6 +941,8 @@ def select_k_auto(
 
     curve_config = with_effective_k_bounds(config, min_k=min_k, max_k=max_k)
     best_k, diag = choose_k_from_score_curve(diag, curve_config, lower_is_better=True)
+    if is_sklearn_scorer(metric):
+        diag["metric"] = sklearn_scorer_label(metric)
 
     return best_k, valid_features[:best_k], diag
 

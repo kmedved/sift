@@ -8,6 +8,12 @@ or result classes by default. The completed core adapter slice supports
 `ImportanceResult`. It also adapts a fitted `StabilitySelector` through its
 dynamic `result_view_` property.
 
+Cache-backed filters have their own additive entry point:
+`select_cached(..., return_result=True)` returns a complete `SelectionView`
+with selected positions, relevance, objective-path diagnostics, and cache
+provenance. The four historical list/tuple return shapes remain unchanged when
+the flag is omitted or false.
+
 ## The common five accessors
 
 Request the existing rich result first, then adapt it. Supplying
@@ -55,6 +61,7 @@ selected features. `table` is a defensive-copy alias for `raw_table`.
 | `FeaturePathEvaluationResult` | supported | complete when `input_features` uniquely resolves the path; otherwise path rows only | normalized evaluation curve | unavailable |
 | fitted `StabilitySelector` | supported | complete over the fitted candidate-feature namespace | empty standardized table | frozen fitted column subset; inverse unavailable |
 | `ImportanceResult` from `permutation_importance(..., return_result=True)` | supported | complete in original feature-position order | empty standardized table | unavailable |
+| `SelectionView` from `select_cached(..., return_result=True)` | supported directly | complete from the named cache contract | empty standardized table | unavailable |
 
 The seven-family core adapter acceptance criterion is complete. The historical
 permutation-importance DataFrame remains the default return and is deliberately

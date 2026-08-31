@@ -9,6 +9,12 @@ import pandas as pd
 from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
 
+from sift.scoring import (
+    UnsupportedScorerSampleWeightError,
+    is_sklearn_scorer,
+    score_with_sklearn_scorer,
+)
+
 
 def build_k_grid(min_k: int, max_k: int) -> List[int]:
     """Build sensible k grid: dense early, sparse later."""
@@ -29,8 +35,14 @@ def build_k_grid(min_k: int, max_k: int) -> List[int]:
     return sorted(k for k in grid if min_k <= k <= max_k)
 
 
-def resolve_metric(metric: str, task: str) -> str:
+def resolve_metric(metric: object, task: str) -> object:
     """Resolve metric, defaulting based on task."""
+    if is_sklearn_scorer(metric):
+        return metric
+    if not isinstance(metric, str):
+        raise ValueError(
+            "metric must be a SIFT metric name or an sklearn scorer object"
+        )
     if metric == "auto":
         return "rmse" if task == "regression" else "logloss"
     if task == "regression":
@@ -219,9 +231,10 @@ def evaluate_numeric_prefixes(
     w_val: np.ndarray,
     *,
     task: Literal["regression", "classification"],
-    metric: str,
+    metric: object,
     k_grid: list[int],
     ridge_alpha_strategy: Literal["per_prefix", "full_path"] = "per_prefix",
+    sample_weight_supplied: bool = True,
 ) -> dict[int, float]:
     """Evaluate all prefix sizes on an already-built feature path."""
     if X_train_path.shape[1] == 0:
@@ -269,7 +282,16 @@ def evaluate_numeric_prefixes(
 
             model.fit(Xtr_s[:, :k], y_train, sample_weight=w_train)
 
-            if task == "classification" and metric == "logloss":
+            if is_sklearn_scorer(metric):
+                signed_score = score_with_sklearn_scorer(
+                    metric,
+                    model,
+                    Xva_s[:, :k],
+                    y_val,
+                    sample_weight=w_val if sample_weight_supplied else None,
+                )
+                scores[k] = -signed_score
+            elif task == "classification" and metric == "logloss":
                 if not np.isin(np.unique(y_val), model.classes_).all():
                     scores[k] = np.inf
                 else:
@@ -290,6 +312,8 @@ def evaluate_numeric_prefixes(
                     metric,
                     sample_weight=w_val,
                 )
+        except UnsupportedScorerSampleWeightError:
+            raise
         except Exception:
             scores[k] = np.inf
     return scores

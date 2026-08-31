@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
+from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
@@ -239,6 +240,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             "selected_indices_",
             "k_",
             "nested_auto_k_diagnostics_",
+            "_row_metadata_columns_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -418,6 +420,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             resolved_auto_k = getattr(self, "auto_k_config", None)
 
         self._clear_fit_state()
+        metadata = resolve_row_metadata(X, groups=groups, time=time)
+        X = metadata.X
+        groups = metadata.groups
+        time = metadata.time
+        self._row_metadata_columns_ = metadata.extracted_columns
         has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
 
         if resolved_cache is not None and has_supervised_categoricals:
@@ -635,6 +642,10 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         check_is_fitted(
             self,
             ["selected_indices_", "selected_features_", "feature_names_in_"],
+        )
+        X = drop_fitted_metadata_columns(
+            X,
+            getattr(self, "_row_metadata_columns_", ()),
         )
         if isinstance(X, pd.DataFrame):
             if list(X.columns) != list(self.feature_names_in_):
