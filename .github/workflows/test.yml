@@ -10,6 +10,26 @@ on:
     - cron: "0 6 * * 1"
 
 jobs:
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+      - name: Verify clean wheel install
+        run: |
+          smoke_dir="$(mktemp -d)"
+          python -m venv "$smoke_dir/venv"
+          "$smoke_dir/venv/bin/python" -m pip install dist/*.whl
+          (cd "$smoke_dir" && "$smoke_dir/venv/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel_install.py")
+
   test:
     runs-on: ubuntu-latest
     strategy:

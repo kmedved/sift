@@ -11,18 +11,17 @@ The package is a single Python library. Public entry points are exported from
 
 ## Quickstart
 
-Install the feature-selection distribution from PyPI (the import remains
-`sift`):
+SIFT is not published to PyPI. Install it from a repository checkout:
 
 ```bash
-python -m pip install sift-feature-selection
+python -m pip install .
 ```
 
-The distribution name is distinct from Sift Science's occupied `Sift` project.
-For source compatibility this project still imports as `sift`, so the two
-projects must not be installed in the same Python environment.
+The built distribution name is `sift-feature-selection`, while the import stays
+`sift`. That import collides with Sift Science's SDK, so the two projects must
+not be installed in the same Python environment.
 
-For local development, install from the repository root:
+For editable local development, install from the repository root:
 
 ```bash
 python -m pip install -e .

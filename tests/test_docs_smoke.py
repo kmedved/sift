@@ -57,7 +57,7 @@ def test_readme_python_examples_execute():
         exec(compile(block, "README.md", "exec"), namespace)
 
 
-def test_readme_has_only_pypi_safe_links():
+def test_readme_has_only_distribution_safe_links():
     readme_text = (ROOT / "README.md").read_text(encoding="utf8")
     relative_links = re.findall(r"\]\((?!https?://|mailto:|#)[^)]+\)", readme_text)
 

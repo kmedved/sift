@@ -63,9 +63,9 @@ nothing.
 ## Documentation Checks
 
 `README.md` is the package long description; its links must therefore be
-absolute and PyPI-safe. `DOCS.MD` is the detailed API manual. The docs smoke
-tests verify the README examples, documented top-level exports, and install
-extras.
+absolute and render correctly outside a repository checkout. `DOCS.MD` is the
+detailed API manual. The docs smoke tests verify the README examples,
+documented top-level exports, and install extras.
 
 ```bash
 python -m pytest tests/test_docs_smoke.py -q
@@ -105,8 +105,9 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 ## CI and Releases
 
 GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus optional CatBoost
-coverage and a scheduled quick benchmark gate. Publishing is triggered from
-GitHub releases through a separate build job and an OIDC-only PyPI job.
+coverage, a clean-wheel installation smoke test, and a scheduled quick benchmark
+gate. GitHub releases build and retain verified source and wheel artifacts. This
+project does not publish those artifacts to PyPI.
 
 Before release-oriented promotion, run:
 
@@ -114,17 +115,19 @@ Before release-oriented promotion, run:
 python -m pytest -q
 python -m pytest tests/test_docs_smoke.py -q
 python -m pytest tests/test_benchmarks.py -q
-python -m build
+python -m build --wheel
 python -m twine check dist/*
+python -m venv /tmp/sift-wheel-smoke
+/tmp/sift-wheel-smoke/bin/python -m pip install --force-reinstall dist/*.whl
+(cd /tmp && /tmp/sift-wheel-smoke/bin/python "$OLDPWD/scripts/verify_wheel_install.py")
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Before the first `sift-feature-selection` upload, configure the PyPI Trusted
-Publisher for repository `kmedved/sift`, workflow
-`.github/workflows/python-publish.yml`, and environment `pypi`. Release tags
-must match `v` plus `sift.__version__`.
+Release tags must match `v` plus `sift.__version__`. The release workflow builds
+artifacts for GitHub Releases only; adding an external package index is a future
+owner decision rather than an implicit release step.
 
 For the 0.8.0 release bundle, the focused smoke is:
 
