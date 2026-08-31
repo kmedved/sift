@@ -18,9 +18,16 @@ surface. For deeper examples and option notes, see the canonical manual in
 | Model importance | `permutation_importance` |
 | Boruta | `BorutaSelector`, `BorutaResult`, `select_boruta`, `select_boruta_shap` |
 | Optional CatBoost | `catboost_select`, `catboost_regression`, `catboost_classif` |
+| Logging | `set_verbosity` |
 
 CatBoost entry points are lazy exports from `sift`; importing `sift` does not
 require the `catboost` extra.
+
+Progress from calls with `verbose=True` is emitted at INFO on the `sift`
+logger. It remains visible by default and propagates to application logging
+handlers when configured. Use `sift.set_verbosity("debug")`,
+`sift.set_verbosity("info")`, or `sift.set_verbosity(None)` to select debug,
+normal progress, or silence globally; per-call `verbose=False` remains silent.
 
 ## Shared Selector Behavior
 
@@ -403,11 +410,16 @@ When `saturation_reason="candidate_path_exhausted"`, increasing `max_k` alone
 cannot help; inspect valid candidates and `corr_prune`/`top_m`. When
 `saturation_reason="evaluation_curve_limited"`, the candidate path still has
 features but a fold/statistical limit ended the risk curve; inspect fold sample
-sizes and evaluation diagnostics. For dense weak-signal
-domains, set `auto_dense_check=True` on `AutoKConfig(k_method="auto")` to run
-an opt-in `gaussian_cv` cross-check with `selection_rule="best"` after large
-EBIC picks; the router warns when EBIC's detectable-feature count and the
-Gaussian CV sufficiency pick differ by more than the configured ratio.
+sizes and evaluation diagnostics.
+
+For dense weak-signal domains in Gaussian CEFS+ automatic routing, set
+`auto_dense_check=True` on `AutoKConfig(k_method="auto")` to run an opt-in
+`gaussian_cv` cross-check with `selection_rule="best"` after large EBIC picks;
+the router warns when EBIC's detectable-feature count and the Gaussian CV
+sufficiency pick differ by more than the configured ratio. Binary log-loss
+CEFS+ has no dense-regime diagnostic and rejects non-default `auto_dense_*`
+fields. Binary Brier selection delegates to Gaussian CEFS+ and therefore
+follows the Gaussian dense-check contract.
 
 Important `AutoKConfig` method fields:
 
@@ -423,7 +435,7 @@ Important `AutoKConfig` method fields:
 | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` |
 | `floor_z`, `floor_window` | `changepoint` |
 | `consensus_methods` | `consensus` |
-| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` |
+| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` (Gaussian CEFS+, including the binary Brier delegate; binary log-loss rejects non-default values) |
 
 `knockoff_path` returns an approximate Gaussian-copula plug-in selected set when
 `knockoff_return="set"`. `changepoint`, `stability`, `xfit_objective`, and
@@ -502,6 +514,17 @@ After fitting, `StabilitySelector.get_feature_names_out()` returns the selected
 feature names and validates any supplied `input_features` against the fit-time
 feature order.
 
+`StabilitySelector.transform` always returns an ndarray. For a selector fitted
+on a DataFrame, or on an ndarray with explicit `feature_names`, DataFrame
+transforms select fitted features by name: extra and reordered columns are
+accepted, while duplicate labels or missing selected columns raise.
+`tune_threshold` applies the same identity checks while requiring every fitted
+feature. A selector fitted on an unnamed positional ndarray cannot prove
+DataFrame column identity and therefore rejects DataFrame input to either
+method; keep using same-width ndarrays, provide explicit names when fitting the
+ndarray, or refit on a DataFrame. Ndarray transforms are positional and must
+have the fit-time feature count.
+
 ## Smart Sampling
 
 ```python
@@ -518,6 +541,22 @@ sampled = smart_sample(
 
 Smart sampling reduces large panel or cross-section data before selection and
 adds inverse-probability style sample weights for selected rows.
+
+With `StabilitySelector(use_smart_sampler=True)`, `X` must be a DataFrame. An
+explicit `fit(..., feature_names=[...])` sequence is an ordered feature-subset
+contract: the selector does not widen it to other numeric columns. Every
+surviving explicit feature must be numeric. Pass an ordered iterable such as a
+list, tuple, pandas Index, or one-dimensional NumPy array; strings, bytes-like
+objects, mappings, sets, scalar arrays, and matrix-like containers are rejected.
+Tuple and MultiIndex column labels remain single feature names in
+`get_feature_names_out`. `group_col` and `time_col` from the sampler
+configuration are metadata exclusions and are removed from the feature subset
+even when named explicitly. Without `feature_names`, the selector uses the
+numeric DataFrame columns other than those metadata columns. Datetime and
+timedelta feature columns are rejected before numeric coercion; a configured
+datetime `time_col` remains valid metadata. `tune_threshold` preserves those
+metadata columns for fold-local smart sampling without widening the fitted
+feature subset.
 
 ## Permutation Importance
 

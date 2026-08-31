@@ -10,6 +10,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import ensure_weights
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
@@ -397,7 +398,7 @@ def _require_eval_split_context(
 
 def _print_selected_k(label: str, selected_count: int, verbose: bool) -> None:
     if verbose:
-        print(f"  {label} selected k={selected_count}")
+        logger.info(f"  {label} selected k={selected_count}")
 
 
 def _select_elbow_count(
@@ -1207,11 +1208,13 @@ def select_gaussian_auto_path(
         (degenerate_stop or empty_terminal_stop)
         and routed_config.k_method != "penalized_objective"
     ):
-        fallback_config = replace(
-            auto_k_config,
-            k_method="penalized_objective",
-            objective_penalty="ebic",
-            min_k=0,
+        fallback_config = _strip_router_only_fields(
+            replace(
+                auto_k_config,
+                k_method="penalized_objective",
+                objective_penalty="ebic",
+                min_k=0,
+            )
         )
         route["primary"] = route["chosen"]
         route["chosen"] = "penalized_objective"

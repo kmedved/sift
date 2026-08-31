@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from typing import Any, List, Literal, Optional, Tuple
 import warnings
 
@@ -149,23 +150,64 @@ def extract_feature_names(X) -> Optional[List[str]]:
     return None
 
 
+def _is_temporal_feature_dtype(dtype) -> bool:
+    """Recognize NumPy, pandas, and Arrow-backed datetime/duration dtypes."""
+    return (
+        pd.api.types.is_datetime64_any_dtype(dtype)
+        or pd.api.types.is_timedelta64_dtype(dtype)
+        # pandas 2.2 does not classify Arrow duration dtypes as timedelta,
+        # but they retain NumPy's temporal dtype kind.
+        or getattr(dtype, "kind", None) in {"M", "m"}
+    )
+
+
 def reject_datetime_like_features(X) -> None:
     """Reject pandas datetime/timedelta features before numeric coercion."""
-    if hasattr(X, "dtypes"):
+    temporal_object_types = (
+        date,
+        datetime,
+        timedelta,
+        np.datetime64,
+        np.timedelta64,
+        pd.Timestamp,
+        pd.Timedelta,
+    )
+
+    def contains_temporal_objects(values) -> bool:
+        try:
+            flat = np.asarray(values, dtype=object).ravel()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            value is pd.NaT or isinstance(value, temporal_object_types)
+            for value in flat
+        )
+
+    if isinstance(X, pd.DataFrame):
         datetime_like = [
             name
-            for name, column_dtype in X.dtypes.items()
-            if pd.api.types.is_datetime64_any_dtype(column_dtype)
-            or pd.api.types.is_timedelta64_dtype(column_dtype)
+            for i, (name, column_dtype) in enumerate(X.dtypes.items())
+            if _is_temporal_feature_dtype(column_dtype)
+            or (
+                pd.api.types.is_object_dtype(column_dtype)
+                and contains_temporal_objects(X.iloc[:, i])
+            )
         ]
     else:
-        dtype = getattr(X, "dtype", None)
+        try:
+            array = np.asarray(X)
+        except (TypeError, ValueError):
+            array = None
+        dtype = None if array is None else array.dtype
         datetime_like = (
             ["<array>"]
             if dtype is not None
             and (
-                pd.api.types.is_datetime64_any_dtype(dtype)
-                or pd.api.types.is_timedelta64_dtype(dtype)
+                _is_temporal_feature_dtype(dtype)
+                or (
+                    pd.api.types.is_object_dtype(dtype)
+                    and contains_temporal_objects(array)
+                )
             )
             else []
         )

@@ -197,7 +197,11 @@ def _block_bootstrap_indices(
         yield train_arr, val_arr
 
     if valid < n_bootstrap:
-        warnings.warn(f"Only generated {valid}/{n_bootstrap} valid block bootstrap splits.")
+        warnings.warn(
+            f"Only generated {valid}/{n_bootstrap} valid block bootstrap splits.",
+            UserWarning,
+            stacklevel=5,
+        )
 
 
 def _allocate_group_draws(

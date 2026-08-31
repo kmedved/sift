@@ -147,8 +147,17 @@ from sift import (
     catboost_select,
     catboost_regression,
     catboost_classif,
+    set_verbosity,
 )
 ```
+
+## Logging
+
+Calls with `verbose=True` emit INFO records on the `sift` logger and remain
+visible by default. Use `set_verbosity("debug")`, `set_verbosity("info")`, or
+`set_verbosity(None)` to select debug, normal progress, or silence globally;
+per-call `verbose=False` remains silent. Application logging handlers can
+capture `sift` records normally.
 
 ## Data Requirements
 
@@ -737,7 +746,11 @@ selected = select_mrmr(
   `auto_dense_check=True` to have large EBIC picks cross-checked against
   `gaussian_cv` with `selection_rule="best"`; the router warns when EBIC's
   detectable-feature count and the Gaussian CV sufficiency pick disagree
-  sharply.
+  sharply. The dense check is a Gaussian CEFS+ diagnostic: binary log-loss
+  CEFS+ automatic routing has no dense-regime diagnostic and rejects
+  non-default `auto_dense_*` settings with a `ValueError` instead of silently
+  ignoring them. Binary Brier selection delegates to Gaussian CEFS+ and
+  therefore follows the Gaussian dense-check contract.
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model. `selection_rule="best"` preserves the historical argmin
   behavior. `selection_rule="plateau"` and `"tolerance"` require
@@ -848,7 +861,7 @@ Important v2 knobs:
 | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` | Bootstrap count/mode, max-one-SE or pi-threshold sizing, and a Phi floor for chance-level agreement. |
 | `floor_z`, `floor_window` | `changepoint` | Experimental noise-floor diagnostic parameters. |
 | `consensus_methods` | `consensus` | Submethods included in the lower-median consensus. |
-| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
+| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` (Gaussian CEFS+, including the binary Brier delegate; binary log-loss rejects non-default values) | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
 
 Supported function-style routes:
 
@@ -1123,6 +1136,18 @@ X_reduced = selector.transform(X)
 selected_names_out = selector.get_feature_names_out()
 ```
 
+`StabilitySelector.transform` always returns an ndarray. A selector fitted on
+a DataFrame selects transformed DataFrames by fitted column name, so extra or
+reordered columns are accepted; duplicate labels and missing selected columns
+raise clear errors. `tune_threshold` applies the same identity checks while
+requiring every fitted feature. The same named paths are available when fitting
+an ndarray with explicit `feature_names`. By contrast, a selector fitted on an
+unnamed positional ndarray rejects DataFrame input to either method because its
+generated `x0`, `x1`, ... names cannot establish column identity. Keep using
+same-width ndarrays, provide explicit names when fitting the ndarray, or refit
+on a DataFrame. Ndarray transforms are positional and must retain the fit-time
+feature count.
+
 Important options:
 
 - `n_bootstrap`: number of resamples.
@@ -1255,8 +1280,20 @@ selector = StabilitySelector(
 selector.fit(df, y)
 ```
 
-When `use_smart_sampler=True`, `X` must be a DataFrame. The sampler uses numeric
-feature columns only and drops group/time columns from the feature matrix.
+When `use_smart_sampler=True`, `X` must be a DataFrame. An explicit
+`fit(..., feature_names=[...])` sequence is preserved as an ordered feature
+subset rather than widened to every numeric column. Explicit feature names must
+refer to numeric columns after the sampler's metadata exclusions. Pass an
+ordered iterable such as a list, tuple, pandas Index, or one-dimensional NumPy
+array; strings, bytes-like objects, mappings, sets, scalar arrays, and
+matrix-like containers are rejected. Tuple and MultiIndex column labels remain
+single feature names in `get_feature_names_out`. Configured `group_col` and
+`time_col` columns remain metadata and are excluded from the feature matrix even
+if they appear in `feature_names`. Without explicit names, the sampler uses
+numeric columns other than those group/time columns. Datetime and timedelta
+feature columns are rejected before numeric coercion; a configured datetime
+`time_col` remains valid sampler metadata. Fold-local `tune_threshold` fits
+retain the configured group/time metadata while scoring only fitted features.
 
 ### Anchor utilities and presets
 

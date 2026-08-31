@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
+from sift._logging import logger
 from sift._preprocess import best_score_from_dict, infer_higher_is_better
 from sift.catboost_common import (
     CatBoostClassifier,
@@ -92,7 +93,11 @@ def _resolve_catboost_feature_types(
     if cat_features is not None:
         missing = [f for f in cat_features if f not in all_features]
         if missing:
-            warnings.warn(f"cat_features not found in X (ignoring): {missing[:5]}")
+            warnings.warn(
+                f"cat_features not found in X (ignoring): {missing[:5]}",
+                UserWarning,
+                stacklevel=3,
+            )
         cat_features_final = [f for f in cat_features if f in all_features]
         for f in detected_cat:
             if f not in cat_features_final:
@@ -110,7 +115,9 @@ def _resolve_catboost_feature_types(
                 f"treat_object_as_categorical=False but {len(orphan_obj)} object column(s) "
                 f"are not in text_features or cat_features: {orphan_obj[:5]}. "
                 "Auto-treating them as categorical to avoid CatBoost errors. "
-                "To exclude them, drop from X before calling."
+                "To exclude them, drop from X before calling.",
+                UserWarning,
+                stacklevel=3,
             )
             cat_features_final = list(cat_features_final)
             for c in orphan_obj:
@@ -118,7 +125,7 @@ def _resolve_catboost_feature_types(
                     cat_features_final.append(c)
 
     if verbose and cat_features_final:
-        print(f"  Categorical features: {len(cat_features_final)}")
+        logger.info(f"  Categorical features: {len(cat_features_final)}")
 
     return cat_features_final, text_feat
 
@@ -240,7 +247,7 @@ def _build_catboost_splits(
         )
         if verbose:
             group_msg = " (group-aware)" if groups is not None else ""
-            print(f"  Stability selection: {n_bootstrap} resampled splits{group_msg}")
+            logger.info(f"  Stability selection: {n_bootstrap} resampled splits{group_msg}")
         return splits
 
     if cv is not None:
@@ -263,7 +270,7 @@ def _build_catboost_splits(
             else cv.split(X_work, y)
         )
         if verbose:
-            print(f"  Custom CV: {type(cv).__name__} ({len(splits)} splits)")
+            logger.info(f"  Custom CV: {type(cv).__name__} ({len(splits)} splits)")
         return splits
 
     if groups is not None:
@@ -274,7 +281,7 @@ def _build_catboost_splits(
         )
         splits = list(splitter.split(X_work, y, groups))
         if verbose:
-            print(f"  Group-aware splits: {n_splits}")
+            logger.info(f"  Group-aware splits: {n_splits}")
         return splits
 
     if task == 'classification':
@@ -333,7 +340,7 @@ def _run_catboost_split_evaluation(
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         if verbose:
-            print(f"  Split {fold_idx + 1}/{len(splits)}...", end=" ", flush=True)
+            logger.info(f"  Split {fold_idx + 1}/{len(splits)}...")
 
         X_train, X_val = X_work.iloc[train_idx], X_work.iloc[val_idx]
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
@@ -436,9 +443,12 @@ def _run_catboost_split_evaluation(
         if verbose:
             if scores:
                 best_k_fold, best_score_fold = best_score_from_dict(scores, resolved_hib)
-                print(f"best k={best_k_fold}, score={best_score_fold:.4f}")
+                logger.info(
+                    f"  Split {fold_idx + 1}/{len(splits)}: "
+                    f"best k={best_k_fold}, score={best_score_fold:.4f}"
+                )
             else:
-                print("no valid scores")
+                logger.info(f"  Split {fold_idx + 1}/{len(splits)}: no valid scores")
 
     return all_scores, all_features_by_k, prefilter_features_first
 
@@ -499,7 +509,7 @@ def _choose_catboost_target_k(
     )
 
     if verbose:
-        print(
+        logger.info(
             f"  Best score {best_score:.4f} at k={best_k}; "
             f"parsimony rule (tolerance={tolerance_float:g}) selected "
             f"k={parsimonious_k}"
@@ -510,7 +520,9 @@ def _choose_catboost_target_k(
         if k_req > max_eval_k:
             warnings.warn(
                 f"k={k_req} exceeds max evaluated feature count ({max_eval_k}) after "
-                f"prefiltering/fit failures; using k={max_eval_k} instead."
+                f"prefiltering/fit failures; using k={max_eval_k} instead.",
+                UserWarning,
+                stacklevel=3,
             )
             target_k = max_eval_k
         else:
@@ -615,7 +627,11 @@ def _compute_final_catboost_importances(
             method=importance_method,
         )
     except Exception as exc:
-        warnings.warn(f"Failed to compute final importances: {exc}")
+        warnings.warn(
+            f"Failed to compute final importances: {exc}",
+            UserWarning,
+            stacklevel=3,
+        )
         return pd.Series(dtype=float)
 
 
@@ -710,8 +726,10 @@ def catboost_select(
 
     if verbose:
         direction = "up" if resolved_hib else "down"
-        print(f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features")
-        print(f"  Metric: {resolved_metric} ({direction} better)")
+        logger.info(
+            f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features"
+        )
+        logger.info(f"  Metric: {resolved_metric} ({direction} better)")
 
     cat_features_final, text_feat = _resolve_catboost_feature_types(
         X_work,
@@ -731,8 +749,8 @@ def catboost_select(
     )
 
     if verbose:
-        print(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
-        print(f"  Algorithm: {algorithm}")
+        logger.info(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
+        logger.info(f"  Algorithm: {algorithm}")
 
     splits = _build_catboost_splits(
         X_work=X_work,
@@ -803,7 +821,7 @@ def catboost_select(
 
     if verbose:
         score = scores_mean.get(target_k, best_score)
-        print(
+        logger.info(
             f"Selected {len(selected_features)} features (k={target_k}, score={score:.4f}; "
             f"best-scoring k={best_k}, score={best_score:.4f})"
         )

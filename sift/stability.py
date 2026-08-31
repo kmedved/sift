@@ -1,3 +1,4 @@
+from collections.abc import Hashable, Iterable, Mapping, Set
 from dataclasses import replace
 from functools import wraps
 import inspect
@@ -27,8 +28,62 @@ from sklearn.utils.validation import check_is_fitted
 from joblib import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
-from sift._preprocess import ensure_weights
+from sift._logging import logger
+from sift._preprocess import ensure_weights, reject_datetime_like_features
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
+
+
+def _coerce_feature_names(feature_names, *, argument: str = "feature_names") -> list[Hashable]:
+    """Normalize an ordered one-dimensional collection of hashable column labels."""
+    invalid_container = isinstance(
+        feature_names,
+        (str, bytes, bytearray, memoryview, Mapping, Set),
+    )
+    ndim = getattr(feature_names, "ndim", None)
+    if invalid_container or (ndim is not None and ndim != 1):
+        raise ValueError(
+            f"{argument} must be an ordered, one-dimensional iterable of names; "
+            "pass a list, tuple, pandas Index, or one-dimensional NumPy array, "
+            "not a string, bytes-like object, mapping, set, scalar, or matrix."
+        )
+    try:
+        names = list(feature_names)
+    except TypeError as exc:
+        raise ValueError(
+            f"{argument} must be an ordered, one-dimensional iterable of names."
+        ) from exc
+    for name in names:
+        try:
+            hash(name)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{argument} entries must be hashable column labels."
+            ) from exc
+    return names
+
+
+def _feature_names_object_array(feature_names) -> np.ndarray:
+    """Build a one-dimensional object array without expanding tuple labels."""
+    names = list(feature_names)
+    result = np.empty(len(names), dtype=object)
+    result[:] = names
+    return result
+
+
+def _feature_names_index(feature_names) -> pd.Index:
+    """Build a flat object Index with exact tuple and missing-label semantics."""
+    return pd.Index(
+        _feature_names_object_array(feature_names),
+        dtype=object,
+        tupleize_cols=False,
+    )
+
+
+def _exact_column_positions(columns, required_names) -> np.ndarray:
+    """Resolve required labels exactly, without pandas MultiIndex partial keys."""
+    available = _feature_names_index(columns)
+    required = _feature_names_index(required_names)
+    return available.get_indexer(required)
 
 
 # =============================================================================
@@ -118,7 +173,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         Fraction of bootstrap runs in which each feature was selected.
     selected_features_ : ndarray
         Indices of selected features.
-    selected_feature_names_ : list of str
+    selected_feature_names_ : list of hashable labels
         Names of selected features.
     n_features_selected_ : int
         Number of selected features.
@@ -175,7 +230,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         sample_weight: Optional[np.ndarray] = None,
         groups: np.ndarray | None = None,
         time: np.ndarray | None = None,
-        feature_names: Optional[List[str]] = None
+        feature_names: Optional[Iterable[Hashable]] = None
     ) -> 'StabilitySelector':
         """
         Run stability selection.
@@ -192,18 +247,60 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             Group labels. If provided with time, uses block bootstrap.
         time : array, optional
             Time values. If provided with groups, uses block bootstrap.
-        feature_names : list of str, optional
-            Feature names.
+        feature_names : ordered iterable of hashable labels, optional
+            Feature names. Strings, bytes-like objects, mappings, sets, scalar
+            arrays, and matrix-like containers are rejected.
 
         Returns
         -------
         self
         """
         self._clear_fit_state()
-        self._fit_used_sample_weight_ = sample_weight is not None
-        self._fit_used_groups_ = groups is not None
-        self._fit_used_time_ = time is not None
         try:
+            self._fit_used_sample_weight_ = sample_weight is not None
+            self._fit_used_groups_ = groups is not None
+            self._fit_used_time_ = time is not None
+            self._fit_feature_names_generated_ = (
+                feature_names is None and not isinstance(X, pd.DataFrame)
+            )
+            if isinstance(X, pd.DataFrame):
+                column_index = _feature_names_index(X.columns)
+                duplicate_mask = column_index.duplicated()
+            else:
+                duplicate_mask = np.zeros(0, dtype=bool)
+            if duplicate_mask.any():
+                duplicates = column_index[duplicate_mask].unique().tolist()[:5]
+                raise ValueError(
+                    "Duplicate DataFrame column labels are not supported: "
+                    f"{duplicates}. Rename columns before fitting."
+                )
+            if feature_names is not None:
+                feature_names = _coerce_feature_names(feature_names)
+                if len(feature_names) == 0:
+                    raise ValueError(
+                        "feature_names must be a non-empty list of unique names "
+                        "when provided; pass None to derive names from X."
+                    )
+                feature_index = _feature_names_index(feature_names)
+                if feature_index.duplicated().any():
+                    raise ValueError(
+                        "feature_names must be unique; duplicate names (including "
+                        "repeated NaN labels) make name-based selection and "
+                        "transform ambiguous."
+                    )
+                if isinstance(X, pd.DataFrame):
+                    positions = _exact_column_positions(X.columns, feature_names)
+                    missing = [
+                        feature_names[i]
+                        for i in np.flatnonzero(positions < 0)
+                    ]
+                    if missing:
+                        sample = missing[:5]
+                        suffix = "..." if len(missing) > 5 else ""
+                        raise ValueError(
+                            "feature_names must reference existing DataFrame "
+                            f"columns; missing: {sample}{suffix}"
+                        )
             X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
                 X, y, sample_weight, groups, time, feature_names
             )
@@ -227,6 +324,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             "_scaler",
             "_alpha_ref_weight_",
             "_target_center_",
+            "_fit_feature_names_generated_",
             "_fit_used_groups_",
             "_fit_used_sample_weight_",
             "_fit_used_time_",
@@ -252,7 +350,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         if self.use_smart_sampler and (groups is not None or time is not None):
             raise ValueError("groups/time are not supported when use_smart_sampler=True.")
         if self.use_smart_sampler:
-            X, y, sample_weight, feature_names = self._apply_smart_sampler(X, y, sample_weight)
+            X, y, sample_weight, feature_names = self._apply_smart_sampler(
+                X, y, sample_weight, feature_names
+            )
         else:
             X, y, sample_weight, feature_names = self._prep_arrays(
                 X, y, sample_weight, feature_names
@@ -303,8 +403,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
         if self.verbose:
             task_str = 'classification' if self.task == 'classification' else 'regression'
-            print(f"Stability selection ({task_str}): {self.n_bootstrap} bootstraps, "
-                  f"α={self.alpha_:.4f}, threshold={self.threshold}")
+            logger.info(
+                f"Stability selection ({task_str}): {self.n_bootstrap} bootstraps, "
+                f"α={self.alpha_:.4f}, threshold={self.threshold}"
+            )
 
         return X_scaled, y, sample_weight, feature_names, groups, time
 
@@ -312,7 +414,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         use_block = groups is not None and time is not None
         if use_block:
             if self.verbose:
-                print(f"Using block bootstrap (method={self.block_method}, size={self.block_size})")
+                logger.info(
+                    f"Using block bootstrap (method={self.block_method}, size={self.block_size})"
+                )
             split_iter = _block_bootstrap_indices(
                 n=n,
                 n_bootstrap=self.n_bootstrap,
@@ -327,7 +431,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             )
         else:
             if self.verbose:
-                print("Using i.i.d. bootstrap")
+                logger.info("Using i.i.d. bootstrap")
             split_iter = _bootstrap_indices(
                 n=n,
                 n_bootstrap=self.n_bootstrap,
@@ -462,15 +566,59 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.n_features_selected_ = len(self.selected_features_)
 
         if self.verbose:
-            print(f"Selected {self.n_features_selected_} / {p} features")
+            logger.info(f"Selected {self.n_features_selected_} / {p} features")
 
         return self
+
+    def _select_dataframe_columns(
+        self,
+        X: pd.DataFrame,
+        required_names: Iterable[Hashable],
+        *,
+        operation: str,
+        selected_only: bool,
+    ) -> pd.DataFrame:
+        """Apply the fitted DataFrame identity contract for a public operation."""
+        if getattr(self, "_fit_feature_names_generated_", False):
+            raise ValueError(
+                "This StabilitySelector was fitted on a positional array with "
+                f"generated feature names; pass a positional ndarray to {operation}, "
+                "or refit on a DataFrame to establish column names."
+            )
+        column_index = _feature_names_index(X.columns)
+        duplicate_mask = column_index.duplicated()
+        if duplicate_mask.any():
+            duplicates = column_index[duplicate_mask].unique().tolist()[:5]
+            raise ValueError(
+                "Duplicate DataFrame column labels are not supported in "
+                f"{operation}: {duplicates}. Rename columns so name-based "
+                "selection is unambiguous."
+            )
+        names = list(required_names)
+        positions = _exact_column_positions(X.columns, names)
+        missing = [names[i] for i in np.flatnonzero(positions < 0)]
+        if missing:
+            sample = missing[:5]
+            suffix = "..." if len(missing) > 5 else ""
+            descriptor = "selected feature" if selected_only else "fitted feature"
+            raise ValueError(
+                f"X is missing {descriptor} column(s) {sample}{suffix}; "
+                f"{operation} selects fitted columns by name and requires them "
+                "to be present."
+            )
+        return X.iloc[:, positions]
 
     def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """Reduce X to selected features."""
         check_is_fitted(self, ["selected_features_", "selected_feature_names_"])
         if isinstance(X, pd.DataFrame):
-            return X[self.selected_feature_names_].values
+            selected = self._select_dataframe_columns(
+                X,
+                self.selected_feature_names_,
+                operation="transform",
+                selected_only=True,
+            )
+            return selected.values
         X_arr = np.asarray(X)
         if X_arr.ndim != 2:
             raise ValueError("X must be a 2-dimensional array-like object")
@@ -485,15 +633,18 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         """Return names of selected columns using sklearn's transformer contract."""
         check_is_fitted(self, ["selected_features_", "selected_feature_names_", "feature_names_in_"])
         if input_features is not None:
-            supplied = np.asarray(input_features, dtype=object)
-            if supplied.ndim != 1 or supplied.shape[0] != self.n_features_in_:
+            supplied_names = _coerce_feature_names(
+                input_features, argument="input_features"
+            )
+            if len(supplied_names) != self.n_features_in_:
                 raise ValueError(
                     "input_features must contain one name for each fitted feature"
                 )
-            fitted = np.asarray(self.feature_names_in_, dtype=object)
-            if not np.array_equal(supplied, fitted):
+            supplied = _feature_names_index(supplied_names)
+            fitted = _feature_names_index(self.feature_names_in_)
+            if not supplied.equals(fitted):
                 raise ValueError("input_features do not match feature_names_in_")
-        return np.asarray(self.selected_feature_names_, dtype=object)
+        return _feature_names_object_array(self.selected_feature_names_)
 
     def fit_transform(
         self,
@@ -599,11 +750,17 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             )
 
         if isinstance(X, pd.DataFrame):
-            missing = [name for name in self.feature_names_in_ if name not in X.columns]
-            if missing:
-                raise ValueError(f"X is missing fitted features: {missing[:5]}")
-            X_selector_source = X[self.feature_names_in_]
-            X_values = X_selector_source.to_numpy()
+            X_feature_source = self._select_dataframe_columns(
+                X,
+                self.feature_names_in_,
+                operation="tune_threshold",
+                selected_only=False,
+            )
+            X_values = X_feature_source.to_numpy()
+            # Fold-local smart sampling still needs configured group/time
+            # metadata, while scoring must remain restricted to fitted
+            # features. Keep those two views separate.
+            X_selector_source = X if self.use_smart_sampler else X_feature_source
         else:
             X_values = np.asarray(X)
             X_selector_source = X_values
@@ -682,6 +839,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 fold_fit_kwargs["groups"] = groups_values[train_idx]
             if time_values is not None:
                 fold_fit_kwargs["time"] = time_values[train_idx]
+            if isinstance(X_selector_train, pd.DataFrame) and self.use_smart_sampler:
+                fold_fit_kwargs["feature_names"] = list(self.feature_names_in_)
             fold_selector.fit(
                 X_selector_train,
                 y_values[train_idx],
@@ -770,9 +929,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         valid = results.dropna(subset=['mean_score'])
         best_thresh = threshold_values[0] if valid.empty else valid.loc[valid['mean_score'].idxmax(), 'threshold']
         if self.verbose:
-            print(f"Threshold tuning results (scoring={scoring}):")
-            print(results.to_string(index=False))
-            print(f"Best threshold: {best_thresh}")
+            logger.info(f"Threshold tuning results (scoring={scoring}):")
+            logger.info(results.to_string(index=False))
+            logger.info(f"Best threshold: {best_thresh}")
         return best_thresh, results
 
     def set_threshold(self, threshold: float) -> 'StabilitySelector':
@@ -795,7 +954,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.selected_feature_names_ = [self.feature_names_in_[i] for i in self.selected_features_]
         self.n_features_selected_ = len(self.selected_features_)
         if self.verbose:
-            print(f"Updated threshold to {threshold}: {self.n_features_selected_} features selected")
+            logger.info(
+                f"Updated threshold to {threshold}: "
+                f"{self.n_features_selected_} features selected"
+            )
         return self
 
     def plot_frequencies(
@@ -830,7 +992,11 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         plt.tight_layout()
         return fig, ax
 
-    def plot_coef_distributions(self, features: Optional[List[str]] = None, top_n: int = 12):
+    def plot_coef_distributions(
+        self,
+        features: Optional[Iterable[Hashable]] = None,
+        top_n: int = 12,
+    ):
         """Plot coefficient distributions across bootstrap runs."""
         if not hasattr(self, 'coef_bootstrap_'):
             raise ValueError(
@@ -839,8 +1005,17 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             )
         if features is None:
             features = self.get_feature_info()['feature'].head(top_n).tolist()
+        else:
+            features = _coerce_feature_names(features, argument="features")
         if len(features) == 0:
             raise ValueError("features must contain at least one feature.")
+        positions = _exact_column_positions(self.feature_names_in_, features)
+        if np.any(positions < 0):
+            missing = [features[i] for i in np.flatnonzero(positions < 0)]
+            raise ValueError(
+                "features must reference fitted feature names; "
+                f"missing: {missing[:5]}"
+            )
 
         import matplotlib.pyplot as plt
 
@@ -850,9 +1025,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2.5 * nrows))
         axes = np.atleast_2d(axes).flatten()
 
-        for i, feat in enumerate(features):
+        for i, (feat, idx) in enumerate(zip(features, positions)):
             ax = axes[i]
-            idx = self.feature_names_in_.index(feat)
             coefs = self.coef_bootstrap_[:, idx]
             ax.hist(coefs, bins=20, edgecolor='white', alpha=0.7)
             ax.axvline(0, color='red', linestyle='--', alpha=0.5)
@@ -948,7 +1122,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         y,
         sample_weight,
         feature_names
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Hashable]]:
         """Convert inputs to arrays, extract feature names."""
         exclude = set()
         if self.use_smart_sampler and self.sampler_config:
@@ -958,13 +1132,27 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 exclude.add(self.sampler_config.time_col)
 
         if isinstance(X, pd.DataFrame):
-            feature_names = feature_names or [c for c in X.columns if c not in exclude]
-            X = X[feature_names].values
+            if feature_names is None:
+                feature_names = [c for c in X.columns if c not in exclude]
+            positions = _exact_column_positions(X.columns, feature_names)
+            if np.any(positions < 0):
+                missing = [
+                    feature_names[i] for i in np.flatnonzero(positions < 0)
+                ]
+                raise ValueError(
+                    "feature_names must reference existing DataFrame columns; "
+                    f"missing: {missing[:5]}"
+                )
+            feature_frame = X.iloc[:, positions]
+            reject_datetime_like_features(feature_frame)
+            X = feature_frame.values
         else:
+            reject_datetime_like_features(X)
             X = np.asarray(X)
             if X.ndim != 2:
                 raise ValueError("X must be a 2-dimensional array-like object")
-            feature_names = feature_names or [f"x{i}" for i in range(X.shape[1])]
+            if feature_names is None:
+                feature_names = [f"x{i}" for i in range(X.shape[1])]
 
         if len(feature_names) != X.shape[1]:
             raise ValueError(
@@ -1003,8 +1191,9 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self,
         X,
         y,
-        sample_weight=None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+        sample_weight=None,
+        feature_names=None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Hashable]]:
         """Apply smart sampler to reduce data size."""
         if not isinstance(X, pd.DataFrame):
             raise ValueError("use_smart_sampler=True requires X to be a DataFrame")
@@ -1033,13 +1222,41 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             exclude.add(config.group_col)
         if config.time_col:
             exclude.add(config.time_col)
-        candidate_cols = [c for c in X.columns if c not in exclude]
-        feature_names = X[candidate_cols].select_dtypes(include=[np.number]).columns.tolist()
+        if feature_names is None:
+            candidate_cols = [c for c in X.columns if c not in exclude]
+        else:
+            # An explicit feature_names list is a feature-subset contract. Keep
+            # its order, retain the sampler's group/time exclusions, and never
+            # widen it back to every numeric DataFrame column.
+            candidate_cols = [c for c in feature_names if c not in exclude]
+        positions = _exact_column_positions(X.columns, candidate_cols)
+        if np.any(positions < 0):
+            missing = [candidate_cols[i] for i in np.flatnonzero(positions < 0)]
+            raise ValueError(
+                "feature_names for use_smart_sampler must reference existing "
+                f"DataFrame columns; missing: {missing[:5]}"
+            )
+        candidate_frame = X.iloc[:, positions]
+        reject_datetime_like_features(candidate_frame)
+        if feature_names is not None:
+            non_numeric = candidate_frame.select_dtypes(
+                exclude=[np.number]
+            ).columns.tolist()
+            if non_numeric:
+                raise ValueError(
+                    "feature_names for use_smart_sampler must reference numeric "
+                    f"columns; non-numeric: {non_numeric[:5]}"
+                )
+        feature_names = candidate_frame.select_dtypes(
+            include=[np.number]
+        ).columns.tolist()
         dropped = [c for c in candidate_cols if c not in feature_names]
         if dropped:
             warnings.warn(
                 f"Smart sampler uses numeric features only; dropping {len(dropped)} non-numeric column(s): "
-                f"{dropped[:5]}{'...' if len(dropped) > 5 else ''}"
+                f"{dropped[:5]}{'...' if len(dropped) > 5 else ''}",
+                UserWarning,
+                stacklevel=4,
             )
         if not feature_names:
             raise ValueError("No numeric feature columns available for smart sampling.")
@@ -1261,7 +1478,7 @@ def _stability_task_features(
     y: Union[np.ndarray, pd.Series],
     k: int,
     **kwargs,
-) -> Union[List[str], List[int]]:
+) -> Union[List[Hashable], List[int]]:
     sample_weight = kwargs.pop("sample_weight", None)
     groups = kwargs.pop("groups", None)
     time = kwargs.pop("time", None)
@@ -1284,7 +1501,7 @@ def stability_regression(
     y: Union[np.ndarray, pd.Series],
     k: int,
     **kwargs,
-) -> Union[List[str], List[int]]:
+) -> Union[List[Hashable], List[int]]:
     """Stability selection for regression.
 
     Returns up to ``k`` features whose selection frequency clears ``threshold``
@@ -1299,7 +1516,7 @@ def stability_classif(
     y: Union[np.ndarray, pd.Series],
     k: int,
     **kwargs,
-) -> Union[List[str], List[int]]:
+) -> Union[List[Hashable], List[int]]:
     """Stability selection for classification.
 
     Returns up to ``k`` features whose selection frequency clears ``threshold``

@@ -12,12 +12,40 @@
 - `k='auto'` (router) calls now emit a `UserWarning` when they select zero
   features, and `select_cefsplus` warns when `y` contains only 3-20 distinct
   integer-valued levels (labels-shaped targets). Selector classes reject 1-D
-  `X` with a `ValueError` instead of an `IndexError`. The no-config router
+  `X` with a `ValueError` instead of an `IndexError`. Binary log-loss CEFS+
+  automatic routing rejects non-default `auto_dense_*` options with a
+  `ValueError` (there is no log-loss dense-regime diagnostic; the fields were
+  previously warned about, and stripping that warning would have made them
+  silently ignored). Binary Brier selection delegates to Gaussian CEFS+ and
+  retains its dense-check behavior. `StabilitySelector` rejects duplicate
+  DataFrame column labels and duplicate, empty, missing, scalar, or unordered
+  explicit `feature_names` at fit; pass an ordered iterable such as a list,
+  tuple, pandas Index, or one-dimensional NumPy array. Transform validates
+  duplicate labels and missing selected DataFrame columns; `tune_threshold`
+  uses the same identity helper but requires every fitted feature column. A
+  failed fit or refit now leaves the selector unfitted. Column identity is
+  exact for tuple/MultiIndex and missing-value labels, and unhashable labels
+  are rejected clearly. A
+  selector fitted on an unnamed positional ndarray rejects DataFrame input to
+  `transform` or `tune_threshold`, because its generated names cannot establish
+  column identity. Continue passing positional ndarrays, provide explicit
+  `feature_names` when fitting the ndarray, or refit on a DataFrame before
+  passing DataFrames to those methods.
+  The no-config router
   routes time-context non-CEFS+ Gaussian selectors to
   `gaussian_cv/time_holdout` with `selection_rule="best"` (previously the
   `one_se` request fell back to `best` with a warning), no longer re-warns
   about `auto_dense_*` fields it already consumed, and
   `StabilitySelector.selection_frequencies_` is now float64.
+- `StabilitySelector(use_smart_sampler=True)` now honors an explicit
+  `feature_names` sequence as an ordered feature subset instead of widening it
+  to every numeric DataFrame column, so existing calls can produce different
+  selections and output widths. Omit `feature_names` to retain the former
+  all-numeric behavior. Configured group/time columns remain sampler metadata
+  and are excluded from an explicit subset. Datetime and timedelta feature
+  columns are rejected before numeric coercion, while a configured datetime
+  `time_col` remains valid metadata. Fold-local `tune_threshold` fits retain
+  required sampler metadata while scoring only the fitted feature subset.
 
 - Prebuilt Gaussian caches now enforce their full source contract. Named caches
   require the same row count and exact DataFrame names/order; positional caches
@@ -33,9 +61,10 @@
   use `k="auto"` with the matching evaluation strategy. `KnockoffSelector`
   rejects row `groups`/`time` in every mode; its `feature_groups` option groups
   features, not observations.
-- Datetime and timedelta feature columns, including NumPy datetime/timedelta
-  arrays, now raise before numeric coercion in classic, cache, and Boruta paths.
-  Derive explicit numeric calendar or elapsed-time features before selection.
+- Datetime and timedelta feature columns, including native and object-typed
+  NumPy arrays, now raise before numeric coercion in classic, cache, Boruta,
+  and stability-selection paths. Derive explicit numeric calendar or
+  elapsed-time features before selection.
 - Function-style filters using `task="classification"` follow sklearn's
   discrete-target contract. String, categorical, integer, and integer-valued
   floating labels remain valid; non-integral numeric class codes such as
@@ -54,6 +83,25 @@
   choosing the mRMR backend.
 
 ### Correctness, API, and documentation
+
+- Progress output now uses the `sift` package logger at INFO instead of direct
+  `print` calls. Existing `verbose` defaults and silence behavior are unchanged;
+  `sift.set_verbosity("debug"|"info"|None)` is an additive global control.
+  Every package warning now declares its category and a caller-facing stack
+  level without changing warning counts or categories, and CEFS+ path-depth
+  saturation reports the effective depth actually used.
+- The first 0.9 compatibility matrix now covers fixed-k functions, cache tuple
+  shapes, five sklearn-style filter wrappers, stability, Boruta, knockoffs, and
+  permutation importance across named/positional and weighted/unweighted calls.
+  Internal deprecation helpers have exact warn-and-forward tests. A deterministic
+  Auto-K gate summarizer is available, but the legacy gate artifact remains
+  unreproducible until its missing fixed-k path timing and mixed oracle-aggregation
+  provenance are resolved; the existing CSV is intentionally unchanged.
+- Distribution metadata now uses the SPDX `MIT` license expression and ships
+  the `py.typed` marker declared by PEP 561. Release CI builds and installs a
+  clean wheel, verifies its license and typed-package metadata, and rejects
+  leaked repository-only packages. GitHub releases retain build artifacts but
+  do not publish them to PyPI.
 
 - Smart-sampler regression targets now remain float64, are robustly centered
   on the pilot median, and use two-fold cross-fitted predictions for every row.
@@ -271,12 +319,11 @@
 - The CatBoost dependency job now runs the full test suite with all optional
   dependencies installed. The redundant Python 3.11 Numba job was removed;
   Numba is a required dependency and remains covered by every base matrix job.
-- The distribution is now published as `sift-feature-selection` (while the
-  import remains `sift`) to avoid the occupied `Sift` PyPI project. Wheels
-  exclude benchmark packages, PyPI renders the concise README with absolute
-  links, and the release workflow uses a separate verified build plus OIDC
-  Trusted Publishing. Critical Ruff checks and a scheduled quick benchmark
-  promotion gate now run in CI.
+- The built distribution is named `sift-feature-selection` while the import
+  remains `sift`, avoiding a distribution-name clash with the occupied `Sift`
+  project. Wheels exclude benchmark packages, and release automation retains
+  verified build artifacts without publishing them to PyPI. Critical Ruff
+  checks and a scheduled quick benchmark promotion gate run in CI.
 
 ## 0.7.0
 

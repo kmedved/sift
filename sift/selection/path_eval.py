@@ -335,7 +335,7 @@ def _fit_predict_score(
             "Feature-path evaluation failed for one estimator fit/score and "
             f"recorded an infinite score: {type(exc).__name__}: {exc}",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         return float("inf")
 

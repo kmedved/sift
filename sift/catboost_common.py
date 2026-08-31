@@ -10,6 +10,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import best_score_from_dict, infer_higher_is_better
 
 
@@ -379,13 +380,15 @@ def _prefilter_features(
 
     if len(numeric_cols) == 0:
         if verbose:
-            print(f"No numeric columns for pre-filtering, keeping all {len(all_features)} features")
+            logger.info(
+                f"No numeric columns for pre-filtering, keeping all {len(all_features)} features"
+            )
         return all_features
 
     k_numeric = min(k, len(numeric_cols))
 
     if verbose:
-        print(f"  Pre-filter: {len(numeric_cols)} numeric → {k_numeric} using {method}")
+        logger.info(f"  Pre-filter: {len(numeric_cols)} numeric → {k_numeric} using {method}")
 
     if method == 'cefsplus':
         if task == 'classification':
@@ -487,7 +490,11 @@ def _catboost_importance_prefilter(
     try:
         model.fit(pool)
     except Exception as e:
-        warnings.warn(f"CatBoost prefilter failed ({e}); keeping all features.")
+        warnings.warn(
+            f"CatBoost prefilter failed ({e}); keeping all features.",
+            UserWarning,
+            stacklevel=5,
+        )
         return list(X_train.columns)
 
     # Explicitly specify importance type for deterministic behavior

@@ -1,5 +1,6 @@
 __version__ = "0.8.0"
 
+from sift._logging import set_verbosity
 from sift.api import (
     FeatureCache,
     build_cache,
@@ -121,4 +122,5 @@ __all__ = [
     "catboost_select",
     "catboost_regression",
     "catboost_classif",
+    "set_verbosity",
 ]

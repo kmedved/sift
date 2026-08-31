@@ -14,6 +14,7 @@ import pandas as pd
 from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from threadpoolctl import threadpool_limits
 
+from sift._logging import logger
 from sift._preprocess import to_numpy
 from sift.estimators.copula import (
     FeatureCache,
@@ -211,7 +212,7 @@ def _warn_if_integer_multiclass_target(y: Any) -> None:
             "3-20 unique values look multiclass. For multiclass discovery, run "
             "one-vs-rest targets and combine the selected features.",
             UserWarning,
-            stacklevel=3,
+            stacklevel=4,
         )
 
 
@@ -498,7 +499,7 @@ def _build_active_rxx(cache: FeatureCache, active: np.ndarray, *, verbose: bool)
         return np.ascontiguousarray(_validate_cache_rxx(R_active, active_count), dtype=np.float64)
 
     if verbose:
-        print("cache.Rxx is None; computing a local weighted correlation matrix.")
+        logger.info("cache.Rxx is None; computing a local weighted correlation matrix.")
     Z_active = (
         np.asarray(cache.Z)
         if bool(active.all())
@@ -1284,7 +1285,7 @@ def _select_fdr_cluster_representatives(
         feature_names_are_synthetic=cache.feature_names_are_synthetic,
     )
     if verbose:
-        print(
+        logger.info(
             f"feature_groups='auto': {p_valid} features -> {reps_sorted.shape[0]} "
             f"clusters at |corr| >= {group_corr_threshold:g}; running knockoffs on representatives"
         )
@@ -1532,7 +1533,7 @@ def select_fdr(
             "feature_groups for collinear clusters, or pruning near-duplicate "
             "columns before select_fdr.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
     active_positions = np.flatnonzero(active).astype(np.int64)
     path_depth_requested = options.get("path_depth")
@@ -1697,11 +1698,11 @@ def select_fdr(
         )
         if metadata["path_depth_saturated"]:
             warnings.warn(
-                "The CEFS+ knockoff discovery set reached the configured "
+                "The CEFS+ knockoff discovery set reached the effective "
                 f"path_depth={metadata['path_depth']}; increasing path_depth may "
                 "yield additional discoveries.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
 
     mean_W = W_draws.mean(axis=0)
@@ -1760,7 +1761,7 @@ def select_fdr(
     if verbose:
         threshold_text = "derandomized" if threshold_out is None else f"threshold={threshold_out:.6g}"
         threshold_name = "knockoff+" if offset_int == 1 else "knockoff"
-        print(
+        logger.info(
             f"{threshold_name} q={q_float:.3g}: selected {len(selected_features)} features "
             f"({threshold_text}, s_mean={metadata['s_mean']:.3g})"
         )

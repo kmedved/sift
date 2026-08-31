@@ -8,6 +8,7 @@ from typing import List, Literal, Optional, Union
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import (
     encode_categoricals,
     ensure_weights,
@@ -269,7 +270,7 @@ def print_binary_path_message(
 ) -> None:
     weighted_label = "weighted " if problem.weighted else ""
     if options.k_value != "auto":
-        print(
+        logger.info(
             f"CEFS+ binary {weighted_label}logloss: selecting {path_k} features "
             f"(top_m={top_m_eff}, corr_prune={options.corr_prune})"
         )
@@ -284,7 +285,7 @@ def print_binary_path_message(
         )
     else:
         mode = f"evaluate/{auto_k_config.strategy}/{auto_k_config.selection_rule}"
-    print(
+    logger.info(
         f"CEFS+ binary {weighted_label}logloss auto-k ({mode}): "
         f"building path to {path_k} features "
         f"(top_m={top_m_eff}, corr_prune={options.corr_prune})"

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import (
     CatEncoding,
     RelevanceMethod,
@@ -41,6 +42,8 @@ from sift.selection.cefsplus_binary_common import (
     validate_binary_options,
 )
 from sift.selection.filter_auto_k import (
+    _AUTOK_FIELD_DEFAULTS,
+    _strip_router_only_fields,
     auto_k_mode_label,
     prepare_filter_eval_data,
     select_binary_changepoint,
@@ -102,7 +105,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} classic: selecting {k} features from "
                 f"{prep.X_arr.shape[1]} (top_m={top_m})"
             )
@@ -148,7 +151,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
         max_k = int(ctx.auto_k_config.max_k)
         top_m = _default_top_m(_kw(ctx, "top_m"), max_k)
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} classic auto-k: building path to {max_k} "
                 f"features (top_m={top_m})"
             )
@@ -191,7 +194,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
-            print(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
+            logger.info(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
         if ctx.request.return_result:
             selected, selected_indices, objective = select_cached(
                 cache,
@@ -262,7 +265,7 @@ def make_auto_gaussian(
         cache, cat_features = _cache_for_gaussian(ctx)
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} auto-k ({auto_k_mode_label(ctx.auto_k_config)}): "
                 f"building path to {ctx.auto_k_config.max_k} features (top_m={top_m})"
             )
@@ -345,13 +348,42 @@ def binary_auto_changepoint_payload(ctx: "FilterContext") -> SelectionPayload:
     return _binary_auto_payload(ctx, select_binary_changepoint)
 
 
+def _reject_binary_auto_dense_options(config) -> None:
+    """Binary CEFS+ has no dense-regime diagnostic; reject the opt-in explicitly.
+
+    Silently ignoring ``auto_dense_check`` would let a user believe the
+    EBIC-vs-CV cross-check ran when it cannot; keep the contract honest until a
+    binary dense diagnostic exists.
+    """
+    defaults = _AUTOK_FIELD_DEFAULTS
+    fields = (
+        "auto_dense_check",
+        "auto_dense_min_k",
+        "auto_dense_min_frac",
+        "auto_dense_disagreement_ratio",
+    )
+    changed = [
+        name for name in fields if getattr(config, name) != getattr(defaults, name)
+    ]
+    if changed:
+        raise ValueError(
+            "auto_dense_* options are not supported for binary log-loss CEFS+ "
+            f"automatic routing (no log-loss dense-regime diagnostic exists): {changed}. "
+            "Remove them, use loss='brier' for Gaussian-proxy binary selection, "
+            "or run the Gaussian select_cefsplus router for the dense check."
+        )
+
+
 def binary_auto_auto_payload(ctx: "FilterContext") -> SelectionPayload:
     assert ctx.auto_k_config is not None
-    routed = replace(
-        ctx.auto_k_config,
-        k_method="penalized_objective",
-        objective_penalty="ebic",
-        min_k=0,
+    _reject_binary_auto_dense_options(ctx.auto_k_config)
+    routed = _strip_router_only_fields(
+        replace(
+            ctx.auto_k_config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        )
     )
     payload = _binary_auto_payload(replace(ctx, auto_k_config=routed), select_binary_penalized)
     if payload.diagnostics and "auto_k" in payload.diagnostics:
@@ -498,7 +530,7 @@ def _warn_if_multiclass_labels_as_regression_target(y_arr: np.ndarray) -> None:
             "one-vs-rest targets with select_cefsplus_binary) for categorical "
             "targets; ignore this warning if y is a genuine numeric target.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=5,
         )
 
 

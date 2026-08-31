@@ -20,6 +20,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
+from sift._logging import logger
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
@@ -730,7 +731,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             group_info = build_group_info(groups, time, n_samples=n)
 
         if self.verbose:
-            print(
+            logger.info(
                 "Boruta: p={} importance={} shadow={} mode={} max_iter={}".format(
                     p, self.importance, shadow_method, self.shadow_mode, self.max_iter
                 )
@@ -740,7 +741,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             tentative_idx = np.where(status == 0)[0]
             if tentative_idx.size == 0:
                 if self.verbose:
-                    print(f"  iter={it + 1}: all features decided, stopping")
+                    logger.info(f"  iter={it + 1}: all features decided, stopping")
                 break
 
             active_idx = np.where(status != -1)[0]
@@ -826,13 +827,13 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 n_rej = int((status == -1).sum())
                 n_ten = int((status == 0).sum())
                 if iter_n_estimators is not None:
-                    print(
+                    logger.info(
                         "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
                             it + 1, iter_n_estimators, thr, n_acc, n_rej, n_ten
                         )
                     )
                 else:
-                    print(
+                    logger.info(
                         "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
                             it + 1, thr, n_acc, n_rej, n_ten
                         )
@@ -842,7 +843,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                 no_progress_count += 1
                 if no_progress_count >= self.early_stop_rounds:
                     if self.verbose:
-                        print(
+                        logger.info(
                             "  Early stop: no decisions for {} rounds".format(
                                 no_progress_count
                             )
