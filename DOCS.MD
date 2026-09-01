@@ -689,8 +689,9 @@ Available classes:
 - `CEFSPlusBinarySelector`
 - `KnockoffSelector`
 
-Each class supports `fit`, `transform`, `fit_transform`, and
-`get_support(indices=False)`. After fitting, the selectors expose:
+Each listed class subclasses sklearn's `SelectorMixin` and supports `fit`, `transform`,
+`fit_transform`, `get_support(indices=False)`, `get_feature_names_out()`, and
+dense `inverse_transform`. After fitting, the selectors expose:
 
 - `selected_features_`
 - `selected_indices_`
@@ -698,6 +699,24 @@ Each class supports `fit`, `transform`, `fit_transform`, and
 - `n_features_in_`
 - `get_feature_names_out()` for the selected columns
 - `result_` on `KnockoffSelector`
+
+All eight public selector classes, including Boruta and Stability, accept
+`output_order="legacy"` (default) to preserve each family's historical
+order: filter and knockoff path order, Boruta input order, and Stability
+descending selection-frequency order with stable input-position ties. Set
+`output_order="original"` for ascending fitted-column order. `transform`,
+`get_support(indices=True)`, and `get_feature_names_out()` follow that order;
+the boolean mask remains positional. `inverse_transform` returns a dense,
+full-width array with unselected columns filled with zero and is unavailable
+after supervised categorical encoding. Sparse matrices are rejected during
+fit, transform, and inverse transform.
+
+Metadata routing is additive and explicit. On sklearn 1.4+, enable routing and
+call `set_fit_request(...)` for metadata the configured fit path accepts before
+using `cross_validate(..., params=...)`. Fixed-k filter selectors reject
+`groups`/`time`; group/time requests require `k="auto"`. Knockoff exposes only
+`sample_weight`. Sklearn 1.3 callers continue to pass accepted metadata
+directly to `fit`.
 
 For pandas inputs, `transform` validates that columns match the fitted columns
 and order before selecting by stored positions.
@@ -1222,6 +1241,10 @@ When `alpha=None`, the default `alpha_rule="one_se"` chooses the strongest
 regularization within one standard error of the best CV score. This is a
 selection-oriented default that reduces noise-variable frequency; use
 `alpha_rule="best"` when predictive CV error is the primary objective.
+For compatibility, 0.9 passes sample weights to the sparse model fits in this
+alpha search but retains the historical unweighted validation score and scaler.
+By contrast, `tune_threshold` forwards fit weights and scores validation rows
+with the supplied weights.
 
 The lower-level convenience function `sift.stability.stability_select` returns
 `(selected_indices, selection_frequencies)`:
@@ -1261,11 +1284,18 @@ info = selector.get_feature_info()
 coef_stability = selector.get_coef_stability()
 mask = selector.get_support()
 X_reduced = selector.transform(X)
+X_restored = selector.inverse_transform(X_reduced)
 # sklearn-compatible selected names:
 selected_names_out = selector.get_feature_names_out()
 # normalized, non-cached fitted view:
 view = selector.result_view_
 ```
+
+`output_order="legacy"` preserves descending selection-frequency order;
+`output_order="original"` emits selected columns in fitted input order. The
+same order governs transform, selected support indices, feature names, and
+dense inverse transformation. The fitted selector can invert a reduced dense
+matrix by zero-filling unselected columns; its frozen result view cannot.
 
 `StabilitySelector.transform` always returns an ndarray. A selector fitted on
 a DataFrame selects transformed DataFrames by fitted column name, so extra or

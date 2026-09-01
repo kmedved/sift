@@ -8,11 +8,21 @@ from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator
+from sklearn.feature_selection import SelectorMixin
+from sklearn.utils.metadata_routing import UNUSED
 from sklearn.utils.validation import check_is_fitted
 
 from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback
+from sift._selector_compat import (
+    inverse_selected_matrix,
+    ordered_indices,
+    reject_sparse,
+    selector_tags,
+    validate_fit_matrix,
+    validate_output_order,
+)
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     ensure_weights,
@@ -104,13 +114,7 @@ def _coerce_selection_indices(
 
 def _require_2d_x(X) -> None:
     """Reject non-2D feature input with a clear error instead of an IndexError."""
-    x_shape = X.shape if hasattr(X, "shape") else np.asarray(X).shape
-    if len(x_shape) != 2:
-        raise ValueError(
-            "X must be a 2D feature matrix; got an array with "
-            f"{len(x_shape)} dimension(s). Reshape your data (e.g. "
-            "X.reshape(-1, 1) for a single feature)."
-        )
+    validate_fit_matrix(X)
 
 
 def _feature_names_or_default(X) -> list[str]:
@@ -186,9 +190,13 @@ def _make_category_encoder(
         return Encoder(cols=columns, handle_missing="return_nan")
 
 
-class _BaseSelector(BaseEstimator, TransformerMixin):
+class _BaseSelector(SelectorMixin, BaseEstimator):
     """Sklearn-style compatibility layer for function-based selectors."""
 
+    __metadata_request__fit = {
+        "cache": UNUSED,
+        "auto_k_config": UNUSED,
+    }
     _selector_fn: Callable
     _subsample_auto_is_cache_default = False
     _random_state_auto_is_cache_default = False
@@ -209,6 +217,41 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         # the private identity sentinels inside the function API and expose the
         # literal ``"auto"`` as the estimator-facing omission marker.
         return self._resolve_auto_selector_params(params)
+
+    def _output_indices(self) -> np.ndarray:
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        return ordered_indices(self.selected_indices_, self.output_order)
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        mask = np.zeros(self.n_features_in_, dtype=bool)
+        mask[self.selected_indices_] = True
+        return mask
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags({} if parent is None else parent())
+
+    def __sklearn_tags__(self):
+        parent = getattr(super(), "__sklearn_tags__", None)
+        if parent is None:
+            return self._more_tags()
+        return selector_tags(parent())
+
+    def get_metadata_routing(self):
+        routing = super().get_metadata_routing()
+        if hasattr(self, "k") and self.k != "auto":
+            unsupported = [
+                name
+                for name in ("groups", "time")
+                if routing.fit.requests.get(name) not in (None, False)
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"{self.__class__.__name__} can request groups/time metadata only "
+                    "when k='auto'; fixed-k fitting rejects row context"
+                )
+        return routing
 
     def _resolve_auto_selector_params(self, params: dict) -> dict:
         """Translate sklearn-facing auto tokens only for supporting selectors."""
@@ -396,7 +439,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
 
@@ -414,6 +457,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         **fit_params,
     ):
         _require_2d_x(X)
+        validate_output_order(self.output_order)
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         resolved_auto_k = auto_k_config
         if resolved_auto_k is None:
@@ -422,6 +466,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         self._clear_fit_state()
         metadata = resolve_row_metadata(X, groups=groups, time=time)
         X = metadata.X
+        validate_fit_matrix(X)
         groups = metadata.groups
         time = metadata.time
         self._row_metadata_columns_ = metadata.extracted_columns
@@ -559,6 +604,9 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             # callback sequence reserved for the final refit instead of
             # emitting several unrelated 1..max_k sequences.
             params["callback"] = None
+        if "output_order" in params:
+            # Prefix evaluation always follows the learned selector path.
+            params["output_order"] = "legacy"
         return self.__class__(**params)
 
     def _fit_nested_auto_k(
@@ -643,6 +691,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             self,
             ["selected_indices_", "selected_features_", "feature_names_in_"],
         )
+        reject_sparse(X, operation="transform")
         X = drop_fitted_metadata_columns(
             X,
             getattr(self, "_row_metadata_columns_", ()),
@@ -651,7 +700,7 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             if list(X.columns) != list(self.feature_names_in_):
                 raise ValueError("DataFrame columns must match fitted columns and order")
             X = self._transform_categoricals(X)
-            return X.iloc[:, self.selected_indices_]
+            return X.iloc[:, self._output_indices()]
         X_arr = np.asarray(X)
         if getattr(self, "_categorical_encoding_applied_", False):
             raise ValueError(
@@ -659,22 +708,22 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 "transform also requires a DataFrame."
             )
         if X_arr.ndim != 2:
-            raise ValueError("X must be 2D")
+            raise ValueError(
+                "X must be a 2D feature matrix. Reshape your data with "
+                "X.reshape(-1, 1) for a single feature."
+            )
         if X_arr.shape[1] != self.n_features_in_:
             raise ValueError(
                 f"X has {X_arr.shape[1]} features, but selector was fitted with "
                 f"{self.n_features_in_}"
             )
-        return X_arr[:, self.selected_indices_]
+        return X_arr[:, self._output_indices()]
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         """Return selected-feature mask (default) or indices (indices=True)."""
-        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
         if indices:
-            return self.selected_indices_
-        mask = np.zeros(self.n_features_in_, dtype=bool)
-        mask[self.selected_indices_] = True
-        return mask
+            return self._output_indices()
+        return self._get_support_mask()
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return names of selected features following sklearn's transformer API."""
@@ -690,7 +739,21 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 raise ValueError(
                     "input_features is not equal to feature_names_in_"
                 )
-        return fitted_names[self.selected_indices_]
+        return fitted_names[self._output_indices()]
+
+    def inverse_transform(self, X):
+        """Restore selected values to their fitted raw-column positions."""
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            raise NotImplementedError(
+                "inverse_transform is unavailable after supervised categorical "
+                "encoding because the fitted encoder is not invertible"
+            )
+        return inverse_selected_matrix(
+            X,
+            n_features=self.n_features_in_,
+            selected_indices=self._output_indices(),
+        )
 
 
 class MRMRSelector(_BaseSelector):
@@ -719,6 +782,7 @@ class MRMRSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_mrmr, locals())
 
@@ -746,6 +810,7 @@ class JMISelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_jmi, locals())
 
@@ -773,6 +838,7 @@ class JMIMSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_jmim, locals())
 
@@ -798,6 +864,7 @@ class CEFSPlusSelector(_BaseSelector):
         cache=None,
         auto_k_config=None,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_cefsplus, locals())
 
@@ -829,6 +896,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         verbose: bool = True,
         auto_k_config=None,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_cefsplus_binary, locals())
 
@@ -939,7 +1007,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
 
@@ -955,6 +1023,7 @@ class KnockoffSelector(_BaseSelector):
     """
 
     _subsample_auto_is_cache_default = True
+    __metadata_request__fit = {"groups": UNUSED, "time": UNUSED}
 
     def __init__(
         self,
@@ -981,6 +1050,7 @@ class KnockoffSelector(_BaseSelector):
         n_jobs: int = 1,
         verbose: bool = True,
         cache=None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_fdr, locals())
 
@@ -991,18 +1061,14 @@ class KnockoffSelector(_BaseSelector):
         # sklearn <1.6 returns a module-level default dict here.  Copy it
         # before overriding one tag, otherwise instantiating this selector
         # changes the non_deterministic tag for every BaseEstimator instance.
-        tags = dict(super()._more_tags())
-        tags["non_deterministic"] = True
-        return tags
+        return selector_tags(super()._more_tags(), non_deterministic=True)
 
     def __sklearn_tags__(self):
         """Expose the row-order sensitivity through sklearn's new tag API."""
         parent_tags = getattr(super(), "__sklearn_tags__", None)
         if parent_tags is None:  # sklearn <1.6 uses the dict API above.
             return self._more_tags()
-        tags = parent_tags()
-        tags.non_deterministic = True
-        return tags
+        return selector_tags(parent_tags(), non_deterministic=True)
 
     def _clear_fit_state(self) -> None:
         super()._clear_fit_state()
@@ -1023,6 +1089,7 @@ class KnockoffSelector(_BaseSelector):
         **fit_params,
     ):
         _require_2d_x(X)
+        validate_output_order(self.output_order)
         if groups is not None:
             raise ValueError(
                 "KnockoffSelector does not support row groups. Use feature_groups "
@@ -1133,7 +1200,7 @@ class KnockoffSelector(_BaseSelector):
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
 

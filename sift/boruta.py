@@ -15,14 +15,23 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.feature_selection import SelectorMixin
 from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
 from sift._logging import logger
 from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
+from sift._selector_compat import (
+    inverse_selected_matrix,
+    ordered_indices,
+    reject_sparse,
+    selector_tags,
+    validate_fit_matrix,
+    validate_output_order,
+)
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
@@ -143,7 +152,7 @@ class BorutaLoopResult:
 # =============================================================================
 
 
-class BorutaSelector(BaseEstimator, TransformerMixin):
+class BorutaSelector(SelectorMixin, BaseEstimator):
     """
     Boruta / Boruta-Shap feature selector.
 
@@ -188,6 +197,9 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         Random seed.
     verbose : bool
         Print progress.
+    output_order : {'legacy', 'original'}, default='legacy'
+        Order used by transform, selected support indices, feature names, and
+        inverse transform. Boruta's legacy order is already input order.
     callback : callable, optional
         Called after each completed Boruta iteration as
         ``callback(step, total, info)``.
@@ -229,6 +241,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         random_state: int = 0,
         verbose: bool = True,
         callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self.estimator = estimator
         self.n_estimators = n_estimators
@@ -251,6 +264,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.early_stop_rounds = early_stop_rounds
         self.random_state = random_state
         self.verbose = verbose
+        self.output_order = output_order
         self.callback = callback
 
     def _get_default_estimator(self, y: np.ndarray | None = None):
@@ -451,8 +465,23 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         check_is_fitted(self, ["status_"])
-        mask = self.status_ == 1
-        return np.where(mask)[0] if indices else mask
+        if indices:
+            return ordered_indices(np.flatnonzero(self.status_ == 1), self.output_order)
+        return self._get_support_mask()
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, ["status_"])
+        return self.status_ == 1
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags({} if parent is None else parent())
+
+    def __sklearn_tags__(self):
+        parent = getattr(super(), "__sklearn_tags__", None)
+        if parent is None:
+            return self._more_tags()
+        return selector_tags(parent())
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return accepted feature names following sklearn's transformer API."""
@@ -470,6 +499,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         check_is_fitted(self, ["status_"])
+        reject_sparse(X, operation="transform")
         X = drop_fitted_metadata_columns(
             X,
             getattr(self, "_row_metadata_columns_", ()),
@@ -486,7 +516,32 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         if isinstance(X, pd.DataFrame):
             cols = [self.feature_names_in_[i] for i in keep_idx]
             return X.loc[:, cols]
-        return np.asarray(X)[:, keep_idx]
+        X_arr = np.asarray(X)
+        if X_arr.ndim != 2:
+            raise ValueError(
+                "X must be a 2D feature matrix. Reshape your data with "
+                "X.reshape(-1, 1) for a single feature."
+            )
+        if X_arr.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X_arr.shape[1]} features, but BorutaSelector was fitted "
+                f"with {self.n_features_in_} features"
+            )
+        return X_arr[:, keep_idx]
+
+    def inverse_transform(self, X):
+        """Restore accepted values to their fitted raw-column positions."""
+        check_is_fitted(self, ["status_", "n_features_in_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            raise NotImplementedError(
+                "inverse_transform is unavailable after supervised categorical "
+                "encoding because the fitted encoder is not invertible"
+            )
+        return inverse_selected_matrix(
+            X,
+            n_features=self.n_features_in_,
+            selected_indices=self.get_support(indices=True),
+        )
 
     def fit_transform(self, X, y=None, **fit_params):
         return self.fit(X, y, **fit_params).transform(X)
@@ -517,6 +572,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         try:
             metadata = resolve_row_metadata(X, groups=groups, time=time)
             X = metadata.X
+            validate_fit_matrix(X)
+            validate_output_order(self.output_order)
             groups = metadata.groups
             time = metadata.time
             self._row_metadata_columns_ = metadata.extracted_columns

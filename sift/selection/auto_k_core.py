@@ -6,6 +6,7 @@ from typing import List, Literal, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn import config_context
 from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
 
@@ -250,11 +251,15 @@ def evaluate_numeric_prefixes(
 
     full_path_alpha = None
     if task == "regression" and ridge_alpha_strategy == "full_path":
-        ridgecv = RidgeCV(alphas=alphas).fit(
-            Xtr_s,
-            y_train,
-            sample_weight=w_train,
-        )
+        # An outer sklearn Pipeline may enable metadata routing globally.  This
+        # private RidgeCV call receives weights directly and must keep its
+        # historical, non-routed semantics on every supported sklearn version.
+        with config_context(enable_metadata_routing=False):
+            ridgecv = RidgeCV(alphas=alphas).fit(
+                Xtr_s,
+                y_train,
+                sample_weight=w_train,
+            )
         full_path_alpha = float(ridgecv.alpha_)
 
     for k in k_grid:
@@ -268,11 +273,12 @@ def evaluate_numeric_prefixes(
 
             if task == "regression":
                 if full_path_alpha is None:
-                    ridgecv = RidgeCV(alphas=alphas).fit(
-                        Xtr_s[:, :k],
-                        y_train,
-                        sample_weight=w_train,
-                    )
+                    with config_context(enable_metadata_routing=False):
+                        ridgecv = RidgeCV(alphas=alphas).fit(
+                            Xtr_s[:, :k],
+                            y_train,
+                            sample_weight=w_train,
+                        )
                     alpha = float(ridgecv.alpha_)
                 else:
                     alpha = full_path_alpha

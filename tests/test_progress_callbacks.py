@@ -593,9 +593,15 @@ def test_callback_parameters_are_appended_without_rebinding_legacy_positionals()
         sift.CEFSPlusBinarySelector,
     ]
     additive_suffixes = {
-        sift.StabilitySelector: ["penalty"],
+        sift.StabilitySelector: ["penalty", "output_order"],
+        sift.BorutaSelector: ["output_order"],
         sift.catboost_select: ["groups", "time", "sample_weight"],
-        sift.select_cached: ["return_result"],
+        sift.select_cached: ["return_result", "store_proxies"],
+        sift.MRMRSelector: ["output_order"],
+        sift.JMISelector: ["output_order"],
+        sift.JMIMSelector: ["output_order"],
+        sift.CEFSPlusSelector: ["output_order"],
+        sift.CEFSPlusBinarySelector: ["output_order"],
     }
     for callable_ in callback_last:
         parameters = inspect.signature(callable_).parameters

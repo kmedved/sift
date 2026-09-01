@@ -36,6 +36,8 @@ features, invalid scores, `top_m`, or pruning remove candidates.
 For fixed-k filter calls, `groups` and `time` are rejected because they only
 define auto-k evaluation splits; use `k="auto"` with a matching strategy or
 omit those arguments. `KnockoffSelector` rejects row `groups` and `time` too.
+Sklearn-style selector classes accept dense arrays and DataFrames; sparse
+matrices are rejected during fit, transform, and inverse transform.
 
 ## Binary CEFS+
 
@@ -219,6 +221,8 @@ selector = StabilitySelector(
 )
 selector.fit(X, y)
 stable_features = selector.selected_feature_names_
+X_stable = selector.transform(X)
+X_restored = selector.inverse_transform(X_stable)
 ```
 
 Pass both `groups` and `time` to use block bootstrap for ordered panel data.
@@ -228,6 +232,11 @@ metadata columns; direct arrays remain positional. `penalty` is an alias for
 sklearn scorer objects as well as scorer names.
 `selector.get_feature_names_out()` is the sklearn-compatible equivalent for
 retrieving the selected names after fitting.
+Set `output_order="legacy"` (the default) to keep descending stability-frequency
+order, or `output_order="original"` to emit selected columns in fitted input
+order. The same order is used by `transform`, `get_support(indices=True)`,
+`get_feature_names_out`, and dense `inverse_transform`; inverse output
+zero-fills unselected columns.
 Block draws honor `sample_frac`; the rounded panel-wide draw budget is allocated
 proportionally across groups and block windows are sampled with replacement.
 Time values must be non-missing and orderable within each group.
@@ -362,3 +371,6 @@ X_stable = view.transform(X)
 
 Its table covers the selector's fitted candidate features; `view.indices`
 keeps the existing integer positions and `view.features` supplies names.
+The fitted selector itself supports dense `inverse_transform`; the frozen
+`SelectionView` intentionally does not retain the fitted preprocessing state
+needed for inversion.

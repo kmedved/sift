@@ -1,5 +1,31 @@
 # Release Notes
 
+## 0.9.0 (2026-08-31)
+
+### Sklearn integration
+
+- All eight public selector classes now subclass `SelectorMixin` and expose
+  support masks, ordered support indices, selected feature names, and dense
+  `inverse_transform`. Sparse matrices are rejected consistently during fit,
+  transform, and inverse transform.
+- Added `output_order="legacy"|"original"`. The default preserves filter and
+  knockoff selection order, Boruta input order, and Stability descending
+  selection-frequency order; `"original"` is the additive input-order option.
+- Added explicit, version-gated sklearn metadata routing. The dependency floor
+  remains `scikit-learn>=1.3,<2`: 1.3 callers pass fit metadata directly, while
+  sklearn 1.4+ can route requested metadata through Pipeline and
+  `cross_validate(params=...)`. Fixed-k filters reject group/time requests,
+  Knockoff exposes only weights, and smart-sampler conflicts fail before fit.
+- Scoped private `RidgeCV`, `GridSearchCV`, and threshold-tuning pipelines out
+  of an outer estimator's routing context, preserving their historical fit
+  semantics on sklearn 1.5 and 1.7. The compatibility audit documents, without
+  silently changing selections, that inner auto-k Ridge alpha CV does not yet
+  consume group/time context and Stability automatic-alpha validation scoring
+  remains unweighted in 0.9.
+- Pinned a common green sklearn estimator-check list and selector tags across
+  all classes. All audited selectors handle non-finite feature values and
+  require `y`; only Knockoff is tagged non-deterministic.
+
 ## 0.9.0b1 (2026-08-31)
 
 ### Additive conventions

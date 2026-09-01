@@ -67,6 +67,10 @@ Function-style filter selectors accept pandas DataFrames or NumPy arrays. With
 DataFrame input, selected features are returned as column labels; with ndarray
 input, synthetic names such as `x0` are used.
 
+Selector classes accept dense NumPy arrays and pandas DataFrames. Sparse
+matrices are rejected consistently during `fit`, `transform`, and
+`inverse_transform`; convert to a dense representation before fitting.
+
 Fixed-k filter selectors treat `k` as an upper bound. They can return fewer than
 `k` features after constant-feature filtering, relevance screening, correlation
 pruning, or non-positive objective checks.
@@ -546,8 +550,9 @@ module-scoped and are not added to either export surface.
 
 ## Selector Classes
 
-All fixed-k selector classes implement `fit`, `transform`, `fit_transform`, and
-`get_support`.
+The filter and knockoff selector classes implement `fit`, `transform`, `fit_transform`,
+`get_support`, `get_feature_names_out`, and dense `inverse_transform` with
+`SelectorMixin`-compatible support masks.
 
 ```python
 from sift import MRMRSelector, JMISelector, JMIMSelector
@@ -558,6 +563,7 @@ selector.fit(X, y)
 X_selected = selector.transform(X)
 mask = selector.get_support()
 indices = selector.get_support(indices=True)
+X_restored = selector.inverse_transform(X_selected)
 ```
 
 After fitting, selector classes expose:
@@ -570,6 +576,25 @@ After fitting, selector classes expose:
 - `get_feature_names_out()`
 
 `KnockoffSelector` additionally exposes `result_`.
+
+Every public selector class, including Boruta and Stability, accepts
+`output_order="legacy"` (default) or `"original"`.
+Legacy order preserves existing behavior: filter and knockoff selectors emit
+selection/path order, Boruta emits input-column order, and Stability emits
+descending selection-frequency order with stable input-position ties.
+`"original"` emits selected columns in ascending input position. `transform`,
+`get_support(indices=True)`, and `get_feature_names_out()` follow that order;
+the boolean support mask always remains positional. `inverse_transform`
+returns a dense full-width array with zero-filled unselected columns. It is
+unavailable after supervised categorical encoding because that encoder is not
+invertible.
+
+Sklearn metadata routing is opt-in and explicit. With routing enabled, call
+`set_fit_request(...)` only for metadata the configured fit path consumes.
+Fixed-k filter selectors reject `groups`/`time` requests; those are valid only
+for `k="auto"` paths. `KnockoffSelector` exposes only `sample_weight` and
+rejects row groups/time in every mode. On sklearn 1.3, pass metadata directly
+to `fit`; use `cross_validate(..., params=...)` only on sklearn 1.4 or newer.
 
 The Gaussian/cache-backed selector classes expose sklearn-compatible automatic
 defaults: `subsample="auto"` and, except for `KnockoffSelector`,
@@ -610,6 +635,12 @@ scorer names. Weighted tuning requires a weight-aware scorer. A fit with
 `random_state=None` emits a `FutureWarning`: it remains
 nondeterministic in 0.9, while SIFT 1.0 will default to seed 0.
 
+For compatibility, automatic alpha selection in 0.9 passes sample weights to
+the sparse model fits but retains the historical unweighted CV validation
+score and scaler. `tune_threshold` is different: it forwards training weights
+and scores validation rows with the supplied weights. A future fully weighted
+alpha-CV mode must be an explicit option.
+
 Convenience wrappers:
 
 ```python
@@ -622,6 +653,11 @@ models. It does not provide the same q-calibrated API as `select_fdr`.
 After fitting, `StabilitySelector.get_feature_names_out()` returns the selected
 feature names and validates any supplied `input_features` against the fit-time
 feature order.
+
+`StabilitySelector` also accepts `output_order="legacy"|"original"` and dense
+`inverse_transform`. Legacy order is descending selection frequency; original
+order is ascending fitted position. The inverse output zero-fills unselected
+columns.
 
 `StabilitySelector.transform` always returns an ndarray. For a selector fitted
 on a DataFrame, or on an ndarray with explicit `feature_names`, DataFrame

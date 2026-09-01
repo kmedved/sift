@@ -116,6 +116,7 @@ BORUTA_EXPLICIT_DEFAULTS = {
     "test_size": 0.3,
     "shap_sample_size": 2000,
     "early_stop_rounds": 5,
+    "output_order": "legacy",
 }
 
 
@@ -244,6 +245,7 @@ KNOCKOFF_EXPLICIT_DEFAULTS = {
     "subsample": 50_000,
     "n_jobs": 1,
     "cache": None,
+    "output_order": "legacy",
 }
 
 KNOCKOFF_METADATA_KEYS = {

@@ -1,11 +1,11 @@
 # SIFT 0.9 worklog
 
-- Objective: Complete the 0.9.0b1 advanced `SelectionView` operations without moving the later F2 cluster/report program into this milestone.
-- Latest steering: Proceed after Workstream C commit `8a17aab`.
-- Constraints: Preserve legacy result classes, constructors, default returns, pickles, and the ordered 58-name top-level surface; never retain source `X`; proxy storage is explicit, float32, position-safe with duplicate labels, and capped at 64 MiB.
-- Decisions: Limit initial proxy producers to `select_cached` and Gaussian filter routes, including the binary Brier delegate. Defer non-Gaussian producers and cluster-frequency aggregation to F2. Reject partial-table plots rather than presenting incomplete data as complete.
-- Completed: Three independent read-only audits confirmed the narrow gaps. Implemented bounded selection-time proxy storage, duplicate-safe name/position lookup, unsupported-route validation, defensive proxy normalization, pickle preservation for opt-in filter results, partial-plot degradation, docs, release notes, and installed-wheel coverage. Workstreams A, B2, and C are complete.
-- Current state: Changes are verified and ready to commit on `main`, which was 12 commits ahead of `origin/main` before this commit.
-- Next action: Commit the completed 0.9.0b1 stage; Workstream D sklearn integration is next.
+- Objective: Complete 0.9 Workstream D sklearn integration without changing any 0.8 selection, return, default, or legacy-order contract.
+- Latest steering: Proceed after 0.9.0b1 commit `662b352`.
+- Constraints: Keep sklearn `>=1.3,<2`, the 49-field `AutoKConfig`, the ordered 58-name top-level surface, dense-only selector inputs, and every selector family's legacy transform order.
+- Decisions: Add `output_order="original"` as an opt-in while defaulting to legacy order. Make row-metadata requests explicit and reject configured requests the selected fit path cannot consume. Scope private sklearn CV/pipeline calls out of an outer routing context. Document, rather than silently change, contextual inner Ridge CV and fully weighted Stability alpha scoring.
+- Completed: All eight public selectors subclass `SelectorMixin`; support masks, ordered indices/names/transforms, dense inverse transforms, sparse rejection, tags, and metadata-request guards are implemented. Group metadata routes through Pipeline/cross_validate on sklearn 1.5.1 and 1.7.1. Six common estimator checks are pinned for every class. Public docs, release notes, and the rev-12 campaign status describe the shipped and compatibility-gated behavior.
+- Current state: Workstream D is complete and its code, contracts, documentation, and packaged wheel are verified.
+- Next action: Begin Workstream E categoricals on the next explicit proceed.
 - Blockers: None.
-- Decisive verification: Primary affected matrix `436 passed, 9 skipped`; base-environment compatibility slice `240 passed`; full Ruff and compile checks clean; clean-built wheel installed with current dependencies and passed `scripts/verify_wheel_install.py` from outside the source tree.
+- Decisive verification: The expanded D contract and related focused tests pass 55 on sklearn 1.5.1; the original 37-test D matrix passes on sklearn 1.7.1; affected selector suites pass 247 with 7 skipped; the full primary suite passes 1,637 with 16 skipped. Ruff, compileall, and `git diff --check` are clean. The isolated wheel build installs from `dist` and passes a 58-export MRMR fit/transform/inverse smoke test.

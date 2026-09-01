@@ -59,6 +59,7 @@ STABILITY_EXPLICIT_DEFAULTS = {
     "store_coefs": True,
     "coef_threshold": 1e-8,
     "parallel_backend": "threads",
+    "output_order": "legacy",
 }
 
 

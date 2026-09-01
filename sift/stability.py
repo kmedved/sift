@@ -8,7 +8,9 @@ import pandas as pd
 from typing import Optional, List, Tuple, Union
 import warnings
 
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn import config_context
+from sklearn.base import BaseEstimator, clone
+from sklearn.feature_selection import SelectorMixin
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import (
     Lasso, LassoCV, ElasticNet, ElasticNetCV,
@@ -25,6 +27,7 @@ from sklearn.model_selection import (
 )
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.metadata_routing import UNUSED
 from joblib import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
@@ -33,6 +36,14 @@ from sift._logging import logger
 from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, reject_datetime_like_features
+from sift._selector_compat import (
+    inverse_selected_matrix,
+    ordered_indices,
+    reject_sparse,
+    selector_tags,
+    validate_fit_matrix,
+    validate_output_order,
+)
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
 from sift.scoring import (
     UnsupportedScorerSampleWeightError,
@@ -124,7 +135,7 @@ def _cv_alpha_grid_kwargs(model_cls, n_alphas: int) -> dict[str, int]:
     return {"alphas": int(n_alphas)}
 
 
-class StabilitySelector(BaseEstimator, TransformerMixin):
+class StabilitySelector(SelectorMixin, BaseEstimator):
     """
     Stability selection for linear models with optional smart sampling.
 
@@ -175,6 +186,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         Random seed for reproducibility.
     verbose : bool, default=True
         Print progress information.
+    output_order : {'legacy', 'original'}, default='legacy'
+        Order used by transform, selected support indices, feature names, and
+        inverse transform. Legacy is descending selection frequency; original
+        is ascending fitted feature position.
     callback : callable, optional
         Called after each completed bootstrap as
         ``callback(step, total, info)``.
@@ -194,6 +209,8 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
     coef_bootstrap_ : ndarray of shape (n_bootstrap, n_features), optional
         Coefficients from each bootstrap run. Only available if store_coefs=True.
     """
+
+    __metadata_request__fit = {"feature_names": UNUSED}
 
     def __init__(
         self,
@@ -217,6 +234,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         verbose: bool = True,
         callback: ProgressCallback | None = None,
         penalty: Optional[float] = None,
+        output_order: str = "legacy",
     ):
         self.n_bootstrap = n_bootstrap
         self.sample_frac = sample_frac
@@ -236,6 +254,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         self.parallel_backend = parallel_backend
         self.random_state = random_state
         self.verbose = verbose
+        self.output_order = output_order
         self.callback = callback
         self.penalty = penalty
 
@@ -275,6 +294,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         try:
             metadata = resolve_row_metadata(X, groups=groups, time=time)
             X = metadata.X
+            # Smart-sampler group/time columns live in X but are not candidate
+            # features. Its candidate-frame validation below rejects temporal
+            # features after excluding those metadata columns.
+            if not (self.use_smart_sampler and isinstance(X, pd.DataFrame)):
+                reject_datetime_like_features(X)
+            validate_fit_matrix(X)
+            validate_output_order(self.output_order)
             groups = metadata.groups
             time = metadata.time
             self._row_metadata_columns_ = metadata.extracted_columns
@@ -656,10 +682,13 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
     def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """Reduce X to selected features."""
         check_is_fitted(self, ["selected_features_", "selected_feature_names_"])
+        reject_sparse(X, operation="transform")
+        selected_indices = ordered_indices(self.selected_features_, self.output_order)
         if isinstance(X, pd.DataFrame):
+            selected_names = [self.feature_names_in_[i] for i in selected_indices]
             selected = self._select_dataframe_columns(
                 X,
-                self.selected_feature_names_,
+                selected_names,
                 operation="transform",
                 selected_only=True,
             )
@@ -672,7 +701,7 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                 f"X has {X_arr.shape[1]} features, but StabilitySelector was fitted "
                 f"with {self.n_features_in_} features"
             )
-        return X_arr[:, self.selected_features_]
+        return X_arr[:, selected_indices]
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return names of selected columns using sklearn's transformer contract."""
@@ -689,7 +718,10 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
             fitted = _feature_names_index(self.feature_names_in_)
             if not supplied.equals(fitted):
                 raise ValueError("input_features do not match feature_names_in_")
-        return _feature_names_object_array(self.selected_feature_names_)
+        selected_indices = ordered_indices(self.selected_features_, self.output_order)
+        return _feature_names_object_array(
+            [self.feature_names_in_[i] for i in selected_indices]
+        )
 
     def fit_transform(
         self,
@@ -715,12 +747,53 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         """Get mask or indices of selected features."""
-        check_is_fitted(self, ["selected_features_", "n_features_in_"])
         if indices:
-            return self.selected_features_
+            check_is_fitted(self, ["selected_features_", "n_features_in_"])
+            return ordered_indices(self.selected_features_, self.output_order)
+        return self._get_support_mask()
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, ["selected_features_", "n_features_in_"])
         mask = np.zeros(self.n_features_in_, dtype=bool)
         mask[self.selected_features_] = True
         return mask
+
+    def inverse_transform(self, X):
+        """Restore selected values to their fitted raw-column positions."""
+        check_is_fitted(self, ["selected_features_", "n_features_in_"])
+        return inverse_selected_matrix(
+            X,
+            n_features=self.n_features_in_,
+            selected_indices=ordered_indices(
+                self.selected_features_,
+                self.output_order,
+            ),
+        )
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags({} if parent is None else parent())
+
+    def __sklearn_tags__(self):
+        parent = getattr(super(), "__sklearn_tags__", None)
+        if parent is None:
+            return self._more_tags()
+        return selector_tags(parent())
+
+    def get_metadata_routing(self):
+        routing = super().get_metadata_routing()
+        if self.use_smart_sampler:
+            unsupported = [
+                name
+                for name in ("sample_weight", "groups", "time")
+                if routing.fit.requests.get(name) not in (None, False)
+            ]
+            if unsupported:
+                raise ValueError(
+                    "StabilitySelector with use_smart_sampler=True cannot request "
+                    "sample_weight, groups, or time metadata"
+                )
+        return routing
 
     def get_coef_stability(self) -> pd.DataFrame:
         """Return coefficient mean, std, and CV across bootstrap runs."""
@@ -942,11 +1015,12 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
                             downstream_fit_kwargs[f"{final_name}__sample_weight"] = (
                                 weight_values[train_idx]
                             )
-                        model.fit(
-                            X_values[train_idx][:, selected],
-                            y_values[train_idx],
-                            **downstream_fit_kwargs,
-                        )
+                        with config_context(enable_metadata_routing=False):
+                            model.fit(
+                                X_values[train_idx][:, selected],
+                                y_values[train_idx],
+                                **downstream_fit_kwargs,
+                            )
                         X_score = X_values[val_idx][:, selected]
                         y_score = y_values[val_idx]
                         if is_sklearn_scorer(scorer):
@@ -1462,11 +1536,15 @@ class StabilitySelector(BaseEstimator, TransformerMixin):
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            search.fit(
-                np.asarray(X)[idx],
-                np.asarray(y)[idx],
-                model__sample_weight=np.asarray(sample_weight)[idx],
-            )
+            # GridSearchCV is private implementation detail here.  An outer
+            # routed Pipeline must not reinterpret its legacy ``step__param``
+            # kwargs when sklearn metadata routing is globally enabled.
+            with config_context(enable_metadata_routing=False):
+                search.fit(
+                    np.asarray(X)[idx],
+                    np.asarray(y)[idx],
+                    model__sample_weight=np.asarray(sample_weight)[idx],
+                )
 
         if self.task == 'classification':
             self._alpha_ref_weight_ = self._cv_train_weight(cv, idx, sample_weight)
