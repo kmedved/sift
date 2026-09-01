@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.9.0b1 (in progress)
+## 0.9.0b1 (2026-08-31)
 
 ### Additive conventions
 
@@ -75,12 +75,17 @@
   Its complete view preserves duplicate labels positionally and marks every
   evaluated feature as a `ranking_only` report rather than inventing a subset
   threshold.
-- A1 views serialize to JSON-safe schema version `"1"`, preserve positional
+- Views serialize to JSON-safe schema version `"1"`, preserve positional
   identity in `selected_index`, report incomplete tables explicitly, and use
   `input_kind="unknown"` when a legacy result cannot prove whether its source
-  was named or positional. The core adapter acceptance is complete; result-only
-  transforms, inverse-transform, proxy storage, and route-level Auto-K curves
-  remain advanced follow-up work.
+  was named or positional. Partial views now reject table-only plots instead of
+  presenting incomplete data as complete.
+- Added explicit bounded proxy storage to `select_cached` and Gaussian filter
+  result paths. `return_result=True, store_proxies=True` retains only the
+  post-screening candidate-by-selected copula correlations as `float32`, with
+  a 64 MiB cap and no retained `X` or cache. Name lookup rejects ambiguous
+  duplicate labels and `proxies_at(...)` provides positional access. Existing
+  calls, return types, and serialized default results are unchanged.
 
 ## 0.9.0a1 (2026-08-31)
 

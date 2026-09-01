@@ -14,6 +14,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from sift.selection.proxies import normalize_proxy_frame
+
 
 SCHEMA_VERSION = "1"
 CURVE_COLUMNS = ("k", "criterion", "criterion_se", "selected")
@@ -515,9 +517,16 @@ class SelectionView:
         )
         self._transformer = transformer
         self._inverse_transformer = inverse_transformer
-        self._proxy_correlations = (
-            None if proxy_correlations is None else proxy_correlations.copy(deep=True)
+        self._proxy_correlations, proxy_storage_bytes = normalize_proxy_frame(
+            proxy_correlations,
+            selected_indices=selected_indices,
+            n_raw_features=n_raw_features,
         )
+        self._metadata["proxy_correlations_stored"] = self._proxy_correlations is not None
+        self._metadata["proxy_candidate_count"] = (
+            0 if self._proxy_correlations is None else len(self._proxy_correlations)
+        )
+        self._metadata["proxy_storage_bytes"] = proxy_storage_bytes
 
     @property
     def features(self) -> list[Any]:
@@ -618,31 +627,99 @@ class SelectionView:
             raise NotImplementedError(
                 "proxy correlations were not stored; rerun selection with store_proxies=True"
             )
-        if not 0.0 <= float(r_min) <= 1.0:
-            raise ValueError("r_min must be between 0 and 1")
-        columns = list(self._proxy_correlations.columns)
-        matches = [idx for idx, value in enumerate(columns) if _labels_equal(value, feature)]
+        raw_names = self.raw_features
+        if raw_names is None:
+            names = self.features
+            positions = self.indices
+        else:
+            names = raw_names
+            positions = list(range(len(raw_names)))
+        assert positions is not None
+        matches = [
+            position
+            for position, value in zip(positions, names)
+            if _labels_equal(value, feature)
+        ]
         if len(matches) != 1:
             raise ValueError(
-                f"feature {feature!r} is missing or ambiguous; use positional proxy access"
+                f"feature {feature!r} is missing or ambiguous; use "
+                "proxies_at(selected_index, ...) for positional access"
             )
-        values = self._proxy_correlations.iloc[:, matches[0]]
-        mask = np.abs(values.to_numpy(dtype=float)) >= float(r_min)
+        return self.proxies_at(matches[0], r_min=r_min)
+
+    def proxies_at(self, selected_index: int, r_min: float = 0.8) -> pd.DataFrame:
+        """Return unselected proxy candidates for one selected raw position."""
+        if self._proxy_correlations is None:
+            raise NotImplementedError(
+                "proxy correlations were not stored; rerun selection with store_proxies=True"
+            )
+        if isinstance(selected_index, (bool, np.bool_)) or not isinstance(
+            selected_index,
+            (int, np.integer),
+        ):
+            raise ValueError("selected_index must be an integer raw-feature position")
+        position = int(selected_index)
+        if position not in self._proxy_correlations.columns:
+            raise ValueError(f"raw feature position {position} is not a selected proxy feature")
+        if isinstance(r_min, (bool, np.bool_)) or not isinstance(
+            r_min,
+            (Real, np.integer, np.floating),
+        ):
+            raise ValueError("r_min must be a finite number between 0 and 1")
+        threshold = float(r_min)
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("r_min must be a finite number between 0 and 1")
+
+        values = self._proxy_correlations[position]
+        candidate_positions = np.asarray(values.index, dtype=np.int64)
+        selected_positions = set(self._indices or ())
+        correlations = values.to_numpy(dtype=np.float64)
+        mask = np.asarray(
+            [candidate not in selected_positions for candidate in candidate_positions],
+            dtype=bool,
+        )
+        mask &= np.abs(correlations) >= threshold
+        candidate_positions = candidate_positions[mask]
+        correlations = correlations[mask]
+        order = np.lexsort((candidate_positions, -np.abs(correlations)))
+        candidate_positions = candidate_positions[order]
+        correlations = correlations[order]
+        raw_names = self.raw_features
+        labels = (
+            candidate_positions.tolist()
+            if raw_names is None
+            else [raw_names[int(candidate)] for candidate in candidate_positions]
+        )
         return pd.DataFrame(
             {
-                "feature": self._proxy_correlations.index[mask],
-                "correlation": values.to_numpy(dtype=float)[mask],
+                "feature": labels,
+                "selected_index": candidate_positions,
+                "correlation": correlations,
             }
-        ).reset_index(drop=True)
+        )
 
     def plot(self, ax=None):
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError as exc:  # pragma: no cover - optional dependency path
-            raise ImportError("plot() requires matplotlib") from exc
+        curve_available = not self._curve.empty
+        if not curve_available and not self._metadata["table_complete"]:
+            raise NotImplementedError(
+                "plot data is incomplete for this partial result view; supply a result "
+                "with a complete raw table"
+            )
+        metric = None
+        if not curve_available:
+            metric = next(
+                (name for name in ("gain", "relevance") if name in self._raw_table),
+                None,
+            )
+            if metric is None:
+                raise NotImplementedError("plot data is unavailable for this result view")
         if ax is None:
+            try:
+                import matplotlib.pyplot as plt
+            except ImportError as exc:  # pragma: no cover - optional dependency path
+                raise ImportError("plot() requires matplotlib") from exc
             _, ax = plt.subplots()
-        if not self._curve.empty:
+        if curve_available:
             ax.plot(self._curve["k"], self._curve["criterion"], marker="o")
             selected = self._curve.loc[self._curve["selected"]]
             if not selected.empty:
@@ -650,12 +727,7 @@ class SelectionView:
             ax.set_xlabel("k")
             ax.set_ylabel("criterion")
             return ax
-        metric = next(
-            (name for name in ("gain", "relevance") if name in self._raw_table),
-            None,
-        )
-        if metric is None:
-            raise NotImplementedError("plot data is unavailable for this partial view")
+        assert metric is not None
         table = self._raw_table.sort_values(metric, ascending=False, kind="mergesort")
         ax.bar(np.arange(len(table)), table[metric])
         ax.set_xlabel("feature rank")
@@ -780,6 +852,8 @@ def _normalize_filter_table(
 
 
 def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
+    from sift.selection.result import _PROXY_CORRELATIONS_ATTR
+
     selected = list(result.selected_features)
     selected_indices = _coerce_indices(result.selected_indices, label="selected_indices")
     raw_features = _coerce_feature_names(input_features)
@@ -834,6 +908,7 @@ def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
         raw_table=table,
         metadata=metadata,
         diagnostics=result.diagnostics_,
+        proxy_correlations=getattr(result, _PROXY_CORRELATIONS_ATTR, None),
     )
 
 

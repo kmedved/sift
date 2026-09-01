@@ -16,6 +16,8 @@ from sift.estimators.copula import (
 )
 from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
+from sift.selection.proxies import proxy_frame_from_panel
+from sift.selection.result import _PROXY_CORRELATIONS_ATTR
 from sift.selection.knockoff_filter import (
     _reject_duplicate_feature_names,
     _validate_prebuilt_cache_structure,
@@ -526,6 +528,7 @@ def select_cached(
     warn_noise_floor: bool = True,
     callback: ProgressCallback | None = None,
     return_result: bool = False,
+    store_proxies: bool = False,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
 ] | "SelectionView":
@@ -541,6 +544,10 @@ def select_cached(
 
     if not isinstance(return_result, (bool, np.bool_)):
         raise ValueError("return_result must be a boolean")
+    if not isinstance(store_proxies, (bool, np.bool_)):
+        raise ValueError("store_proxies must be a boolean")
+    if store_proxies and not return_result:
+        raise ValueError("store_proxies=True requires return_result=True")
     if return_result and (return_objective or return_indices):
         raise ValueError(
             "return_result=True cannot be combined with return_objective or "
@@ -680,6 +687,17 @@ def select_cached(
                 ).copy(),
             },
         )
+        if store_proxies:
+            proxy_correlations = proxy_frame_from_panel(
+                panel.R,
+                candidate_indices=panel.original,
+                selected_indices=selected_indices,
+            )
+            object.__setattr__(
+                result,
+                _PROXY_CORRELATIONS_ATTR,
+                proxy_correlations,
+            )
         return as_result(result, input_features=feature_names)
 
     if return_objective:

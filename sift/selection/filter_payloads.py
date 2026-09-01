@@ -69,6 +69,8 @@ from sift.selection.filter_auto_k import (
     select_gaussian_xfit_objective_path,
 )
 from sift.selection.loops import jmi_select, mrmr_select
+from sift.selection.panel import build_candidate_panel
+from sift.selection.proxies import proxy_frame_from_panel
 
 if TYPE_CHECKING:
     from sift.selection.filter_api import FilterContext
@@ -93,6 +95,7 @@ class SelectionPayload:
     metadata_extra: dict | None = None
     ranking: pd.DataFrame | None = None
     diagnostics: dict | None = None
+    proxy_correlations: pd.DataFrame | None = None
 
 
 ClassicPath = Callable[["FilterContext", ClassicPrepared, int, int], np.ndarray]
@@ -226,6 +229,14 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             selected,
             selected_indices,
         )
+        proxy_correlations = _gaussian_proxy_correlations(
+            ctx,
+            cache=cache,
+            method=method,
+            k=k,
+            top_m=top_m,
+            selected_indices=selected_indices,
+        )
         ranking = None
         diagnostics = None
         if ctx.request.return_result:
@@ -251,6 +262,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             n_features=n_features,
             ranking=ranking,
             diagnostics=diagnostics,
+            proxy_correlations=proxy_correlations,
         )
 
     return fixed_gaussian
@@ -281,10 +293,11 @@ def make_auto_gaussian(
             ctx.request.sample_weight,
             feature_names=ctx.feature_names,
         )
+        method = method_func(ctx)
         selected, selected_indices, auto_diag, auto_summary = runner(
             cache=cache,
             y=ctx.request.y,
-            method=method_func(ctx),
+            method=method,
             max_k=int(ctx.auto_k_config.max_k),
             top_m=top_m,
             auto_k_config=ctx.auto_k_config,
@@ -308,6 +321,14 @@ def make_auto_gaussian(
             selected,
             selected_indices,
         )
+        proxy_correlations = _gaussian_proxy_correlations(
+            ctx,
+            cache=cache,
+            method=method,
+            k=int(ctx.auto_k_config.max_k),
+            top_m=top_m,
+            selected_indices=selected_indices,
+        )
         diagnostics = None
         if include_diagnostics and ctx.request.return_result:
             diagnostics = {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
@@ -321,9 +342,40 @@ def make_auto_gaussian(
             n_features=n_features,
             metadata_extra=metadata_extra,
             diagnostics=diagnostics,
+            proxy_correlations=proxy_correlations,
         )
 
     return auto_gaussian
+
+
+def _gaussian_proxy_correlations(
+    ctx: "FilterContext",
+    *,
+    cache: FeatureCache,
+    method: str,
+    k: int,
+    top_m: int,
+    selected_indices: list[int] | None,
+) -> pd.DataFrame | None:
+    if not ctx.request.store_proxies:
+        return None
+    if selected_indices is None:
+        raise ValueError(
+            "store_proxies=True requires unambiguous raw selected-feature positions"
+        )
+    panel = build_candidate_panel(
+        cache,
+        ctx.request.y,
+        k,
+        top_m=top_m,
+        corr_prune=_kw(ctx, "corr_prune", "auto"),
+        method=method,
+    )
+    return proxy_frame_from_panel(
+        panel.R,
+        candidate_indices=panel.original,
+        selected_indices=selected_indices,
+    )
 
 
 def binary_fixed_payload(ctx: "FilterContext") -> SelectionPayload:

@@ -9,6 +9,9 @@ import numpy as np
 import pandas as pd
 
 
+_PROXY_CORRELATIONS_ATTR = "_proxy_correlations"
+
+
 @dataclass(frozen=True)
 class FilterSelectionResult:
     """Result object for conservative filter selection APIs.

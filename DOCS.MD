@@ -366,10 +366,10 @@ indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
 
-The five legacy selection-result adapters are result-only:
+The six legacy adapters that do not wrap fitted state are result-only:
 `metadata["input_kind"]` is `"unknown"`,
-transform and inverse-transform are unavailable, and proxy correlations are
-not stored. Feature-path evaluation and CatBoost supply normalized score curves;
+and transform and inverse-transform are unavailable. Feature-path evaluation
+and CatBoost supply normalized score curves;
 the other supported legacy results have no retained route-level curve. CatBoost
 views remain partial without an explicit raw feature identity and distinguish
 the target curve count from the number of stable features actually returned.
@@ -379,6 +379,13 @@ frozen fitted column-subset transform; inverse transform remains unavailable.
 repeat-level score drops without retaining the model or input matrix. See
 [Reading Results](docs/results.md) for the current completeness
 matrix and versioned JSON contract.
+
+Cached selectors and Gaussian filter routes can opt into proxy lookup with
+`return_result=True, store_proxies=True`. The view retains only a bounded
+`float32` candidate-by-selected copula-correlation block (at most 64 MiB), not
+`X` or the cache. Use `view.proxies(feature)` for unique labels and
+`view.proxies_at(selected_index)` when labels repeat. Classic and binary
+log-loss routes reject this option.
 
 ### `select_jmi`
 

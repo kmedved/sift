@@ -146,7 +146,7 @@ compatible.
 `relevance`; it raises `NotImplementedError` when a partial table has no plotted
 metric. Matplotlib is imported only when `plot()` is called.
 
-## Transform and proxy limitations
+## Transform and proxy storage
 
 The six result-only adapters wrap result objects, not fitted selector state.
 They do not retain encoders or the source matrix, so `transform()` and
@@ -160,7 +160,19 @@ does not retain training rows or coefficient matrices, and does not change if
 the original selector is refit or its threshold is changed later. Stability has
 no inverse transform, so `inverse_transform()` remains unavailable.
 
-Likewise, the core adapter slice does not add selection-time `store_proxies` plumbing.
-`proxies()` raises `NotImplementedError`; it never captures `X` implicitly.
-Proxy-correlation storage, its explicit option, and its memory cap remain part
-of the unfinished Workstream A scope.
+Proxy lookup is an explicit selection-time opt-in on cached selectors and
+Gaussian filter routes. Pass `return_result=True, store_proxies=True` to
+`select_cached`, to `select_cefsplus`, or to Gaussian `select_mrmr`,
+`select_jmi`, and `select_jmim` calls. Binary CEFS+ supports the same option
+only in Brier mode, which delegates to Gaussian CEFS+. Classic and binary
+log-loss routes reject the option instead of silently ignoring it.
+
+The view stores only the post-screening candidate-by-selected copula
+correlation block as `float32`; it never retains `X` or a cache. Storage is
+capped at 64 MiB and an oversized request fails rather than truncating the
+block. `view.proxies(name, r_min=0.8)` returns unselected candidates above the
+absolute-correlation threshold. When raw labels repeat, use
+`view.proxies_at(selected_index, r_min=0.8)` for unambiguous positional access.
+The proxy block is deliberately omitted from `to_dict()`; its presence, byte
+count, and candidate count are recorded in metadata. Without the explicit
+option, both proxy accessors raise with guidance to rerun selection.

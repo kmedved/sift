@@ -1,11 +1,11 @@
 # SIFT 0.9 worklog
 
-- Objective: Complete Workstream C from `docs/specs/0.9-product-layer.md`: additive `AutoKConfig` presets, immutable option-group views/builders, field-semantics documentation and unused-field validation, plus `sift.experimental`.
-- Latest steering: Proceed after B2 commit `910d475`.
-- Constraints: Preserve all 49 flat `AutoKConfig` dataclass fields and their defaults/signature/equality/repr/replace/pickle behavior; preserve the exact 58-name `sift.__all__`; no algorithmic/default-path changes; minimum sufficient implementation and verification.
-- Decisions: Treat option groups as synthesized immutable views and builder inputs only; keep overlapping fields distinct; experimental access warns without removing current top-level exports.
-- Completed: B2 committed; repository was clean at start of C. Three independent read-only C audits resolved preset mappings, option ownership, namespace exports, and acceptance checks. C code, focused contract tests, release notes, API/manual documentation, campaign status, and installed-wheel verification are complete.
-- Current state: Workstream C is complete. The flat dataclass remains 49 fields and the ordered top-level surface remains 58 names; no algorithmic defaults or selections changed.
-- Next action: None for C; commit the completed workstream.
+- Objective: Complete the 0.9.0b1 advanced `SelectionView` operations without moving the later F2 cluster/report program into this milestone.
+- Latest steering: Proceed after Workstream C commit `8a17aab`.
+- Constraints: Preserve legacy result classes, constructors, default returns, pickles, and the ordered 58-name top-level surface; never retain source `X`; proxy storage is explicit, float32, position-safe with duplicate labels, and capped at 64 MiB.
+- Decisions: Limit initial proxy producers to `select_cached` and Gaussian filter routes, including the binary Brier delegate. Defer non-Gaussian producers and cluster-frequency aggregation to F2. Reject partial-table plots rather than presenting incomplete data as complete.
+- Completed: Three independent read-only audits confirmed the narrow gaps. Implemented bounded selection-time proxy storage, duplicate-safe name/position lookup, unsupported-route validation, defensive proxy normalization, pickle preservation for opt-in filter results, partial-plot degradation, docs, release notes, and installed-wheel coverage. Workstreams A, B2, and C are complete.
+- Current state: Changes are verified and ready to commit on `main`, which was 12 commits ahead of `origin/main` before this commit.
+- Next action: Commit the completed 0.9.0b1 stage; Workstream D sklearn integration is next.
 - Blockers: None.
-- Decisive verification: rich affected suites 346 passed / 6 skipped; final rich contracts 97 passed; base contracts 203 passed; docs smoke 4 passed; clean Python 3.12 wheel install verified; full Ruff, compileall, and diff checks clean.
+- Decisive verification: Primary affected matrix `436 passed, 9 skipped`; base-environment compatibility slice `240 passed`; full Ruff and compile checks clean; clean-built wheel installed with current dependencies and passed `scripts/verify_wheel_install.py` from outside the source tree.

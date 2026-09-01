@@ -146,12 +146,20 @@ def main() -> None:
         y,
         k=2,
         return_result=True,
+        store_proxies=True,
         warn_noise_floor=False,
     )
     if type(cached_view) is not sift.SelectionView or cached_view.k != 2:
         raise SystemExit("installed cached rich-result contract is unavailable")
     if cached_view.metadata.get("cache_backed") is not True:
         raise SystemExit("installed cached result lost cache provenance")
+    if cached_view.metadata.get("proxy_correlations_stored") is not True:
+        raise SystemExit("installed cached result lost opt-in proxy correlations")
+    proxy_rows = cached_view.proxies_at(cached_view.indices[0], r_min=0.0)
+    if proxy_rows.empty:
+        raise SystemExit("installed proxy lookup lost the remaining candidate")
+    if set(proxy_rows["selected_index"]).intersection(cached_view.indices):
+        raise SystemExit("installed proxy lookup returned an already-selected feature")
 
     X_context = X_cache.assign(group=np.repeat(np.arange(5), 4))
     contextual_importance = sift.permutation_importance(

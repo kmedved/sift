@@ -405,6 +405,7 @@ selected = select_cached(
     return_objective=False,
     return_indices=False,
     return_result=False,
+    store_proxies=False,
 )
 ```
 
@@ -413,6 +414,9 @@ selection against new numeric targets. `return_result=True` returns a complete
 `SelectionView` carrying selected positions, cache provenance, relevance, and
 the objective path. It cannot be combined with `return_objective` or
 `return_indices`; the four historical list/tuple forms remain unchanged.
+With `store_proxies=True`, the view also retains the bounded selection-time
+copula-correlation block used by `proxies()` and `proxies_at()`. This option
+requires `return_result=True`, never retains `X`, and fails above 64 MiB.
 
 ## Automatic K
 
