@@ -114,6 +114,14 @@ enabled. SIFT 1.0 is expected to standardize these defaults; 0.9 does not.
 Supervised categorical encodings are conservative by default. When a function
 selector would fit target encoders on the full dataset, pass
 `allow_full_data_target_encoding=True` only if leakage is handled outside SIFT.
+The additive `cat_encoding="target_cv"` path is different: for unweighted
+regression and binary targets it uses sklearn's cross-fitted `TargetEncoder`
+without optional dependencies. Function results record
+`encoding_cv={"kind": "fixed_k", "n_splits": ...}`; fitted selector classes
+store the same mapping in `categorical_encoding_metadata_` and reuse the fitted
+encoder target-blind at transform time. Multiclass, sample-weighted, and
+groups/time-aware `target_cv` calls currently raise rather than silently use an
+incorrect fold policy.
 
 ## Filter Functions
 
@@ -574,6 +582,8 @@ After fitting, selector classes expose:
 - `n_features_in_`
 - `k_` when automatic k resolved a value
 - `get_feature_names_out()`
+- `categorical_encoding_metadata_` when `cat_encoding="target_cv"` encoded at
+  least one fitted categorical column
 
 `KnockoffSelector` additionally exposes `result_`.
 

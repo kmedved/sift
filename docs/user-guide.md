@@ -308,10 +308,28 @@ without applying an arbitrary selection threshold.
 ## Categorical Features
 
 Function-style selectors default to `cat_encoding="none"` and support
-`cat_features` and explicit encodings. Supervised
-categorical encodings are guarded against full-data target leakage by default;
-use them through train-only wrappers or opt in only when leakage is handled
-outside SIFT. CatBoost selectors handle categorical features natively.
+`cat_features` and explicit encodings. Use `cat_encoding="target_cv"` for the
+built-in leakage-safe unweighted regression/binary path; it uses cross-fitted
+training values and needs no optional dependency:
+
+```python
+selected = select_mrmr(
+    X,
+    y,
+    k=10,
+    task="regression",
+    cat_encoding="target_cv",
+    verbose=False,
+)
+```
+
+Selector classes retain the full-training encoder for target-blind inference,
+while `fit_transform` returns the cross-fitted training columns used for
+selection. Weighted, grouped, time-aware, and multiclass `target_cv` modes are
+rejected until their custom fold/block contracts land. Existing `"target"`,
+`"loo"`, `"james_stein"`, and `"loo_logit"` function encodings remain guarded
+against full-data target leakage; opt in only when leakage is handled outside
+SIFT. CatBoost selectors handle categorical features natively.
 
 ## Diagnostics
 

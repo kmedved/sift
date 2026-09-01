@@ -9,11 +9,19 @@ import warnings
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 
 EstimatorJMI = Literal["auto", "binned", "r2", "ksg", "gaussian"]
 EstimatorMRMR = Literal["classic", "gaussian"]
 RelevanceMethod = Literal["f", "ks", "rf"]
-CatEncoding = Literal["none", "target", "loo", "james_stein", "loo_logit"]
+CatEncoding = Literal[
+    "none",
+    "target_cv",
+    "target",
+    "loo",
+    "james_stein",
+    "loo_logit",
+]
 Formula = Literal["quotient", "difference"]
 Task = Literal["regression", "classification"]
 
@@ -326,8 +334,8 @@ def validate_inputs(
             suffix = "..." if len(non_numeric) > 5 else ""
             raise ValueError(
                 f"Non-numeric columns found: {sample}{suffix}. "
-                "Either encode them first or set cat_encoding to 'loo', "
-                "'target', 'james_stein', or binary-only 'loo_logit'."
+                "Either encode them first or set cat_encoding to 'target_cv', "
+                "'loo', 'target', 'james_stein', or binary-only 'loo_logit'."
             )
     X_arr = to_numpy(X, dtype=np.float64)
 
@@ -556,6 +564,156 @@ class LeaveOneOutLogitEncoder:
         return X_out
 
 
+def target_cv_n_splits(
+    y,
+    *,
+    target_type: Literal["auto", "continuous", "binary"] = "auto",
+    cv: int = 5,
+) -> int:
+    """Return the usable deterministic fold count for native target encoding."""
+    from sklearn.utils.multiclass import type_of_target
+
+    if isinstance(cv, (bool, np.bool_)) or not isinstance(cv, (int, np.integer)):
+        raise ValueError("target_cv cv must be an integer >= 2")
+    requested = int(cv)
+    if requested < 2:
+        raise ValueError("target_cv cv must be an integer >= 2")
+    if target_type not in {"auto", "continuous", "binary"}:
+        raise ValueError("target_cv target_type must be 'auto', 'continuous', or 'binary'")
+
+    y_arr = np.asarray(y).reshape(-1)
+    if y_arr.size < 2:
+        raise ValueError("target_cv requires at least two rows")
+    inferred_kind = type_of_target(y_arr)
+    target_kind = inferred_kind if target_type == "auto" else target_type
+    if inferred_kind == "multiclass" and target_type != "continuous":
+        raise ValueError(
+            "cat_encoding='target_cv' does not yet support multiclass targets: "
+            "sklearn expands each categorical feature to one column per class, "
+            "which requires block-aware selection"
+        )
+    if target_kind == "binary":
+        _, counts = np.unique(y_arr, return_counts=True)
+        if counts.size != 2:
+            raise ValueError("target_cv target_type='binary' requires exactly two classes")
+        effective = min(requested, int(counts.min()))
+    else:
+        effective = min(requested, int(y_arr.size))
+    if effective < 2:
+        raise ValueError(
+            "target_cv requires at least two rows per class for binary targets"
+        )
+    return effective
+
+
+class TargetCVEncoder(TransformerMixin, BaseEstimator):
+    """Cross-fitted sklearn target encoder with DataFrame-preserving output.
+
+    The encoder intentionally preserves one output column per raw categorical
+    feature.  sklearn's multiclass target encoding expands every input feature
+    to one column per class, which cannot be represented by SIFT's current
+    feature-selection contract until block-aware selection lands.
+    """
+
+    def __init__(
+        self,
+        cols: List[str],
+        *,
+        target_type: Literal["auto", "continuous", "binary"] = "auto",
+        smooth: Literal["auto"] | float = "auto",
+        cv: int = 5,
+        random_state: int = 0,
+    ):
+        self.cols = cols
+        self.target_type = target_type
+        self.smooth = smooth
+        self.cv = cv
+        self.random_state = random_state
+
+    def _validate_frame(self, X: pd.DataFrame) -> None:
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("target_cv encoding requires X to be a pandas DataFrame")
+        if not X.columns.is_unique:
+            raise ValueError("target_cv encoding requires unique DataFrame column names")
+        missing = [col for col in self.cols if col not in X.columns]
+        if missing:
+            raise ValueError(f"target_cv columns are missing from X: {missing[:5]}")
+
+    def _effective_cv(self, y) -> int:
+        return target_cv_n_splits(y, target_type=self.target_type, cv=self.cv)
+
+    def _encoder_input(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Normalize all pandas missing sentinels to one learned category."""
+        frame = X.loc[:, self.cols].copy()
+        for col in self.cols:
+            series = frame[col]
+            if bool(series.isna().any()):
+                frame[col] = series.astype(object).where(~series.isna(), np.nan)
+        return frame
+
+    def _make_encoder(self, y):
+        from sklearn.preprocessing import TargetEncoder
+
+        self.n_splits_ = self._effective_cv(y)
+        return TargetEncoder(
+            target_type=self.target_type,
+            smooth=self.smooth,
+            cv=self.n_splits_,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+    def _replace_columns(self, X: pd.DataFrame, values: np.ndarray) -> pd.DataFrame:
+        encoded = np.asarray(values, dtype=np.float64)
+        if encoded.ndim != 2 or encoded.shape[1] != len(self.cols):
+            raise ValueError(
+                "cat_encoding='target_cv' must preserve one encoded column per "
+                "categorical feature; multiclass expansion is not supported"
+            )
+        X_out = X.copy()
+        for index, col in enumerate(self.cols):
+            X_out[col] = encoded[:, index]
+        return X_out
+
+    def fit(self, X: pd.DataFrame, y):
+        self._validate_frame(X)
+        y_arr = np.asarray(y).reshape(-1)
+        if len(X) != y_arr.size:
+            raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
+        self.encoder_ = self._make_encoder(y_arr)
+        self.encoder_.fit(self._encoder_input(X), y_arr)
+        self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
+        return self
+
+    def fit_transform(
+        self,
+        X: pd.DataFrame,
+        y,
+        sample_weight=None,
+    ) -> pd.DataFrame:
+        self._validate_frame(X)
+        y_arr = np.asarray(y).reshape(-1)
+        if len(X) != y_arr.size:
+            raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
+        if sample_weight is not None:
+            raise ValueError(
+                "sample_weight with cat_encoding='target_cv' requires the custom "
+                "weighted cross-fitting mode, which is not available yet"
+            )
+        self.encoder_ = self._make_encoder(y_arr)
+        values = self.encoder_.fit_transform(self._encoder_input(X), y_arr)
+        self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
+        return self._replace_columns(X, values)
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        from sklearn.utils.validation import check_is_fitted
+
+        check_is_fitted(self, ["encoder_", "encoding_cv_"])
+        self._validate_frame(X)
+        values = self.encoder_.transform(self._encoder_input(X))
+        return self._replace_columns(X, values)
+
+
 def encode_categoricals(
     X: pd.DataFrame,
     y: pd.Series,
@@ -566,10 +724,14 @@ def encode_categoricals(
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     sample_weight=None,
+    target_type: Literal["auto", "continuous", "binary"] = "auto",
 ) -> pd.DataFrame:
     """Apply target encoding to categorical features."""
     if method == "none":
         return X
+    if method == "target_cv":
+        encoder = TargetCVEncoder(cat_features, target_type=target_type)
+        return encoder.fit_transform(X, y, sample_weight=sample_weight)
     if method == "loo_logit":
         encoder = LeaveOneOutLogitEncoder(
             cat_features,

@@ -117,9 +117,16 @@ def validate_binary_options(
         or int(refit_every) < 1
     ):
         raise ValueError("refit_every must be a positive integer")
-    if cat_encoding not in {"none", "target", "loo", "james_stein", "loo_logit"}:
+    if cat_encoding not in {
+        "none",
+        "target_cv",
+        "target",
+        "loo",
+        "james_stein",
+        "loo_logit",
+    }:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target', 'loo', "
+            "cat_encoding must be one of 'none', 'target_cv', 'target', 'loo', "
             "'james_stein', or 'loo_logit'."
         )
 
@@ -220,6 +227,8 @@ def build_binary_logloss_path(
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,
         sample_weight=problem.weights if problem.weighted else None,
+        groups=problem.groups,
+        time=problem.time,
     )
     # The logistic path works in float64 throughout; skipping the classic
     # float32 round trip keeps large-offset or tiny-scale columns intact.
@@ -460,6 +469,8 @@ def encode_categoricals_for_binary_selector(
     loo_clip_min: float,
     loo_clip_max: float,
     sample_weight: np.ndarray | None,
+    groups: np.ndarray | None = None,
+    time: np.ndarray | None = None,
 ) -> Union[pd.DataFrame, np.ndarray]:
     if not cat_features or cat_encoding == "none":
         return X
@@ -468,6 +479,11 @@ def encode_categoricals_for_binary_selector(
     present_cat_features = [col for col in cat_features if col in X.columns]
     if not present_cat_features:
         return X
+    if cat_encoding == "target_cv" and (groups is not None or time is not None):
+        raise ValueError(
+            "cat_encoding='target_cv' with groups/time requires the contextual "
+            "cross-fitting mode, which is not available yet"
+        )
     if cat_encoding in {"target", "loo", "james_stein", "loo_logit"} and not allow_full_data_target_encoding:
         raise ValueError(
             f"cat_encoding='{cat_encoding}' fits a supervised categorical encoder "
@@ -485,6 +501,7 @@ def encode_categoricals_for_binary_selector(
         loo_clip_min=loo_clip_min,
         loo_clip_max=loo_clip_max,
         sample_weight=sample_weight,
+        target_type="binary",
     )
 
 

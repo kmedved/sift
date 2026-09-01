@@ -25,6 +25,7 @@ from sift._selector_compat import (
 )
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
+    TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
     suppress_category_encoder_pandas_warnings,
@@ -49,7 +50,9 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 
-_SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
+_SUPERVISED_CLASS_ENCODINGS = frozenset(
+    {"target_cv", "loo", "target", "james_stein", "loo_logit"}
+)
 _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
     {
         "loss",
@@ -148,12 +151,15 @@ def _make_category_encoder(
     method: str,
     columns: list[str],
     *,
+    target_type: Literal["continuous", "binary"] = "continuous",
     loo_smoothing: float = 20.0,
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
 ):
     if method == "none" or not columns:
         return None
+    if method == "target_cv":
+        return TargetCVEncoder(columns, target_type=target_type)
     if method == "loo_logit":
         return LeaveOneOutLogitEncoder(
             columns,
@@ -163,8 +169,8 @@ def _make_category_encoder(
         )
     if method not in {"loo", "target", "james_stein"}:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target', 'loo', 'james_stein', "
-            "or 'loo_logit'. "
+            "cat_encoding must be one of 'none', 'target_cv', 'target', 'loo', "
+            "'james_stein', or 'loo_logit'. "
             f"Got {method!r}."
         )
     if importlib.util.find_spec("category_encoders") is None:
@@ -275,6 +281,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         for attr in (
             "_fit_transform_output_",
             "categorical_encoder_",
+            "categorical_encoding_metadata_",
             "categorical_features_",
             "_categorical_encoding_applied_",
             "feature_names_in_",
@@ -331,11 +338,15 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         encoder = _make_category_encoder(
             cat_encoding,
             cat_features,
+            target_type="binary" if self._task() == "classification" else "continuous",
             loo_smoothing=getattr(self, "loo_smoothing", 20.0),
             loo_clip_min=getattr(self, "loo_clip_min", 1e-4),
             loo_clip_max=getattr(self, "loo_clip_max", 1.0 - 1e-4),
         )
-        if sample_weight is not None and not isinstance(encoder, LeaveOneOutLogitEncoder):
+        if sample_weight is not None and not isinstance(
+            encoder,
+            (LeaveOneOutLogitEncoder, TargetCVEncoder),
+        ):
             raise ValueError(
                 "sample_weight with selector-class categorical encoding is only "
                 "supported for cat_encoding='loo_logit'. category_encoders-backed "
@@ -349,10 +360,21 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                     y_enc,
                     sample_weight=self._categorical_sample_weight(y, sample_weight),
                 )
+            elif isinstance(encoder, TargetCVEncoder):
+                target_cv_weight = None
+                if sample_weight is not None or getattr(self, "class_weight", None) is not None:
+                    target_cv_weight = self._categorical_sample_weight(y, sample_weight)
+                X_encoded = encoder.fit_transform(
+                    X,
+                    y_enc,
+                    sample_weight=target_cv_weight,
+                )
             else:
                 X_encoded = encoder.fit_transform(X, y_enc)
 
         self.categorical_encoder_ = encoder
+        if hasattr(encoder, "encoding_cv_"):
+            self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
         self._categorical_encoding_applied_ = True
         return X_encoded
 
@@ -471,6 +493,15 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         time = metadata.time
         self._row_metadata_columns_ = metadata.extracted_columns
         has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
+        if (
+            has_supervised_categoricals
+            and getattr(self, "cat_encoding", "none") == "target_cv"
+            and (groups is not None or time is not None)
+        ):
+            raise ValueError(
+                "cat_encoding='target_cv' with groups/time requires the contextual "
+                "cross-fitting mode, which is not available yet"
+            )
 
         if resolved_cache is not None and has_supervised_categoricals:
             raise ValueError(

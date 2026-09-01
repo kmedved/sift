@@ -26,6 +26,23 @@
   all classes. All audited selectors handle non-finite feature values and
   require `y`; only Knockoff is tagged non-deterministic.
 
+### Leakage-safe categorical encoding
+
+- Added `cat_encoding="target_cv"` for unweighted regression and binary
+  DataFrame inputs. It reuses sklearn's cross-fitted `TargetEncoder`, requires
+  no `category_encoders` extra, preserves one output column per raw feature,
+  normalizes missing values to one learned category, and maps unseen inference
+  categories to the fitted global target mean.
+- Function filter results conditionally record the fixed-fold encoding kind and
+  effective split count. Selector classes and Boruta retain the full-training
+  encoder for target-blind `transform`, expose the same information through
+  `categorical_encoding_metadata_`, and return the cross-fitted selected
+  training columns from `fit_transform` where applicable.
+- Existing defaults and unsafe expert encoders are unchanged. Multiclass is
+  rejected until block-aware expansion exists; sample-weighted and groups/time
+  `target_cv` calls reject explicitly until their public custom-fold prior and
+  warmup policy is finalized.
+
 ## 0.9.0b1 (2026-08-31)
 
 ### Additive conventions

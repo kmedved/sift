@@ -18,6 +18,7 @@ from sift._preprocess import (
     encode_categoricals,
     ensure_weights,
     subsample_xy,
+    target_cv_n_splits,
     to_numpy,
     validate_inputs,
 )
@@ -604,13 +605,36 @@ def standard_extra(aggregation: str | None = None) -> Callable[["FilterContext"]
                 extra[name] = _kw(ctx, name)
         if aggregation is not None:
             extra["aggregation"] = aggregation
+        extra.update(_target_cv_metadata(ctx))
         return extra
 
     return metadata_extra
 
 
-def no_extra(_ctx: "FilterContext") -> dict:
-    return {}
+def no_extra(ctx: "FilterContext") -> dict:
+    return _target_cv_metadata(ctx)
+
+
+def _target_cv_metadata(ctx: "FilterContext") -> dict:
+    if _kw(ctx, "cat_encoding", "none") != "target_cv":
+        return {}
+    cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
+    if not isinstance(ctx.request.X, pd.DataFrame) or not cat_features:
+        return {}
+    present = [col for col in cat_features if col in ctx.request.X.columns]
+    if not present:
+        return {}
+    target_type = "binary" if ctx.request.task == "classification" else "continuous"
+    return {
+        "cat_encoding": "target_cv",
+        "encoding_cv": {
+            "kind": "fixed_k",
+            "n_splits": target_cv_n_splits(
+                ctx.request.y,
+                target_type=target_type,
+            ),
+        },
+    }
 
 
 def _binary_auto_payload(
@@ -738,6 +762,14 @@ def _binary_payload_from_selection(
         "loo_clip_min": options.loo_clip_min,
         "loo_clip_max": options.loo_clip_max,
     }
+    if _kw(ctx, "cat_encoding") == "target_cv" and run.cat_features:
+        metadata_extra["encoding_cv"] = {
+            "kind": "fixed_k",
+            "n_splits": target_cv_n_splits(
+                problem.y01,
+                target_type="binary",
+            ),
+        }
     if options.k_value == "auto" and ctx.auto_k_config is not None:
         metadata_extra.update(_binary_auto_metadata(ctx.auto_k_config))
     return SelectionPayload(
@@ -772,6 +804,9 @@ def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] |
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         sample_weight=ctx.request.sample_weight,
+        task=ctx.request.task,
+        groups=ctx.groups,
+        time=ctx.time,
     )
     return (
         build_cache(
@@ -816,12 +851,22 @@ def _encode_categoricals_for_selector(
     cat_features: Optional[list[str]], cat_encoding: CatEncoding, *,
     allow_full_data_target_encoding: bool,
     sample_weight=None,
+    task: Task = "regression",
+    groups=None,
+    time=None,
 ) -> Union[pd.DataFrame, np.ndarray]:
     if not cat_features or cat_encoding == "none":
         return X
     if not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
     present_cat_features = [col for col in cat_features if col in X.columns]
+    if present_cat_features and cat_encoding == "target_cv" and (
+        groups is not None or time is not None
+    ):
+        raise ValueError(
+            "cat_encoding='target_cv' with groups/time requires the contextual "
+            "cross-fitting mode, which is not available yet"
+        )
     if (
         present_cat_features
         and cat_encoding in _SUPERVISED_CAT_ENCODINGS
@@ -834,7 +879,14 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
-    return encode_categoricals(X, y, cat_features, cat_encoding, sample_weight=sample_weight)
+    return encode_categoricals(
+        X,
+        y,
+        cat_features,
+        cat_encoding,
+        sample_weight=sample_weight,
+        target_type="binary" if task == "classification" else "continuous",
+    )
 
 
 def _default_top_m(top_m: Optional[int], k: int) -> int:
@@ -854,6 +906,9 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         sample_weight=ctx.request.sample_weight,
+        task=ctx.request.task,
+        groups=ctx.groups,
+        time=ctx.time,
     )
     X_arr, y_arr, feature_names = validate_inputs(
         X_encoded,

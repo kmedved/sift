@@ -18,6 +18,7 @@ from sift._deprecate import warn_external
 from sift._metadata import resolve_row_metadata
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
+    TargetCVEncoder,
     ensure_weights,
     suppress_category_encoder_pandas_warnings,
 )
@@ -981,7 +982,14 @@ def _evaluate_prefix_split(
     k_grid: list[int],
     sample_weight_supplied: bool,
     cat_features: Optional[List[str]],
-    cat_encoding: Literal["none", "target", "loo", "james_stein", "loo_logit"],
+    cat_encoding: Literal[
+        "none",
+        "target_cv",
+        "target",
+        "loo",
+        "james_stein",
+        "loo_logit",
+    ],
     loo_smoothing: float,
     loo_clip_min: float,
     loo_clip_max: float,
@@ -1003,7 +1011,19 @@ def _evaluate_prefix_split(
     else:
         fold_cat = [col for col in cat_features if col in Xtr_df.columns]
 
-    if cat_encoding == "loo_logit" and fold_cat:
+    if cat_encoding == "target_cv" and fold_cat:
+        if sample_weight_supplied:
+            raise ValueError(
+                "sample_weight with cat_encoding='target_cv' requires the custom "
+                "weighted cross-fitting mode, which is not available yet"
+            )
+        enc = TargetCVEncoder(
+            fold_cat,
+            target_type="binary" if task == "classification" else "continuous",
+        )
+        Xtr_df = enc.fit_transform(Xtr_df, ytr)
+        Xva_df = enc.transform(Xva_df)
+    elif cat_encoding == "loo_logit" and fold_cat:
         if task != "classification":
             raise ValueError("cat_encoding='loo_logit' requires task='classification'")
         enc = LeaveOneOutLogitEncoder(
@@ -1062,7 +1082,14 @@ def select_k_auto(
     groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     task: Literal["regression", "classification"] = "regression",
-    cat_encoding: Literal["none", "target", "loo", "james_stein", "loo_logit"] = "none",
+    cat_encoding: Literal[
+        "none",
+        "target_cv",
+        "target",
+        "loo",
+        "james_stein",
+        "loo_logit",
+    ] = "none",
     cat_features: Optional[List[str]] = None,
     sample_weight: Optional[np.ndarray] = None,
     loo_smoothing: float = 20.0,

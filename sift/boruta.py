@@ -42,6 +42,7 @@ from sift._permute import (
 from sift._preprocess import (
     CatEncoding,
     LeaveOneOutLogitEncoder,
+    TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
     reject_datetime_like_features,
@@ -544,7 +545,25 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         )
 
     def fit_transform(self, X, y=None, **fit_params):
-        return self.fit(X, y, **fit_params).transform(X)
+        if self.cat_encoding != "target_cv":
+            return self.fit(X, y, **fit_params).transform(X)
+        self._capture_target_cv_training_output_ = True
+        try:
+            self.fit(X, y, **fit_params)
+            captured = getattr(self, "_target_cv_training_output_", None)
+            if captured is None:
+                return self.transform(X)
+            keep_idx = self.get_support(indices=True)
+            if isinstance(captured, pd.DataFrame):
+                return captured.iloc[:, keep_idx].copy()
+            return np.asarray(captured)[:, keep_idx].copy()
+        finally:
+            for attr in (
+                "_capture_target_cv_training_output_",
+                "_target_cv_training_output_",
+            ):
+                if hasattr(self, attr):
+                    delattr(self, attr)
 
     def fit(
         self,
@@ -600,6 +619,8 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
     def _clear_fit_state(self) -> None:
         for attr in (
             "categorical_encoder_",
+            "categorical_encoding_metadata_",
+            "_target_cv_training_output_",
             "categorical_features_",
             "_categorical_encoding_applied_",
             "feature_names_in_",
@@ -651,13 +672,23 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 cat_features = [c for c in cat_features if c in X.columns]
 
             if cat_features and self.cat_encoding != "none":
+                if self.cat_encoding == "target_cv" and (
+                    groups is not None or time is not None
+                ):
+                    raise ValueError(
+                        "cat_encoding='target_cv' with groups/time requires the "
+                        "contextual cross-fitting mode, which is not available yet"
+                    )
                 if self.importance_data == "test":
                     raise ValueError(
                         "BorutaSelector(importance_data='test') cannot use supervised "
                         "cat_encoding on the full dataset. Pre-encode categoricals "
                         "leakage-safely or use importance_data='train'."
                     )
-                if not self.allow_full_data_target_encoding:
+                if (
+                    self.cat_encoding != "target_cv"
+                    and not self.allow_full_data_target_encoding
+                ):
                     raise ValueError(
                         f"cat_encoding={self.cat_encoding!r} fits a supervised categorical "
                         "encoder on the full dataset before Boruta. Tree learners can read "
@@ -673,13 +704,28 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     )
                 else:
                     y_for_encoder = y
-                if sample_weight is not None and self.cat_encoding != "loo_logit":
+                if (
+                    sample_weight is not None
+                    and self.cat_encoding not in {"loo_logit", "target_cv"}
+                ):
                     raise ValueError(
                         "sample_weight with Boruta categorical encoding is only "
                         "supported for cat_encoding='loo_logit'. category_encoders-backed "
                         "methods ('loo', 'target', 'james_stein') do not consume sample weights."
                     )
-                if self.cat_encoding == "loo_logit":
+                if self.cat_encoding == "target_cv":
+                    encoder = TargetCVEncoder(
+                        cat_features,
+                        target_type="binary"
+                        if self.task == "classification"
+                        else "continuous",
+                    )
+                    X = encoder.fit_transform(
+                        X,
+                        y_for_encoder,
+                        sample_weight=sample_weight,
+                    )
+                elif self.cat_encoding == "loo_logit":
                     encoder = LeaveOneOutLogitEncoder(cat_features)
                     X = encoder.fit_transform(X, y_for_encoder, sample_weight=sample_weight)
                 else:
@@ -692,8 +738,8 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     }
                     if self.cat_encoding not in encoders:
                         raise ValueError(
-                            "cat_encoding must be one of 'none', 'target', 'loo', "
-                            "'james_stein', or 'loo_logit'. "
+                            "cat_encoding must be one of 'none', 'target_cv', "
+                            "'target', 'loo', 'james_stein', or 'loo_logit'. "
                             f"Got {self.cat_encoding!r}."
                         )
                     Encoder = encoders[self.cat_encoding]
@@ -708,9 +754,13 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     with suppress_category_encoder_pandas_warnings():
                         X = encoder.fit_transform(X, y_for_encoder)
                 self.categorical_encoder_ = encoder
+                if hasattr(encoder, "encoding_cv_"):
+                    self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
                 self.categorical_features_ = list(cat_features)
                 self._categorical_encoding_applied_ = True
                 feature_names = extract_feature_names(X)
+                if getattr(self, "_capture_target_cv_training_output_", False):
+                    self._target_cv_training_output_ = X.copy()
 
             non_numeric = X.select_dtypes(
                 include=["object", "category", "string"]

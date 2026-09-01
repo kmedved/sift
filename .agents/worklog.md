@@ -1,11 +1,11 @@
 # SIFT 0.9 worklog
 
-- Objective: Complete 0.9 Workstream D sklearn integration without changing any 0.8 selection, return, default, or legacy-order contract.
-- Latest steering: Proceed after 0.9.0b1 commit `662b352`.
-- Constraints: Keep sklearn `>=1.3,<2`, the 49-field `AutoKConfig`, the ordered 58-name top-level surface, dense-only selector inputs, and every selector family's legacy transform order.
-- Decisions: Add `output_order="original"` as an opt-in while defaulting to legacy order. Make row-metadata requests explicit and reject configured requests the selected fit path cannot consume. Scope private sklearn CV/pipeline calls out of an outer routing context. Document, rather than silently change, contextual inner Ridge CV and fully weighted Stability alpha scoring.
-- Completed: All eight public selectors subclass `SelectorMixin`; support masks, ordered indices/names/transforms, dense inverse transforms, sparse rejection, tags, and metadata-request guards are implemented. Group metadata routes through Pipeline/cross_validate on sklearn 1.5.1 and 1.7.1. Six common estimator checks are pinned for every class. Public docs, release notes, and the rev-12 campaign status describe the shipped and compatibility-gated behavior.
-- Current state: Workstream D is complete and its code, contracts, documentation, and packaged wheel are verified.
-- Next action: Begin Workstream E categoricals on the next explicit proceed.
+- Objective: Complete 0.9 Workstream E leakage-safe categorical encoding while preserving every 0.8 categorical/default contract; E1 is complete and E2 contextual folds remain.
+- Latest steering: Proceed after Workstream D commit `8263e00`.
+- Constraints: Keep sklearn `>=1.3,<2`, existing unsafe encoders behind `allow_full_data_target_encoding=True`, fixed-k rejection of `groups`/`time`, the 58-name top-level surface, and current default `cat_encoding="none"`. One-hot remains blocked on F3 block-aware selection.
+- Decisions: Add `cat_encoding="target_cv"` using sklearn `TargetEncoder.fit_transform` for unweighted regression/binary training and target-blind `transform` for inference. Preserve one raw column per selected feature, so multiclass expansion rejects until block-aware selection. Reject weights/groups/time until E2 assigns the already-specified prior, warmup, smoothing, and fold options to public signatures; never fall back to full-data encoding.
+- Completed: Workstream D is committed at `8263e00`. E1 now covers function filters, sklearn wrappers, binary CEFS+, Boruta, split-local auto-k evaluation, inference unknown/missing rules, conditional result/fitted metadata, and the no-extra high-cardinality leakage regression.
+- Current state: E1 code, tests, documentation, and the rev-13 campaign status are fully verified and ready to commit.
+- Next action: Commit E1, then settle and implement E2 weighted/group/time fold policy on the next explicit proceed.
 - Blockers: None.
-- Decisive verification: The expanded D contract and related focused tests pass 55 on sklearn 1.5.1; the original 37-test D matrix passes on sklearn 1.7.1; affected selector suites pass 247 with 7 skipped; the full primary suite passes 1,637 with 16 skipped. Ruff, compileall, and `git diff --check` are clean. The isolated wheel build installs from `dist` and passes a 58-export MRMR fit/transform/inverse smoke test.
+- Decisive verification: The 12-test E1 contract passes on sklearn 1.3.2, 1.5.1, and 1.7.1. Existing affected categorical/selector suites pass 231 with 14 skipped; docs/public-contract checks pass 214; the full primary suite passes 1,649 with 16 skipped. Ruff, compileall, and `git diff --check` are clean.

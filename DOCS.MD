@@ -210,8 +210,13 @@ Sample weights:
 
 Categorical encoding:
 
-- Filter selectors support `cat_features=[...]` and `cat_encoding="loo"`,
-  `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
+- Filter selectors support `cat_features=[...]` and `cat_encoding="target_cv"`,
+  `"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
+- `cat_encoding="target_cv"` is built into SIFT through sklearn's
+  `TargetEncoder`. For unweighted regression and binary targets it cross-fits
+  training rows, uses a deterministic effective fold count up to five, maps
+  unseen inference categories to the fitted target mean, and treats missing
+  values as one learned category. It needs no optional dependency.
 - `cat_encoding="loo"`, `"target"`, and `"james_stein"` require the
   `category_encoders` package. `cat_encoding="loo_logit"` is built into SIFT
   and is intended for binary targets.
@@ -220,6 +225,9 @@ Categorical encoding:
   `allow_full_data_target_encoding=True` is passed. That flag preserves the old
   full-dataset encoding behavior and should only be used when leakage has been
   handled outside the selector.
+- Weighted, groups/time-aware, and multiclass `target_cv` calls currently raise
+  explicitly. Their custom fold/prior and block-expansion contracts are the
+  next categorical workstream; they never fall back to full-data encoding.
 - If `cat_features` is omitted and `X` is a DataFrame, object/category/string
   columns are auto-detected for Gaussian/JMI/CEFS+ paths in the places where the
   code supports it.
@@ -729,15 +737,16 @@ overrides are rejected. `KnockoffSelector` uses the same `subsample="auto"`
 contract, while its numeric `random_state` continues to seed each fresh
 knockoff draw.
 
-Selector classes default to `cat_encoding="none"`. When you explicitly set
-`cat_encoding` to `"target"`, `"loo"`, `"james_stein"`, or `"loo_logit"`, the
-encoder is fitted only inside `fit(X_train, y_train)` and reused by
-`transform(X_test)` without access to test targets. `fit_transform(X_train,
-y_train)` returns the selected columns from the y-aware encoded matrix used
-during selection, so sklearn pipeline training does not silently switch to
-target-blind transform semantics.
-These fitted encoders are not cross-fitted; use external cross-fitting or
-selector-class `auto_k_mode="nested"` when you need fold-local evaluation.
+Selector classes default to `cat_encoding="none"`. With
+`cat_encoding="target_cv"`, `fit_transform(X_train, y_train)` returns the
+selected cross-fitted columns used during selection, while
+`transform(X_test)` reuses the full-training fitted encoder without access to
+test targets. The fitted `categorical_encoding_metadata_` records the fold
+kind/count. Existing `"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"`
+encoders retain their 0.8 behavior: they are fitted only inside
+`fit(X_train, y_train)` and reused target-blind at transform time, but are not
+all internally cross-fitted. Use `target_cv`, external cross-fitting, or
+selector-class `auto_k_mode="nested"` when you need fold-local training values.
 Function-style selectors still reject supervised full-data categorical encoding
 by default unless `allow_full_data_target_encoding=True` is passed explicitly.
 
@@ -1596,8 +1605,10 @@ Important options:
 - `shap_sample_size`: optional SHAP row subsample.
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
-  fitting Boruta. Supervised encodings (`"loo"`, `"target"`, `"james_stein"`,
-  `"loo_logit"`) are fitted on the full dataset, which tree learners can
+  fitting Boruta. `"target_cv"` is the built-in unweighted regression/binary
+  cross-fitted option and retains a target-blind inference encoder. Existing
+  supervised encodings (`"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`)
+  are fitted on the full dataset, which tree learners can
   invert (leave-one-out values within a category are monotone in the row's own
   target), so Boruta requires `allow_full_data_target_encoding=True` before
   applying them, exactly like the filter selectors. Prefer pre-encoding
@@ -2081,8 +2092,8 @@ Utility behavior:
 - `check_regression_only`: blocks regression-only estimators for classification.
 - `resolve_jmi_estimator`: maps `estimator="auto"` to `"r2"` or `"binned"`.
 - `subsample_xy`: row-subsamples features, target, and weights.
-- `encode_categoricals`: target/LOO/James-Stein encoding through
-  `category_encoders`.
+- `encode_categoricals`: built-in sklearn `target_cv` plus the optional
+  target/LOO/James-Stein `category_encoders` backends and binary LOO-logit.
 
 ## Permutation Utilities
 
