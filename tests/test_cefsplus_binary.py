@@ -14,7 +14,14 @@ from sift.selection.cefsplus_binary import (
     logistic_score_test_scores_from_gram,
     weighted_standardize,
 )
-from sift.selection.cefsplus_binary_common import validate_binary_target
+import sift.selection.cefsplus_binary_common as cefsplus_binary_common_module
+from sift.selection.cefsplus_binary_common import (
+    BinaryOptions,
+    build_binary_logloss_path,
+    encode_categoricals_for_binary_selector,
+    prepare_binary_problem,
+    validate_binary_target,
+)
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.result import FilterSelectionResult
 
@@ -338,6 +345,94 @@ def test_sample_weights_can_change_binary_selection():
 
     assert unweighted == ["global_signal"]
     assert weighted == ["rare_signal"]
+
+
+def test_binary_target_cv_propagates_resolved_sample_weights():
+    X = pd.DataFrame(
+        {
+            "team": ["a", "a", "b", "b", "c", "c", "d", "d"],
+            "signal": np.arange(8, dtype=float),
+        }
+    )
+    y = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=float)
+    sample_weight = np.array([1.0, 2.0, 1.5, 0.5, 3.0, 1.0, 2.0, 4.0])
+
+    encoded, effective_weight = encode_categoricals_for_binary_selector(
+        X,
+        y,
+        ["team"],
+        "target_cv",
+        allow_full_data_target_encoding=False,
+        loo_smoothing=20.0,
+        loo_clip_min=1e-4,
+        loo_clip_max=1.0 - 1e-4,
+        sample_weight=sample_weight,
+        target_cv_n_splits=2,
+        target_cv_smoothing=2.0,
+        return_effective_weights=True,
+    )
+
+    assert isinstance(encoded, pd.DataFrame)
+    np.testing.assert_array_equal(effective_weight, sample_weight)
+
+
+def test_binary_target_cv_time_warmup_weights_are_local_to_path(monkeypatch):
+    X = pd.DataFrame(
+        {
+            "team": ["a"] * 8,
+            "signal": np.array([-2.0, 2.0, -1.5, 1.5, -1.0, 1.0, -0.5, 0.5]),
+        }
+    )
+    y = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=float)
+    time = np.repeat(np.arange(4), 2)
+    problem = prepare_binary_problem(
+        X,
+        y,
+        groups=None,
+        time=time,
+        sample_weight=None,
+        class_weight=None,
+    )
+    options = BinaryOptions(
+        k_value=1,
+        loss="logloss",
+        top_m=None,
+        corr_prune=None,
+        subsample=None,
+        ridge=1e-4,
+        refit_every=1,
+        loo_smoothing=20.0,
+        loo_clip_min=1e-4,
+        loo_clip_max=1.0 - 1e-4,
+    )
+    captured = {}
+    original_subsample_xy = cefsplus_binary_common_module.subsample_xy
+
+    def wrapped_subsample_xy(*args, **kwargs):
+        captured["weight"] = np.asarray(kwargs["sample_weight"]).copy()
+        return original_subsample_xy(*args, **kwargs)
+
+    monkeypatch.setattr(
+        cefsplus_binary_common_module,
+        "subsample_xy",
+        wrapped_subsample_xy,
+    )
+    build_binary_logloss_path(
+        X,
+        problem,
+        options,
+        auto_k_config=None,
+        cat_features=["team"],
+        cat_encoding="target_cv",
+        allow_full_data_target_encoding=False,
+        random_state=0,
+        verbose=False,
+        target_cv_n_splits=4,
+        target_cv_smoothing=0.0,
+    )
+
+    np.testing.assert_array_equal(captured["weight"], np.array([0, 0, 1, 1, 1, 1, 1, 1]))
+    np.testing.assert_array_equal(problem.weights, np.ones(len(y)))
 
 
 def test_class_weight_balanced_runs_and_marks_weighted_result():

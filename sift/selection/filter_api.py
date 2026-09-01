@@ -192,6 +192,10 @@ MRMR_SELECTOR_KWARGS = (
     "top_m",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -205,6 +209,10 @@ JMI_SELECTOR_KWARGS = (
     "top_m",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -215,6 +223,10 @@ CEFSPLUS_SELECTOR_KWARGS = (
     "corr_prune",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -229,6 +241,10 @@ CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "refit_every",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "loo_smoothing",
     "loo_clip_min",
     "loo_clip_max",
@@ -282,6 +298,9 @@ def select_mrmr(
     relevance: RelevanceMethod = "f", estimator: EstimatorMRMR = "classic",
     formula: Formula = "quotient", top_m: Optional[int] = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
@@ -306,6 +325,9 @@ def select_jmi(
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
@@ -329,6 +351,9 @@ def select_jmim(
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
@@ -354,6 +379,9 @@ def select_cefsplus(
     sample_weight: np.ndarray | None = None,
     top_m: Optional[int] = None, corr_prune: float | None = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
@@ -378,6 +406,9 @@ def select_cefsplus_binary(
     class_weight=None,
     ridge: float = 1e-4, refit_every: int = 1,
     cat_features: Optional[list[str]] = None, cat_encoding: str = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     loo_smoothing: float = 20.0, loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     allow_full_data_target_encoding: bool = False,
@@ -418,6 +449,7 @@ def _select_filter(
                 f"{spec.display_name} does not support k_method="
                 f"{ctx.auto_k_config.k_method!r}"
             )
+        _require_context_auto_k_compatibility(ctx)
         _require_auto_k_eval_context(ctx)
     else:
         handler = spec.fixed_handler
@@ -624,6 +656,21 @@ def _require_auto_k_eval_context(ctx: FilterContext) -> None:
     _require_unique_evaluate_feature_names(config, ctx.request.X)
 
 
+def _require_context_auto_k_compatibility(ctx: FilterContext) -> None:
+    """Contextual target encoding is safe only in split-based evaluation."""
+    if (
+        (ctx.groups is None and ctx.time is None)
+        or (ctx.selector_kwargs or {}).get("cat_encoding") != "target_cv"
+    ):
+        return
+    assert ctx.auto_k_config is not None
+    if ctx.auto_k_config.k_method != "evaluate":
+        raise ValueError(
+            "groups and time are supported only with k='auto' and "
+            "AutoKConfig(k_method='evaluate')"
+        )
+
+
 def _require_evaluate_context(
     config: AutoKConfig,
     groups: np.ndarray | None,
@@ -706,6 +753,10 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         corr_prune=options.corr_prune,
         cat_features=kw("cat_features"),
         cat_encoding=cat_encoding_eff,
+        target_cv_n_splits=kw("target_cv_n_splits"),
+        target_cv_smoothing=kw("target_cv_smoothing"),
+        target_prior=kw("target_prior"),
+        warmup_policy=kw("warmup_policy"),
         allow_full_data_target_encoding=kw("allow_full_data_target_encoding"),
         subsample=options.subsample,
         random_state=kw("random_state"),

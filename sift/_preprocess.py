@@ -623,12 +623,16 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         smooth: Literal["auto"] | float = "auto",
         cv: int = 5,
         random_state: int = 0,
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     ):
         self.cols = cols
         self.target_type = target_type
         self.smooth = smooth
         self.cv = cv
         self.random_state = random_state
+        self.target_prior = target_prior
+        self.warmup_policy = warmup_policy
 
     def _validate_frame(self, X: pd.DataFrame) -> None:
         if not isinstance(X, pd.DataFrame):
@@ -641,6 +645,229 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
     def _effective_cv(self, y) -> int:
         return target_cv_n_splits(y, target_type=self.target_type, cv=self.cv)
+
+    def _requested_cv(self) -> int:
+        if isinstance(self.cv, (bool, np.bool_)) or not isinstance(
+            self.cv, (int, np.integer)
+        ):
+            raise ValueError("target_cv cv must be an integer >= 2")
+        requested = int(self.cv)
+        if requested < 2:
+            raise ValueError("target_cv cv must be an integer >= 2")
+        return requested
+
+    def _validate_custom_options(self) -> float:
+        if self.smooth == "auto":
+            raise ValueError(
+                "target_cv_smoothing must be an explicit non-negative float for "
+                "weighted, grouped, or time-aware target_cv encoding; "
+                "smooth='auto' is delegated only to sklearn's unweighted fixed-k path"
+            )
+        if isinstance(self.smooth, (bool, np.bool_)) or not isinstance(
+            self.smooth, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError("target_cv_smoothing must be 'auto' or a non-negative float")
+        smooth = float(self.smooth)
+        if not np.isfinite(smooth) or smooth < 0.0:
+            raise ValueError("target_cv_smoothing must be finite and >= 0")
+        if self.warmup_policy not in {"exclude", "zero_weight"}:
+            raise ValueError("warmup_policy must be 'exclude' or 'zero_weight'")
+        return smooth
+
+    def _target_values(self, y) -> tuple[np.ndarray, str]:
+        from sklearn.preprocessing import LabelEncoder
+        from sklearn.utils.multiclass import type_of_target
+
+        y_arr = np.asarray(y).reshape(-1)
+        inferred = type_of_target(y_arr)
+        target_kind = inferred if self.target_type == "auto" else self.target_type
+        if inferred == "multiclass" and self.target_type != "continuous":
+            raise ValueError(
+                "cat_encoding='target_cv' does not yet support multiclass targets: "
+                "sklearn expands each categorical feature to one column per class, "
+                "which requires block-aware selection"
+            )
+        if target_kind == "binary":
+            label_encoder = LabelEncoder().fit(y_arr)
+            if label_encoder.classes_.size != 2:
+                raise ValueError("target_cv target_type='binary' requires exactly two classes")
+            self.classes_ = label_encoder.classes_
+            values = label_encoder.transform(y_arr).astype(np.float64)
+            if self.target_prior is not None and not 0.0 <= float(self.target_prior) <= 1.0:
+                raise ValueError("target_prior must be between 0 and 1 for binary targets")
+            return values, "binary"
+        if target_kind != "continuous":
+            raise ValueError(
+                "target_cv supports only continuous regression and binary classification targets"
+            )
+        try:
+            values = np.asarray(y_arr, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("continuous target_cv targets must be numeric") from exc
+        if not np.isfinite(values).all():
+            raise ValueError("target_cv y contains non-finite values")
+        return values, "continuous"
+
+    @staticmethod
+    def _normalized_series(series: pd.Series) -> pd.Series:
+        return series.astype(object).where(~series.isna(), np.nan)
+
+    def _fit_custom_maps(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        sample_weight: np.ndarray,
+        smooth: float,
+    ) -> tuple[dict[str, dict[object, float]], float]:
+        active = sample_weight > 0.0
+        if not bool(np.any(active)):
+            raise ValueError("target_cv fit rows have zero total sample_weight")
+        weights = sample_weight[active]
+        y_active = y[active]
+        total_weight = float(weights.sum())
+        prior = float(np.dot(weights, y_active) / total_weight)
+        mappings: dict[str, dict[object, float]] = {}
+        for col in self.cols:
+            series = self._normalized_series(X.loc[active, col])
+            codes, categories = pd.factorize(
+                series,
+                sort=False,
+                use_na_sentinel=False,
+            )
+            counts = np.bincount(codes, weights=weights, minlength=len(categories))
+            sums = np.bincount(
+                codes,
+                weights=weights * y_active,
+                minlength=len(categories),
+            )
+            encoded = (sums + smooth * prior) / (counts + smooth)
+            mappings[col] = {
+                category: float(value)
+                for category, value in zip(categories.tolist(), encoded.tolist())
+            }
+        return mappings, prior
+
+    def _apply_custom_maps(
+        self,
+        X: pd.DataFrame,
+        mappings: dict[str, dict[object, float]],
+        prior: float,
+    ) -> pd.DataFrame:
+        X_out = X.copy()
+        for col in self.cols:
+            series = self._normalized_series(X_out[col])
+            X_out[col] = series.map(mappings[col]).fillna(prior).astype(np.float64)
+        return X_out
+
+    def _fixed_splits(
+        self,
+        y: np.ndarray,
+        target_kind: str,
+        active: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        from sklearn.model_selection import KFold, StratifiedKFold
+
+        active_idx = np.flatnonzero(active)
+        requested = target_cv_n_splits(
+            y[active],
+            target_type="binary" if target_kind == "binary" else "continuous",
+            cv=self.cv,
+        )
+        if target_kind == "binary":
+            splitter = StratifiedKFold(
+                n_splits=requested,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            split_iter = splitter.split(active_idx, y[active])
+        else:
+            splitter = KFold(
+                n_splits=requested,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            split_iter = splitter.split(active_idx)
+        return [
+            (active_idx[train_local], active_idx[valid_local])
+            for train_local, valid_local in split_iter
+        ]
+
+    def _group_splits(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups,
+        active: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        from sklearn.model_selection import GroupKFold
+
+        group_arr = np.asarray(groups).reshape(-1)
+        if group_arr.size != len(X):
+            raise ValueError(f"groups has {group_arr.size} rows but X has {len(X)}")
+        if bool(np.asarray(pd.isna(group_arr), dtype=bool).any()):
+            raise ValueError("groups must not contain missing values")
+        active_idx = np.flatnonzero(active)
+        n_groups = int(pd.unique(group_arr[active]).size)
+        n_splits = min(self._requested_cv(), n_groups)
+        if n_splits < 2:
+            raise ValueError(f"target_cv group folds require at least 2 groups, got {n_groups}")
+        splitter = GroupKFold(n_splits=n_splits)
+        return [
+            (active_idx[train_local], active_idx[valid_local])
+            for train_local, valid_local in splitter.split(
+                X.iloc[active_idx],
+                y[active_idx],
+                group_arr[active_idx],
+            )
+        ]
+
+    def _time_splits(
+        self,
+        time,
+        active: np.ndarray,
+    ) -> tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray]:
+        values = np.asarray(time).reshape(-1)
+        if values.size != active.size:
+            raise ValueError(f"time has {values.size} rows but X has {active.size}")
+        if bool(np.asarray(pd.isna(values), dtype=bool).any()):
+            raise ValueError("time values must not contain missing values")
+        active_idx = np.flatnonzero(active)
+        active_values = values[active_idx]
+        try:
+            order_local = np.argsort(active_values, kind="mergesort")
+            ordered = active_values[order_local]
+            if ordered.dtype.kind == "O":
+                for previous, current in zip(ordered[:-1], ordered[1:]):
+                    if bool(current < previous):
+                        raise TypeError
+            elif np.asarray(ordered[1:] < ordered[:-1], dtype=bool).any():
+                raise TypeError
+            distinct = np.asarray(ordered[1:] != ordered[:-1], dtype=bool)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("time values must be orderable") from exc
+        boundaries = np.flatnonzero(distinct) + 1
+        timestamp_groups = np.split(active_idx[order_local], boundaries)
+        n_timestamps = len(timestamp_groups)
+        n_splits = min(self._requested_cv(), n_timestamps)
+        if n_splits < 2:
+            raise ValueError(
+                "target_cv time folds require at least 2 distinct timestamps"
+            )
+        block_groups = np.array_split(np.arange(n_timestamps), n_splits)
+        blocks = [
+            np.concatenate([timestamp_groups[int(i)] for i in block]).astype(
+                np.int64,
+                copy=False,
+            )
+            for block in block_groups
+        ]
+        warmup = blocks[0]
+        splits: list[tuple[np.ndarray, np.ndarray]] = []
+        history: list[np.ndarray] = [blocks[0]]
+        for block in blocks[1:]:
+            splits.append((np.concatenate(history), block))
+            history.append(block)
+        return splits, warmup
 
     def _encoder_input(self, X: pd.DataFrame) -> pd.DataFrame:
         """Normalize all pandas missing sentinels to one learned category."""
@@ -675,13 +902,34 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             X_out[col] = encoded[:, index]
         return X_out
 
-    def fit(self, X: pd.DataFrame, y):
+    def fit(self, X: pd.DataFrame, y, sample_weight=None):
         self._validate_frame(X)
         y_arr = np.asarray(y).reshape(-1)
         if len(X) != y_arr.size:
             raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
+        if self.target_prior is not None or self.warmup_policy != "zero_weight":
+            raise ValueError(
+                "target_prior and warmup_policy are only meaningful for time-aware "
+                "target_cv fit_transform"
+            )
+        if sample_weight is not None:
+            smooth = self._validate_custom_options()
+            y_values, target_kind = self._target_values(y_arr)
+            weights = ensure_weights(sample_weight, len(X), normalize=False)
+            self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+                X,
+                y_values,
+                weights,
+                smooth,
+            )
+            self.target_kind_ = target_kind
+            self.fit_mode_ = "custom"
+            self.n_splits_ = self._effective_cv(y_arr)
+            self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
+            return self
         self.encoder_ = self._make_encoder(y_arr)
         self.encoder_.fit(self._encoder_input(X), y_arr)
+        self.fit_mode_ = "sklearn"
         self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
         return self
 
@@ -690,26 +938,117 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         X: pd.DataFrame,
         y,
         sample_weight=None,
+        groups=None,
+        time=None,
     ) -> pd.DataFrame:
         self._validate_frame(X)
         y_arr = np.asarray(y).reshape(-1)
         if len(X) != y_arr.size:
             raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
-        if sample_weight is not None:
+        if groups is not None and time is not None:
             raise ValueError(
-                "sample_weight with cat_encoding='target_cv' requires the custom "
-                "weighted cross-fitting mode, which is not available yet"
+                "cat_encoding='target_cv' does not support groups and time together"
             )
+        if time is None and self.target_prior is not None:
+            raise ValueError("target_prior is only meaningful for time-aware target_cv")
+        if time is None and self.warmup_policy != "zero_weight":
+            raise ValueError("warmup_policy is only meaningful for time-aware target_cv")
+        if (
+            time is not None
+            and self.target_prior is not None
+            and self.warmup_policy == "exclude"
+        ):
+            raise ValueError(
+                "target_prior and warmup_policy='exclude' are mutually exclusive"
+            )
+        custom = sample_weight is not None or groups is not None or time is not None
+        if custom:
+            smooth = self._validate_custom_options()
+            y_values, target_kind = self._target_values(y_arr)
+            raw_weights = ensure_weights(sample_weight, len(X), normalize=False)
+            active = raw_weights > 0.0
+            values = np.full(
+                (len(X), len(self.cols)),
+                0.5 if target_kind == "binary" else 0.0,
+                dtype=np.float64,
+            )
+            if groups is not None:
+                splits = self._group_splits(X, y_values, groups, active)
+                kind = "group"
+                warmup = np.empty(0, dtype=np.int64)
+            elif time is not None:
+                splits, warmup = self._time_splits(time, active)
+                kind = "time"
+                if self.target_prior is not None:
+                    prior = float(self.target_prior)
+                    if not np.isfinite(prior):
+                        raise ValueError("target_prior must be finite")
+                    if target_kind == "binary" and not 0.0 <= prior <= 1.0:
+                        raise ValueError(
+                            "target_prior must be between 0 and 1 for binary targets"
+                        )
+                    values[warmup, :] = prior
+            else:
+                splits = self._fixed_splits(y_values, target_kind, active)
+                kind = "fixed_k"
+                warmup = np.empty(0, dtype=np.int64)
+
+            for train_idx, valid_idx in splits:
+                mappings, prior = self._fit_custom_maps(
+                    X.iloc[train_idx],
+                    y_values[train_idx],
+                    raw_weights[train_idx],
+                    smooth,
+                )
+                fold_values = self._apply_custom_maps(
+                    X.iloc[valid_idx],
+                    mappings,
+                    prior,
+                )
+                values[valid_idx, :] = fold_values.loc[:, self.cols].to_numpy(
+                    dtype=np.float64,
+                )
+
+            effective_weights = raw_weights.copy()
+            if time is not None and self.target_prior is None:
+                effective_weights[warmup] = 0.0
+            if not bool(np.any(effective_weights > 0.0)):
+                raise ValueError(
+                    "target_cv warmup handling leaves no positive selection weight"
+                )
+            self.effective_sample_weight_ = (
+                effective_weights
+                if sample_weight is not None or warmup.size > 0
+                else None
+            )
+            self.warmup_mask_ = np.ones(len(X), dtype=bool)
+            self.warmup_mask_[warmup] = False
+            self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+                X,
+                y_values,
+                raw_weights,
+                smooth,
+            )
+            self.target_kind_ = target_kind
+            self.fit_mode_ = "custom"
+            self.n_splits_ = len(splits) + (1 if time is not None else 0)
+            self.encoding_cv_ = {"kind": kind, "n_splits": self.n_splits_}
+            return self._replace_columns(X, values)
         self.encoder_ = self._make_encoder(y_arr)
         values = self.encoder_.fit_transform(self._encoder_input(X), y_arr)
+        self.fit_mode_ = "sklearn"
+        self.effective_sample_weight_ = None
+        self.warmup_mask_ = np.ones(len(X), dtype=bool)
         self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
         return self._replace_columns(X, values)
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         from sklearn.utils.validation import check_is_fitted
 
-        check_is_fitted(self, ["encoder_", "encoding_cv_"])
+        check_is_fitted(self, ["fit_mode_", "encoding_cv_"])
         self._validate_frame(X)
+        if self.fit_mode_ == "custom":
+            return self._apply_custom_maps(X, self.category_maps_, self.global_prior_)
         values = self.encoder_.transform(self._encoder_input(X))
         return self._replace_columns(X, values)
 
@@ -725,13 +1064,32 @@ def encode_categoricals(
     loo_clip_max: float = 1.0 - 1e-4,
     sample_weight=None,
     target_type: Literal["auto", "continuous", "binary"] = "auto",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    groups=None,
+    time=None,
 ) -> pd.DataFrame:
     """Apply target encoding to categorical features."""
     if method == "none":
         return X
     if method == "target_cv":
-        encoder = TargetCVEncoder(cat_features, target_type=target_type)
-        return encoder.fit_transform(X, y, sample_weight=sample_weight)
+        encoder = TargetCVEncoder(
+            cat_features,
+            target_type=target_type,
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
+        return encoder.fit_transform(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+        )
     if method == "loo_logit":
         encoder = LeaveOneOutLogitEncoder(
             cat_features,

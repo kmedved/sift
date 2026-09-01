@@ -234,6 +234,10 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         block_size: int | str = "auto",
         cat_features: list[str] | None = None,
         cat_encoding: CatEncoding = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         importance_data: Literal["train", "test"] = "train",
         test_size: float = 0.3,
@@ -258,6 +262,10 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         self.block_size = block_size
         self.cat_features = cat_features
         self.cat_encoding = cat_encoding
+        self.target_cv_n_splits = target_cv_n_splits
+        self.target_cv_smoothing = target_cv_smoothing
+        self.target_prior = target_prior
+        self.warmup_policy = warmup_policy
         self.allow_full_data_target_encoding = allow_full_data_target_encoding
         self.importance_data = importance_data
         self.test_size = test_size
@@ -672,13 +680,6 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 cat_features = [c for c in cat_features if c in X.columns]
 
             if cat_features and self.cat_encoding != "none":
-                if self.cat_encoding == "target_cv" and (
-                    groups is not None or time is not None
-                ):
-                    raise ValueError(
-                        "cat_encoding='target_cv' with groups/time requires the "
-                        "contextual cross-fitting mode, which is not available yet"
-                    )
                 if self.importance_data == "test":
                     raise ValueError(
                         "BorutaSelector(importance_data='test') cannot use supervised "
@@ -719,11 +720,17 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                         target_type="binary"
                         if self.task == "classification"
                         else "continuous",
+                        smooth=self.target_cv_smoothing,
+                        cv=self.target_cv_n_splits,
+                        target_prior=self.target_prior,
+                        warmup_policy=self.warmup_policy,
                     )
                     X = encoder.fit_transform(
                         X,
                         y_for_encoder,
                         sample_weight=sample_weight,
+                        groups=groups,
+                        time=time,
                     )
                 elif self.cat_encoding == "loo_logit":
                     encoder = LeaveOneOutLogitEncoder(cat_features)
@@ -784,8 +791,15 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         if X_arr.shape[0] != y_arr.shape[0]:
             raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
 
-        w_score = ensure_weights(sample_weight, n, normalize=True)
-        w_fit = w_score if sample_weight is not None else None
+        effective_sample_weight = getattr(
+            self.categorical_encoder_, "effective_sample_weight_", None
+        )
+        if effective_sample_weight is not None:
+            effective_sample_weight = np.asarray(effective_sample_weight, dtype=float)
+        else:
+            effective_sample_weight = sample_weight
+        w_score = ensure_weights(effective_sample_weight, n, normalize=True)
+        w_fit = w_score if effective_sample_weight is not None else None
 
         if groups is not None:
             groups = np.asarray(groups).reshape(-1)
@@ -1103,6 +1117,10 @@ def select_boruta(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
@@ -1192,6 +1210,10 @@ def select_boruta(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
         allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,
@@ -1230,6 +1252,10 @@ def select_boruta_shap(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
@@ -1272,6 +1298,10 @@ def select_boruta_shap(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
         allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,

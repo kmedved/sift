@@ -14,6 +14,7 @@ from sift._preprocess import (
     CatEncoding,
     RelevanceMethod,
     Task,
+    TargetCVEncoder,
     check_regression_only,
     encode_categoricals,
     ensure_weights,
@@ -85,6 +86,8 @@ class ClassicPrepared:
     mi_w: np.ndarray
     feature_names: list[str]
     row_idx: np.ndarray
+    target_cv_metadata: dict | None = None
+    eval_sample_weight: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             n_features=ctx.n_features_input,
             ranking=ranking,
             diagnostics=diagnostics,
+            metadata_extra=prep.target_cv_metadata,
         )
 
     return fixed_classic
@@ -175,10 +179,14 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             auto_k_config=ctx.auto_k_config,
             eval_groups=ctx.groups[prep.row_idx] if ctx.groups is not None else None,
             eval_time=ctx.time[prep.row_idx] if ctx.time is not None else None,
-            sample_weight=prep.w,
+            sample_weight=prep.eval_sample_weight,
             task=ctx.request.task,
             cat_features=_kw(ctx, "cat_features"),
             cat_encoding=_kw(ctx, "cat_encoding"),
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
             verbose=_kw(ctx, "verbose"),
             return_indices=True,
         )
@@ -187,6 +195,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             selected_indices=selected_indices,
             top_m=top_m,
             n_features=len(prep.feature_names),
+            metadata_extra=prep.target_cv_metadata,
         )
 
     return auto_classic
@@ -194,7 +203,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
 
 def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext"], SelectionPayload]:
     def fixed_gaussian(ctx: "FilterContext") -> SelectionPayload:
-        cache, _ = _cache_for_gaussian(ctx)
+        cache, _, _, target_cv_metadata = _cache_for_gaussian(ctx)
         method = method_func(ctx)
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
@@ -264,6 +273,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             ranking=ranking,
             diagnostics=diagnostics,
             proxy_correlations=proxy_correlations,
+            metadata_extra=target_cv_metadata,
         )
 
     return fixed_gaussian
@@ -278,7 +288,7 @@ def make_auto_gaussian(
 ) -> Callable[["FilterContext"], SelectionPayload]:
     def auto_gaussian(ctx: "FilterContext") -> SelectionPayload:
         assert ctx.auto_k_config is not None
-        cache, cat_features = _cache_for_gaussian(ctx)
+        cache, cat_features, effective_weight, target_cv_metadata = _cache_for_gaussian(ctx)
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
             logger.info(
@@ -291,7 +301,7 @@ def make_auto_gaussian(
             cache,
             ctx.groups,
             ctx.time,
-            ctx.request.sample_weight,
+            effective_weight,
             feature_names=ctx.feature_names,
         )
         method = method_func(ctx)
@@ -315,6 +325,10 @@ def make_auto_gaussian(
             feature_names=ctx.feature_names,
             verbose=_kw(ctx, "verbose"),
             callback=ctx.request.callback,
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         )
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
             ctx,
@@ -334,6 +348,8 @@ def make_auto_gaussian(
         if include_diagnostics and ctx.request.return_result:
             diagnostics = {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
         metadata_extra = {}
+        if target_cv_metadata:
+            metadata_extra.update(target_cv_metadata)
         if include_objective_penalty:
             metadata_extra["objective_penalty"] = ctx.auto_k_config.objective_penalty
         return SelectionPayload(
@@ -615,7 +631,9 @@ def no_extra(ctx: "FilterContext") -> dict:
     return _target_cv_metadata(ctx)
 
 
-def _target_cv_metadata(ctx: "FilterContext") -> dict:
+def _target_cv_metadata(
+    ctx: "FilterContext", encoding_cv: dict | None = None
+) -> dict:
     if _kw(ctx, "cat_encoding", "none") != "target_cv":
         return {}
     cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
@@ -625,15 +643,36 @@ def _target_cv_metadata(ctx: "FilterContext") -> dict:
     if not present:
         return {}
     target_type = "binary" if ctx.request.task == "classification" else "continuous"
+    if encoding_cv is None:
+        requested_cv = _kw(ctx, "target_cv_n_splits", 5)
+        if ctx.groups is not None:
+            n_splits = min(int(requested_cv), int(pd.unique(ctx.groups).size))
+            kind = "group"
+        elif ctx.time is not None:
+            n_splits = min(int(requested_cv), int(pd.unique(ctx.time).size))
+            kind = "time"
+        else:
+            y_arr = np.asarray(ctx.request.y).reshape(-1)
+            if ctx.request.sample_weight is not None:
+                weights = ensure_weights(
+                    ctx.request.sample_weight, ctx.n_rows, normalize=False
+                )
+                y_arr = y_arr[weights > 0.0]
+            n_splits = target_cv_n_splits(
+                y_arr,
+                target_type=target_type,
+                cv=requested_cv,
+            )
+            kind = "fixed_k"
+        encoding_cv = {"kind": kind, "n_splits": int(n_splits)}
+    else:
+        encoding_cv = {
+            "kind": encoding_cv["kind"],
+            "n_splits": int(encoding_cv["n_splits"]),
+        }
     return {
         "cat_encoding": "target_cv",
-        "encoding_cv": {
-            "kind": "fixed_k",
-            "n_splits": target_cv_n_splits(
-                ctx.request.y,
-                target_type=target_type,
-            ),
-        },
+        "encoding_cv": encoding_cv,
     }
 
 
@@ -643,6 +682,14 @@ def _binary_auto_payload(
 ) -> SelectionPayload:
     assert ctx.auto_k_config is not None
     problem, options, run = _build_binary_run(ctx)
+    handler_kwargs = {}
+    if ctx.auto_k_config.k_method == "evaluate":
+        handler_kwargs.update(
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+        )
     selection = handler(
         ctx.request.X,
         problem,
@@ -651,6 +698,7 @@ def _binary_auto_payload(
         auto_k_config=ctx.auto_k_config,
         cat_encoding=_kw(ctx, "cat_encoding"),
         verbose=_kw(ctx, "verbose"),
+        **handler_kwargs,
     )
     return _binary_payload_from_selection(ctx, problem, options, run, selection)
 
@@ -675,6 +723,10 @@ def _build_binary_run(ctx: "FilterContext") -> tuple[BinaryProblem, BinaryOption
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         random_state=_kw(ctx, "random_state"),
         verbose=_kw(ctx, "verbose"),
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         callback=ctx.request.callback,
     )
     return problem, options, run
@@ -763,13 +815,7 @@ def _binary_payload_from_selection(
         "loo_clip_max": options.loo_clip_max,
     }
     if _kw(ctx, "cat_encoding") == "target_cv" and run.cat_features:
-        metadata_extra["encoding_cv"] = {
-            "kind": "fixed_k",
-            "n_splits": target_cv_n_splits(
-                problem.y01,
-                target_type="binary",
-            ),
-        }
+        metadata_extra["encoding_cv"] = _target_cv_metadata(ctx)["encoding_cv"]
     if options.k_value == "auto" and ctx.auto_k_config is not None:
         metadata_extra.update(_binary_auto_metadata(ctx.auto_k_config))
     return SelectionPayload(
@@ -793,10 +839,20 @@ def _binary_auto_metadata(auto_k_config) -> dict:
     }
 
 
-def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] | None]:
+def _cache_for_gaussian(
+    ctx: "FilterContext",
+) -> tuple[FeatureCache, list[str] | None, np.ndarray | None, dict | None]:
     cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
     if ctx.request.cache is not None:
-        return ctx.request.cache, cat_features
+        if (
+            _kw(ctx, "cat_encoding", "none") == "target_cv"
+            and cat_features
+        ):
+            raise ValueError(
+                "cat_encoding='target_cv' cannot be combined with a prebuilt "
+                "Gaussian cache because the cache has no target-encoding provenance"
+            )
+        return ctx.request.cache, cat_features, ctx.request.sample_weight, None
     X_encoded = _encode_categoricals_for_selector(
         ctx.request.X,
         ctx.request.y,
@@ -807,17 +863,24 @@ def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] |
         task=ctx.request.task,
         groups=ctx.groups,
         time=ctx.time,
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
     )
+    X_encoded, effective_weight, target_cv_metadata = X_encoded
     return (
         build_cache(
             X_encoded,
-            sample_weight=ctx.request.sample_weight,
+            sample_weight=effective_weight,
             subsample=_kw(ctx, "subsample", 50_000),
             random_state=_kw(ctx, "random_state", 0),
             n_jobs=ctx.n_jobs,
             rank_backend=ctx.rank_backend,
         ),
         cat_features,
+        effective_weight,
+        target_cv_metadata,
     )
 
 
@@ -854,19 +917,18 @@ def _encode_categoricals_for_selector(
     task: Task = "regression",
     groups=None,
     time=None,
-) -> Union[pd.DataFrame, np.ndarray]:
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: str | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: str = "zero_weight",
+) -> tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None, dict | None]:
     if not cat_features or cat_encoding == "none":
-        return X
+        return X, sample_weight, None
     if not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
     present_cat_features = [col for col in cat_features if col in X.columns]
-    if present_cat_features and cat_encoding == "target_cv" and (
-        groups is not None or time is not None
-    ):
-        raise ValueError(
-            "cat_encoding='target_cv' with groups/time requires the contextual "
-            "cross-fitting mode, which is not available yet"
-        )
+    if not present_cat_features:
+        return X, sample_weight, None
     if (
         present_cat_features
         and cat_encoding in _SUPERVISED_CAT_ENCODINGS
@@ -879,6 +941,23 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
+    if cat_encoding == "target_cv":
+        encoder = TargetCVEncoder(
+            present_cat_features,
+            target_type="binary" if task == "classification" else "continuous",
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
+        encoded = encoder.fit_transform(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+        )
+        return encoded, encoder.effective_sample_weight_, dict(encoder.encoding_cv_)
     return encode_categoricals(
         X,
         y,
@@ -886,7 +965,7 @@ def _encode_categoricals_for_selector(
         cat_encoding,
         sample_weight=sample_weight,
         target_type="binary" if task == "classification" else "continuous",
-    )
+    ), sample_weight, None
 
 
 def _default_top_m(top_m: Optional[int], k: int) -> int:
@@ -909,7 +988,12 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         task=ctx.request.task,
         groups=ctx.groups,
         time=ctx.time,
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
     )
+    X_encoded, effective_weight, target_cv_metadata = X_encoded
     X_arr, y_arr, feature_names = validate_inputs(
         X_encoded,
         ctx.request.y,
@@ -920,19 +1004,33 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         y_arr,
         _kw(ctx, "subsample"),
         _kw(ctx, "random_state"),
-        sample_weight=ctx.request.sample_weight,
+        sample_weight=effective_weight,
         return_idx=True,
     )
-    if ctx.request.sample_weight is None:
+    if effective_weight is None:
         mi_w = np.ones(row_idx.size, dtype=np.float64)
     else:
         raw_weight = ensure_weights(
-            ctx.request.sample_weight,
+            effective_weight,
             ctx.n_rows,
             normalize=False,
         )
         mi_w = raw_weight[row_idx]
-    return ClassicPrepared(X_arr, y_arr, w, mi_w, feature_names, row_idx)
+    eval_sample_weight = (
+        None
+        if effective_weight is None
+        else np.asarray(w, dtype=np.float64)
+    )
+    return ClassicPrepared(
+        X_arr,
+        y_arr,
+        w,
+        mi_w,
+        feature_names,
+        row_idx,
+        target_cv_metadata,
+        eval_sample_weight,
+    )
 
 
 def _compute_relevance(

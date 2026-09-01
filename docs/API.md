@@ -114,14 +114,21 @@ enabled. SIFT 1.0 is expected to standardize these defaults; 0.9 does not.
 Supervised categorical encodings are conservative by default. When a function
 selector would fit target encoders on the full dataset, pass
 `allow_full_data_target_encoding=True` only if leakage is handled outside SIFT.
-The additive `cat_encoding="target_cv"` path is different: for unweighted
-regression and binary targets it uses sklearn's cross-fitted `TargetEncoder`
-without optional dependencies. Function results record
+The additive `cat_encoding="target_cv"` path is different: for unweighted,
+ungrouped regression and binary targets it uses sklearn's cross-fitted
+`TargetEncoder`; weighted, grouped, and time-aware calls use SIFT's custom
+fold-local weighted m-estimate encoder. Neither path needs optional
+dependencies. Configure them with `target_cv_n_splits=5` and
+`target_cv_smoothing="auto"`; custom modes require an explicit non-negative
+smoothing float. Time-aware calls accept a target-independent `target_prior`,
+or use `warmup_policy="zero_weight"` (default) / `"exclude"` to remove the
+earliest no-history block from selection. Function results record
 `encoding_cv={"kind": "fixed_k", "n_splits": ...}`; fitted selector classes
 store the same mapping in `categorical_encoding_metadata_` and reuse the fitted
-encoder target-blind at transform time. Multiclass, sample-weighted, and
-groups/time-aware `target_cv` calls currently raise rather than silently use an
-incorrect fold policy.
+encoder target-blind at transform time. Group/time metadata is supported only
+by auto-k evaluate routes (nested evaluate mode for selector classes), and
+reports `kind="group"` or `"time"`; fixed-k calls continue to reject that row
+context. Multiclass remains rejected until block-aware expansion exists.
 
 ## Filter Functions
 

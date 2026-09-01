@@ -364,6 +364,42 @@ def test_selector_prefix_auto_k_rejects_supervised_class_encoder():
         selector.fit(X, y, time=np.arange(len(X)))
 
 
+def test_selector_nested_target_cv_passes_context_to_fold_local_encoder():
+    X = pd.DataFrame(
+        {
+            "category": np.tile(["a", "b"], 40),
+            "signal": np.linspace(0.0, 1.0, 80),
+        }
+    )
+    y = X["signal"].to_numpy()
+    config = AutoKConfig(
+        k_method="evaluate",
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=2,
+    )
+
+    selector = MRMRSelector(
+        k="auto",
+        cat_features=["category"],
+        cat_encoding="target_cv",
+        target_cv_n_splits=3,
+        target_cv_smoothing=1.0,
+        auto_k_config=config,
+        verbose=False,
+    ).fit(X, y, time=np.arange(len(X)))
+
+    assert selector.categorical_encoding_metadata_ == {
+        "kind": "time",
+        "n_splits": 3,
+    }
+    np.testing.assert_array_equal(
+        selector.categorical_encoder_.effective_sample_weight_[:3],
+        np.zeros(3),
+    )
+
+
 def test_selector_nested_auto_k_time_holdout():
     rng = np.random.default_rng(4)
     X = pd.DataFrame(rng.normal(size=(160, 5)), columns=[f"f{i}" for i in range(5)])

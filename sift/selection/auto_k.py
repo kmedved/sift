@@ -993,6 +993,13 @@ def _evaluate_prefix_split(
     loo_smoothing: float,
     loo_clip_min: float,
     loo_clip_max: float,
+    target_cv_n_splits: int,
+    target_cv_smoothing: Literal["auto"] | float,
+    target_prior: float | None,
+    warmup_policy: Literal["exclude", "zero_weight"],
+    groups: Optional[np.ndarray],
+    time: Optional[np.ndarray],
+    encoding_weight_arr: Optional[np.ndarray],
 ) -> dict:
     """Evaluate all k values for one train/validation split."""
     Xtr_df = X_path_df.iloc[train_idx]
@@ -1012,17 +1019,30 @@ def _evaluate_prefix_split(
         fold_cat = [col for col in cat_features if col in Xtr_df.columns]
 
     if cat_encoding == "target_cv" and fold_cat:
-        if sample_weight_supplied:
-            raise ValueError(
-                "sample_weight with cat_encoding='target_cv' requires the custom "
-                "weighted cross-fitting mode, which is not available yet"
-            )
         enc = TargetCVEncoder(
             fold_cat,
             target_type="binary" if task == "classification" else "continuous",
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
         )
-        Xtr_df = enc.fit_transform(Xtr_df, ytr)
+        encoder_kwargs = {}
+        if sample_weight_supplied:
+            assert encoding_weight_arr is not None
+            encoder_kwargs["sample_weight"] = encoding_weight_arr[train_idx]
+        if groups is not None:
+            encoder_kwargs["groups"] = groups[train_idx]
+        if time is not None:
+            encoder_kwargs["time"] = time[train_idx]
+        Xtr_df = enc.fit_transform(Xtr_df, ytr, **encoder_kwargs)
         Xva_df = enc.transform(Xva_df)
+        if enc.effective_sample_weight_ is not None:
+            wtr = ensure_weights(
+                enc.effective_sample_weight_,
+                len(train_idx),
+                normalize=True,
+            )
     elif cat_encoding == "loo_logit" and fold_cat:
         if task != "classification":
             raise ValueError("cat_encoding='loo_logit' requires task='classification'")
@@ -1095,6 +1115,10 @@ def select_k_auto(
     loo_smoothing: float = 20.0,
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path."""
     metadata = resolve_row_metadata(
@@ -1129,6 +1153,11 @@ def select_k_auto(
 
     y_arr = np.asarray(y).ravel()
     sample_weight_supplied = sample_weight is not None
+    encoding_weight_arr = (
+        ensure_weights(sample_weight, len(y_arr), normalize=False)
+        if sample_weight_supplied
+        else None
+    )
     w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
     max_k = min(config.max_k, len(feature_path))
     min_k = max(1, min(config.min_k, max_k))
@@ -1159,6 +1188,13 @@ def select_k_auto(
         "loo_smoothing": loo_smoothing,
         "loo_clip_min": loo_clip_min,
         "loo_clip_max": loo_clip_max,
+        "target_cv_n_splits": target_cv_n_splits,
+        "target_cv_smoothing": target_cv_smoothing,
+        "target_prior": target_prior,
+        "warmup_policy": warmup_policy,
+        "groups": groups,
+        "time": time,
+        "encoding_weight_arr": encoding_weight_arr,
     }
 
     if config.strategy == "time_holdout":

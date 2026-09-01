@@ -505,6 +505,10 @@ def select_gaussian_evaluate_path(
     corr_prune: float | None | Literal["auto"] = "auto",
     feature_names: Optional[list[str]] = None,
     verbose: bool = True,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     **_unused,
 ) -> GaussianAutoKResult:
     _require_eval_split_context(auto_k_config, groups, time)
@@ -531,6 +535,10 @@ def select_gaussian_evaluate_path(
         cat_features=cat_features,
         cat_encoding=cat_encoding,
         sample_weight=sample_weight,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     summary = auto_k_summary(
@@ -1649,6 +1657,10 @@ def select_filter_classic_auto_k(
     sample_weight: Optional[np.ndarray],
     task: Literal["regression", "classification"],
     cat_features: Optional[list[str]], cat_encoding: str,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     verbose: bool = True,
     return_indices: bool = False,
 ) -> list[str] | tuple[list[str], list[int]]:
@@ -1665,6 +1677,10 @@ def select_filter_classic_auto_k(
         cat_features=cat_features,
         cat_encoding=cat_encoding,
         sample_weight=sample_weight,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     if return_indices:
@@ -1906,6 +1922,10 @@ def select_binary_changepoint(
 def select_binary_evaluate(
     X, problem: BinaryProblem, run: BinaryPathRun, options: BinaryOptions, *,
     auto_k_config: AutoKConfig, cat_encoding: str, verbose: bool,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ) -> BinarySelection:
     eval_X = X if isinstance(X, pd.DataFrame) else pd.DataFrame(np.asarray(X), columns=run.feature_names)
     eval_X = eval_X.iloc[run.row_idx]
@@ -1924,10 +1944,23 @@ def select_binary_evaluate(
         task="classification",
         cat_features=run.cat_features,
         cat_encoding=cat_encoding,
-        sample_weight=run.w_sub,
+        sample_weight=(
+            run.w_sub
+            if problem.weighted
+            or (
+                cat_encoding == "target_cv"
+                and problem.time is not None
+                and target_prior is None
+            )
+            else None
+        ),
         loo_smoothing=options.loo_smoothing,
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     selected_count = len(selected_features)
     _print_selected_k("CV/holdout", best_k, verbose)

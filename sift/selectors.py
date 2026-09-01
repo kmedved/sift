@@ -155,11 +155,22 @@ def _make_category_encoder(
     loo_smoothing: float = 20.0,
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ):
     if method == "none" or not columns:
         return None
     if method == "target_cv":
-        return TargetCVEncoder(columns, target_type=target_type)
+        return TargetCVEncoder(
+            columns,
+            target_type=target_type,
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
     if method == "loo_logit":
         return LeaveOneOutLogitEncoder(
             columns,
@@ -321,7 +332,14 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             return False
         return bool(_categorical_columns(X, getattr(self, "cat_features", None)))
 
-    def _fit_transform_categoricals(self, X, y, sample_weight=None):
+    def _fit_transform_categoricals(
+        self,
+        X,
+        y,
+        sample_weight=None,
+        groups=None,
+        time=None,
+    ):
         self.categorical_encoder_ = None
         self.categorical_features_ = []
         self._categorical_encoding_applied_ = False
@@ -342,6 +360,10 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             loo_smoothing=getattr(self, "loo_smoothing", 20.0),
             loo_clip_min=getattr(self, "loo_clip_min", 1e-4),
             loo_clip_max=getattr(self, "loo_clip_max", 1.0 - 1e-4),
+            target_cv_n_splits=getattr(self, "target_cv_n_splits", 5),
+            target_cv_smoothing=getattr(self, "target_cv_smoothing", "auto"),
+            target_prior=getattr(self, "target_prior", None),
+            warmup_policy=getattr(self, "warmup_policy", "zero_weight"),
         )
         if sample_weight is not None and not isinstance(
             encoder,
@@ -368,6 +390,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                     X,
                     y_enc,
                     sample_weight=target_cv_weight,
+                    groups=groups,
+                    time=time,
                 )
             else:
                 X_encoded = encoder.fit_transform(X, y_enc)
@@ -402,6 +426,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         call_params = dict(self._selector_params())
 
@@ -429,7 +455,22 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         self._resolve_auto_selector_params(call_params)
 
         feature_names = _feature_names_or_default(X)
-        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+        X_fit = self._fit_transform_categoricals(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=encoding_groups,
+            time=encoding_time,
+        )
+        effective_sample_weight = sample_weight
+        if (
+            getattr(self, "cat_encoding", "none") == "target_cv"
+            and getattr(self, "categorical_encoder_", None) is not None
+            and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+            is not None
+        ):
+            effective_sample_weight = self.categorical_encoder_.effective_sample_weight_
+        call_params["sample_weight"] = effective_sample_weight
         if getattr(self, "_categorical_encoding_applied_", False):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
@@ -476,6 +517,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         cache=None,
         auto_k_config=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
         **fit_params,
     ):
         _require_2d_x(X)
@@ -497,10 +540,11 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             has_supervised_categoricals
             and getattr(self, "cat_encoding", "none") == "target_cv"
             and (groups is not None or time is not None)
+            and self.k != "auto"
         ):
             raise ValueError(
-                "cat_encoding='target_cv' with groups/time requires the contextual "
-                "cross-fitting mode, which is not available yet"
+                "cat_encoding='target_cv' with groups/time is supported only for "
+                "k='auto' nested evaluate paths"
             )
 
         if resolved_cache is not None and has_supervised_categoricals:
@@ -527,6 +571,19 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 groups,
                 allow_nested=True,
             )
+            if (
+                has_supervised_categoricals
+                and getattr(self, "cat_encoding", "none") == "target_cv"
+                and (groups is not None or time is not None)
+                and not (
+                    effective_auto_k.auto_k_mode == "nested"
+                    and effective_auto_k.k_method == "evaluate"
+                )
+            ):
+                raise ValueError(
+                    "contextual cat_encoding='target_cv' requires an explicit "
+                    "AutoKConfig(auto_k_mode='nested', k_method='evaluate')"
+                )
             if effective_auto_k.auto_k_mode == "nested":
                 if effective_auto_k.k_method != "evaluate":
                     raise ValueError(
@@ -570,6 +627,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             auto_k_config=resolved_auto_k,
             fit_params=fit_params,
             capture_training_output=capture_training_output,
+            encoding_groups=encoding_groups,
+            encoding_time=encoding_time,
         )
 
     def fit(
@@ -652,6 +711,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         if cache is not None:
             raise ValueError("auto_k_mode='nested' does not support prebuilt caches")
@@ -678,6 +739,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 train_X,
                 y_arr[train_idx],
                 sample_weight=fit_w_arr[train_idx] if fit_w_arr is not None else None,
+                encoding_groups=groups[train_idx] if groups is not None else None,
+                encoding_time=time[train_idx] if time is not None else None,
                 **fold_fit_params,
             )
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
@@ -715,6 +778,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             auto_k_config=None,
             fit_params=fit_params,
             capture_training_output=capture_training_output,
+            encoding_groups=groups,
+            encoding_time=time,
         )
 
     def transform(self, X):
@@ -804,6 +869,10 @@ class MRMRSelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
@@ -834,6 +903,10 @@ class JMISelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
@@ -862,6 +935,10 @@ class JMIMSelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
@@ -888,6 +965,10 @@ class CEFSPlusSelector(_BaseSelector):
         corr_prune: float | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
@@ -918,6 +999,10 @@ class CEFSPlusBinarySelector(_BaseSelector):
         refit_every: int = 1,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
         loo_clip_max: float = 1.0 - 1e-4,
@@ -968,6 +1053,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         if cache is not None:
             raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
@@ -1011,7 +1098,40 @@ class CEFSPlusBinarySelector(_BaseSelector):
             )
 
         feature_names = _feature_names_or_default(X)
-        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+        X_fit = self._fit_transform_categoricals(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=encoding_groups,
+            time=encoding_time,
+        )
+        effective_sample_weight = sample_weight
+        if (
+            self.cat_encoding == "target_cv"
+            and getattr(self, "categorical_encoder_", None) is not None
+            and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+            is not None
+        ):
+            encoder_weights = self.categorical_encoder_.effective_sample_weight_
+            if self.class_weight is None:
+                effective_sample_weight = encoder_weights
+            else:
+                # Binary filter functions apply class_weight themselves. Preserve
+                # that single application while carrying contextual warmup
+                # exclusions from the encoder into the selector weights.
+                warmup_mask = getattr(
+                    self.categorical_encoder_, "warmup_mask_", None
+                )
+                if warmup_mask is not None and not np.all(warmup_mask):
+                    base_weights = (
+                        np.ones(len(y), dtype=float)
+                        if sample_weight is None
+                        else ensure_weights(sample_weight, len(y), normalize=False)
+                    )
+                    effective_sample_weight = base_weights * np.asarray(
+                        warmup_mask, dtype=float
+                    )
+        call_params["sample_weight"] = effective_sample_weight
         if getattr(self, "_categorical_encoding_applied_", False):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
@@ -1072,6 +1192,10 @@ class KnockoffSelector(_BaseSelector):
         group_corr_threshold: float = 0.7,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
@@ -1163,10 +1287,18 @@ class KnockoffSelector(_BaseSelector):
         feature_names = _feature_names_or_default(X)
         if resolved_cache is None:
             X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+            effective_sample_weight = sample_weight
+            if (
+                self.cat_encoding == "target_cv"
+                and getattr(self, "categorical_encoder_", None) is not None
+                and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+                is not None
+            ):
+                effective_sample_weight = self.categorical_encoder_.effective_sample_weight_
             result = self._selector_fn(
                 X_fit,
                 y,
-                sample_weight=sample_weight,
+                sample_weight=effective_sample_weight,
                 **call_params,
             )
         else:

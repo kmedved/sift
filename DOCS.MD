@@ -212,11 +212,21 @@ Categorical encoding:
 
 - Filter selectors support `cat_features=[...]` and `cat_encoding="target_cv"`,
   `"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
-- `cat_encoding="target_cv"` is built into SIFT through sklearn's
-  `TargetEncoder`. For unweighted regression and binary targets it cross-fits
-  training rows, uses a deterministic effective fold count up to five, maps
-  unseen inference categories to the fitted target mean, and treats missing
-  values as one learned category. It needs no optional dependency.
+- `cat_encoding="target_cv"` is built into SIFT. For unweighted, ungrouped
+  regression and binary targets it delegates to sklearn's `TargetEncoder`;
+  weighted, grouped, and time-aware calls use SIFT's fold-local weighted
+  m-estimate encoder. It maps unseen inference categories to the fitted target
+  mean, treats missing values as one learned category, and needs no optional
+  dependency.
+- Configure target encoding with `target_cv_n_splits=5` and
+  `target_cv_smoothing="auto"`. Custom weighted/group/time modes require an
+  explicit non-negative smoothing float. Group folds never use targets from a
+  held-out group. Time folds keep tied timestamps together and use only
+  strictly earlier history.
+- Earliest time-fold rows have no history. Supply a target-independent
+  `target_prior`, or leave it unset and choose
+  `warmup_policy="zero_weight"` (default) or `"exclude"`; both policies remove
+  those warmup rows from the selection fit through zero effective weight.
 - `cat_encoding="loo"`, `"target"`, and `"james_stein"` require the
   `category_encoders` package. `cat_encoding="loo_logit"` is built into SIFT
   and is intended for binary targets.
@@ -225,9 +235,10 @@ Categorical encoding:
   `allow_full_data_target_encoding=True` is passed. That flag preserves the old
   full-dataset encoding behavior and should only be used when leakage has been
   handled outside the selector.
-- Weighted, groups/time-aware, and multiclass `target_cv` calls currently raise
-  explicitly. Their custom fold/prior and block-expansion contracts are the
-  next categorical workstream; they never fall back to full-data encoding.
+- Fixed-k calls still reject `groups`/`time`; contextual encoding is available
+  through auto-k evaluate routes (and nested evaluate mode for selector
+  classes). Multiclass remains rejected until block-aware expansion exists.
+  No target-CV route falls back to full-data training values.
 - If `cat_features` is omitted and `X` is a DataFrame, object/category/string
   columns are auto-detected for Gaussian/JMI/CEFS+ paths in the places where the
   code supports it.
@@ -1605,8 +1616,9 @@ Important options:
 - `shap_sample_size`: optional SHAP row subsample.
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
-  fitting Boruta. `"target_cv"` is the built-in unweighted regression/binary
-  cross-fitted option and retains a target-blind inference encoder. Existing
+  fitting Boruta. `"target_cv"` is the built-in regression/binary cross-fitted
+  option, supports weights and group/time context with explicit custom
+  smoothing, and retains a target-blind inference encoder. Existing
   supervised encodings (`"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`)
   are fitted on the full dataset, which tree learners can
   invert (leave-one-out values within a category are monotone in the row's own

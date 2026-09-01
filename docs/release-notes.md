@@ -28,20 +28,27 @@
 
 ### Leakage-safe categorical encoding
 
-- Added `cat_encoding="target_cv"` for unweighted regression and binary
-  DataFrame inputs. It reuses sklearn's cross-fitted `TargetEncoder`, requires
-  no `category_encoders` extra, preserves one output column per raw feature,
-  normalizes missing values to one learned category, and maps unseen inference
-  categories to the fitted global target mean.
+- Added `cat_encoding="target_cv"` for regression and binary DataFrame inputs.
+  The unweighted, ungrouped path reuses sklearn's cross-fitted `TargetEncoder`;
+  weighted, grouped, and time-aware paths use SIFT's fold-local weighted
+  m-estimate encoder. Neither requires the `category_encoders` extra. Both
+  preserve one output column per raw feature, normalize missing values to one
+  learned category, and map unseen inference categories to the fitted global
+  target mean.
 - Function filter results conditionally record the fixed-fold encoding kind and
   effective split count. Selector classes and Boruta retain the full-training
   encoder for target-blind `transform`, expose the same information through
   `categorical_encoding_metadata_`, and return the cross-fitted selected
   training columns from `fit_transform` where applicable.
+- Added `target_cv_n_splits`, `target_cv_smoothing`, `target_prior`, and
+  `warmup_policy` to filter and Boruta entry points. Custom weighted/group/time
+  folds require explicit numeric smoothing. Group folds exclude held-out
+  groups; time folds keep ties together, use strictly earlier history, and
+  remove earliest no-history rows from selection unless a target-independent
+  prior is supplied. Contextual filter calls remain limited to auto-k evaluate
+  routes, while fixed-k `groups`/`time` rejection is unchanged.
 - Existing defaults and unsafe expert encoders are unchanged. Multiclass is
-  rejected until block-aware expansion exists; sample-weighted and groups/time
-  `target_cv` calls reject explicitly until their public custom-fold prior and
-  warmup policy is finalized.
+  still rejected until block-aware expansion exists.
 
 ## 0.9.0b1 (2026-08-31)
 

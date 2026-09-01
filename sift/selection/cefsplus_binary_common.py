@@ -11,6 +11,7 @@ import pandas as pd
 from sift._logging import logger
 from sift._progress import ProgressCallback
 from sift._preprocess import (
+    TargetCVEncoder,
     encode_categoricals,
     ensure_weights,
     subsample_xy,
@@ -213,11 +214,15 @@ def build_binary_logloss_path(
     allow_full_data_target_encoding: bool,
     random_state: int,
     verbose: bool,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     callback: ProgressCallback | None = None,
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
-    X_encoded = encode_categoricals_for_binary_selector(
+    X_encoded, encoding_weights = encode_categoricals_for_binary_selector(
         X,
         problem.y01,
         cat_features,
@@ -229,6 +234,11 @@ def build_binary_logloss_path(
         sample_weight=problem.weights if problem.weighted else None,
         groups=problem.groups,
         time=problem.time,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
+        return_effective_weights=True,
     )
     # The logistic path works in float64 throughout; skipping the classic
     # float32 round trip keeps large-offset or tiny-scale columns intact.
@@ -240,7 +250,7 @@ def build_binary_logloss_path(
         problem.y01,
         options.subsample,
         random_state,
-        sample_weight=problem.weights,
+        sample_weight=problem.weights if encoding_weights is None else encoding_weights,
         return_idx=True,
     )
     check_binary_effective_weights(y_sub, w_sub)
@@ -471,19 +481,24 @@ def encode_categoricals_for_binary_selector(
     sample_weight: np.ndarray | None,
     groups: np.ndarray | None = None,
     time: np.ndarray | None = None,
-) -> Union[pd.DataFrame, np.ndarray]:
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    return_effective_weights: bool = False,
+) -> Union[
+    pd.DataFrame,
+    np.ndarray,
+    tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None],
+]:
+    effective_weights = None
     if not cat_features or cat_encoding == "none":
-        return X
+        return (X, effective_weights) if return_effective_weights else X
     if not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
     present_cat_features = [col for col in cat_features if col in X.columns]
     if not present_cat_features:
-        return X
-    if cat_encoding == "target_cv" and (groups is not None or time is not None):
-        raise ValueError(
-            "cat_encoding='target_cv' with groups/time requires the contextual "
-            "cross-fitting mode, which is not available yet"
-        )
+        return (X, effective_weights) if return_effective_weights else X
     if cat_encoding in {"target", "loo", "james_stein", "loo_logit"} and not allow_full_data_target_encoding:
         raise ValueError(
             f"cat_encoding='{cat_encoding}' fits a supervised categorical encoder "
@@ -492,16 +507,39 @@ def encode_categoricals_for_binary_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
-    return encode_categoricals(
-        X,
-        y01,
-        present_cat_features,
-        cat_encoding,
-        loo_smoothing=loo_smoothing,
-        loo_clip_min=loo_clip_min,
-        loo_clip_max=loo_clip_max,
-        sample_weight=sample_weight,
-        target_type="binary",
+    if cat_encoding == "target_cv":
+        encoder = TargetCVEncoder(
+            present_cat_features,
+            target_type="binary",
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
+        X_encoded = encoder.fit_transform(
+            X,
+            y01,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+        )
+        effective_weights = getattr(encoder, "effective_sample_weight_", None)
+    else:
+        X_encoded = encode_categoricals(
+            X,
+            y01,
+            present_cat_features,
+            cat_encoding,
+            loo_smoothing=loo_smoothing,
+            loo_clip_min=loo_clip_min,
+            loo_clip_max=loo_clip_max,
+            sample_weight=sample_weight,
+            target_type="binary",
+        )
+    return (
+        (X_encoded, effective_weights)
+        if return_effective_weights
+        else X_encoded
     )
 
 

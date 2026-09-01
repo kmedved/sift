@@ -247,6 +247,7 @@ def test_target_cv_auto_k_split_evaluation_refits_encoder_inside_split():
         time=np.arange(len(X)),
         task="regression",
         cat_encoding="target_cv",
+        target_cv_smoothing=20.0,
     )
 
     assert best_k in {1, 2}
@@ -254,40 +255,241 @@ def test_target_cv_auto_k_split_evaluation_refits_encoder_inside_split():
     assert diagnostics["selected"].sum() == 1
 
 
-def test_target_cv_rejects_unsettled_weighted_and_contextual_modes():
+def test_target_cv_weighted_map_matches_integer_row_replication():
+    X = pd.DataFrame({"category": ["a", "a", "b", "b", None, None]})
+    y = np.array([0.0, 4.0, 3.0, 9.0, -2.0, 2.0])
+    weight = np.array([1, 3, 2, 1, 4, 2])
+    probe = pd.DataFrame({"category": ["a", "b", None, "unseen"]})
+
+    weighted = TargetCVEncoder(
+        ["category"],
+        target_type="continuous",
+        smooth=2.5,
+        cv=3,
+    ).fit(X, y, sample_weight=weight)
+    repeated = TargetCVEncoder(
+        ["category"],
+        target_type="continuous",
+        smooth=2.5,
+        cv=3,
+    ).fit(X.loc[X.index.repeat(weight)].reset_index(drop=True), np.repeat(y, weight))
+
+    np.testing.assert_allclose(
+        weighted.transform(probe).to_numpy(),
+        repeated.transform(probe).to_numpy(),
+        rtol=1e-13,
+        atol=1e-13,
+    )
+
+
+def test_target_cv_zero_weight_targets_do_not_affect_custom_encoding():
+    X = pd.DataFrame({"category": ["a", "a", "b", "b", "c", "c"]})
+    y = np.array([0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+    weight = np.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
+    changed = y.copy()
+    changed[-2:] = [1e9, -1e9]
+
+    first = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=2
+    )
+    second = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=2
+    )
+    first_oof = first.fit_transform(X, y, sample_weight=weight)
+    second_oof = second.fit_transform(X, changed, sample_weight=weight)
+
+    np.testing.assert_allclose(first_oof.to_numpy(), second_oof.to_numpy())
+    np.testing.assert_allclose(
+        first.transform(X).to_numpy(),
+        second.transform(X).to_numpy(),
+    )
+
+
+def test_target_cv_group_folds_never_use_the_held_out_groups_targets():
+    groups = np.repeat(np.arange(6), 3)
+    X = pd.DataFrame(
+        {"category": np.tile(["shared", "shared", "private"], 6)}
+    )
+    y = np.arange(len(X), dtype=float)
+    changed = y.copy()
+    changed[groups == 2] += 100_000.0
+
+    first = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=3
+    )
+    second = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=3
+    )
+    first_oof = first.fit_transform(X, y, groups=groups)
+    second_oof = second.fit_transform(X, changed, groups=groups)
+
+    np.testing.assert_allclose(
+        first_oof.loc[groups == 2].to_numpy(),
+        second_oof.loc[groups == 2].to_numpy(),
+    )
+    assert first.encoding_cv_ == {"kind": "group", "n_splits": 3}
+    assert first.effective_sample_weight_ is None
+
+
+def test_target_cv_time_folds_use_strict_history_and_zero_weight_warmup():
+    X = pd.DataFrame({"category": ["a"] * 6})
+    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
+    time = np.repeat(np.arange(3), 2)
+
+    encoder = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=0.0, cv=3
+    )
+    training = encoder.fit_transform(X, y, time=time)
+
+    np.testing.assert_allclose(training.iloc[:2, 0], 0.0)
+    np.testing.assert_allclose(training.iloc[2:4, 0], 150.0)
+    np.testing.assert_allclose(training.iloc[4:, 0], 76.0)
+    np.testing.assert_array_equal(
+        encoder.effective_sample_weight_,
+        np.array([0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+    )
+    assert encoder.encoding_cv_ == {"kind": "time", "n_splits": 3}
+
+
+def test_target_cv_time_prior_is_target_independent_and_keeps_warmup():
+    X = pd.DataFrame({"category": ["a"] * 6})
+    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
+    time = np.repeat(np.arange(3), 2)
+    encoder = TargetCVEncoder(
+        ["category"],
+        target_type="continuous",
+        smooth=0.0,
+        cv=3,
+        target_prior=-7.5,
+    )
+
+    training = encoder.fit_transform(X, y, time=time)
+
+    np.testing.assert_allclose(training.iloc[:2, 0], -7.5)
+    np.testing.assert_allclose(encoder.effective_sample_weight_, np.ones(len(X)))
+
+
+def test_target_cv_time_exclude_policy_removes_warmup_from_selection_weight():
+    X = pd.DataFrame({"category": ["a"] * 6})
+    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
+    time = np.repeat(np.arange(3), 2)
+    encoder = TargetCVEncoder(
+        ["category"],
+        target_type="continuous",
+        smooth=0.0,
+        cv=3,
+        warmup_policy="exclude",
+    )
+
+    encoder.fit_transform(X, y, time=time)
+
+    np.testing.assert_array_equal(
+        encoder.effective_sample_weight_,
+        np.array([0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+    )
+
+
+def test_target_cv_custom_modes_require_explicit_smoothing():
     X, y = _regression_categorical_data(1705)
-
-    with pytest.raises(ValueError, match="custom weighted cross-fitting mode"):
-        sift.select_mrmr(
+    with pytest.raises(ValueError, match="target_cv_smoothing.*explicit"):
+        TargetCVEncoder(["category"], target_type="continuous").fit_transform(
             X,
             y,
-            1,
-            task="regression",
-            cat_encoding="target_cv",
-            sample_weight=np.ones(len(X)),
-            subsample=None,
-            verbose=False,
+            groups=np.repeat(np.arange(9), 10),
         )
 
-    groups = np.repeat(np.arange(9), 10)
-    with pytest.raises(ValueError, match="contextual cross-fitting mode"):
-        sift.select_mrmr(
-            X,
-            y,
-            "auto",
-            task="regression",
-            cat_encoding="target_cv",
-            groups=groups,
-            auto_k_config=AutoKConfig(
-                k_method="evaluate",
-                strategy="group_cv",
-                min_k=1,
-                max_k=2,
-                n_splits=3,
-            ),
-            subsample=None,
-            verbose=False,
-        )
+
+@pytest.mark.parametrize(("selector", "kwargs"), FUNCTION_ROUTES)
+def test_target_cv_weighted_function_routes_use_custom_cross_fitting(
+    selector,
+    kwargs,
+):
+    X, y = _regression_categorical_data(1707)
+    result = selector(
+        X,
+        y,
+        1,
+        cat_encoding="target_cv",
+        target_cv_smoothing=2.0,
+        sample_weight=np.linspace(0.5, 2.0, len(X)),
+        subsample=None,
+        verbose=False,
+        return_result=True,
+        **kwargs,
+    )
+
+    assert result.selected_features == ["category"]
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": "fixed_k",
+        "n_splits": 5,
+    }
+
+
+def test_target_cv_weighted_binary_function_route_uses_custom_cross_fitting():
+    X, y_reg = _regression_categorical_data(1708)
+    y = (y_reg > np.median(y_reg)).astype(np.int64)
+    result = sift.select_cefsplus_binary(
+        X,
+        y,
+        1,
+        cat_encoding="target_cv",
+        target_cv_smoothing=2.0,
+        sample_weight=np.linspace(0.5, 2.0, len(X)),
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert result.selected_features == ["category"]
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": "fixed_k",
+        "n_splits": 5,
+    }
+
+
+@pytest.mark.parametrize(
+    ("strategy", "context_name", "context", "expected_kind"),
+    [
+        ("group_cv", "groups", np.repeat(np.arange(9), 10), "group"),
+        ("time_holdout", "time", np.repeat(np.arange(18), 5), "time"),
+    ],
+)
+def test_target_cv_contextual_function_route_reports_actual_fold_kind(
+    strategy,
+    context_name,
+    context,
+    expected_kind,
+):
+    X, y = _regression_categorical_data(1709)
+    config = AutoKConfig(
+        k_method="evaluate",
+        strategy=strategy,
+        min_k=1,
+        max_k=2,
+        n_splits=3,
+        selection_rule="best",
+    )
+    result = sift.select_mrmr(
+        X,
+        y,
+        "auto",
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_encoding="target_cv",
+        target_cv_n_splits=3,
+        target_cv_smoothing=2.0,
+        auto_k_config=config,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+        **{context_name: context},
+    )
+
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": expected_kind,
+        "n_splits": 3,
+    }
 
 
 def test_boruta_target_cv_retains_encoder_for_inference():

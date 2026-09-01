@@ -595,6 +595,38 @@ class TestBorutaOptions:
         assert calls["n"] == 1
 
 
+class TestBorutaTargetCV:
+    def test_grouped_target_cv_is_train_only_and_reports_context(self, monkeypatch):
+        X = pd.DataFrame(
+            {
+                "category": np.tile(["a", "b"], 30),
+                "signal": np.linspace(0.0, 1.0, 60),
+            }
+        )
+        y = X["signal"].to_numpy()
+        groups = np.repeat(np.arange(6), 10)
+
+        def fixed_importance(self, est, X, y, w_score, **kwargs):
+            del est, y, w_score, kwargs
+            return np.ones(X.shape[1] * 2, dtype=float)
+
+        monkeypatch.setattr(BorutaSelector, "_compute_importance", fixed_importance)
+        selector = BorutaSelector(
+            cat_features=["category"],
+            cat_encoding="target_cv",
+            target_cv_n_splits=3,
+            target_cv_smoothing=1.0,
+            max_iter=1,
+            early_stop_rounds=1,
+            verbose=False,
+        ).fit(X, y, groups=groups)
+
+        assert selector.categorical_encoding_metadata_ == {
+            "kind": "group",
+            "n_splits": 3,
+        }
+
+
 class TestBorutaShap:
     """Boruta-Shap tests (requires catboost)."""
 

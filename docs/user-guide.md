@@ -309,8 +309,8 @@ without applying an arbitrary selection threshold.
 
 Function-style selectors default to `cat_encoding="none"` and support
 `cat_features` and explicit encodings. Use `cat_encoding="target_cv"` for the
-built-in leakage-safe unweighted regression/binary path; it uses cross-fitted
-training values and needs no optional dependency:
+built-in leakage-safe regression/binary path; it uses cross-fitted training
+values and needs no optional dependency:
 
 ```python
 selected = select_mrmr(
@@ -325,11 +325,33 @@ selected = select_mrmr(
 
 Selector classes retain the full-training encoder for target-blind inference,
 while `fit_transform` returns the cross-fitted training columns used for
-selection. Weighted, grouped, time-aware, and multiclass `target_cv` modes are
-rejected until their custom fold/block contracts land. Existing `"target"`,
-`"loo"`, `"james_stein"`, and `"loo_logit"` function encodings remain guarded
-against full-data target leakage; opt in only when leakage is handled outside
-SIFT. CatBoost selectors handle categorical features natively.
+selection. Weighted calls use SIFT's weighted m-estimate folds and require an
+explicit smoothing value:
+
+```python
+selected = select_mrmr(
+    X,
+    y,
+    k=10,
+    task="regression",
+    cat_encoding="target_cv",
+    target_cv_smoothing=20.0,
+    sample_weight=weights,
+    verbose=False,
+)
+```
+
+Grouped/time-aware encoding is available on auto-k evaluate routes. Set
+`target_cv_n_splits` independently of the outer auto-k fold count. Group folds
+exclude whole groups; time folds keep tied timestamps together and use only
+strictly earlier values. Earliest time rows use an explicit target-independent
+`target_prior`, or receive zero effective selection weight under
+`warmup_policy="zero_weight"` (default) or `"exclude"`. Fixed-k calls continue
+to reject `groups`/`time`, and multiclass target encoding remains blocked on
+block-aware selection. Existing `"target"`, `"loo"`, `"james_stein"`, and
+`"loo_logit"` function encodings remain guarded against full-data target
+leakage; opt in only when leakage is handled outside SIFT. CatBoost selectors
+handle categorical features natively.
 
 ## Diagnostics
 
