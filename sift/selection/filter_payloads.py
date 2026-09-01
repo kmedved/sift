@@ -29,6 +29,7 @@ from sift.estimators.copula import (
     weighted_corr_with_vector,
     weighted_rank_gauss_1d,
 )
+from sift.selection import auto_k as auto_k_module
 from sift.selection.cefsplus import select_cached
 from sift.selection.cefsplus_binary import make_diagnostics
 from sift.selection.cefsplus_binary_common import (
@@ -379,6 +380,7 @@ def _reject_binary_auto_dense_options(config) -> None:
 
 def binary_auto_auto_payload(ctx: "FilterContext") -> SelectionPayload:
     assert ctx.auto_k_config is not None
+    auto_k_module.validate_auto_k_config(ctx.auto_k_config)
     _reject_binary_auto_dense_options(ctx.auto_k_config)
     routed = _strip_router_only_fields(
         replace(
@@ -388,7 +390,11 @@ def binary_auto_auto_payload(ctx: "FilterContext") -> SelectionPayload:
             min_k=0,
         )
     )
-    payload = _binary_auto_payload(replace(ctx, auto_k_config=routed), select_binary_penalized)
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        payload = _binary_auto_payload(
+            replace(ctx, auto_k_config=routed),
+            select_binary_penalized,
+        )
     if payload.diagnostics and "auto_k" in payload.diagnostics:
         summary = dict(payload.diagnostics["auto_k"])
         summary["method"] = "auto"

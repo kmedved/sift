@@ -765,6 +765,59 @@ selected = select_mrmr(
 )
 ```
 
+Four additive presets cover the common intent-first cases without changing the
+flat constructor:
+
+```python
+router = AutoKConfig.default()
+predictive = AutoKConfig.predictive(strategy="kfold", rule="best", n_folds=5)
+discovery = AutoKConfig.discovery(alpha=0.05)
+downstream = AutoKConfig.downstream("group_cv", "rmse", "best")
+```
+
+`predictive(..., n_folds=...)` writes `xfit_folds`; it does not overwrite the
+distinct evaluate/nested field `n_splits`. `downstream` retains the current
+evaluate contract and therefore rejects `strategy="kfold"`.
+
+For larger configurations, module-scoped frozen option objects can be flattened
+through `from_groups`:
+
+```python
+from sift.selection.auto_k_options import AutoKCVOptions, AutoKPermutationOptions
+
+config = AutoKConfig.from_groups(
+    k_method="perm_gap",
+    min_k=0,
+    cv=AutoKCVOptions(strategy="group_cv"),
+    perm=AutoKPermutationOptions(perm_B=50, perm_null="within_group"),
+)
+```
+
+The 49 original flat fields remain the only stored dataclass fields. Group
+views such as `config.cv` and `config.perm` are immutable snapshots; they do
+not change constructor signatures, equality, `repr`, `dataclasses.replace`, or
+pickle state. `from_groups` rejects unknown fields, wrong group types, and a
+field supplied both flat and through a group.
+
+| Owner | Canonical flat fields |
+| --- | --- |
+| Core | `k_method`, `max_k`, `min_k`, `random_state` |
+| `objective` | `objective_penalty`, `objective_penalty_weight`, `objective_n_eff`, `n_eff_mode`, `ebic_gamma`, `binary_objective_mode` |
+| `test` | `alpha`, `m_mode`, `stop_patience` |
+| `perm` | `perm_B`, `perm_null`, `gap_rule` |
+| `knockoff` | `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` |
+| `cv` | `strategy`, `metric`, `val_frac`, `n_splits`, `xfit_folds`, `xfit_mode`, `xfit_ridge`, `selection_rule`, `one_se_multiplier`, `score_abs_tol`, `score_rel_tol`, `plateau_prefer`, `plateau_min_points` |
+| `stability` | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` |
+| `experimental` | `auto_k_mode`, `elbow_min_rel_gain`, `elbow_patience`, `posterior_level`, `posterior_pick`, `floor_z`, `floor_window`, `consensus_methods`, `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` |
+
+The similarly named fields remain distinct: `n_splits` controls evaluate and
+nested folds while `xfit_folds` controls Gaussian fold curves;
+`elbow_patience` confirms an elbow while `stop_patience` controls sequential
+stops; `objective_n_eff` is an explicit override while `n_eff_mode` chooses
+the effective-sample-size rule. Non-default fields that the chosen method does
+not consume emit a caller-facing `UserWarning`; internally routed copies do not
+repeat or invent those warnings.
+
 `AutoKConfig` fields:
 
 - `k_method="auto"` delegates to the measured router. CEFS+ and binary CEFS+
@@ -892,14 +945,18 @@ Important v2 knobs:
 
 | Field | Used by | Meaning |
 | --- | --- | --- |
-| `alpha`, `m_mode`, `stop_patience` | `chi2_stop`, `forward_stop`, `perm_gap`, `changepoint` | Path-test level, max-candidate correction width, and consecutive-stop patience. |
+| `alpha` | `chi2_stop`, `forward_stop`; `perm_gap` with `gap_rule="gain_envelope"` | Path-test level. |
+| `m_mode` | `chi2_stop`, `forward_stop` | Max-candidate correction width. |
+| `stop_patience` | `chi2_stop`, `changepoint`; `perm_gap` with `gap_rule="gain_envelope"` | Consecutive-stop patience. |
 | `perm_B`, `perm_null`, `gap_rule` | `perm_gap` | Number of null paths, structure-preserving null type, and gap decision rule. |
 | `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` | `knockoff_path` | Target q, derandomized draws, sampler construction, and set-vs-prefix return contract. |
 | `xfit_folds`, `xfit_mode` | `gaussian_cv`, `xfit_objective` | Fold count and shared-copula mode. |
 | `xfit_ridge` | `gaussian_cv` | Gaussian linear-risk ridge. |
-| `ebic_gamma`, `n_eff_mode` | `penalized_objective`, `k_posterior` | Multiplicity penalty strength and effective-sample-size source. |
+| `ebic_gamma` | EBIC `penalized_objective`, `k_posterior` | Multiplicity penalty strength. |
+| `objective_n_eff`, `n_eff_mode` | Objective/posterior and gain-test methods | Explicit effective sample size and its fallback rule. |
 | `posterior_level`, `posterior_pick` | `k_posterior` | HPD mass and MAP-vs-smallest-HPD selection rule. |
-| `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` | Bootstrap count/mode, max-one-SE or pi-threshold sizing, and a Phi floor for chance-level agreement. |
+| `boot_B`, `boot_mode`, `stability_rule` | `stability` | Bootstrap count/mode and sizing rule. |
+| `stability_pi` | `stability` with `stability_rule="pi_threshold"` | Selection-frequency threshold. |
 | `floor_z`, `floor_window` | `changepoint` | Experimental noise-floor diagnostic parameters. |
 | `consensus_methods` | `consensus` | Submethods included in the lower-median consensus. |
 | `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` (Gaussian CEFS+, including the binary Brier delegate; binary log-loss rejects non-default values) | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
@@ -983,6 +1040,21 @@ best_k, ic_diagnostics = select_k_penalized_objective(
     n_samples=len(y),
 )
 ```
+
+Research-oriented auto-k helpers are also available through an additive staged
+namespace:
+
+```python
+import sift.experimental as experimental
+
+curves = experimental.gaussian_cv_curves(...)
+```
+
+Accessing one of the 16 names through `sift.experimental` emits a
+`FutureWarning` because those helpers may change before 1.0. Their existing
+top-level imports remain available and warning-free throughout 0.9;
+`sift.__all__` remains the same ordered 58-name surface. The option-group types
+remain module-scoped and are not added to either top-level export list.
 
 ### Explicit feature-path evaluation
 

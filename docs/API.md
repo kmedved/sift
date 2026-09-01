@@ -448,6 +448,30 @@ their existing definitions and scale. When `sample_weight` is supplied, the
 scorer must accept it; SIFT raises clearly rather than silently recording a
 non-finite curve.
 
+Additive intent presets map directly to the existing flat fields:
+
+```python
+AutoKConfig.default()  # k_method="auto"
+AutoKConfig.predictive(strategy="kfold", rule="best", n_folds=5)
+AutoKConfig.discovery(alpha=0.05)  # chi2_stop with min_k=0
+AutoKConfig.downstream("group_cv", "rmse", "best")
+```
+
+`predictive.n_folds` maps only to `xfit_folds`; `n_splits` remains the distinct
+evaluate/nested fold count. `downstream` preserves evaluate semantics and
+rejects `strategy="kfold"`.
+
+`AutoKConfig.from_groups(...)` accepts frozen, module-scoped
+`AutoKObjectiveOptions`, `AutoKTestOptions`, `AutoKPermutationOptions`,
+`AutoKKnockoffOptions`, `AutoKCVOptions`, `AutoKStabilityOptions`, and
+`AutoKExperimentalOptions` from `sift.selection.auto_k_options`. It immediately
+flattens them into the unchanged 49 dataclass fields. The matching
+`config.objective`, `.test`, `.perm`, `.knockoff`, `.cv`, `.stability`, and
+`.experimental` properties are immutable snapshots. Unknown fields, wrong
+group types, and flat/group conflicts raise before construction; direct flat
+construction, equality, `repr`, `dataclasses.replace`, and pickle behavior are
+unchanged.
+
 Function-style selectors use `auto_k_mode="prefix_only"`: they build one
 supervised feature path and evaluate prefixes. Selector classes also implement a
 nested mode for train-only fold paths where supported.
@@ -485,14 +509,18 @@ Important `AutoKConfig` method fields:
 
 | Field | Applies to |
 | --- | --- |
-| `alpha`, `m_mode`, `stop_patience` | `chi2_stop`, `forward_stop`, `perm_gap`, `changepoint` |
+| `alpha` | `chi2_stop`, `forward_stop`; `perm_gap` with `gap_rule="gain_envelope"` |
+| `m_mode` | `chi2_stop`, `forward_stop` |
+| `stop_patience` | `chi2_stop`, `changepoint`; `perm_gap` with `gap_rule="gain_envelope"` |
 | `perm_B`, `perm_null`, `gap_rule` | `perm_gap` |
 | `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` | `knockoff_path` |
 | `xfit_folds`, `xfit_mode` | `gaussian_cv`, `xfit_objective` |
 | `xfit_ridge` | `gaussian_cv` |
-| `ebic_gamma`, `n_eff_mode` | `penalized_objective`, `k_posterior` |
+| `ebic_gamma` | EBIC `penalized_objective`, `k_posterior` |
+| `objective_n_eff`, `n_eff_mode` | Objective/posterior and gain-test methods |
 | `posterior_level`, `posterior_pick` | `k_posterior` |
-| `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` |
+| `boot_B`, `boot_mode`, `stability_rule` | `stability` |
+| `stability_pi` | `stability` with `stability_rule="pi_threshold"` |
 | `floor_z`, `floor_window` | `changepoint` |
 | `consensus_methods` | `consensus` |
 | `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` (Gaussian CEFS+, including the binary Brier delegate; binary log-loss rejects non-default values) |
@@ -502,6 +530,15 @@ Important `AutoKConfig` method fields:
 `knockoff_path` remain experimental or failed-gate for automatic sizing in the
 Auto-K v2 campaign; stability uses `stability_rule="max_one_se"` by default and returns
 `stopped_by="stability_floor"` when chance-corrected agreement is too low.
+
+### `sift.experimental`
+
+The additive `sift.experimental` module exposes the 16 research-oriented
+auto-k helpers scheduled to leave the top-level namespace in 1.0. Attribute or
+`from` access through that module emits a `FutureWarning`; importing the module
+itself does not. All existing top-level imports remain warning-free in 0.9 and
+the ordered 58-name `sift.__all__` is unchanged. Option-group classes remain
+module-scoped and are not added to either export surface.
 
 ## Selector Classes
 

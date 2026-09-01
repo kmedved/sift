@@ -1209,10 +1209,11 @@ def select_gaussian_auto_path(
         "verbose": verbose,
         **kwargs,
     }
-    selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
-        routed_config,
-        **runner_kwargs,
-    )
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+            routed_config,
+            **runner_kwargs,
+        )
     stopped_by = summary.get("stopped_by")
     degenerate_stop = stopped_by in {"degenerate_folds", "degenerate"}
     empty_terminal_stop = not selected and stopped_by == "max_k"
@@ -1236,16 +1237,17 @@ def select_gaussian_auto_path(
             "objective_penalty": "ebic",
             "reason": f"primary stopped_by={stopped_by}",
         }
-        selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
-            fallback_config,
-            **{
-                **runner_kwargs,
-                "auto_k_config": fallback_config,
-                # The fallback rebuilds the same greedy path under a different
-                # stopping rule. Do not duplicate/reset path progress events.
-                "callback": None,
-            },
-        )
+        with auto_k_module._suppress_auto_k_unused_field_warnings():
+            selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+                fallback_config,
+                **{
+                    **runner_kwargs,
+                    "auto_k_config": fallback_config,
+                    # The fallback rebuilds the same greedy path under a different
+                    # stopping rule. Do not duplicate/reset path progress events.
+                    "callback": None,
+                },
+            )
 
     summary = dict(summary)
     summary["method"] = "auto"
@@ -1292,18 +1294,19 @@ def select_gaussian_auto_path(
                 "automatic-k optimum."
             )
         warnings.warn(message, UserWarning, stacklevel=2)
-    _run_auto_dense_check(
-        config=auto_k_config,
-        summary=summary,
-        route=route,
-        cache=cache,
-        y=y,
-        method=method,
-        groups=groups,
-        time=time,
-        top_m=top_m,
-        corr_prune=corr_prune,
-    )
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        _run_auto_dense_check(
+            config=auto_k_config,
+            summary=summary,
+            route=route,
+            cache=cache,
+            y=y,
+            method=method,
+            groups=groups,
+            time=time,
+            top_m=top_m,
+            corr_prune=corr_prune,
+        )
     summary["auto_routing"] = route
     return selected, selected_indices, auto_diag, summary
 
@@ -1519,12 +1522,7 @@ def select_gaussian_consensus_path(
     for name in auto_k_config.consensus_methods:
         start = time_module.perf_counter()
         note = ""
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"AutoKConfig\..*does not use it\.",
-                category=UserWarning,
-            )
+        with auto_k_module._suppress_auto_k_unused_field_warnings():
             try:
                 k_hat, note = _consensus_method_k(
                     name,

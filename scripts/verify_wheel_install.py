@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 import inspect
 from importlib.metadata import distribution
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
 import sift
+import sift.experimental as experimental
 from sift.importance import ImportanceResult
+from sift.selection.auto_k_options import AutoKCVOptions
 
 
 class _ArrayPredictor:
@@ -52,6 +56,33 @@ def main() -> None:
         raise SystemExit("installed select_cached changed return_result default")
     if inspect.signature(sift.StabilitySelector).parameters["penalty"].default is not None:
         raise SystemExit("installed StabilitySelector changed penalty default")
+    if len(fields(sift.AutoKConfig)) != 49:
+        raise SystemExit("installed AutoKConfig changed its pinned 49-field storage")
+    predictive = sift.AutoKConfig.predictive(
+        strategy="group_cv",
+        rule="one_se",
+        n_folds=7,
+    )
+    if predictive != sift.AutoKConfig(
+        k_method="gaussian_cv",
+        strategy="group_cv",
+        selection_rule="one_se",
+        xfit_folds=7,
+    ):
+        raise SystemExit("installed AutoKConfig predictive preset changed flat semantics")
+    grouped = sift.AutoKConfig.from_groups(
+        k_method="gaussian_cv",
+        cv=AutoKCVOptions(strategy="kfold", xfit_folds=3),
+    )
+    if grouped.cv != AutoKCVOptions(strategy="kfold", xfit_folds=3):
+        raise SystemExit("installed AutoKConfig option-group view changed flat semantics")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        experimental_posterior = experimental.select_k_posterior
+    if experimental_posterior is not sift.select_k_posterior:
+        raise SystemExit("installed experimental namespace changed object identity")
+    if len(caught) != 1 or caught[0].category is not FutureWarning:
+        raise SystemExit("installed experimental access must emit one FutureWarning")
 
     X = np.arange(60, dtype=np.float64).reshape(20, 3)
     y = 2.0 * X[:, 0] - X[:, 1]

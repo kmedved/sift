@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, fields as dataclass_fields, replace
 import importlib.util
-from typing import Any, TYPE_CHECKING, List, Literal, Optional, Tuple
+from typing import Any, Iterator, TYPE_CHECKING, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -12,6 +14,7 @@ import pandas as pd
 from scipy.special import gammaln, logsumexp
 from sklearn.model_selection import GroupKFold
 
+from sift._deprecate import warn_external
 from sift._metadata import resolve_row_metadata
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
@@ -27,6 +30,16 @@ from sift.selection.auto_k_core import (
     time_holdout_split,
 )
 from sift.scoring import is_sklearn_scorer, sklearn_scorer_label
+from sift.selection.auto_k_options import (
+    AUTO_K_OPTION_GROUP_TYPES,
+    AutoKCVOptions,
+    AutoKExperimentalOptions,
+    AutoKKnockoffOptions,
+    AutoKObjectiveOptions,
+    AutoKPermutationOptions,
+    AutoKStabilityOptions,
+    AutoKTestOptions,
+)
 
 if TYPE_CHECKING:
     from sift.estimators.copula import FeatureCache
@@ -110,6 +123,136 @@ class AutoKConfig:
     auto_dense_min_frac: float = 0.25
     auto_dense_disagreement_ratio: float = 2.0
 
+    @classmethod
+    def default(cls) -> AutoKConfig:
+        """Return the measured automatic router preset."""
+        return cls._validated(k_method="auto")
+
+    @classmethod
+    def predictive(
+        cls,
+        strategy: Literal["time_holdout", "group_cv", "kfold"] = "kfold",
+        rule: Literal["best", "one_se", "plateau", "tolerance"] = "best",
+        n_folds: int = 5,
+    ) -> AutoKConfig:
+        """Return the closed-form Gaussian predictive-risk preset."""
+        return cls._validated(
+            k_method="gaussian_cv",
+            strategy=strategy,
+            selection_rule=rule,
+            xfit_folds=n_folds,
+        )
+
+    @classmethod
+    def discovery(cls, alpha: float = 0.05) -> AutoKConfig:
+        """Return the calibrated no-signal discovery-stop preset."""
+        return cls._validated(k_method="chi2_stop", min_k=0, alpha=alpha)
+
+    @classmethod
+    def downstream(
+        cls,
+        strategy: Literal["time_holdout", "group_cv"],
+        metric: Any,
+        rule: Literal["best", "one_se", "plateau", "tolerance"],
+    ) -> AutoKConfig:
+        """Return the downstream-model prefix-evaluation preset."""
+        return cls._validated(
+            k_method="evaluate",
+            strategy=strategy,
+            metric=metric,
+            selection_rule=rule,
+        )
+
+    @classmethod
+    def from_groups(
+        cls,
+        *,
+        objective: AutoKObjectiveOptions | None = None,
+        test: AutoKTestOptions | None = None,
+        perm: AutoKPermutationOptions | None = None,
+        knockoff: AutoKKnockoffOptions | None = None,
+        cv: AutoKCVOptions | None = None,
+        stability: AutoKStabilityOptions | None = None,
+        experimental: AutoKExperimentalOptions | None = None,
+        **flat_fields: Any,
+    ) -> AutoKConfig:
+        """Flatten immutable option groups into the canonical flat config."""
+        known_fields = {field.name for field in dataclass_fields(cls)}
+        unknown = sorted(set(flat_fields) - known_fields)
+        if unknown:
+            raise TypeError(f"Unknown AutoKConfig field(s): {unknown}")
+
+        groups = {
+            "objective": objective,
+            "test": test,
+            "perm": perm,
+            "knockoff": knockoff,
+            "cv": cv,
+            "stability": stability,
+            "experimental": experimental,
+        }
+        flattened: dict[str, Any] = {}
+        for group_name, group in groups.items():
+            if group is None:
+                continue
+            expected_type = AUTO_K_OPTION_GROUP_TYPES[group_name]
+            if not isinstance(group, expected_type):
+                raise TypeError(
+                    f"{group_name} must be {expected_type.__name__}, "
+                    f"got {type(group).__name__}"
+                )
+            for field in dataclass_fields(group):
+                if field.name in flat_fields:
+                    raise ValueError(
+                        f"AutoKConfig field {field.name!r} was supplied both "
+                        f"through {group_name} and as a flat keyword"
+                    )
+                flattened[field.name] = getattr(group, field.name)
+
+        return cls._validated(**flat_fields, **flattened)
+
+    @classmethod
+    def _validated(cls, **values: Any) -> AutoKConfig:
+        config = cls(**values)
+        validate_auto_k_config(config)
+        return config
+
+    @property
+    def objective(self) -> AutoKObjectiveOptions:
+        return self._group_view(AutoKObjectiveOptions)
+
+    @property
+    def test(self) -> AutoKTestOptions:
+        return self._group_view(AutoKTestOptions)
+
+    @property
+    def perm(self) -> AutoKPermutationOptions:
+        return self._group_view(AutoKPermutationOptions)
+
+    @property
+    def knockoff(self) -> AutoKKnockoffOptions:
+        return self._group_view(AutoKKnockoffOptions)
+
+    @property
+    def cv(self) -> AutoKCVOptions:
+        return self._group_view(AutoKCVOptions)
+
+    @property
+    def stability(self) -> AutoKStabilityOptions:
+        return self._group_view(AutoKStabilityOptions)
+
+    @property
+    def experimental(self) -> AutoKExperimentalOptions:
+        return self._group_view(AutoKExperimentalOptions)
+
+    def _group_view(self, group_type):
+        return group_type(
+            **{
+                field.name: getattr(self, field.name)
+                for field in dataclass_fields(group_type)
+            }
+        )
+
 
 _VALID_K_METHODS = frozenset(
     {
@@ -173,13 +316,31 @@ _VALID_CONSENSUS_METHODS = frozenset(
 )
 _DEFAULT_AUTOK_CONFIG = None
 _REAL_TYPES = (int, float, np.integer, np.floating)
+_WARN_UNUSED_METHOD_FIELDS = ContextVar(
+    "sift_warn_unused_auto_k_method_fields",
+    default=True,
+)
+
+
+@contextmanager
+def _suppress_auto_k_unused_field_warnings() -> Iterator[None]:
+    """Suppress warnings while an already-validated config is routed internally."""
+    token = _WARN_UNUSED_METHOD_FIELDS.set(False)
+    try:
+        yield
+    finally:
+        _WARN_UNUSED_METHOD_FIELDS.reset(token)
 
 
 def _is_real_number(value) -> bool:
     return not isinstance(value, (bool, np.bool_)) and isinstance(value, _REAL_TYPES)
 
 
-def validate_auto_k_config(config: AutoKConfig) -> None:
+def validate_auto_k_config(
+    config: AutoKConfig,
+    *,
+    warn_unused: bool = True,
+) -> None:
     """Validate runtime values on an AutoKConfig instance."""
     if config.k_method not in _VALID_K_METHODS:
         raise ValueError(
@@ -435,7 +596,8 @@ def validate_auto_k_config(config: AutoKConfig) -> None:
             f"{sorted(_VALID_BINARY_OBJECTIVE_MODES)}; got {config.binary_objective_mode!r}"
         )
 
-    _warn_unused_method_fields(config)
+    if warn_unused and _WARN_UNUSED_METHOD_FIELDS.get():
+        _warn_unused_method_fields(config)
 
 
 def _warn_unused_method_fields(config: AutoKConfig) -> None:
@@ -446,9 +608,51 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         _DEFAULT_AUTOK_CONFIG = AutoKConfig()
     defaults = _DEFAULT_AUTOK_CONFIG
     used_by = {
-        "alpha": {"chi2_stop", "forward_stop", "perm_gap"},
+        "strategy": {"evaluate", "gaussian_cv", "xfit_objective"},
+        "metric": {"evaluate"},
+        "val_frac": {"evaluate", "gaussian_cv", "xfit_objective"},
+        "n_splits": {"evaluate"},
+        "random_state": {
+            "perm_gap",
+            "knockoff_path",
+            "xfit_kfold_split",
+            "stability",
+        },
+        "elbow_min_rel_gain": {"elbow"},
+        "elbow_patience": {"elbow"},
+        "selection_rule": {"evaluate", "gaussian_cv", "xfit_objective"},
+        "one_se_multiplier": {"score_rule_one_se"},
+        "score_abs_tol": {"score_rule_plateau", "score_rule_tolerance"},
+        "score_rel_tol": {"score_rule_plateau", "score_rule_tolerance"},
+        "plateau_prefer": {"score_rule_plateau"},
+        "plateau_min_points": {"score_rule_plateau"},
+        "objective_penalty": {"direct_penalized_objective"},
+        "objective_penalty_weight": {"penalized_custom"},
+        "objective_n_eff": {
+            "penalized_objective",
+            "k_posterior",
+            "chi2_stop",
+            "forward_stop",
+            "changepoint",
+        },
+        "binary_objective_mode": {
+            "direct_penalized_objective",
+            "direct_k_posterior",
+        },
+        "n_eff_mode": {
+            "penalized_objective",
+            "k_posterior",
+            "chi2_stop",
+            "forward_stop",
+            "changepoint",
+        },
+        "alpha": {"chi2_stop", "forward_stop", "perm_gain_envelope"},
         "m_mode": {"chi2_stop", "forward_stop"},
-        "stop_patience": {"chi2_stop", "changepoint", "perm_gap"},
+        "stop_patience": {
+            "chi2_stop",
+            "changepoint",
+            "perm_gain_envelope",
+        },
         "perm_B": {"perm_gap"},
         "perm_null": {"perm_gap"},
         "gap_rule": {"perm_gap"},
@@ -459,13 +663,13 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         "xfit_folds": {"xfit_objective", "gaussian_cv"},
         "xfit_mode": {"xfit_objective", "gaussian_cv"},
         "xfit_ridge": {"gaussian_cv"},
-        "ebic_gamma": {"penalized_objective", "k_posterior"},
+        "ebic_gamma": {"penalized_ebic", "k_posterior"},
         "posterior_level": {"k_posterior"},
         "posterior_pick": {"k_posterior"},
         "boot_B": {"stability"},
         "boot_mode": {"stability"},
         "stability_rule": {"stability"},
-        "stability_pi": {"stability"},
+        "stability_pi": {"stability_pi_threshold"},
         "floor_z": {"changepoint"},
         "floor_window": {"changepoint"},
         "consensus_methods": {"consensus"},
@@ -474,39 +678,60 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         "auto_dense_min_frac": {"auto"},
         "auto_dense_disagreement_ratio": {"auto"},
     }
-    consensus_methods = None
-    if config.k_method == "consensus":
-        consensus_aliases = {
-            "ebic": "penalized_objective",
-            "ric": "penalized_objective",
-            "posterior": "k_posterior",
-        }
-        consensus_methods = {
-            consensus_aliases.get(method.lower(), method.lower())
-            for method in config.consensus_methods
-        }
-        consensus_methods.add("consensus")
+    method_tags = _auto_k_method_tags(config)
     for field_name, methods in used_by.items():
-        if config.k_method in methods:
-            continue
-        if consensus_methods is not None and bool(consensus_methods & methods):
+        if method_tags & methods:
             continue
         if getattr(config, field_name) != getattr(defaults, field_name):
-            warnings.warn(
+            warn_external(
                 f"AutoKConfig.{field_name} is set but k_method={config.k_method!r} "
                 "does not use it.",
                 UserWarning,
-                stacklevel=3,
             )
+
+
+def _auto_k_method_tags(config: AutoKConfig) -> set[str]:
+    """Return semantic tags used to classify flat fields for warnings."""
+    method = config.k_method
+    tags = {method}
+    if method == "consensus":
+        tags = {"consensus"}
+        for raw_method in config.consensus_methods:
+            lower = raw_method.lower()
+            if lower == "ebic":
+                tags.update({"penalized_objective", "penalized_ebic"})
+            elif lower == "ric":
+                tags.update({"penalized_objective", "penalized_ric"})
+            elif lower == "posterior":
+                tags.add("k_posterior")
+            else:
+                tags.add(lower)
+    elif method == "penalized_objective":
+        tags.add("direct_penalized_objective")
+        tags.add(f"penalized_{config.objective_penalty}")
+    elif method == "k_posterior":
+        tags.add("direct_k_posterior")
+
+    score_methods = {"evaluate", "gaussian_cv", "xfit_objective"}
+    if tags & score_methods:
+        tags.add(f"score_rule_{config.selection_rule}")
+    if tags & {"gaussian_cv", "xfit_objective"}:
+        tags.add(f"xfit_{config.strategy}_split")
+    if "perm_gap" in tags and config.gap_rule == "gain_envelope":
+        tags.add("perm_gain_envelope")
+    if "stability" in tags and config.stability_rule == "pi_threshold":
+        tags.add("stability_pi_threshold")
+    return tags
 
 
 def _ensure_supported_auto_k_mode(
     config: AutoKConfig,
     *,
     allow_nested: bool = False,
+    warn_unused: bool = True,
 ) -> None:
     """Validate path-selection semantics for the current implementation."""
-    validate_auto_k_config(config)
+    validate_auto_k_config(config, warn_unused=warn_unused)
     if config.auto_k_mode == "prefix_only":
         return
     if config.auto_k_mode == "nested":
@@ -539,15 +764,27 @@ def resolve_auto_k_config(
 ) -> AutoKConfig:
     """Resolve auto-k config, inferring strategy from supplied split context."""
     if auto_k_config is not None:
-        _ensure_supported_auto_k_mode(auto_k_config, allow_nested=allow_nested)
+        _ensure_supported_auto_k_mode(
+            auto_k_config,
+            allow_nested=allow_nested,
+            warn_unused=False,
+        )
         return auto_k_config
     if time is not None:
         config = AutoKConfig(strategy="time_holdout")
-        _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
+        _ensure_supported_auto_k_mode(
+            config,
+            allow_nested=allow_nested,
+            warn_unused=False,
+        )
         return config
     if groups is not None:
         config = AutoKConfig(strategy="group_cv")
-        _ensure_supported_auto_k_mode(config, allow_nested=allow_nested)
+        _ensure_supported_auto_k_mode(
+            config,
+            allow_nested=allow_nested,
+            warn_unused=False,
+        )
         return config
     raise ValueError(
         "k='auto' requires time, groups, or auto_k_config with an explicit "

@@ -26,6 +26,23 @@
   nondeterministic in 0.9 and will resolve to seed 0 in 1.0. Literal-42
   defaults and all existing `n_jobs` defaults remain unchanged in 0.9.
 
+### Auto-k ergonomics
+
+- Added `AutoKConfig.default()`, `.predictive(...)`, `.discovery(...)`, and
+  `.downstream(...)` presets. Predictive fold counts map to `xfit_folds`, not
+  the distinct evaluate/nested `n_splits` field.
+- Added `AutoKConfig.from_groups(...)` and seven immutable module-scoped option
+  group types. They flatten immediately into the unchanged 49 fields; direct
+  flat construction, defaults, equality, representation, replacement, and
+  pickle contracts are unchanged. Unknown, wrong-type, and conflicting group
+  inputs fail before construction.
+- Completed method-level unused-field warnings, including conditional EBIC,
+  permutation-envelope, plateau, and stability-threshold options. Warnings
+  point to the caller and are suppressed for internal router/consensus copies.
+- Added the 16-name `sift.experimental` namespace. Access through it emits a
+  `FutureWarning`; all 58 ordered top-level exports remain available and
+  warning-free throughout 0.9.
+
 ### Additive result views
 
 - Added `SelectionView` and `sift.as_result(...)` without changing legacy return
