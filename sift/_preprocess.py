@@ -564,6 +564,27 @@ class LeaveOneOutLogitEncoder:
         return X_out
 
 
+def validate_target_cv_encoding_flags(
+    cat_encoding, allow_full_data_target_encoding
+) -> None:
+    """Reject ``target_cv`` combined with the full-data escape hatch.
+
+    ``allow_full_data_target_encoding=True`` opts into fitting a supervised
+    encoder on every row, which directly contradicts the cross-fitted
+    ``target_cv`` contract.  Silently ignoring the flag would leave callers
+    believing they had opted out of cross-fitting.
+    """
+    if cat_encoding == "target_cv" and bool(allow_full_data_target_encoding):
+        raise ValueError(
+            "cat_encoding='target_cv' cannot be combined with "
+            "allow_full_data_target_encoding=True: target_cv is cross-fitted by "
+            "construction, so the full-data escape hatch contradicts it. Drop "
+            "allow_full_data_target_encoding, or choose a legacy supervised "
+            "encoding ('target', 'loo', 'james_stein', 'loo_logit') if you "
+            "really want full-data fitting."
+        )
+
+
 def target_cv_n_splits(
     y,
     *,
@@ -607,7 +628,23 @@ def target_cv_n_splits(
 
 
 class TargetCVEncoder(TransformerMixin, BaseEstimator):
-    """Cross-fitted sklearn target encoder with DataFrame-preserving output.
+    """Cross-fitted, prior-centered target encoder with DataFrame output.
+
+    Every emitted value is a *centered category effect*: the fold-local (or
+    full-fit) category estimate minus the training prior that produced it.
+    Out-of-fold training rows emit ``fold_encoding - fold_training_prior`` and
+    inference rows emit ``full_fit_encoding - full_training_prior``.  A category
+    that the fitting rows never saw therefore emits a zero centered effect (the
+    raw global-mean estimate before centering) instead of a fold-identifying
+    prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
+    fold markers.
+
+    All fold kinds (``fixed_k``, ``group``, ``time``) run through this one
+    engine.  sklearn's ``TargetEncoder`` does not expose the per-fold priors the
+    centering contract needs, so it is not used as a backend; the fixed-k folds
+    reproduce its ``KFold``/``StratifiedKFold(shuffle=True, random_state=...)``
+    split construction and its ``smooth="auto"`` empirical-Bayes shrinkage,
+    generalized to weighted rows.
 
     The encoder intentionally preserves one output column per raw categorical
     feature.  sklearn's multiclass target encoding expands every input feature
@@ -656,12 +693,17 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             raise ValueError("target_cv cv must be an integer >= 2")
         return requested
 
-    def _validate_custom_options(self) -> float:
+    def _validate_smoothing(self, *, allow_auto: bool) -> Literal["auto"] | float:
+        """Resolve ``target_cv_smoothing`` for the requested fold mode."""
         if self.smooth == "auto":
+            if allow_auto:
+                if self.warmup_policy not in {"exclude", "zero_weight"}:
+                    raise ValueError("warmup_policy must be 'exclude' or 'zero_weight'")
+                return "auto"
             raise ValueError(
                 "target_cv_smoothing must be an explicit non-negative float for "
                 "weighted, grouped, or time-aware target_cv encoding; "
-                "smooth='auto' is delegated only to sklearn's unweighted fixed-k path"
+                "smooth='auto' is supported only on the unweighted fixed-k path"
             )
         if isinstance(self.smooth, (bool, np.bool_)) or not isinstance(
             self.smooth, (int, float, np.integer, np.floating)
@@ -712,13 +754,45 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     def _normalized_series(series: pd.Series) -> pd.Series:
         return series.astype(object).where(~series.isna(), np.nan)
 
+    @staticmethod
+    def _auto_smoothed_encoding(
+        counts: np.ndarray,
+        sums: np.ndarray,
+        squares: np.ndarray,
+        prior: float,
+        y_variance: float,
+    ) -> np.ndarray:
+        """Empirical-Bayes shrinkage matching sklearn's ``smooth='auto'``.
+
+        ``lambda_i = w_i * s2y / (w_i * s2y + ssd_i / w_i)`` shrinks each
+        category mean toward the training prior, where ``w_i`` is the category's
+        (possibly weighted) row mass and ``ssd_i`` its within-category weighted
+        sum of squared deviations.  With unit weights this reduces exactly to
+        sklearn's integer-count formula.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            means = sums / counts
+            # Weighted within-category sum of squared deviations, computed from
+            # the raw moments so a single pass over the rows suffices.
+            ssd = np.maximum(squares - counts * np.square(means), 0.0)
+            lam = (y_variance * counts) / (y_variance * counts + ssd / counts)
+        encoded = lam * means + (1.0 - lam) * prior
+        # A NaN lambda means either an empty category or a degenerate
+        # zero-variance target; sklearn falls back to the prior in both cases.
+        return np.where(np.isfinite(encoded), encoded, prior)
+
     def _fit_custom_maps(
         self,
         X: pd.DataFrame,
         y: np.ndarray,
         sample_weight: np.ndarray,
-        smooth: float,
+        smooth: Literal["auto"] | float,
     ) -> tuple[dict[str, dict[object, float]], float]:
+        """Fit centered category effects and return them with their prior.
+
+        Every mapped value is ``category_estimate - prior`` so that a category
+        the fitting rows never saw maps to zero rather than to the prior itself.
+        """
         active = sample_weight > 0.0
         if not bool(np.any(active)):
             raise ValueError("target_cv fit rows have zero total sample_weight")
@@ -726,6 +800,11 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         y_active = y[active]
         total_weight = float(weights.sum())
         prior = float(np.dot(weights, y_active) / total_weight)
+        auto = smooth == "auto"
+        if auto:
+            y_variance = float(
+                np.dot(weights, np.square(y_active - prior)) / total_weight
+            )
         mappings: dict[str, dict[object, float]] = {}
         for col in self.cols:
             series = self._normalized_series(X.loc[active, col])
@@ -740,9 +819,19 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 weights=weights * y_active,
                 minlength=len(categories),
             )
-            encoded = (sums + smooth * prior) / (counts + smooth)
+            if auto:
+                squares = np.bincount(
+                    codes,
+                    weights=weights * np.square(y_active),
+                    minlength=len(categories),
+                )
+                encoded = self._auto_smoothed_encoding(
+                    counts, sums, squares, prior, y_variance
+                )
+            else:
+                encoded = (sums + smooth * prior) / (counts + smooth)
             mappings[col] = {
-                category: float(value)
+                category: float(value) - prior
                 for category, value in zip(categories.tolist(), encoded.tolist())
             }
         return mappings, prior
@@ -751,12 +840,12 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         self,
         X: pd.DataFrame,
         mappings: dict[str, dict[object, float]],
-        prior: float,
     ) -> pd.DataFrame:
+        """Emit centered effects; unseen categories map to a zero effect."""
         X_out = X.copy()
         for col in self.cols:
             series = self._normalized_series(X_out[col])
-            X_out[col] = series.map(mappings[col]).fillna(prior).astype(np.float64)
+            X_out[col] = series.map(mappings[col]).fillna(0.0).astype(np.float64)
         return X_out
 
     def _fixed_splits(
@@ -869,27 +958,6 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             history.append(block)
         return splits, warmup
 
-    def _encoder_input(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Normalize all pandas missing sentinels to one learned category."""
-        frame = X.loc[:, self.cols].copy()
-        for col in self.cols:
-            series = frame[col]
-            if bool(series.isna().any()):
-                frame[col] = series.astype(object).where(~series.isna(), np.nan)
-        return frame
-
-    def _make_encoder(self, y):
-        from sklearn.preprocessing import TargetEncoder
-
-        self.n_splits_ = self._effective_cv(y)
-        return TargetEncoder(
-            target_type=self.target_type,
-            smooth=self.smooth,
-            cv=self.n_splits_,
-            shuffle=True,
-            random_state=self.random_state,
-        )
-
     def _replace_columns(self, X: pd.DataFrame, values: np.ndarray) -> pd.DataFrame:
         encoded = np.asarray(values, dtype=np.float64)
         if encoded.ndim != 2 or encoded.shape[1] != len(self.cols):
@@ -912,24 +980,20 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 "target_prior and warmup_policy are only meaningful for time-aware "
                 "target_cv fit_transform"
             )
-        if sample_weight is not None:
-            smooth = self._validate_custom_options()
-            y_values, target_kind = self._target_values(y_arr)
-            weights = ensure_weights(sample_weight, len(X), normalize=False)
-            self.category_maps_, self.global_prior_ = self._fit_custom_maps(
-                X,
-                y_values,
-                weights,
-                smooth,
-            )
-            self.target_kind_ = target_kind
-            self.fit_mode_ = "custom"
-            self.n_splits_ = self._effective_cv(y_arr)
-            self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
-            return self
-        self.encoder_ = self._make_encoder(y_arr)
-        self.encoder_.fit(self._encoder_input(X), y_arr)
-        self.fit_mode_ = "sklearn"
+        smooth = self._validate_smoothing(allow_auto=sample_weight is None)
+        y_values, target_kind = self._target_values(y_arr)
+        weights = ensure_weights(sample_weight, len(X), normalize=False)
+        self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+            X,
+            y_values,
+            weights,
+            smooth,
+        )
+        self.target_kind_ = target_kind
+        self.fit_mode_ = "sift"
+        # ``fit`` alone builds only the target-blind inference maps; the split
+        # count it reports is the one ``fit_transform`` would cross-fit with.
+        self.n_splits_ = self._effective_cv(y_arr)
         self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
         return self
 
@@ -961,85 +1025,74 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             raise ValueError(
                 "target_prior and warmup_policy='exclude' are mutually exclusive"
             )
-        custom = sample_weight is not None or groups is not None or time is not None
-        if custom:
-            smooth = self._validate_custom_options()
-            y_values, target_kind = self._target_values(y_arr)
-            raw_weights = ensure_weights(sample_weight, len(X), normalize=False)
-            active = raw_weights > 0.0
-            values = np.full(
-                (len(X), len(self.cols)),
-                0.5 if target_kind == "binary" else 0.0,
-                dtype=np.float64,
-            )
-            if groups is not None:
-                splits = self._group_splits(X, y_values, groups, active)
-                kind = "group"
-                warmup = np.empty(0, dtype=np.int64)
-            elif time is not None:
-                splits, warmup = self._time_splits(time, active)
-                kind = "time"
-                if self.target_prior is not None:
-                    prior = float(self.target_prior)
-                    if not np.isfinite(prior):
-                        raise ValueError("target_prior must be finite")
-                    if target_kind == "binary" and not 0.0 <= prior <= 1.0:
-                        raise ValueError(
-                            "target_prior must be between 0 and 1 for binary targets"
-                        )
-                    values[warmup, :] = prior
-            else:
-                splits = self._fixed_splits(y_values, target_kind, active)
-                kind = "fixed_k"
-                warmup = np.empty(0, dtype=np.int64)
+        contextual = sample_weight is not None or groups is not None or time is not None
+        smooth = self._validate_smoothing(allow_auto=not contextual)
+        y_values, target_kind = self._target_values(y_arr)
+        raw_weights = ensure_weights(sample_weight, len(X), normalize=False)
+        active = raw_weights > 0.0
+        # Centered effects, so a row no fold could encode stays at the neutral
+        # zero effect instead of carrying a fold-identifying prior.
+        values = np.zeros((len(X), len(self.cols)), dtype=np.float64)
+        if groups is not None:
+            splits = self._group_splits(X, y_values, groups, active)
+            kind = "group"
+            warmup = np.empty(0, dtype=np.int64)
+        elif time is not None:
+            splits, warmup = self._time_splits(time, active)
+            kind = "time"
+            if self.target_prior is not None:
+                prior = float(self.target_prior)
+                if not np.isfinite(prior):
+                    raise ValueError("target_prior must be finite")
+                if target_kind == "binary" and not 0.0 <= prior <= 1.0:
+                    raise ValueError(
+                        "target_prior must be between 0 and 1 for binary targets"
+                    )
+                # The warmup rows are encoded against this explicit
+                # target-independent prior, so their centered effect is the zero
+                # already sitting in ``values``; only their selection weight
+                # differs from the no-prior case below.
+        else:
+            splits = self._fixed_splits(y_values, target_kind, active)
+            kind = "fixed_k"
+            warmup = np.empty(0, dtype=np.int64)
 
-            for train_idx, valid_idx in splits:
-                mappings, prior = self._fit_custom_maps(
-                    X.iloc[train_idx],
-                    y_values[train_idx],
-                    raw_weights[train_idx],
-                    smooth,
-                )
-                fold_values = self._apply_custom_maps(
-                    X.iloc[valid_idx],
-                    mappings,
-                    prior,
-                )
-                values[valid_idx, :] = fold_values.loc[:, self.cols].to_numpy(
-                    dtype=np.float64,
-                )
-
-            effective_weights = raw_weights.copy()
-            if time is not None and self.target_prior is None:
-                effective_weights[warmup] = 0.0
-            if not bool(np.any(effective_weights > 0.0)):
-                raise ValueError(
-                    "target_cv warmup handling leaves no positive selection weight"
-                )
-            self.effective_sample_weight_ = (
-                effective_weights
-                if sample_weight is not None or warmup.size > 0
-                else None
-            )
-            self.warmup_mask_ = np.ones(len(X), dtype=bool)
-            self.warmup_mask_[warmup] = False
-            self.category_maps_, self.global_prior_ = self._fit_custom_maps(
-                X,
-                y_values,
-                raw_weights,
+        for train_idx, valid_idx in splits:
+            mappings, _ = self._fit_custom_maps(
+                X.iloc[train_idx],
+                y_values[train_idx],
+                raw_weights[train_idx],
                 smooth,
             )
-            self.target_kind_ = target_kind
-            self.fit_mode_ = "custom"
-            self.n_splits_ = len(splits) + (1 if time is not None else 0)
-            self.encoding_cv_ = {"kind": kind, "n_splits": self.n_splits_}
-            return self._replace_columns(X, values)
-        self.encoder_ = self._make_encoder(y_arr)
-        values = self.encoder_.fit_transform(self._encoder_input(X), y_arr)
-        self.fit_mode_ = "sklearn"
-        self.effective_sample_weight_ = None
+            fold_values = self._apply_custom_maps(X.iloc[valid_idx], mappings)
+            values[valid_idx, :] = fold_values.loc[:, self.cols].to_numpy(
+                dtype=np.float64,
+            )
+
+        effective_weights = raw_weights.copy()
+        if time is not None and self.target_prior is None:
+            effective_weights[warmup] = 0.0
+        if not bool(np.any(effective_weights > 0.0)):
+            raise ValueError(
+                "target_cv warmup handling leaves no positive selection weight"
+            )
+        self.effective_sample_weight_ = (
+            effective_weights
+            if sample_weight is not None or warmup.size > 0
+            else None
+        )
         self.warmup_mask_ = np.ones(len(X), dtype=bool)
-        self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
+        self.warmup_mask_[warmup] = False
+        self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+            X,
+            y_values,
+            raw_weights,
+            smooth,
+        )
+        self.target_kind_ = target_kind
+        self.fit_mode_ = "sift"
+        self.n_splits_ = len(splits) + (1 if time is not None else 0)
+        self.encoding_cv_ = {"kind": kind, "n_splits": self.n_splits_}
         return self._replace_columns(X, values)
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -1047,10 +1100,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
         check_is_fitted(self, ["fit_mode_", "encoding_cv_"])
         self._validate_frame(X)
-        if self.fit_mode_ == "custom":
-            return self._apply_custom_maps(X, self.category_maps_, self.global_prior_)
-        values = self.encoder_.transform(self._encoder_input(X))
-        return self._replace_columns(X, values)
+        return self._apply_custom_maps(X, self.category_maps_)
 
 
 def encode_categoricals(

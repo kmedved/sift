@@ -310,7 +310,15 @@ without applying an arbitrary selection threshold.
 Function-style selectors default to `cat_encoding="none"` and support
 `cat_features` and explicit encodings. Use `cat_encoding="target_cv"` for the
 built-in leakage-safe regression/binary path; it uses cross-fitted training
-values and needs no optional dependency:
+values and needs no optional dependency.
+
+`target_cv` emits **centered category effects**, not raw category means: each
+value is the category estimate minus the training prior that produced it. An
+unknown or unseen category therefore maps to a zero centered effect (the
+global-mean estimate before centering). That is what makes the path safe for
+high-cardinality columns: a unique ID, a group proxy, or a timestamp proxy is
+never present in its own fold's training rows, so it emits a constant zero and
+carries no relevance instead of encoding a fold-identifying prior.
 
 ```python
 selected = select_mrmr(
@@ -344,14 +352,17 @@ selected = select_mrmr(
 Grouped/time-aware encoding is available on auto-k evaluate routes. Set
 `target_cv_n_splits` independently of the outer auto-k fold count. Group folds
 exclude whole groups; time folds keep tied timestamps together and use only
-strictly earlier values. Earliest time rows use an explicit target-independent
-`target_prior`, or receive zero effective selection weight under
-`warmup_policy="zero_weight"` (default) or `"exclude"`. Fixed-k calls continue
-to reject `groups`/`time`, and multiclass target encoding remains blocked on
-block-aware selection. Existing `"target"`, `"loo"`, `"james_stein"`, and
-`"loo_logit"` function encodings remain guarded against full-data target
-leakage; opt in only when leakage is handled outside SIFT. CatBoost selectors
-handle categorical features natively.
+strictly earlier values. Earliest time rows emit a centered neutral effect
+(zero) when you supply an explicit target-independent `target_prior`, or
+receive zero effective selection weight under `warmup_policy="zero_weight"`
+(default) or `"exclude"`. Fixed-k calls continue to reject `groups`/`time`, and
+multiclass target encoding remains blocked on block-aware selection. Existing
+`"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"` function encodings
+remain guarded against full-data target leakage; opt in only when leakage is
+handled outside SIFT. `allow_full_data_target_encoding=True` is rejected with
+`target_cv`, which is cross-fitted by construction, and `KnockoffSelector`
+rejects `target_cv` entirely because target-derived preprocessing breaks the
+Model-X FDR claim. CatBoost selectors handle categorical features natively.
 
 ## Diagnostics
 

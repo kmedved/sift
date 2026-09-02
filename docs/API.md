@@ -114,21 +114,38 @@ enabled. SIFT 1.0 is expected to standardize these defaults; 0.9 does not.
 Supervised categorical encodings are conservative by default. When a function
 selector would fit target encoders on the full dataset, pass
 `allow_full_data_target_encoding=True` only if leakage is handled outside SIFT.
-The additive `cat_encoding="target_cv"` path is different: for unweighted,
-ungrouped regression and binary targets it uses sklearn's cross-fitted
-`TargetEncoder`; weighted, grouped, and time-aware calls use SIFT's custom
-fold-local weighted m-estimate encoder. Neither path needs optional
-dependencies. Configure them with `target_cv_n_splits=5` and
-`target_cv_smoothing="auto"`; custom modes require an explicit non-negative
-smoothing float. Time-aware calls accept a target-independent `target_prior`,
-or use `warmup_policy="zero_weight"` (default) / `"exclude"` to remove the
-earliest no-history block from selection. Function results record
-`encoding_cv={"kind": "fixed_k", "n_splits": ...}`; fitted selector classes
-store the same mapping in `categorical_encoding_metadata_` and reuse the fitted
-encoder target-blind at transform time. Group/time metadata is supported only
-by auto-k evaluate routes (nested evaluate mode for selector classes), and
-reports `kind="group"` or `"time"`; fixed-k calls continue to reject that row
-context. Multiclass remains rejected until block-aware expansion exists.
+The additive `cat_encoding="target_cv"` path is different: one SIFT encoder
+serves every fold kind and emits prior-centered category effects. Out-of-fold
+training rows get `fold_encoding - fold_training_prior`, inference rows get
+`full_fit_encoding - full_training_prior`, and an unknown or unseen category
+maps to a zero centered effect (the global-mean estimate before centering) so it
+cannot identify its own fold. The unweighted fixed-k folds reproduce sklearn's
+`TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
+shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
+m-estimates. No path needs optional dependencies. Configure them with
+`target_cv_n_splits=5` and `target_cv_smoothing="auto"`; weighted, grouped, and
+time-aware modes require an explicit non-negative smoothing float. Time-aware
+calls accept a target-independent `target_prior` (the earliest block then emits
+a centered neutral zero and stays in the fit), or use
+`warmup_policy="zero_weight"` (default) / `"exclude"` to remove the earliest
+no-history block from selection. Function results record the fitted encoder's
+own `encoding_cv={"kind": ..., "n_splits": ...}` and never reconstruct it from
+the request or from rows the encoder did not use; there are no stray top-level
+`kind`/`n_splits` keys, and nothing is attached when no categorical encoding
+ran. Fitted selector classes store the same mapping in
+`categorical_encoding_metadata_` and reuse the fitted encoder target-blind at
+transform time. Group/time metadata is supported only by auto-k evaluate routes
+(nested evaluate mode for selector classes), and reports `kind="group"` or
+`"time"`; fixed-k calls continue to reject that row context. Multiclass remains
+rejected until block-aware expansion exists.
+
+`allow_full_data_target_encoding=True` is rejected together with
+`cat_encoding="target_cv"` at every function, selector-class, binary, and Boruta
+entry point, because the flag contradicts the cross-fitted contract.
+`KnockoffSelector` rejects `cat_encoding="target_cv"` outright: target-derived
+preprocessing invalidates Model-X exchangeability. Its 0.8 supervised encodings
+still work, but warn and report `fdr_control="none"` plus a `validity_note`.
+`select_fdr` has no `cat_encoding` parameter.
 
 ## Filter Functions
 

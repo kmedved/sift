@@ -21,6 +21,7 @@ from sift._preprocess import (
     RelevanceMethod,
     Task,
     resolve_jmi_estimator,
+    validate_target_cv_encoding_flags,
     validate_task,
     validate_k,
 )
@@ -266,6 +267,10 @@ def _request_from_public_locals(
         groups=values.get("groups"),
         time=values.get("time"),
         sample_weight=values.get("sample_weight"),
+    )
+    validate_target_cv_encoding_flags(
+        values.get("cat_encoding", "none"),
+        values.get("allow_full_data_target_encoding", False),
     )
     store_proxies = values.get("store_proxies", False)
     if not isinstance(store_proxies, (bool, np.bool_)):
