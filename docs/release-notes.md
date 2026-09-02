@@ -178,14 +178,64 @@
   / 3 failed. The blockers are dependency versions the library does not yet
   support, and **they are not specific to 3.13 — they break the existing 3.11 and
   3.12 matrix jobs identically**, because `scikit-learn>=1.3,<2` and
-  `numpy>=1.24,<3` resolve straight to them. Measured on this tree, the supported
-  band is scikit-learn `<1.8` and numpy `<2.5`: scikit-learn 1.9.0 produces 10
-  failures (nine in `contracts/test_target_cv_encoding.py`, one in
-  `test_importance_result.py`) and numpy 2.5.2 produces 3 more (a float32
-  last-ulp determinism assertion, a `ValueError: The truth value of a DataFrame
-  is ambiguous`, and a NumPy 2.5 `DeprecationWarning` about the bare
-  `timedelta64` unit). All thirteen are library-side and remain open.
-  `docs/development.md` records the band and the ready-to-enable job definition.
+  `numpy>=1.24,<3` resolve straight to them. When this was written the band
+  stopped at scikit-learn `<1.8` and numpy `<2.5`, with 13 open failures.
+  Those are now closed — see *Stage 2 — latest-dependency compatibility* below,
+  which records the current verified band. `docs/development.md` carries the
+  band and the ready-to-enable job definition.
+
+### Stage 2 — latest-dependency compatibility
+
+The whole declared band is now exercised, not just its floors. The newest
+resolution `pyproject.toml` allows — numpy 2.5.2, scikit-learn 1.9.0,
+pandas 3.0.5, scipy 1.18.1, numba 0.67.0 on Python 3.12 — is green at
+1,680 passed / 30 skipped under the warnings-as-errors policy. No default,
+selection behavior, return type, or public API changed, and no version ceiling
+was added to `pyproject.toml`.
+
+- **The nine scikit-learn 1.9 `target_cv` failures needed no new fix.** Their
+  cause was not numeric drift and not a renamed API: 1.9 deprecates
+  `TargetEncoder(shuffle=..., random_state=...)` in favour of passing a CV
+  generator as `cv`, and the resulting `FutureWarning` became an error under the
+  new policy. The Stage 1 target-encoding rewrite had already removed that call
+  site — every fold kind now runs through SIFT's own engine, which constructs
+  `KFold`/`StratifiedKFold(shuffle=True, random_state=...)` itself — so nothing
+  in `sift/` still constructs a scikit-learn `TargetEncoder`. Verified directly:
+  sklearn 1.5.1 and 1.9.0 produce bit-identical `TargetEncoder` output on the
+  same fixture, and all `tests/contracts/test_target_cv_encoding.py` cases pass
+  on 1.9.0 unchanged. The rewrite is also forward-compatible with 1.11, where
+  those two parameters are removed outright.
+- **Duplicate DataFrame column labels are now a scikit-learn limitation, not a
+  SIFT one.** From 1.9 its dataframe validation runs through narwhals, which
+  raises `DuplicateError` for repeated column names in `fit` *and* `predict`, so
+  no estimator can be handed such a frame. SIFT still passes `X` through to
+  `model.predict` untouched and still keeps duplicate labels distinct by
+  position; the regression test now proves that with a positional stub predictor
+  instead of a `LinearRegression`, which is the only part of it that scikit-learn
+  no longer permits.
+- **The pinned knockoff draw is compared to float32 tolerance.**
+  `mean_op`/`noise_chol` come out of LAPACK (`eigh`, `cho_factor`) and are then
+  applied as float32 BLAS GEMMs, neither of which is bit-stable across
+  NumPy/SciPy builds; numpy 2.5.2 + scipy 1.18.1 reproduces the pinned block to a
+  max relative deviation of 6.4e-8, under one float32 ulp. This is not library
+  nondeterminism: the same-seed, same-interpreter assertion in that test is
+  still an exact `assert_array_equal` and still passes. Only the cross-version
+  golden moved to `assert_allclose(rtol=1e-6)`, about 8 ulp.
+- **The temporal-label hash test constructs NaT with an explicit unit.**
+  NumPy 2.5 deprecates the generic (bare) `timedelta64` unit, which the policy
+  turns into an error. The library never constructs one — it only reads
+  `.dtype`/`str()` off labels a caller supplies — so the change is confined to
+  the test fixture, and it still distinguishes `None`, datetime64 NaT, and
+  timedelta64 NaT.
+- **Fixed a merge-latent failure that was not dependency-related at all.**
+  `test_routes_without_a_k_curve_say_why[consensus]` fails identically on numpy
+  1.26/sklearn 1.5: the warnings-as-errors policy and the result-view test
+  arrived on separate branches, and the 12-feature fixture makes the four
+  consensus submethods disagree by 3x, tripping auto-k's ill-determined-k
+  advisory. The advisory is correct behavior and is asserted directly in
+  `tests/test_auto_k_v2.py`, so the test carries a local
+  `@pytest.mark.filterwarnings` naming that exact message, per the audited
+  policy.
 
 ### Sklearn integration
 

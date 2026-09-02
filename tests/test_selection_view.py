@@ -556,7 +556,15 @@ def test_columns_hash_is_deterministic_order_and_type_sensitive():
 
 
 def test_columns_hash_distinguishes_numpy_temporal_nat_types():
-    labels = [(None,), (np.datetime64("NaT"),), (np.timedelta64("NaT"),)]
+    # Both temporal scalars carry an explicit unit: NumPy 2.5 deprecates the
+    # generic ("bare") timedelta64 unit.  The unit is incidental here -- the
+    # contract under test is that None, a datetime64 NaT, and a timedelta64 NaT
+    # hash to three different values.
+    labels = [
+        (None,),
+        (np.datetime64("NaT", "ns"),),
+        (np.timedelta64("NaT", "ns"),),
+    ]
     hashes = {
         sift.as_result(_full_filter_result([label]), input_features=[label])
         .raw_input["columns_hash"]
@@ -1379,6 +1387,14 @@ def test_auto_k_routes_publish_their_criterion_curve(
     assert len(view.table) == X.shape[1]
 
 
+# The 12-feature ``auto_k_frame`` makes the four consensus submethods disagree
+# by 3x, so the ``consensus`` parameterization incidentally trips auto-k's
+# ill-determined-k advisory.  That advisory is the library behaving as designed
+# and is asserted directly in ``tests/test_auto_k_v2.py``; this test is about
+# the curve-unavailability metadata, so the exact message is exempted here.
+@pytest.mark.filterwarnings(
+    "ignore:consensus auto-k methods disagree by more than 2x:UserWarning"
+)
 @pytest.mark.parametrize("k_method", ["knockoff_path", "consensus"])
 # The consensus route legitimately warns when its sub-methods disagree by more
 # than 2x on this small fixture; that advisory is not what this test pins.

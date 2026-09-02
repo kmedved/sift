@@ -194,22 +194,62 @@ and `matplotlib` is not a declared dependency, so the one plotting test skips.
 
 ### Python 3.13
 
-Deferred, and the interpreter is not the reason. numba ships cp313 wheels from
-0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local Python 3.13.15 run
-with numba 0.67 reached 1,565 passed / 3 failed. The blockers are dependency
-versions the library does not yet support, and they are not specific to 3.13 —
-they break the 3.11/3.12 matrix identically, because `scikit-learn>=1.3,<2` and
-`numpy>=1.24,<3` resolve straight to them. Measured on this tree:
+Still not enabled, but the reason it was deferred is gone. numba ships cp313
+wheels from 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local Python
+3.13.15 run with numba 0.67 reached 1,565 passed / 3 failed. Those three were
+dependency versions rather than the interpreter — they broke the 3.11/3.12
+matrix identically, because `scikit-learn>=1.3,<2` and `numpy>=1.24,<3` resolve
+straight to them — and they are the numpy 2.5 failures now fixed. A 3.13 run has
+not been repeated since, so enable the job below and read its first result
+rather than assuming it is green.
+
+### Verified dependency band
+
+**The whole declared band is supported — there is no ceiling below what
+`pyproject.toml` allows.** Measured on this tree, each row a full-suite run
+under the warnings-as-errors policy:
 
 | dependency set | result |
 | --- | --- |
-| floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1) | green |
+| floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
+| base (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,685 passed / 25 skipped |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
-| sklearn 1.9.0 (any Python) | 10 failures: `contracts/test_target_cv_encoding.py` (9), `test_importance_result.py` (1) |
-| numpy 2.5.2 | 3 failures: a float32 last-ulp determinism assertion, a `ValueError: The truth value of a DataFrame is ambiguous`, and a NumPy 2.5 `DeprecationWarning` about the bare `timedelta64` unit |
+| numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+| **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 
-So the supported band today is scikit-learn `<1.8` and numpy `<2.5`. Once the
-library supports the newer set, add this job to `.github/workflows/test.yml`:
+The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
+13 failures are closed and described in `docs/release-notes.md` under
+*Stage 2 — latest-dependency compatibility*; the largest group, nine
+`target_cv` failures on scikit-learn 1.9, were a `FutureWarning` from
+`TargetEncoder(shuffle=..., random_state=...)` that the Stage 1 encoder rewrite
+had already eliminated by dropping that backend entirely.
+
+Reproduce the latest row with:
+
+```bash
+python3.12 -m venv /tmp/sift-latest
+/tmp/sift-latest/bin/pip install "numpy>=2.5" "scikit-learn>=1.9" "pandas>=3" \
+  scipy numba joblib threadpoolctl pytest
+/tmp/sift-latest/bin/pip install -e . --no-deps
+/tmp/sift-latest/bin/python -m pytest -q
+```
+
+numpy 2.5 ships cp312 wheels and above, so this row needs Python 3.12+; on 3.11
+pip resolves numpy 2.4.6 instead.
+
+Two failure modes are worth knowing before pinning anything new. scikit-learn
+1.9 routes dataframe validation through narwhals, which rejects duplicate column
+labels in both `fit` and `predict` — that is an estimator-side limit, not a SIFT
+one, and SIFT still keeps duplicate labels distinct by position. And pinned
+float32 goldens derived from LAPACK plus float32 BLAS are only reproducible to
+about one ulp across NumPy/SciPy builds, so compare them with a tolerance;
+same-seed determinism inside one interpreter is exact and should stay pinned
+exactly.
+
+### Enabling a Python 3.13 job
+
+Now that the newer set is supported, this job can be added to
+`.github/workflows/test.yml`:
 
 ```yaml
   test-python313:
