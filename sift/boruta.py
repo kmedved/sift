@@ -304,7 +304,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
     random_state : int
         Random seed.
     verbose : bool
-        Print progress.
+        Emit per-iteration progress at INFO on the ``sift`` logger.
     callback : callable, optional
         Called after each completed Boruta iteration as
         ``callback(step, total, info)``.
@@ -323,6 +323,31 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         Names of accepted features.
     n_iter_ : int
         Number of iterations run.
+
+    See Also
+    --------
+    select_boruta : One-call wrapper around this estimator.
+    select_boruta_shap : The same search with the SHAP importance backend.
+    BorutaResult : Result object returned by ``select_boruta(return_result=True)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sklearn.ensemble import RandomForestRegressor
+    >>> from sift import BorutaSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(120, 5)),
+    ...                  columns=[f"f{i}" for i in range(5)])
+    >>> y = 3.0 * X["f0"] + 2.0 * X["f1"] + 0.1 * rng.normal(size=120)
+    >>> selector = BorutaSelector(
+    ...     estimator=RandomForestRegressor(n_estimators=20, random_state=0),
+    ...     max_iter=10, random_state=0, verbose=False,
+    ... )
+    >>> selector.fit(X, y).selected_features_
+    ['f0', 'f1']
+    >>> selector.transform(X).shape
+    (120, 2)
     """
 
     def __init__(

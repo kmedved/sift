@@ -16,7 +16,7 @@ import pytest
 
 import sift
 from sift.catboost_common import CatBoostSelectionResult
-from sift.selection.view import CURVE_COLUMNS, _json_safe
+from sift.selection.view import CURVE_COLUMNS, _append_rows_like, _json_safe
 
 
 @pytest.fixture(scope="module")
@@ -1755,5 +1755,67 @@ def test_knockoff_view_with_dropped_inputs_appends_rows_without_pandas_warnings(
     assert pd.isna(dropped["relevance"]) and pd.isna(dropped["feature_group"])
     assert str(table["path_rank"].dtype) == "Int64"
     assert table["selected"].dtype == bool
+    # Appending a row that leaves ``feature_group`` missing widens the numpy
+    # int64 column to its nullable counterpart; that promotion is the documented
+    # contract of ``_append_rows_like``, so pin it rather than leaving it loose.
+    assert str(table["feature_group"].dtype) == "Int64"
     assert table.loc[table["selected_index"] != 2, "feature_group"].tolist() == [0, 0, 1]
     assert view.metadata["table_complete"] is True
+
+
+def test_knockoff_view_without_dropped_inputs_keeps_numpy_integer_dtypes():
+    """No appended rows means no widening: ``feature_group`` stays numpy int64."""
+    W = pd.DataFrame(
+        {
+            "feature": ["a", "b", "c"],
+            "selected_index": [0, 1, 2],
+            "W": [1.5, -0.2, 0.9],
+            "selected": [True, False, True],
+            "relevance": [0.8, 0.1, 0.6],
+            "feature_group": [0, 0, 1],
+        }
+    )
+    result = sift.KnockoffSelectionResult(
+        selected_features=["a", "c"],
+        selected_indices=[0, 2],
+        selector_metadata={
+            "selector": "knockoff_fdr",
+            "n_features": 3,
+            "n_features_input": 3,
+        },
+        W=W,
+        threshold=0.5,
+        selection_frequency=None,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        view = sift.as_result(result, input_features=["a", "b", "c"])
+    table = view.table
+    assert table["feature_group"].dtype == np.dtype("int64")
+    assert table["selected"].dtype == bool
+    assert table["feature_group"].tolist() == [0, 0, 1]
+    assert "reason_dropped" not in table.columns
+    assert view.metadata["table_complete"] is True
+
+
+def test_append_rows_like_is_an_identity_on_empty_rows():
+    """``_append_rows_like(table, [])`` returns the table with dtypes untouched."""
+    table = pd.DataFrame(
+        {
+            "feature": ["a", "b"],
+            "count": np.array([1, 2], dtype=np.int64),
+            "selected": np.array([True, False]),
+            "gain": np.array([0.5, 1.5]),
+            "rank": pd.array([1, pd.NA], dtype="Int64"),
+        }
+    )
+    before = table.dtypes.copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        appended = _append_rows_like(table, [])
+
+    assert appended is table
+    pd.testing.assert_series_equal(appended.dtypes, before)
+    pd.testing.assert_frame_equal(appended, table)
+    assert appended["count"].dtype == np.dtype("int64")
+    assert appended["selected"].dtype == np.dtype("bool")

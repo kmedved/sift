@@ -30,6 +30,27 @@ class FilterSelectionResult:
         ranking is built on demand by :meth:`get_feature_ranking`.
     diagnostics_ : dict or DataFrame, optional
         Optional selector-specific diagnostics.
+
+    Examples
+    --------
+    Filter selectors hand one back when ``return_result=True``; the dataclass
+    itself is plain enough to build directly, which is what the example does so
+    every field is visible:
+
+    >>> from sift import FilterSelectionResult
+    >>> result = FilterSelectionResult(
+    ...     selected_features=["f0", "f3"],
+    ...     selected_indices=[0, 3],
+    ...     selector_metadata={"selector": "mrmr", "k": 2, "n_features": 5},
+    ... )
+    >>> result.selected_features
+    ['f0', 'f3']
+    >>> ranking = result.get_feature_ranking()
+    >>> ranking["feature"].tolist(), ranking["rank"].tolist()
+    (['f0', 'f3'], [1, 2])
+    >>> view = result.result_view(input_features=["f0", "f1", "f2", "f3", "f4"])
+    >>> view.features
+    ['f0', 'f3']
     """
 
     selected_features: List[str]

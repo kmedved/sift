@@ -199,7 +199,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         nondeterministic entropy and makes ``fit`` emit a ``FutureWarning``;
         SIFT 1.0 will default to seed 0. Pass an integer to silence it.
     verbose : bool, default=True
-        Print progress information.
+        Emit the bootstrap scheme, the per-fit selection summary and any
+        ``tune_threshold`` table at INFO on the ``sift`` logger. Use
+        :func:`sift.set_verbosity` for a process-wide default.
     callback : callable, optional
         Called after each completed bootstrap as
         ``callback(step, total, info)``. Cross-validation fits inside
@@ -243,6 +245,25 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     stability_classif : One-call classification wrapper.
     sift.as_result : Normalize a fitted selector into a ``SelectionView``;
         also exposed as the dynamic ``result_view_`` property.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import StabilitySelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> y = 3.0 * X["f0"] + 2.0 * X["f1"] + 0.1 * rng.normal(size=200)
+    >>> selector = StabilitySelector(n_bootstrap=10, threshold=0.6,
+    ...                              max_features=2, random_state=0,
+    ...                              verbose=False)
+    >>> selector.fit(X, y).selected_feature_names_
+    ['f0', 'f1']
+    >>> selector.selection_frequencies_[:2].round(2).tolist()
+    [1.0, 1.0]
+    >>> selector.transform(X).shape
+    (200, 2)
     """
 
     __metadata_request__fit = {"feature_names": UNUSED}

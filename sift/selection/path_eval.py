@@ -503,6 +503,38 @@ def evaluate_feature_path(
     -------
     FeaturePathEvaluationResult
         Includes tested ks, evaluated scores, best-k, and diagnostics dataframe.
+
+    See Also
+    --------
+    FeaturePathEvaluationResult : The object returned here.
+    sift.select_k_auto : The rule-driven counterpart that picks its own grid.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import evaluate_feature_path
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(150, 4)), columns=list("abcd"))
+    >>> y = 2.0 * X["a"] + X["b"] + 0.5 * rng.normal(size=150)
+    >>> result = evaluate_feature_path(
+    ...     X, y.to_numpy(), ["a", "b", "c", "d"], [1, 2, 3, 4], random_state=0
+    ... )
+    >>> result.k
+    [1, 2, 3, 4]
+    >>> result.best_k, result.features
+    (2, ['a', 'b'])
+
+    Any sklearn-like estimator and either of the built-in metrics can be
+    supplied instead of the default:
+
+    >>> from sklearn.ensemble import RandomForestRegressor
+    >>> forest = evaluate_feature_path(
+    ...     X, y.to_numpy(), ["a", "b", "c", "d"], [2, 4],
+    ...     estimator=RandomForestRegressor(n_estimators=20, random_state=0),
+    ...     scoring="mae", random_state=0,
+    ... )
+    >>> forest.diagnostics["scoring"].iloc[0]
+    'mae'
     """
     metadata = resolve_row_metadata(
         X,

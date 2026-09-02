@@ -965,7 +965,10 @@ class MRMRSelector(_BaseSelector):
     n_jobs : int, default=1
         Worker count for the redundancy loop.
     mrmr_backend : {"auto", "serial", "blas", "processes"}, default="auto"
-        Loop implementation; ``"auto"`` resolves one from ``n_jobs``.
+        Redundancy-update backend. ``"auto"`` resolves to ``"blas"``
+        regardless of ``n_jobs``, because the BLAS matvec update avoids
+        process start-up and pickling costs; pass ``"processes"`` explicitly
+        to opt into joblib workers.
     verbose : bool, default=True
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or None, default=None
