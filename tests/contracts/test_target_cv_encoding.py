@@ -629,6 +629,235 @@ def test_target_cv_rejects_smoothing_values_that_are_neither_auto_nor_a_float():
         ).fit_transform(X, y)
 
 
+# --- offset targets: the "auto" shrinkage must not depend on y's origin -----
+
+
+def _offset_probe_data(seed: int = 1713, n: int = 300, levels: int = 6):
+    """Category effects plus a numeric covariate, both of ordinary magnitude.
+
+    The empirical-Bayes shrinkage used to accumulate its moments on raw ``y``
+    (``sum(w*y^2) - count*mean^2``).  For a target offset by 1e8 the two terms
+    agree to ~16 digits while their difference is the small within-category
+    scatter being sought, so ``lambda_i`` -- and with it every emitted effect --
+    was dominated by rounding error rather than by the data.
+    """
+    rng = np.random.default_rng(seed)
+    effects = rng.normal(size=levels)
+    codes = rng.integers(0, levels, size=n)
+    numeric = rng.normal(size=n)
+    y = effects[codes] + 0.3 * numeric + rng.normal(scale=0.5, size=n)
+    X = pd.DataFrame(
+        {
+            "cat": pd.Series([f"c{code}" for code in codes], dtype=object),
+            "numeric": numeric,
+        }
+    )
+    return X, y
+
+
+_OFFSET_CONTEXTS = (
+    pytest.param({}, id="plain"),
+    pytest.param({"sample_weight": "int"}, id="integer_weights"),
+    pytest.param({"sample_weight": "float"}, id="float_weights"),
+    pytest.param({"groups": True}, id="groups"),
+    pytest.param({"time": True}, id="time"),
+)
+
+
+def _offset_context_kwargs(spec: dict, n: int) -> dict:
+    """Materialize a fold/weight context for ``n`` rows."""
+    kwargs: dict = {}
+    if spec.get("sample_weight") == "int":
+        kwargs["sample_weight"] = np.resize(np.array([1, 2, 3, 1, 4]), n)
+    elif spec.get("sample_weight") == "float":
+        kwargs["sample_weight"] = np.linspace(0.25, 3.0, n)
+    if spec.get("groups"):
+        kwargs["groups"] = np.repeat(np.arange(n // 20), 20)
+    if spec.get("time"):
+        kwargs["time"] = np.repeat(np.arange(n // 30), 30)
+    return kwargs
+
+
+@pytest.mark.parametrize("context", _OFFSET_CONTEXTS)
+@pytest.mark.parametrize("offset", [1e6, 1e8])
+def test_target_cv_auto_smoothing_is_invariant_to_an_additive_target_offset(
+    context,
+    offset,
+):
+    """``smooth="auto"`` encodes ``y + c`` exactly as it encodes ``y``.
+
+    Both the out-of-fold training emissions and the full-fit inference map are
+    centered category effects, so an additive shift of ``y`` cancels out of
+    every quantity that defines them.  Before the moments were accumulated on
+    ``y - prior``, ``c = 1e8`` moved the emitted effects by more than 0.1 --
+    enough to change which feature a selector picks.
+    """
+    X, y = _offset_probe_data()
+    kwargs = _offset_context_kwargs(context, len(X))
+    probe = pd.DataFrame(
+        {
+            "cat": pd.Series([f"c{i}" for i in range(6)] + ["unseen"], dtype=object),
+            "numeric": np.zeros(7),
+        }
+    )
+
+    def encode(target):
+        encoder = TargetCVEncoder(["cat"], target_type="continuous", smooth="auto")
+        oof = encoder.fit_transform(X, target, **kwargs)["cat"].to_numpy()
+        return oof, encoder.transform(probe)["cat"].to_numpy()
+
+    shifted = y + offset
+    baseline_oof, baseline_inference = encode(y)
+    shifted_oof, shifted_inference = encode(shifted)
+    # ``y + c`` cannot represent ``y`` exactly -- float64 resolves only
+    # ~1.5e-8 near 1e8 -- so ``shifted - offset`` is the target the shifted
+    # run actually saw.  Against it the encoder must be invariant to the last
+    # few bits; against raw ``y`` it can differ by the input's own resolution.
+    requantized_oof, requantized_inference = encode(shifted - offset)
+    np.testing.assert_allclose(shifted_oof, requantized_oof, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        shifted_inference, requantized_inference, rtol=0.0, atol=1e-12
+    )
+
+    resolution = max(1e-9, float(np.spacing(offset)))
+    np.testing.assert_allclose(shifted_oof, baseline_oof, rtol=0.0, atol=resolution)
+    np.testing.assert_allclose(
+        shifted_inference, baseline_inference, rtol=0.0, atol=resolution
+    )
+
+
+@pytest.mark.parametrize("scale", [2.0, 1e-3, 1000.0])
+def test_target_cv_auto_smoothing_scales_with_the_target(scale):
+    """``smooth="auto"`` is scale *equivariant*, not scale invariant.
+
+    Scaling ``y`` by ``s`` scales the prior, the centered means and the square
+    root of every variance by ``s``, so ``lambda_i = w_i*s2y/(w_i*s2y +
+    ssd_i/w_i)`` is unchanged and each emitted effect ``lambda_i*(mean_i -
+    prior)`` scales by exactly ``s``.  The shrinkage itself is therefore
+    scale-free, which is what makes the assertion below a proportional one.
+    """
+    X, y = _offset_probe_data(1714)
+    probe = pd.DataFrame(
+        {
+            "cat": pd.Series([f"c{i}" for i in range(6)], dtype=object),
+            "numeric": np.zeros(6),
+        }
+    )
+
+    def encode(target):
+        encoder = TargetCVEncoder(["cat"], target_type="continuous", smooth="auto")
+        oof = encoder.fit_transform(X, target)["cat"].to_numpy()
+        return oof, encoder.transform(probe)["cat"].to_numpy()
+
+    baseline_oof, baseline_inference = encode(y)
+    scaled_oof, scaled_inference = encode(y * scale)
+
+    np.testing.assert_allclose(scaled_oof, scale * baseline_oof, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(
+        scaled_inference, scale * baseline_inference, rtol=1e-12, atol=0.0
+    )
+
+
+def _offset_selector_data(seed: int, effect_scale: float):
+    """A near-tie between the encoded category and a numeric competitor.
+
+    The two features are close enough in relevance that a 0.1-sized error in
+    the encoding decides which one ``k=1`` returns, which is exactly what the
+    raw-moment shrinkage produced on an offset target.
+    """
+    rng = np.random.default_rng(seed)
+    effects = rng.normal(scale=effect_scale, size=6)
+    codes = rng.integers(0, 6, size=300)
+    numeric = rng.normal(size=300)
+    y = effects[codes] + 0.3 * numeric + rng.normal(scale=0.5, size=300)
+    X = pd.DataFrame(
+        {
+            "cat": pd.Series([f"c{code}" for code in codes], dtype=object),
+            "numeric": numeric,
+        }
+    )
+    return X, y
+
+
+def test_mrmr_target_cv_selection_is_invariant_to_an_additive_target_offset():
+    """Selector-level acceptance: ``y`` and ``y + 1e8`` must agree.
+
+    On this design the raw-moment shrinkage flipped the single selected feature
+    from ``cat`` to ``numeric`` purely because the target was offset.
+    """
+    X, y = _offset_selector_data(8, 0.4)
+    kwargs = dict(
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_features=["cat"],
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+    )
+
+    baseline = sift.select_mrmr(X, y, 1, **kwargs)
+    shifted = sift.select_mrmr(X, y + 1e8, 1, **kwargs)
+
+    assert baseline == ["cat"]
+    assert shifted == baseline
+
+
+def test_cefsplus_target_cv_selection_is_invariant_to_an_additive_target_offset():
+    """The same acceptance on the CEFS+ route, which flipped the other way."""
+    X, y = _offset_selector_data(27, 0.5)
+    kwargs = dict(
+        cat_features=["cat"],
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+    )
+
+    baseline = sift.select_cefsplus(X, y, 1, **kwargs)
+    shifted = sift.select_cefsplus(X, y + 1e8, 1, **kwargs)
+
+    assert baseline == ["numeric"]
+    assert shifted == baseline
+
+
+def test_target_cv_binary_encoding_is_unchanged_by_the_offset_fix():
+    """Regression pin: the correction is numerical, and binary targets are 0/1.
+
+    A 0/1 target has no offset to cancel, so centering the moments must leave
+    the binary encodings where they were.  The values below were produced by
+    the pre-fix raw-moment implementation.
+    """
+    rng = np.random.default_rng(2026)
+    n = 60
+    category = np.resize(np.array(["red", "green", "blue"], dtype=object), n)
+    y = ((category == "red") | (rng.random(n) < 0.3)).astype(np.int64)
+    X = pd.DataFrame({"category": pd.Series(category, dtype=object)})
+    probe = pd.DataFrame({"category": ["red", "green", "blue"]})
+
+    encoder = TargetCVEncoder(["category"], target_type="binary", smooth="auto", cv=4)
+    oof = encoder.fit_transform(X, y)["category"].to_numpy()
+
+    np.testing.assert_allclose(
+        oof[:6],
+        [
+            0.5333333333333333,
+            -0.26888038821308047,
+            -0.20386803185437996,
+            0.5333333333333333,
+            -0.340661799312705,
+            -0.24074807508064902,
+        ],
+        rtol=1e-12,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        encoder.transform(probe)["category"].to_numpy(),
+        [0.5333333333333333, -0.3087581841594573, -0.20880164918885008],
+        rtol=1e-12,
+        atol=0.0,
+    )
+
+
 @pytest.mark.parametrize(("selector", "kwargs"), FUNCTION_ROUTES)
 def test_target_cv_weighted_function_routes_use_custom_cross_fitting(
     selector,

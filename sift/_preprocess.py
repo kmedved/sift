@@ -771,11 +771,61 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         return series.astype(object).where(~series.isna(), np.nan)
 
     @staticmethod
+    def _centered_targets(
+        y_active: np.ndarray,
+        weights: np.ndarray,
+        total_weight: float,
+    ) -> tuple[np.ndarray, float]:
+        """Return ``(y - prior, prior)`` with a refined weighted prior.
+
+        A single ``sum(w*y)/sum(w)`` pass is only accurate to about
+        ``eps * |y|``, which is ~1e-8 for a target offset by 1e8 -- the same
+        order as the category effects being estimated.  Re-running the weighted
+        mean on the residuals gives a correction that is itself accurate to
+        ``eps * |y - prior|``, and applying it to the *residuals* rather than to
+        ``prior`` keeps it off the coarse ulp grid at ``|y|``'s magnitude, where
+        it would simply be rounded away.  ``y_active - prior`` is exact whenever
+        the two are within a factor of two of each other, so the returned
+        centered targets carry no offset-induced error.
+        """
+        prior = float(np.dot(weights, y_active) / total_weight)
+        residual = y_active - prior
+        correction = float(np.dot(weights, residual) / total_weight)
+        return residual - correction, prior + correction
+
+    @staticmethod
+    def _weighted_group_ssd(
+        codes: np.ndarray,
+        weights: np.ndarray,
+        centered_y: np.ndarray,
+        counts: np.ndarray,
+        sums: np.ndarray,
+    ) -> np.ndarray:
+        """Two-pass weighted within-category sum of squared deviations.
+
+        ``sums``/``counts`` are the first pass, so ``centered_y - means[codes]``
+        is exactly ``y - mean_i`` whatever offset ``centered_y`` was centered by.
+        The deviations are formed *before* they are squared and accumulated, so
+        no ``E[y^2] - E[y]^2`` cancellation can occur: an offset target such as
+        ``y + 1e8`` makes ``sum(w*y^2)`` and ``count * mean^2`` agree to ~16
+        digits while their difference is the small quantity being sought, which
+        is what used to leave ``lambda_i`` -- and therefore the encoding --
+        dominated by rounding error.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            means = sums / counts
+        deviations = centered_y - means[codes]
+        return np.bincount(
+            codes,
+            weights=weights * np.square(deviations),
+            minlength=counts.size,
+        )
+
+    @staticmethod
     def _auto_smoothed_encoding(
         counts: np.ndarray,
         sums: np.ndarray,
-        squares: np.ndarray,
-        prior: float,
+        ssd: np.ndarray,
         y_variance: float,
     ) -> np.ndarray:
         """Empirical-Bayes shrinkage matching sklearn's ``smooth='auto'``.
@@ -793,17 +843,22 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         times and giving it weight ``m`` therefore produce identical encodings,
         which is what makes ``smooth="auto"`` well defined for the weighted,
         grouped, and time-aware paths and not only for unweighted fixed-k folds.
+
+        ``sums`` carries the *prior-centered* weighted target sum, so ``means``
+        is ``mean_i - prior`` and the returned value is the centered category
+        effect ``lambda_i * (mean_i - prior)`` that the encoder emits, not the
+        uncentered estimate.  Shrinking in centered space also removes the final
+        ``estimate - prior`` cancellation, which is why the emitted effects are
+        invariant to an additive shift of ``y``.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             means = sums / counts
-            # Weighted within-category sum of squared deviations, computed from
-            # the raw moments so a single pass over the rows suffices.
-            ssd = np.maximum(squares - counts * np.square(means), 0.0)
             lam = (y_variance * counts) / (y_variance * counts + ssd / counts)
-        encoded = lam * means + (1.0 - lam) * prior
+        encoded = lam * means
         # A NaN lambda means either an empty category or a degenerate
-        # zero-variance target; sklearn falls back to the prior in both cases.
-        return np.where(np.isfinite(encoded), encoded, prior)
+        # zero-variance target; sklearn falls back to the prior in both cases,
+        # which is the zero effect in centered space.
+        return np.where(np.isfinite(encoded), encoded, 0.0)
 
     def _fit_custom_maps(
         self,
@@ -816,6 +871,16 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
         Every mapped value is ``category_estimate - prior`` so that a category
         the fitting rows never saw maps to zero rather than to the prior itself.
+
+        Because the emitted quantity is that difference, every moment below is
+        accumulated on ``y - prior`` rather than on ``y``: the centered sums,
+        the global target variance, and the within-category sums of squared
+        deviations.  Nothing is ever reconstructed as ``E[y^2] - E[y]^2``, so an
+        offset target (``y + 1e8``) produces the same effects as ``y`` instead of
+        losing the leading digits of every moment to cancellation.  This is the
+        single engine behind the fixed-k, grouped, and time-aware fold kinds and
+        behind both the out-of-fold and full-fit inference maps, so all of them
+        inherit the invariance.
         """
         active = sample_weight > 0.0
         if not bool(np.any(active)):
@@ -823,11 +888,11 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         weights = sample_weight[active]
         y_active = y[active]
         total_weight = float(weights.sum())
-        prior = float(np.dot(weights, y_active) / total_weight)
+        centered_y, prior = self._centered_targets(y_active, weights, total_weight)
         auto = smooth == "auto"
         if auto:
             y_variance = float(
-                np.dot(weights, np.square(y_active - prior)) / total_weight
+                np.dot(weights, np.square(centered_y)) / total_weight
             )
         mappings: dict[str, dict[object, float]] = {}
         for col in self.cols:
@@ -840,23 +905,22 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             counts = np.bincount(codes, weights=weights, minlength=len(categories))
             sums = np.bincount(
                 codes,
-                weights=weights * y_active,
+                weights=weights * centered_y,
                 minlength=len(categories),
             )
             if auto:
-                squares = np.bincount(
-                    codes,
-                    weights=weights * np.square(y_active),
-                    minlength=len(categories),
+                ssd = self._weighted_group_ssd(
+                    codes, weights, centered_y, counts, sums
                 )
-                encoded = self._auto_smoothed_encoding(
-                    counts, sums, squares, prior, y_variance
-                )
+                effects = self._auto_smoothed_encoding(counts, sums, ssd, y_variance)
             else:
-                encoded = (sums + smooth * prior) / (counts + smooth)
+                # ``(sums_raw + smooth*prior) / (counts + smooth) - prior``
+                # rewritten on the centered sums; algebraically identical and
+                # free of the same cancellation.
+                effects = sums / (counts + smooth)
             mappings[col] = {
-                category: float(value) - prior
-                for category, value in zip(categories.tolist(), encoded.tolist())
+                category: float(value)
+                for category, value in zip(categories.tolist(), effects.tolist())
             }
         return mappings, prior
 

@@ -96,6 +96,32 @@
   all-zero weights, and a fitting slice with no positive weight mass — the one
   genuinely undefined case, where neither the weighted prior nor the weighted
   target variance exists — still raises for both.
+- **`target_cv_smoothing="auto"` is now invariant to an additive shift of the
+  target.** The empirical-Bayes shrinkage used to build its per-category and
+  global variances from raw weighted moments, reconstructing each
+  within-category scatter as `sum(w*y^2) - w_i*mean_i^2`. On an offset target
+  the two terms agree to about sixteen digits while their difference is the
+  small quantity being sought, so `lambda_i` — and therefore every emitted
+  effect — was dominated by rounding error. Measured on a 300-row, 6-level
+  regression fixture, `fit_transform(X, y)` and `fit_transform(X, y + 1e8)`
+  differed by up to 0.19 in the centered out-of-fold encoding (0.31 under
+  time-aware folds) and by 0.05 in the target-blind `transform`; on a near-tie
+  design `select_mrmr(k=1, cat_encoding="target_cv")` flipped from `["cat"]` to
+  `["numeric"]`, and `select_cefsplus(k=1)` flipped the other way on a sibling
+  design. Every moment is now accumulated on `y - prior` with a two-pass
+  weighted sum of squared deviations, and the shrinkage is applied in centered
+  space, so the out-of-fold, full-fit, weighted, grouped, and time-aware paths
+  all encode `y + c` exactly as they encode `y` — agreement is ~4e-16 against
+  the target the shifted run actually sees, and ~2e-9 against raw `y`, limited
+  beyond that only by float64's own ~1.5e-8 resolution near 1e8 — the offset
+  target cannot represent `y` any more exactly than that. The shrinkage remains
+  scale *equivariant*: scaling `y` by `s` leaves `lambda_i` unchanged and scales
+  the effects by `s`. Ordinary-scale encodings are unchanged to the last ulp,
+  sklearn `smooth="auto"` parity is preserved, and binary `target_cv` — a 0/1
+  target has no offset to cancel — is pinned unchanged. An explicit
+  `target_cv_smoothing` float was never badly affected (4.4e-8 at the same
+  offset, i.e. float noise), which is what localized the defect to the
+  empirical-Bayes path; it is centered too and is now exact as well.
 - Earliest temporal rows with an explicit target-independent `target_prior` now
   emit a centered neutral effect (zero) instead of the raw prior value; without
   one they still retain zero effective selection weight.
