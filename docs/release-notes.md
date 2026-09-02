@@ -2,6 +2,66 @@
 
 ## 0.9.0 (2026-08-31)
 
+### Stage 2 — CI surface
+
+- Added `[tool.pytest.ini_options]`: `testpaths = ["tests"]` and the registered
+  markers `slow`, `catboost`, and `categorical`. The optional-dependency markers
+  sit beside the existing `pytest.importorskip` gates rather than replacing them,
+  so the suite still skips cleanly when `catboost` or `category_encoders` is
+  absent; `slow` covers the `test_knockoff_fdr_control.py` seed loops, the Auto-K
+  null-calibration simulation, the 12k-row D10 design, and the 25k-row knockoff
+  sampler draw, and `-m "not slow"` removes about 60 seconds from a local run.
+- Warnings are now errors. The audited allowlist holds exactly one entry: loky's
+  `DeprecationWarning` about `fork()` in a multi-threaded process, which joblib
+  emits from `loky/backend/fork_exec.py` and which this project cannot address.
+  It is genuinely intermittent — it depends on how many threads exist at fork
+  time, and it appeared in one full run and not the next on the same machine.
+  Every other warning is handled where it occurs: warnings a test intends are
+  asserted with `pytest.warns`, warnings a single test incidentally triggers get
+  a local `@pytest.mark.filterwarnings`, and fixtures that set an `AutoKConfig`
+  field the chosen `k_method` does not consume simply stopped setting it. No
+  category is blanket-ignored.
+- Fixed three `pytest.warns` assertions in `tests/test_knockoff_filter.py` that
+  only ever passed by accident. `select_fdr` emits two legitimate advisories on
+  those near-collinear designs; pytest 7.4.4 silently discarded the one that did
+  not match, while pytest 8+ re-emits it. The tests now record all `UserWarning`s
+  and assert the intended message, which is stable across pytest versions and
+  across the supported NumPy/SciPy range.
+- `tests/test_stability_selection.py` no longer hard-imports `matplotlib`, which
+  is not a declared runtime or test dependency; the plotting test now skips.
+  It would have failed the standard CI job as written.
+- `.github/workflows/test.yml`: `cache: pip` on every `setup-python` step,
+  `timeout-minutes` on every job, and a top-level `concurrency` group that
+  cancels superseded pull-request runs while letting branch and scheduled runs
+  finish. The scheduled `benchmark-smoke` job now also regenerates the Auto-K
+  G1-G6 gate table from the committed raw CSVs, `cmp`s it against the committed
+  artifact, and uploads it as `sift-auto-k-gate-table`; it checks out with
+  `fetch-depth: 0` because the summarizer verifies its provenance sidecar by
+  hashing recorded sources at the commit the sidecar names, which a shallow
+  clone cannot resolve.
+- Added a `min-pins` job that installs every direct runtime floor exactly
+  (numpy 1.24, pandas 2.0, scikit-learn 1.3, scipy 1.10, numba 0.59, joblib 1.3,
+  threadpoolctl 3.1) and then `pip install -e . --no-deps`. **These floors had
+  never been executed anywhere.** They were pre-validated locally on Python 3.11
+  and are green: 1,566 passed, 30 skipped, under the new warning policy. The
+  floors are mutually consistent and resolve to numpy 1.24.4 / pandas 2.0.3 /
+  scikit-learn 1.3.2 / scipy 1.10.1 / numba 0.59.1 / joblib 1.3.2 /
+  threadpoolctl 3.1.0, so **no floor in `pyproject.toml` needs to be raised**.
+- A Python 3.13 job is deferred rather than added, because a job that cannot pass
+  is worse than none. The interpreter is not the blocker: numba ships cp313
+  wheels from 0.61.0 and a local 3.13.15 run with numba 0.67 reached 1,565 passed
+  / 3 failed. The blockers are dependency versions the library does not yet
+  support, and **they are not specific to 3.13 — they break the existing 3.11 and
+  3.12 matrix jobs identically**, because `scikit-learn>=1.3,<2` and
+  `numpy>=1.24,<3` resolve straight to them. Measured on this tree, the supported
+  band is scikit-learn `<1.8` and numpy `<2.5`: scikit-learn 1.9.0 produces 10
+  failures (nine in `contracts/test_target_cv_encoding.py`, one in
+  `test_importance_result.py`) and numpy 2.5.2 produces 3 more (a float32
+  last-ulp determinism assertion, a `ValueError: The truth value of a DataFrame
+  is ambiguous`, and a NumPy 2.5 `DeprecationWarning` about the bare
+  `timedelta64` unit). All thirteen are library-side and remain open.
+  `docs/development.md` records the band and the ready-to-enable job definition.
+
 ### Sklearn integration
 
 - All eight public selector classes now subclass `SelectorMixin` and expose

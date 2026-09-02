@@ -47,6 +47,58 @@ python -m ruff check sift tests
 git diff --check
 ```
 
+### Test markers
+
+`pyproject.toml` sets `testpaths = ["tests"]`, so a bare `python -m pytest`
+collects the suite from anywhere in the repository. Three markers are registered:
+
+| marker | meaning |
+| --- | --- |
+| `slow` | Monte-Carlo or large-fixture tests: the `test_knockoff_fdr_control.py` seed loops, the Auto-K null-calibration simulation, the 12k-row D10 design, and the 25k-row knockoff sampler draw. |
+| `catboost` | Needs the optional `catboost` dependency. |
+| `categorical` | Needs the optional `category_encoders` dependency. |
+
+The markers sit beside the existing `pytest.importorskip` gates rather than
+replacing them, so the suite still skips cleanly without the optional packages;
+the markers exist so a run can *select* those tests. Useful selections:
+
+```bash
+python -m pytest -m "not slow" -q          # ~11 tests fewer, ~60s faster
+python -m pytest -m slow -q                # the Monte-Carlo tests only
+python -m pytest -m "catboost or categorical" -q
+```
+
+### Warning policy
+
+`filterwarnings` starts from `error`: any warning that escapes a test fails the
+run. The allowlist is deliberately tiny and every entry names an exact message
+prefix *and* a category — never a bare category. Adding an entry requires a
+comment saying why the project cannot fix the warning at its source.
+
+The current allowlist has one entry: loky's `DeprecationWarning` about calling
+`fork()` from a multi-threaded process. It is emitted by
+`joblib/externals/loky/backend/fork_exec.py` whenever the process backend starts
+workers after a thread pool exists, it depends on how many threads happen to be
+running at fork time (so it appears and disappears between runs on the same
+machine), and nothing in this project can prevent it.
+
+Everything else is handled at the site instead of suite-wide:
+
+- A warning a test *intends* to trigger is asserted with `pytest.warns`. Where a
+  call emits several legitimate warnings, record them all and assert the one you
+  mean — `with pytest.warns(UserWarning) as record:` followed by
+  `assert any("..." in str(w.message) for w in record)`. pytest 7 silently
+  discarded non-matching warnings inside `pytest.warns`; pytest 8+ re-emits them,
+  where `error` turns them into failures, so the plain `match=` form is fragile
+  for calls with more than one advisory.
+- A warning a single test incidentally triggers gets a local
+  `@pytest.mark.filterwarnings("ignore:...")` with a comment, so the exemption
+  stays visible next to the test that needs it.
+- A warning that says an option is inert (`AutoKConfig.<field> is set but
+  k_method=... does not use it`) means the fixture is wrong: drop the inert
+  field. `sift/selection/auto_k.py::_warn_unused_method_fields` is the authority
+  on which field each method consumes.
+
 For selector-layer refactors, keep the dispatcher contract honest with:
 
 ```bash
@@ -104,11 +156,106 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus optional CatBoost
-coverage, a clean-wheel installation smoke test, and a scheduled quick benchmark
-gate. Published GitHub releases build and metadata-check source and wheel
+GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus a `min-pins` job on
+the declared dependency floors, optional CatBoost coverage, a clean-wheel
+installation smoke test, a scheduled latest-dependency canary, and a scheduled
+quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
+the workflow declares a `concurrency` group that cancels superseded pull-request
+runs while letting branch and scheduled runs finish so their artifacts stay
+complete. Published GitHub releases build and metadata-check source and wheel
 distributions, clean-install the exact wheel, and attach those distributions to
 the GitHub Release. This project does not publish those artifacts to PyPI.
+
+### The `min-pins` job
+
+`min-pins` installs every direct runtime requirement at its advertised floor and
+then installs the package with `--no-deps` so pip cannot quietly upgrade them:
+
+```bash
+python -m venv /tmp/sift-min-pins
+/tmp/sift-min-pins/bin/python -m pip install \
+  "numpy==1.24.*" "pandas==2.0.*" "scikit-learn==1.3.*" "scipy==1.10.*" \
+  "numba==0.59.*" "joblib==1.3.*" "threadpoolctl==3.1.*" pytest
+/tmp/sift-min-pins/bin/python -m pip install -e . --no-deps
+/tmp/sift-min-pins/bin/python -m pytest -q
+```
+
+The floors are mutually consistent and resolve to numpy 1.24.4, pandas 2.0.3,
+scikit-learn 1.3.2, scipy 1.10.1, numba 0.59.1, joblib 1.3.2 and
+threadpoolctl 3.1.0. numba 0.59 constrains numpy to `<1.27`, which is what makes
+1.24 the binding floor rather than an arbitrary one. CI runs this on Python 3.10;
+3.11 is a valid local stand-in, since every one of these pins ships wheels for
+both.
+
+Two behaviours differ at the floor and are worth knowing before you debug a
+failure there: older LAPACK returns a slightly smaller minimum eigenvalue, so the
+Gaussian knockoff shrinkage advisory fires where it does not on newer NumPy/SciPy;
+and `matplotlib` is not a declared dependency, so the one plotting test skips.
+
+### Python 3.13
+
+Deferred, and the interpreter is not the reason. numba ships cp313 wheels from
+0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local Python 3.13.15 run
+with numba 0.67 reached 1,565 passed / 3 failed. The blockers are dependency
+versions the library does not yet support, and they are not specific to 3.13 —
+they break the 3.11/3.12 matrix identically, because `scikit-learn>=1.3,<2` and
+`numpy>=1.24,<3` resolve straight to them. Measured on this tree:
+
+| dependency set | result |
+| --- | --- |
+| floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1) | green |
+| numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
+| sklearn 1.9.0 (any Python) | 10 failures: `contracts/test_target_cv_encoding.py` (9), `test_importance_result.py` (1) |
+| numpy 2.5.2 | 3 failures: a float32 last-ulp determinism assertion, a `ValueError: The truth value of a DataFrame is ambiguous`, and a NumPy 2.5 `DeprecationWarning` about the bare `timedelta64` unit |
+
+So the supported band today is scikit-learn `<1.8` and numpy `<2.5`. Once the
+library supports the newer set, add this job to `.github/workflows/test.yml`:
+
+```yaml
+  test-python313:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install "numba>=0.61"
+          pip install -e ".[test]"
+      - run: pytest
+```
+
+`numba>=0.61` is the only 3.13-specific pin required. This is a support job on
+the supported dependency set, not a 3.13/min-pins combination.
+
+### Auto-K gate summarizer
+
+The scheduled `benchmark-smoke` job regenerates the Auto-K G1-G6 gate table from
+the committed raw campaign CSVs and uploads it as the `sift-auto-k-gate-table`
+artifact. The summarizer is deterministic — `tests/test_auto_k_gate_summary.py`
+pins the exact output bytes — so the job also `cmp`s the regenerated table against
+the committed one. Run it locally with:
+
+```bash
+python benchmarks/summarize_auto_k_gates.py \
+  --main benchmarks/results/auto_k_v2_main.csv \
+  --null benchmarks/results/auto_k_v2_null.csv \
+  --timing benchmarks/results/auto_k_v2_d9.csv \
+  --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
+  --oracle-aggregation mean \
+  --output /tmp/auto_k_v2_gates_mean_oracle.csv
+cmp /tmp/auto_k_v2_gates_mean_oracle.csv \
+  benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
+```
+
+Every argument is required, including `--oracle-aggregation`, so the denominator
+convention is always recorded rather than inferred. The summarizer verifies the
+path-timing provenance sidecar by hashing its recorded source files *at the commit
+the sidecar names*, which is why the job checks out with `fetch-depth: 0`; a
+shallow clone cannot resolve that commit and the summarizer fails closed.
 
 Before release-oriented promotion, run:
 

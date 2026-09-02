@@ -713,6 +713,7 @@ def test_catboost_split_callback_errors_propagate(monkeypatch):
         _run_fake_catboost_splits(monkeypatch, fail)
 
 
+@pytest.mark.catboost
 def test_catboost_public_callback_preserves_result_when_installed():
     pytest.importorskip("catboost")
     X, y = _regression_frame(5)

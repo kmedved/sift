@@ -130,6 +130,7 @@ def test_process_mrmr_k_one_does_not_start_process_pool(monkeypatch):
     np.testing.assert_array_equal(selected, np.array([1], dtype=np.int64))
 
 
+@pytest.mark.filterwarnings("ignore:Gaussian mRMR:UserWarning")
 def test_gaussian_mrmr_process_rank_transform_matches_serial():
     X, y = _regression_data(n=120, p=10)
 
@@ -160,6 +161,7 @@ def test_gaussian_mrmr_process_rank_transform_matches_serial():
     assert processes == serial
 
 
+@pytest.mark.filterwarnings("ignore:Gaussian mRMR:UserWarning")
 def test_gaussian_mrmr_prebuilt_cache_is_reused(monkeypatch):
     X, y = _regression_data(n=120, p=10)
     cache = build_cache(X, subsample=None, n_jobs=2, rank_backend="processes")
@@ -201,6 +203,7 @@ def test_mrmr_parallel_validation_errors():
         )
 
 
+@pytest.mark.catboost
 def test_process_mrmr_after_catboost_import_smoke():
     pytest.importorskip("catboost")
     X, y = _regression_data(n=80, p=8)

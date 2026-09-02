@@ -1211,6 +1211,7 @@ def test_binary_selector_class_rejects_return_result_fit_param():
 
 
 @pytest.mark.parametrize("cat_encoding", ["target", "loo"])
+@pytest.mark.categorical
 def test_binary_selector_class_encodes_categoricals_with_binary_target_for_string_labels(
     cat_encoding,
 ):
@@ -1496,6 +1497,7 @@ def test_weighted_brier_mode_matches_resolved_weighted_cefsplus():
     assert selected == expected
 
 
+@pytest.mark.categorical
 def test_brier_mode_matches_existing_cefsplus_with_loo_categoricals():
     pytest.importorskip("category_encoders")
     rng = np.random.default_rng(15)

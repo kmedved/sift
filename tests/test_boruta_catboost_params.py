@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 pytest.importorskip("catboost")
+
+pytestmark = pytest.mark.catboost
 from catboost import CatBoostRegressor
 
 from sift.boruta import _clone_estimator, _set_n_estimators

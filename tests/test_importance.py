@@ -96,6 +96,7 @@ def test_permutation_importance_requires_time_for_block():
             permute_method="block",
             n_repeats=2,
             n_jobs=1,
+            random_state=0,
         )
     except ValueError as exc:
         assert "requires time" in str(exc)
@@ -598,6 +599,7 @@ def test_permutation_importance_validates_direction_override():
             higher_is_better="yes",
             n_repeats=2,
             n_jobs=1,
+            random_state=0,
         )
 
 
@@ -623,6 +625,7 @@ def test_permutation_importance_rejects_direction_override_for_signed_scorers(sc
             higher_is_better=False,
             n_repeats=2,
             n_jobs=1,
+            random_state=0,
         )
 
 
@@ -641,6 +644,7 @@ def test_permutation_importance_rejects_plain_error_scoring():
             scoring="error",
             n_repeats=2,
             n_jobs=1,
+            random_state=0,
         )
     except ValueError as exc:
         assert "Unknown scoring" in str(exc)
@@ -666,6 +670,7 @@ def test_permutation_importance_logloss_requires_predict_proba():
             scoring="neg_logloss",
             n_repeats=2,
             n_jobs=1,
+            random_state=0,
         )
     except ValueError as exc:
         assert "predict_proba" in str(exc)

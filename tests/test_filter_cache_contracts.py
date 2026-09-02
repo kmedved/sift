@@ -166,6 +166,7 @@ def test_fixed_k_rejects_auto_k_evaluation_metadata(metadata):
         (CEFSPlusSelector, {}),
     ],
 )
+@pytest.mark.filterwarnings("ignore:Gaussian mRMR:UserWarning")
 def test_selector_get_feature_names_out_preserves_fitted_names(selector_cls, kwargs):
     X, y = _data()
     selector = selector_cls(k=2, verbose=False, **kwargs).fit(X, y)

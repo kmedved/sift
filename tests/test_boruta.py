@@ -660,6 +660,7 @@ class TestBorutaShap:
         expected = (expected_per_row * weights[:, None]).sum(axis=0) / weights.sum()
         np.testing.assert_allclose(out, expected)
 
+    @pytest.mark.catboost
     def test_shap_backend(self):
         """select_boruta_shap should use SHAP importance."""
         pytest.importorskip("catboost")
@@ -677,6 +678,7 @@ class TestBorutaShap:
 
         assert isinstance(selected, list)
 
+    @pytest.mark.catboost
     def test_shap_importance_data_test(self):
         """SHAP importances can score the held-out split."""
         pytest.importorskip("catboost")
@@ -860,6 +862,7 @@ class TestBorutaCategoricals:
                 verbose=False,
             )
 
+    @pytest.mark.categorical
     def test_cat_encoding_runs(self):
         """Categorical columns should be encodable for Boruta."""
         pytest.importorskip("category_encoders")

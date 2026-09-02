@@ -11,6 +11,8 @@ import pytest
 
 pytest.importorskip("catboost")
 
+pytestmark = pytest.mark.catboost
+
 import sift  # noqa: E402
 from sift.catboost import (  # noqa: E402
     CatBoostSelectionResult,

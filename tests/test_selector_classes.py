@@ -270,6 +270,7 @@ def test_selector_set_params_updates_fit_call():
     assert len(selector.selected_features_) == 3
 
 
+@pytest.mark.categorical
 def test_selector_class_fits_supervised_categorical_encoder_on_train_only():
     pytest.importorskip("category_encoders")
 
@@ -299,6 +300,7 @@ def test_selector_class_fits_supervised_categorical_encoder_on_train_only():
     assert np.isclose(float(X_out.iloc[2, 0]), float(np.mean(y_train)))
 
 
+@pytest.mark.categorical
 def test_selector_loo_fit_transform_uses_training_fit_transform_matrix():
     pytest.importorskip("category_encoders")
 
@@ -333,6 +335,7 @@ def test_selector_loo_fit_transform_uses_training_fit_transform_matrix():
     )
 
 
+@pytest.mark.categorical
 def test_selector_prefix_auto_k_rejects_supervised_class_encoder():
     pytest.importorskip("category_encoders")
 
@@ -494,6 +497,7 @@ def test_cefsplus_selector_nested_auto_k_distinguishes_best_and_selected(monkeyp
     assert selector.k_ == 1
 
 
+@pytest.mark.categorical
 def test_selector_nested_auto_k_allows_supervised_class_encoder():
     pytest.importorskip("category_encoders")
 
@@ -528,6 +532,7 @@ def test_selector_nested_auto_k_allows_supervised_class_encoder():
     assert not selector.nested_auto_k_diagnostics_["scores"].empty
 
 
+@pytest.mark.categorical
 def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
     pytest.importorskip("category_encoders")
 
@@ -681,7 +686,8 @@ def test_selector_nested_auto_k_handles_empty_fold_paths(monkeypatch):
         auto_k_config=cfg,
         verbose=False,
     )
-    selector.fit(X, y, time=np.arange(len(X)))
+    with pytest.warns(UserWarning, match="candidate score-curve values are non-finite"):
+        selector.fit(X, y, time=np.arange(len(X)))
 
     scores = selector.nested_auto_k_diagnostics_["scores"]
     assert np.isinf(scores["score"]).all()
@@ -777,6 +783,7 @@ def test_selector_nested_auto_k_passes_fit_params_to_fold_and_final_paths(monkey
     assert calls == [1, 1]
 
 
+@pytest.mark.categorical
 def test_selector_supervised_encoding_rejects_prebuilt_cache():
     pytest.importorskip("category_encoders")
 
