@@ -237,9 +237,11 @@ published, and both are folded into this single section.
   (0.0 max difference), and the full-fit map still matches sklearn's `"auto"` to
   2.8e-17. No case was found in which `"auto"` is undefined but an explicit
   float is not: `ensure_weights` already rejects negative, non-finite, and
-  all-zero weights, and a fitting slice with no positive weight mass — the one
-  genuinely undefined case, where neither the weighted prior nor the weighted
-  target variance exists — still raises for both.
+  all-zero weights; target-CV also rejects individually finite frequency
+  weights whose aggregate mass overflows float64. A fitting slice with no
+  positive weight mass — the one genuinely undefined case, where neither the
+  weighted prior nor the weighted target variance exists — still raises for
+  both.
 - **`target_cv_smoothing="auto"` is now invariant to an additive shift of the
   target.** The empirical-Bayes shrinkage used to build its per-category and
   global variances from raw weighted moments, reconstructing each
@@ -266,6 +268,12 @@ published, and both are folded into this single section.
   `target_cv_smoothing` float was never badly affected (4.4e-8 at the same
   offset, i.e. float noise), which is what localized the defect to the
   empirical-Bayes path; it is centered too and is now exact as well.
+- Target-CV now fails clearly when finite individual `sample_weight` values
+  sum to a non-finite frequency mass. Previously, values such as `1e308` could
+  overflow only when aggregated, yield a NaN target prior, and silently turn
+  every encoded category effect into zero. The check occurs inside the shared
+  map fitter, so direct, out-of-fold, grouped, temporal, and public selector
+  routes share the same contract.
 - Earliest temporal rows with an explicit target-independent `target_prior` now
   emit a centered neutral effect (zero) instead of the raw prior value; without
   one they still retain zero effective selection weight.
