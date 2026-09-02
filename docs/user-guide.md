@@ -301,7 +301,7 @@ seed 0. Their existing `n_jobs=-1` defaults are also unchanged in 0.9.
 ```python
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import GroupKFold
 
 import sift
 
@@ -321,7 +321,7 @@ result = sift.catboost_select(
     groups=group_ids,
     time=dates,
     sample_weight=weights,
-    cv=TimeSeriesSplit(n_splits=3),
+    cv=GroupKFold(n_splits=3),
     random_state=0,
     verbose=False,
 )
@@ -333,8 +333,10 @@ arrays. DataFrame callers may instead use `groups="group_column"` or
 aliases, not deprecated spellings, and neither warns.
 A direct value and its alias cannot be combined. Supplied time values
 must be non-missing and mutually orderable and stably order aligned rows before
-the configured splitter. Use a time-aware splitter when chronological
-validation is required; the default splitter remains random.
+the configured splitter. The example pairs `groups` with `GroupKFold`; a
+time-only splitter such as `TimeSeriesSplit` ignores `groups` (scikit-learn
+warns), so pass `time=` alone when chronological validation is required. The
+default splitter remains random.
 
 ## Time-aware Permutation Importance
 
