@@ -1,9 +1,135 @@
 # Release Notes
 
-## 0.9.0 (2026-08-31)
+## 0.9.0 (unreleased)
 
-### Stage 1 — sklearn contracts
+0.9.0 supersedes the never-published 0.8.0 work — the last published release is v0.7.0, so
+everything recorded under `0.8.0` below reaches users for the first time here. 0.9.0 is
+strictly additive apart from the breaking changes enumerated in the next section: every other
+0.8-style call keeps its selections, return types, output ordering, and defaults.
 
+The work below was staged in the working tree as `0.9.0a1` and `0.9.0b1`; neither was ever
+published, and both are folded into this single section.
+
+### Breaking changes and migration
+
+- `stability_regression(..., k=…)` and `stability_classif(..., k=…)` no longer
+  pad short selections with never-selected features: `k` caps the count and
+  `threshold` gates membership, so wrappers can now return fewer than `k`
+  features (including zero). Rank by `selection_frequencies_` yourself if you
+  need a fixed-size list.
+- `k='auto'` (router) calls now emit a `UserWarning` when they select zero
+  features, and `select_cefsplus` warns when `y` contains only 3-20 distinct
+  integer-valued levels (labels-shaped targets). Selector classes reject 1-D
+  `X` with a `ValueError` instead of an `IndexError`. Binary log-loss CEFS+
+  automatic routing rejects non-default `auto_dense_*` options with a
+  `ValueError` (there is no log-loss dense-regime diagnostic; the fields were
+  previously warned about, and stripping that warning would have made them
+  silently ignored). Binary Brier selection delegates to Gaussian CEFS+ and
+  retains its dense-check behavior. `StabilitySelector` rejects duplicate
+  DataFrame column labels and duplicate, empty, missing, scalar, or unordered
+  explicit `feature_names` at fit; pass an ordered iterable such as a list,
+  tuple, pandas Index, or one-dimensional NumPy array. Transform validates
+  duplicate labels and missing selected DataFrame columns; `tune_threshold`
+  uses the same identity helper but requires every fitted feature column. A
+  failed fit or refit now leaves the selector unfitted. Column identity is
+  exact for tuple/MultiIndex and missing-value labels, and unhashable labels
+  are rejected clearly. A
+  selector fitted on an unnamed positional ndarray rejects DataFrame input to
+  `transform` or `tune_threshold`, because its generated names cannot establish
+  column identity. Continue passing positional ndarrays, provide explicit
+  `feature_names` when fitting the ndarray, or refit on a DataFrame before
+  passing DataFrames to those methods.
+  The no-config router
+  routes time-context non-CEFS+ Gaussian selectors to
+  `gaussian_cv/time_holdout` with `selection_rule="best"` (previously the
+  `one_se` request fell back to `best` with a warning), no longer re-warns
+  about `auto_dense_*` fields it already consumed, and
+  `StabilitySelector.selection_frequencies_` is now float64.
+- `StabilitySelector(use_smart_sampler=True)` now honors an explicit
+  `feature_names` sequence as an ordered feature subset instead of widening it
+  to every numeric DataFrame column, so existing calls can produce different
+  selections and output widths. Omit `feature_names` to retain the former
+  all-numeric behavior. Configured group/time columns remain sampler metadata
+  and are excluded from an explicit subset. Datetime and timedelta feature
+  columns are rejected before numeric coercion, while a configured datetime
+  `time_col` remains valid metadata. Fold-local `tune_threshold` fits retain
+  required sampler metadata while scoring only the fitted feature subset.
+
+- Prebuilt Gaussian caches now enforce their full source contract. Named caches
+  require the same row count and exact DataFrame names/order; positional caches
+  require a positional ndarray with the same row and feature counts. Reordered,
+  renamed, or duplicate columns raise for named caches, and a DataFrame cannot
+  consume a positional cache. Positional caches cannot detect reordered ndarray
+  columns, so callers must preserve their original positions. Cached filter
+  calls reject call-time `sample_weight`, `subsample`, and construction
+  `random_state`; `select_fdr` still accepts `random_state` because it seeds a
+  fresh knockoff draw, while its `subsample` remains forbidden. Rebuild
+  persisted caches that predate `feature_names_are_synthetic`.
+- Fixed-k filter calls now reject `groups` and `time`; remove those arguments or
+  use `k="auto"` with the matching evaluation strategy. `KnockoffSelector`
+  rejects row `groups`/`time` in every mode; its `feature_groups` option groups
+  features, not observations.
+- Datetime and timedelta feature columns, including native and object-typed
+  NumPy arrays and Arrow date, duration, timestamp, and time-of-day dtypes,
+  now raise before numeric coercion in classic, cache, Boruta, and
+  stability-selection paths. Derive explicit numeric calendar or elapsed-time
+  features before selection.
+- Function-style filters using `task="classification"` follow sklearn's
+  discrete-target contract. String, categorical, integer, and integer-valued
+  floating labels remain valid; non-integral numeric class codes such as
+  `0.5`/`1.5` are classified as continuous and rejected. Re-encode those values
+  as categories or integer IDs. `select_fdr` is separate: it requires a finite
+  numeric target and does not use the classification-task contract.
+- Time holdout moves the requested cut to the nearest boundary between distinct
+  timestamps, preferring the smaller boundary on an exact tie. `val_frac` is
+  therefore approximate and row counts can change. Fewer than two rows,
+  all-tied, missing, or mutually unorderable timestamps now raise.
+- Classic numeric filter feature matrices now stay in float64, preventing
+  large-offset signals from collapsing. Their core feature-array footprint is
+  therefore roughly twice the former float32 path, and peak memory can be
+  higher because of copies or solver workspaces. BLAS runtime and native-thread
+  contention remain workload-dependent; benchmark representative data when
+  choosing the mRMR backend.
+- `feature_names_in_` is now sklearn's required one-dimensional NumPy object
+  array rather than a list, on every selector class that exposes it. Because it
+  is an ndarray, `selector.feature_names_in_ == ["a", "b"]` is an element-wise
+  comparison, and asserting on it raises `ValueError: The truth value of an
+  array with more than one element is ambiguous`. Compare with
+  `list(selector.feature_names_in_) == ["a", "b"]` or
+  `np.array_equal(selector.feature_names_in_, ["a", "b"])` instead.
+
+### sklearn contracts
+
+- All eight public selector classes now subclass `SelectorMixin` and expose
+  support masks, ordered support indices, selected feature names, and dense
+  `inverse_transform`. Sparse matrices are rejected consistently during fit,
+  transform, and inverse transform.
+- Added `output_order="legacy"|"original"`. The default preserves filter and
+  knockoff selection order, Boruta input order, and Stability descending
+  selection-frequency order; `"original"` is the additive input-order option.
+- Added explicit, version-gated sklearn metadata routing. The dependency floor
+  remains `scikit-learn>=1.3,<2`: 1.3 callers pass fit metadata directly, while
+  sklearn 1.4+ can route requested metadata through Pipeline and
+  `cross_validate(params=...)`. Fixed-k filters reject group/time requests,
+  Knockoff exposes only weights, and smart-sampler conflicts fail before fit.
+- Scoped private `RidgeCV`, `GridSearchCV`, and threshold-tuning pipelines out
+  of an outer estimator's routing context, preserving their historical fit
+  semantics on sklearn 1.5 and 1.7. The compatibility audit documents, without
+  silently changing selections, that inner auto-k Ridge alpha CV does not yet
+  consume group/time context and Stability automatic-alpha validation scoring
+  remains unweighted in 0.9.
+- Pinned a common green sklearn estimator-check list and selector tags across
+  all classes. All audited selectors handle non-finite feature values and
+  require `y`; only Knockoff is tagged non-deterministic.
+- Gaussian/cache-backed sklearn selector constructors use
+  `subsample="auto"`, resolving to 50,000 rows only at fit time. MRMR, JMI,
+  JMIM, and CEFS+ wrappers also use `random_state="auto"`, resolving to seed 0;
+  `KnockoffSelector.random_state` remains numeric because it seeds each fresh
+  draw. These literals preserve explicit cache-override rejection while
+  satisfying sklearn's default-constructible estimator parameter contract.
+- All sklearn-style selector wrappers now expose `get_feature_names_out()`.
+  `KnockoffSelector` is tagged and documented as row-order-sensitive despite a
+  fixed seed; zero-weight rows are still removed before knockoff RNG draws.
 - Fixed a regression that made every non-Knockoff selector crash on duck-typed
   array input. Dense fit validation no longer calls `np.iscomplexobj` on the
   raw object, so array-likes that refuse `__array_function__` dispatch (such as
@@ -19,12 +145,8 @@
   private `_fit_feature_names_generated_` marker (already present on
   `StabilitySelector`) now records named-versus-positional provenance on the
   filter selectors, `KnockoffSelector`, and `BorutaSelector` as well.
-  **Migration note:** because the attribute is an ndarray rather than a list,
-  `selector.feature_names_in_ == ["a", "b"]` is now an element-wise comparison,
-  and asserting on it raises `ValueError: The truth value of an array with more
-  than one element is ambiguous`. Compare with
-  `list(selector.feature_names_in_) == ["a", "b"]` or
-  `np.array_equal(selector.feature_names_in_, ["a", "b"])` instead.
+  The ndarray-comparison migration note is in *Breaking changes and migration*
+  above.
 - Filter and Knockoff `transform` now raise sklearn's standard feature-name
   mismatch message for all-string DataFrame columns, naming the unexpected and
   missing labels instead of only reporting that columns differ. Non-string
@@ -40,8 +162,30 @@
   `check_dataframe_column_names_consistency` alongside the existing green-check
   list, plus a duck-array fit regression test for every selector class.
 
-### Stage 1 — target-encoding correction
+### Leakage-safe target encoding
 
+- Added `cat_encoding="target_cv"` for regression and binary DataFrame inputs.
+  One SIFT encoder serves every fold kind; it requires no `category_encoders`
+  extra, preserves one output column per raw feature, normalizes missing values
+  to one learned category, and maps unseen inference categories to a zero
+  centered effect (the global-mean estimate before centering). The centering
+  correction and its metadata repairs are in the bullets below.
+- Function filter results conditionally record the fixed-fold encoding kind and
+  effective split count. Selector classes and Boruta retain the full-training
+  encoder for target-blind `transform`, expose the same information through
+  `categorical_encoding_metadata_`, and return the cross-fitted selected
+  training columns from `fit_transform` where applicable.
+- Added `target_cv_n_splits`, `target_cv_smoothing`, `target_prior`, and
+  `warmup_policy` to filter and Boruta entry points. Weighted, grouped, and
+  time-aware folds accept `target_cv_smoothing="auto"` alongside an explicit
+  numeric value (see the `"auto"` bullet below; they briefly required the
+  explicit value). Group folds exclude held-out
+  groups; time folds keep ties together, use strictly earlier history, and
+  remove earliest no-history rows from selection unless a target-independent
+  prior is supplied. Contextual filter calls remain limited to auto-k evaluate
+  routes, while fixed-k `groups`/`time` rejection is unchanged.
+- Existing defaults and unsafe expert encoders are unchanged. Multiclass is
+  still rejected until block-aware expansion exists.
 - **`cat_encoding="target_cv"` now emits centered category effects.**
   Out-of-fold training rows emit `fold_encoding - fold_training_prior` and
   inference rows emit `full_fit_encoding - full_training_prior`. An unknown or
@@ -147,8 +291,49 @@
   parity is deliberately not the fix: `select_fdr` gains no `cat_encoding`
   parameter.
 
-### Stage 1 — result views
+### Result views
 
+- Added `SelectionView` and `sift.as_result(...)` without changing legacy return
+  types, constructors, or defaults. The first A1 slice adapts
+  `FilterSelectionResult` and `KnockoffSelectionResult`, and adds matching
+  `.result_view()` methods. The same five accessors expose selected names,
+  positions, count, the available raw table, and copied metadata.
+- The A2a slice adds non-replacing adapters and `.result_view()` methods for
+  `BorutaResult` and `FeaturePathEvaluationResult`. Boruta retains a complete
+  positional table and maps mean importance to `gain`; feature-path views leave
+  discarded raw positions unknown unless explicit input names resolve uniquely,
+  and expose the tested lower-is-better score as a normalized curve.
+- The A2b slice adds the same non-replacing adapter and `.result_view()` method
+  for `CatBoostSelectionResult`. It preserves the target-k versus returned-count
+  distinction, normalizes the direction-aware score curve, derives standard
+  errors only when raw split scores provide a denominator, and keeps raw
+  identity partial unless the caller supplies it explicitly.
+- The A2c slice adds a dynamic `StabilitySelector.result_view_` and
+  `sift.as_result(fitted_selector)` adapter. Its complete table uses fitted
+  candidate order, maps mean absolute coefficient to `gain`, preserves capped
+  selection membership from the legacy integer indices, and exposes a frozen
+  column-subset transform without retaining training rows or bootstrap
+  coefficient matrices. New fits record DataFrame-versus-positional provenance;
+  no constructor parameter, legacy fitted attribute, return type, or default
+  changes.
+- The A2d slice completes the seven-family core adapter coverage. The default
+  `permutation_importance` return remains its exact four-column DataFrame;
+  `return_result=True` opts into module-scoped `ImportanceResult`, whose
+  defensive-copy repeat matrix is aligned to original feature positions.
+  Its complete view preserves duplicate labels positionally and marks every
+  evaluated feature as a `ranking_only` report rather than inventing a subset
+  threshold.
+- Views serialize to JSON-safe schema version `"1"`, preserve positional
+  identity in `selected_index`, report incomplete tables explicitly, and use
+  `input_kind="unknown"` when a legacy result cannot prove whether its source
+  was named or positional. Partial views now reject table-only plots instead of
+  presenting incomplete data as complete.
+- Added explicit bounded proxy storage to `select_cached` and Gaussian filter
+  result paths. `return_result=True, store_proxies=True` retains only the
+  post-screening candidate-by-selected copula correlations as `float32`, with
+  a 64 MiB cap and no retained `X` or cache. Name lookup rejects ambiguous
+  duplicate labels and `proxies_at(...)` provides positional access. Existing
+  calls, return types, and serialized default results are unchanged.
 - A fitted `StabilitySelector` view now applies the selector's own
   `output_order`. `view.features`, `view.indices`, the raw table's `path_rank`,
   and the frozen `view.transform` follow the same order as
@@ -190,7 +375,98 @@
   and pickle formats are unchanged, and fixed-k `ranking_` semantics are
   unchanged.
 
-### Stage 2 — CI surface
+### Conventions
+
+- DataFrame callers may use `groups="column"` and `time="column"` wherever
+  those row arrays are accepted. SIFT extracts the metadata positionally and
+  removes it from the feature namespace; direct arrays remain positional, and
+  fixed-k filters continue to reject row context.
+- CatBoost selection adds trailing `groups`, `time`, and `sample_weight`
+  arrays while retaining `group_col` and `sample_weight_col` aliases. Alias
+  conflicts raise, supplied time values are validated and stably order aligned
+  rows before the configured splitter, and translated-parameter collisions
+  emit a `UserWarning` while preserving the 0.9 `catboost_params`-wins rule.
+- `StabilitySelector(penalty=...)` is an additive alias for `alpha`; unequal
+  simultaneous values raise. Threshold tuning, explicit feature-path
+  evaluation, and auto-k evaluation accept estimator-style sklearn scorer
+  objects. Path and auto-k routes negate signed scorer output into their
+  historical lower-is-better curves.
+- `select_cached(..., return_result=True)` returns a complete `SelectionView`
+  with cache provenance, selected positions, relevance, and objective-path
+  diagnostics. Its four legacy list/tuple forms and default remain unchanged.
+- The existing `None` defaults on Stability, permutation importance, and
+  CatBoost now emit a caller-facing `FutureWarning` when used; they remain
+  nondeterministic in 0.9 and will resolve to seed 0 in 1.0. Literal-42
+  defaults and all existing `n_jobs` defaults remain unchanged in 0.9.
+- `permutation_importance` accepts sklearn scorer objects and `ScoringSpec`, and
+  exposes `higher_is_better` only for legacy loss callbacks, avoiding a second
+  direction flip for signed scorers.
+- Long-running fixed and Auto-K filter paths, `select_cached`, filter selector
+  classes, stability bootstraps, Boruta iterations, and CatBoost splits now
+  accept an additive `callback(step, total, info)` hook. Calls are one-based,
+  happen after completed units, receive fresh metadata dictionaries, and
+  propagate callback exceptions. `callback=None` retains the original kernels,
+  selections, return types, defaults, and logging behavior. Fold-local fits
+  inside `StabilitySelector.tune_threshold()` remain silent instead of
+  restarting the public bootstrap callback sequence for every fold.
+- Progress output now uses the `sift` package logger at INFO instead of direct
+  `print` calls. Existing `verbose` defaults and silence behavior are unchanged;
+  `sift.set_verbosity("debug"|"info"|None)` is an additive global control. An
+  application handler whose level rejects INFO no longer suppresses the
+  default fallback progress stream.
+  Every package warning now declares its category and a caller-facing stack
+  level without changing warning counts or categories, and CEFS+ path-depth
+  saturation reports the effective depth actually used.
+
+### Auto-k ergonomics
+
+- Added `AutoKConfig.default()`, `.predictive(...)`, `.discovery(...)`, and
+  `.downstream(...)` presets. Predictive fold counts map to `xfit_folds`, not
+  the distinct evaluate/nested `n_splits` field.
+- Added `AutoKConfig.from_groups(...)` and seven immutable module-scoped option
+  group types. They flatten immediately into the unchanged 49 fields; direct
+  flat construction, defaults, equality, representation, replacement, and
+  pickle contracts are unchanged. Unknown, wrong-type, and conflicting group
+  inputs fail before construction.
+- Completed method-level unused-field warnings, including conditional EBIC,
+  permutation-envelope, plateau, and stability-threshold options. Warnings
+  point to the caller and are suppressed for internal router/consensus copies.
+- Added the 16-name `sift.experimental` namespace. Access through it emits a
+  `FutureWarning`; all 58 ordered top-level exports remain available and
+  warning-free throughout 0.9.
+- Auto-k saturation warnings now distinguish a configured `max_k` cap,
+  exhaustion of the candidate path, and a fold/statistical limit that ends an
+  evaluation curve before the path.
+
+### Correctness
+
+- Smart-sampler regression targets now remain float64, are robustly centered
+  on the pilot median, and use two-fold cross-fitted predictions for every row.
+  This prevents large-offset target collapse and in-sample residual optimism;
+  non-pilot rows use one unseen fold model to preserve a comparable residual
+  scale, and constant pilot targets now disable the residual blend.
+- Stability selectors now reject one-dimensional inputs with a clear
+  `ValueError`. Elbow selection accepts integer objective paths, validates its
+  direct arguments, and stops before the first feature in a patience-confirmed
+  flat-gain run rather than retaining that zero-gain feature, subject to the
+  configured `min_k` floor.
+- CatBoost result objects persist `selection_patience`, so
+  `features_within_tolerance()` uses the same consecutive-miss rule as fit-time
+  selection.
+- Weighted binned JMI/JMIM now use weighted quantile edges as well as weighted
+  entropy counts. Zero-weight rows do not affect binning, and multiplying all
+  weights by a positive constant does not change the estimand. Integer
+  frequency ratios are reduced by any common global factor rather than
+  treating that factor as extra replicated sample size.
+- Grouped time-block stability bootstrap now honors `sample_frac` with a rounded
+  panel-wide draw budget allocated across unequal groups. Moving, circular, and
+  stationary windows draw with replacement and preserve the full-panel budget
+  at `sample_frac=1.0`.
+- Finite weighted knockoff-variance reductions use `np.dot` instead of NumPy's
+  matmul ufunc path, avoiding false divide/overflow warnings observed with
+  NumPy 2.2 while preserving selections and statistics.
+
+### CI and packaging
 
 - Added `[tool.pytest.ini_options]`: `testpaths = ["tests"]` and the registered
   markers `slow`, `catboost`, and `categorical`. The optional-dependency markers
@@ -249,11 +525,34 @@
   3.12 matrix jobs identically**, because `scikit-learn>=1.3,<2` and
   `numpy>=1.24,<3` resolve straight to them. When this was written the band
   stopped at scikit-learn `<1.8` and numpy `<2.5`, with 13 open failures.
-  Those are now closed — see *Stage 2 — latest-dependency compatibility* below,
+  Those are now closed — see *Latest-dependency compatibility* below,
   which records the current verified band. `docs/development.md` carries the
   band and the ready-to-enable job definition.
+- The 0.9 compatibility matrix now covers every public export behaviorally and
+  expands the high-risk cross-products across fixed/Auto-K filters, cache tuple
+  shapes and defaults, group/time contexts, categoricals, smart sampling,
+  `select_fdr`, CatBoost, sklearn-style wrappers, stability, Boruta, knockoffs,
+  and permutation importance. Internal deprecation helpers have exact
+  warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
+  dedicated D9 fixed-path timing runner with checksum-bound environment/source
+  provenance. The summarizer now requires the sidecar and verifies its full-run
+  mode, clean state, artifact checksum, seed set, and source hashes against the
+  recorded Git commit rather than the later working tree. The
+  clean `88a8705` run is committed as
+  `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` with
+  `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`, and the explicit
+  mean-oracle recomputation is
+  `auto_k_v2_gates_mean_oracle_2026-08-31.csv`. The mixed-convention legacy gate
+  CSV remains intentionally unchanged; the dated G5 ratio is labeled cross-run
+  evidence rather than a reconstruction of the missing July denominator.
+- Distribution metadata now uses the SPDX `MIT` license expression and ships
+  the `py.typed` marker declared by PEP 561. Release CI builds and metadata-checks
+  source and wheel distributions, clean-installs the exact wheel, verifies its
+  license and typed-package metadata, and rejects leaked repository-only packages.
+  The exact distributions are attached to the GitHub Release but are not published
+  to PyPI.
 
-### Stage 2 — latest-dependency compatibility
+### Latest-dependency compatibility
 
 The whole declared band is now exercised, not just its floors. The newest
 resolution `pyproject.toml` allows — numpy 2.5.2, scikit-learn 1.9.0,
@@ -306,312 +605,63 @@ was added to `pyproject.toml`.
   `@pytest.mark.filterwarnings` naming that exact message, per the audited
   policy.
 
-### Sklearn integration
+### Documentation
 
-- All eight public selector classes now subclass `SelectorMixin` and expose
-  support masks, ordered support indices, selected feature names, and dense
-  `inverse_transform`. Sparse matrices are rejected consistently during fit,
-  transform, and inverse transform.
-- Added `output_order="legacy"|"original"`. The default preserves filter and
-  knockoff selection order, Boruta input order, and Stability descending
-  selection-frequency order; `"original"` is the additive input-order option.
-- Added explicit, version-gated sklearn metadata routing. The dependency floor
-  remains `scikit-learn>=1.3,<2`: 1.3 callers pass fit metadata directly, while
-  sklearn 1.4+ can route requested metadata through Pipeline and
-  `cross_validate(params=...)`. Fixed-k filters reject group/time requests,
-  Knockoff exposes only weights, and smart-sampler conflicts fail before fit.
-- Scoped private `RidgeCV`, `GridSearchCV`, and threshold-tuning pipelines out
-  of an outer estimator's routing context, preserving their historical fit
-  semantics on sklearn 1.5 and 1.7. The compatibility audit documents, without
-  silently changing selections, that inner auto-k Ridge alpha CV does not yet
-  consume group/time context and Stability automatic-alpha validation scoring
-  remains unweighted in 0.9.
-- Pinned a common green sklearn estimator-check list and selector tags across
-  all classes. All audited selectors handle non-finite feature values and
-  require `y`; only Knockoff is tagged non-deterministic.
-
-### Leakage-safe categorical encoding
-
-- Added `cat_encoding="target_cv"` for regression and binary DataFrame inputs.
-  One SIFT encoder serves every fold kind; it requires no `category_encoders`
-  extra, preserves one output column per raw feature, normalizes missing values
-  to one learned category, and maps unseen inference categories to a zero
-  centered effect (the global-mean estimate before centering). See the Stage 1
-  section below for the centering correction and its metadata repairs.
-- Function filter results conditionally record the fixed-fold encoding kind and
-  effective split count. Selector classes and Boruta retain the full-training
-  encoder for target-blind `transform`, expose the same information through
-  `categorical_encoding_metadata_`, and return the cross-fitted selected
-  training columns from `fit_transform` where applicable.
-- Added `target_cv_n_splits`, `target_cv_smoothing`, `target_prior`, and
-  `warmup_policy` to filter and Boruta entry points. Weighted, grouped, and
-  time-aware folds accept `target_cv_smoothing="auto"` alongside an explicit
-  numeric value (see the Stage 1 note above; they briefly required the explicit
-  value). Group folds exclude held-out
-  groups; time folds keep ties together, use strictly earlier history, and
-  remove earliest no-history rows from selection unless a target-independent
-  prior is supplied. Contextual filter calls remain limited to auto-k evaluate
-  routes, while fixed-k `groups`/`time` rejection is unchanged.
-- Existing defaults and unsafe expert encoders are unchanged. Multiclass is
-  still rejected until block-aware expansion exists.
-
-## 0.9.0b1 (2026-08-31)
-
-### Additive conventions
-
-- DataFrame callers may use `groups="column"` and `time="column"` wherever
-  those row arrays are accepted. SIFT extracts the metadata positionally and
-  removes it from the feature namespace; direct arrays remain positional, and
-  fixed-k filters continue to reject row context.
-- CatBoost selection adds trailing `groups`, `time`, and `sample_weight`
-  arrays while retaining `group_col` and `sample_weight_col` aliases. Alias
-  conflicts raise, supplied time values are validated and stably order aligned
-  rows before the configured splitter, and translated-parameter collisions
-  emit a `UserWarning` while preserving the 0.9 `catboost_params`-wins rule.
-- `StabilitySelector(penalty=...)` is an additive alias for `alpha`; unequal
-  simultaneous values raise. Threshold tuning, explicit feature-path
-  evaluation, and auto-k evaluation accept estimator-style sklearn scorer
-  objects. Path and auto-k routes negate signed scorer output into their
-  historical lower-is-better curves.
-- `select_cached(..., return_result=True)` returns a complete `SelectionView`
-  with cache provenance, selected positions, relevance, and objective-path
-  diagnostics. Its four legacy list/tuple forms and default remain unchanged.
-- The existing `None` defaults on Stability, permutation importance, and
-  CatBoost now emit a caller-facing `FutureWarning` when used; they remain
-  nondeterministic in 0.9 and will resolve to seed 0 in 1.0. Literal-42
-  defaults and all existing `n_jobs` defaults remain unchanged in 0.9.
-
-### Auto-k ergonomics
-
-- Added `AutoKConfig.default()`, `.predictive(...)`, `.discovery(...)`, and
-  `.downstream(...)` presets. Predictive fold counts map to `xfit_folds`, not
-  the distinct evaluate/nested `n_splits` field.
-- Added `AutoKConfig.from_groups(...)` and seven immutable module-scoped option
-  group types. They flatten immediately into the unchanged 49 fields; direct
-  flat construction, defaults, equality, representation, replacement, and
-  pickle contracts are unchanged. Unknown, wrong-type, and conflicting group
-  inputs fail before construction.
-- Completed method-level unused-field warnings, including conditional EBIC,
-  permutation-envelope, plateau, and stability-threshold options. Warnings
-  point to the caller and are suppressed for internal router/consensus copies.
-- Added the 16-name `sift.experimental` namespace. Access through it emits a
-  `FutureWarning`; all 58 ordered top-level exports remain available and
-  warning-free throughout 0.9.
-
-### Additive result views
-
-- Added `SelectionView` and `sift.as_result(...)` without changing legacy return
-  types, constructors, or defaults. The first A1 slice adapts
-  `FilterSelectionResult` and `KnockoffSelectionResult`, and adds matching
-  `.result_view()` methods. The same five accessors expose selected names,
-  positions, count, the available raw table, and copied metadata.
-- The A2a slice adds non-replacing adapters and `.result_view()` methods for
-  `BorutaResult` and `FeaturePathEvaluationResult`. Boruta retains a complete
-  positional table and maps mean importance to `gain`; feature-path views leave
-  discarded raw positions unknown unless explicit input names resolve uniquely,
-  and expose the tested lower-is-better score as a normalized curve.
-- The A2b slice adds the same non-replacing adapter and `.result_view()` method
-  for `CatBoostSelectionResult`. It preserves the target-k versus returned-count
-  distinction, normalizes the direction-aware score curve, derives standard
-  errors only when raw split scores provide a denominator, and keeps raw
-  identity partial unless the caller supplies it explicitly.
-- The A2c slice adds a dynamic `StabilitySelector.result_view_` and
-  `sift.as_result(fitted_selector)` adapter. Its complete table uses fitted
-  candidate order, maps mean absolute coefficient to `gain`, preserves capped
-  selection membership from the legacy integer indices, and exposes a frozen
-  column-subset transform without retaining training rows or bootstrap
-  coefficient matrices. New fits record DataFrame-versus-positional provenance;
-  no constructor parameter, legacy fitted attribute, return type, or default
-  changes.
-- The A2d slice completes the seven-family core adapter coverage. The default
-  `permutation_importance` return remains its exact four-column DataFrame;
-  `return_result=True` opts into module-scoped `ImportanceResult`, whose
-  defensive-copy repeat matrix is aligned to original feature positions.
-  Its complete view preserves duplicate labels positionally and marks every
-  evaluated feature as a `ranking_only` report rather than inventing a subset
-  threshold.
-- Views serialize to JSON-safe schema version `"1"`, preserve positional
-  identity in `selected_index`, report incomplete tables explicitly, and use
-  `input_kind="unknown"` when a legacy result cannot prove whether its source
-  was named or positional. Partial views now reject table-only plots instead of
-  presenting incomplete data as complete.
-- Added explicit bounded proxy storage to `select_cached` and Gaussian filter
-  result paths. `return_result=True, store_proxies=True` retains only the
-  post-screening candidate-by-selected copula correlations as `float32`, with
-  a 64 MiB cap and no retained `X` or cache. Name lookup rejects ambiguous
-  duplicate labels and `proxies_at(...)` provides positional access. Existing
-  calls, return types, and serialized default results are unchanged.
-
-## 0.9.0a1 (2026-08-31)
-
-### Breaking changes and migration
-
-- `stability_regression(..., k=…)` and `stability_classif(..., k=…)` no longer
-  pad short selections with never-selected features: `k` caps the count and
-  `threshold` gates membership, so wrappers can now return fewer than `k`
-  features (including zero). Rank by `selection_frequencies_` yourself if you
-  need a fixed-size list.
-- `k='auto'` (router) calls now emit a `UserWarning` when they select zero
-  features, and `select_cefsplus` warns when `y` contains only 3-20 distinct
-  integer-valued levels (labels-shaped targets). Selector classes reject 1-D
-  `X` with a `ValueError` instead of an `IndexError`. Binary log-loss CEFS+
-  automatic routing rejects non-default `auto_dense_*` options with a
-  `ValueError` (there is no log-loss dense-regime diagnostic; the fields were
-  previously warned about, and stripping that warning would have made them
-  silently ignored). Binary Brier selection delegates to Gaussian CEFS+ and
-  retains its dense-check behavior. `StabilitySelector` rejects duplicate
-  DataFrame column labels and duplicate, empty, missing, scalar, or unordered
-  explicit `feature_names` at fit; pass an ordered iterable such as a list,
-  tuple, pandas Index, or one-dimensional NumPy array. Transform validates
-  duplicate labels and missing selected DataFrame columns; `tune_threshold`
-  uses the same identity helper but requires every fitted feature column. A
-  failed fit or refit now leaves the selector unfitted. Column identity is
-  exact for tuple/MultiIndex and missing-value labels, and unhashable labels
-  are rejected clearly. A
-  selector fitted on an unnamed positional ndarray rejects DataFrame input to
-  `transform` or `tune_threshold`, because its generated names cannot establish
-  column identity. Continue passing positional ndarrays, provide explicit
-  `feature_names` when fitting the ndarray, or refit on a DataFrame before
-  passing DataFrames to those methods.
-  The no-config router
-  routes time-context non-CEFS+ Gaussian selectors to
-  `gaussian_cv/time_holdout` with `selection_rule="best"` (previously the
-  `one_se` request fell back to `best` with a warning), no longer re-warns
-  about `auto_dense_*` fields it already consumed, and
-  `StabilitySelector.selection_frequencies_` is now float64.
-- `StabilitySelector(use_smart_sampler=True)` now honors an explicit
-  `feature_names` sequence as an ordered feature subset instead of widening it
-  to every numeric DataFrame column, so existing calls can produce different
-  selections and output widths. Omit `feature_names` to retain the former
-  all-numeric behavior. Configured group/time columns remain sampler metadata
-  and are excluded from an explicit subset. Datetime and timedelta feature
-  columns are rejected before numeric coercion, while a configured datetime
-  `time_col` remains valid metadata. Fold-local `tune_threshold` fits retain
-  required sampler metadata while scoring only the fitted feature subset.
-
-- Prebuilt Gaussian caches now enforce their full source contract. Named caches
-  require the same row count and exact DataFrame names/order; positional caches
-  require a positional ndarray with the same row and feature counts. Reordered,
-  renamed, or duplicate columns raise for named caches, and a DataFrame cannot
-  consume a positional cache. Positional caches cannot detect reordered ndarray
-  columns, so callers must preserve their original positions. Cached filter
-  calls reject call-time `sample_weight`, `subsample`, and construction
-  `random_state`; `select_fdr` still accepts `random_state` because it seeds a
-  fresh knockoff draw, while its `subsample` remains forbidden. Rebuild
-  persisted caches that predate `feature_names_are_synthetic`.
-- Fixed-k filter calls now reject `groups` and `time`; remove those arguments or
-  use `k="auto"` with the matching evaluation strategy. `KnockoffSelector`
-  rejects row `groups`/`time` in every mode; its `feature_groups` option groups
-  features, not observations.
-- Datetime and timedelta feature columns, including native and object-typed
-  NumPy arrays and Arrow date, duration, timestamp, and time-of-day dtypes,
-  now raise before numeric coercion in classic, cache, Boruta, and
-  stability-selection paths. Derive explicit numeric calendar or elapsed-time
-  features before selection.
-- Function-style filters using `task="classification"` follow sklearn's
-  discrete-target contract. String, categorical, integer, and integer-valued
-  floating labels remain valid; non-integral numeric class codes such as
-  `0.5`/`1.5` are classified as continuous and rejected. Re-encode those values
-  as categories or integer IDs. `select_fdr` is separate: it requires a finite
-  numeric target and does not use the classification-task contract.
-- Time holdout moves the requested cut to the nearest boundary between distinct
-  timestamps, preferring the smaller boundary on an exact tie. `val_frac` is
-  therefore approximate and row counts can change. Fewer than two rows,
-  all-tied, missing, or mutually unorderable timestamps now raise.
-- Classic numeric filter feature matrices now stay in float64, preventing
-  large-offset signals from collapsing. Their core feature-array footprint is
-  therefore roughly twice the former float32 path, and peak memory can be
-  higher because of copies or solver workspaces. BLAS runtime and native-thread
-  contention remain workload-dependent; benchmark representative data when
-  choosing the mRMR backend.
-
-### Correctness, API, and documentation
-
-- Long-running fixed and Auto-K filter paths, `select_cached`, filter selector
-  classes, stability bootstraps, Boruta iterations, and CatBoost splits now
-  accept an additive `callback(step, total, info)` hook. Calls are one-based,
-  happen after completed units, receive fresh metadata dictionaries, and
-  propagate callback exceptions. `callback=None` retains the original kernels,
-  selections, return types, defaults, and logging behavior. Fold-local fits
-  inside `StabilitySelector.tune_threshold()` remain silent instead of
-  restarting the public bootstrap callback sequence for every fold.
-- Progress output now uses the `sift` package logger at INFO instead of direct
-  `print` calls. Existing `verbose` defaults and silence behavior are unchanged;
-  `sift.set_verbosity("debug"|"info"|None)` is an additive global control. An
-  application handler whose level rejects INFO no longer suppresses the
-  default fallback progress stream.
-  Every package warning now declares its category and a caller-facing stack
-  level without changing warning counts or categories, and CEFS+ path-depth
-  saturation reports the effective depth actually used.
-- The 0.9 compatibility matrix now covers every public export behaviorally and
-  expands the high-risk cross-products across fixed/Auto-K filters, cache tuple
-  shapes and defaults, group/time contexts, categoricals, smart sampling,
-  `select_fdr`, CatBoost, sklearn-style wrappers, stability, Boruta, knockoffs,
-  and permutation importance. Internal deprecation helpers have exact
-  warn-and-forward tests. The deterministic Auto-K gate summarizer now has a
-  dedicated D9 fixed-path timing runner with checksum-bound environment/source
-  provenance. The summarizer now requires the sidecar and verifies its full-run
-  mode, clean state, artifact checksum, seed set, and source hashes against the
-  recorded Git commit rather than the later working tree. The
-  clean `88a8705` run is committed as
-  `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` with
-  `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`, and the explicit
-  mean-oracle recomputation is
-  `auto_k_v2_gates_mean_oracle_2026-08-31.csv`. The mixed-convention legacy gate
-  CSV remains intentionally unchanged; the dated G5 ratio is labeled cross-run
-  evidence rather than a reconstruction of the missing July denominator.
-- Finite weighted knockoff-variance reductions use `np.dot` instead of NumPy's
-  matmul ufunc path, avoiding false divide/overflow warnings observed with
-  NumPy 2.2 while preserving selections and statistics.
-- Distribution metadata now uses the SPDX `MIT` license expression and ships
-  the `py.typed` marker declared by PEP 561. Release CI builds and metadata-checks
-  source and wheel distributions, clean-installs the exact wheel, verifies its
-  license and typed-package metadata, and rejects leaked repository-only packages.
-  The exact distributions are attached to the GitHub Release but are not published
-  to PyPI.
-
-- Smart-sampler regression targets now remain float64, are robustly centered
-  on the pilot median, and use two-fold cross-fitted predictions for every row.
-  This prevents large-offset target collapse and in-sample residual optimism;
-  non-pilot rows use one unseen fold model to preserve a comparable residual
-  scale, and constant pilot targets now disable the residual blend.
-- Stability selectors now reject one-dimensional inputs with a clear
-  `ValueError`. Elbow selection accepts integer objective paths, validates its
-  direct arguments, and stops before the first feature in a patience-confirmed
-  flat-gain run rather than retaining that zero-gain feature, subject to the
-  configured `min_k` floor.
-- `permutation_importance` accepts sklearn scorer objects and `ScoringSpec`, and
-  exposes `higher_is_better` only for legacy loss callbacks, avoiding a second
-  direction flip for signed scorers. CatBoost result objects
-  persist `selection_patience`, so `features_within_tolerance()` uses the same
-  consecutive-miss rule as fit-time selection. Auto-k saturation warnings now
-  distinguish a configured `max_k` cap, exhaustion of the candidate path, and
-  a fold/statistical limit that ends an evaluation curve before the path.
-- Gaussian/cache-backed sklearn selector constructors use
-  `subsample="auto"`, resolving to 50,000 rows only at fit time. MRMR, JMI,
-  JMIM, and CEFS+ wrappers also use `random_state="auto"`, resolving to seed 0;
-  `KnockoffSelector.random_state` remains numeric because it seeds each fresh
-  draw. These literals preserve explicit cache-override rejection while
-  satisfying sklearn's default-constructible estimator parameter contract.
-- Weighted binned JMI/JMIM now use weighted quantile edges as well as weighted
-  entropy counts. Zero-weight rows do not affect binning, and multiplying all
-  weights by a positive constant does not change the estimand. Integer
-  frequency ratios are reduced by any common global factor rather than
-  treating that factor as extra replicated sample size.
-- Grouped time-block stability bootstrap now honors `sample_frac` with a rounded
-  panel-wide draw budget allocated across unequal groups. Moving, circular, and
-  stationary windows draw with replacement and preserve the full-panel budget
-  at `sample_frac=1.0`.
 - Documentation now records cache/X compatibility and rejected cache overrides,
   fixed-k group/time rejection, the `cat_encoding="none"` default, and the
   stochastic row-order sensitivity of `KnockoffSelector`. Knockoff statistic
   power comparisons are intentionally left data-dependent pending a committed
   quality bakeoff.
-- All sklearn-style selector wrappers now expose `get_feature_names_out()`.
-  `KnockoffSelector` is tagged and documented as row-order-sensitive despite a
-  fixed seed; zero-weight rows are still removed before knockoff RNG draws.
+- Every public export now carries a substantive numpydoc docstring — summary,
+  parameters, returns, and worked examples where the behavior warrants one —
+  across the whole of `sift.__all__`, replacing the one-line stubs that made
+  `help(select_mrmr)` useless. A coverage test pins the surface, so a new export
+  cannot ship undocumented.
+- Every fenced `python` code block in the manual now executes in CI. The README
+  blocks already ran; `DOCS.MD`, `docs/API.md`, `docs/user-guide.md`,
+  `docs/ADVANCED.md`, `docs/troubleshooting.md`, and `docs/results.md` join them,
+  and each block was made standalone rather than inheriting variables defined
+  paragraphs earlier.
+- README and `TODO.MD` were refreshed for the 0.9 surface: `SelectionView` and
+  `sift.as_result`, `cat_encoding="target_cv"`, `output_order`, sklearn metadata
+  routing, the Auto-K presets and option groups, and `sift.experimental`. The
+  stale version, test-count, target-encoding, and release text is gone.
+- **The deprecation ledger's two alias removals are struck.** The CatBoost
+  `group_col`/`sample_weight_col` aliases and stability's `alpha` are permanent:
+  no `FutureWarning` is wired for them and none is planned, so nothing in the
+  ledger claims a deprecation that the code does not emit. Any future removal
+  needs a full warning cycle first. The two warnings SIFT does emit under this
+  policy are the `random_state=None` default-use `FutureWarning`
+  (`StabilitySelector.fit`, `permutation_importance`, `catboost_select`, and
+  their wrappers) and the `sift.experimental` namespace `FutureWarning`; both
+  have production tests.
+- The generated API reference (mkdocs/mkdocstrings), the retirement of
+  `docs/API.md`, the single "which selector" decision tree, the measured
+  runtime/scaling table with its committed script, the data-type support matrix,
+  and the glossary are re-scoped to **0.9.1**. They are documentation debt, not
+  release blockers.
 
-## 0.8.0
+### Deprecation ledger (flips in 1.0)
+
+Reproduced verbatim from §4 of `docs/specs/0.9-product-layer.md`. Nothing in this table
+changes in 0.9; it is the complete list of what 1.0 may flip.
+
+| item | 0.9 state | 1.0 state |
+| --- | --- | --- |
+| `random_state` defaults (`None`/`42` sites) | `None` sites warn on default use; `42` sites remain literal `42` with no sentinel or omission warning | `0` everywhere |
+| `verbose` default | `True`, logging-backed; logging formatting/routing may differ, but selection/returns/default progress behavior does not | `False` |
+| `n_jobs=-1` defaults (stability, permutation, CatBoost) | unchanged, documented | `1` |
+| `transform` output order | `"legacy"` default: filter path/selection order, Boruta original order, Stability descending selection frequency with stable original-index ties; `"original"` opt-in | `"original"` default |
+| `sift.__all__` | 58 names in 0.9.0 (55 existing + 3 additions); later 0.9.x additions are explicitly counted or module-scoped; experimental names warn | §2.C allowlist (42 + explicitly counted landed F additions) |
+| `select_cached` tuple returns | unchanged + `return_result=True` added | tuples deprecated |
+| CatBoost `group_col`/`sample_weight_col` | aliases beside arrays | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
+| stability `alpha` | joined by `penalty=` alias | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
+| overlapping `AutoKConfig` fields | audited + documented in 0.9; no deprecation | consolidated only where the audit proves equivalence |
+| `AutoKConfig` option groups | flat dataclass fields are canonical; group objects are builders/read-only views and are not simultaneous constructor fields | same storage contract unless a separately versioned API is approved |
+| `StabilitySelector.selected_features_` index/name asymmetry | unchanged, documented; `view.features` is the unified accessor | unchanged unless separately decided — **not** auto-flipped |
+| sklearn floor | 1.3 | 1.4 |
+
+## 0.8.0 (never published; folded into 0.9.0)
 
 ### Performance
 
