@@ -2,6 +2,38 @@
 
 ## 0.9.0 (2026-08-31)
 
+### Stage 1 — sklearn contracts
+
+- Fixed a regression that made every non-Knockoff selector crash on duck-typed
+  array input. Dense fit validation no longer calls `np.iscomplexobj` on the
+  raw object, so array-likes that refuse `__array_function__` dispatch (such as
+  the wrapper behind sklearn's `check_sample_weights_not_an_array` and
+  `check_transformer_data_not_an_array`) are materialized through `__array__`
+  and validated normally. DataFrame and sparse handling is unchanged, and wide
+  frames are still checked column-wise without a second materialization.
+- The complex-input error now reads `Complex data not supported by SIFT
+  selectors`, matching the wording sklearn's `check_complex_data` requires.
+- `feature_names_in_` is now sklearn's required one-dimensional NumPy object
+  array on all eight selector classes. Positional fits keep their generated
+  `x0...` names in that public attribute, which is unchanged 0.8 behavior; a
+  private `_fit_feature_names_generated_` marker (already present on
+  `StabilitySelector`) now records named-versus-positional provenance on the
+  filter selectors, `KnockoffSelector`, and `BorutaSelector` as well.
+- Filter and Knockoff `transform` now raise sklearn's standard feature-name
+  mismatch message for all-string DataFrame columns, naming the unexpected and
+  missing labels instead of only reporting that columns differ. Non-string
+  column labels keep SIFT's existing strict order/identity message.
+- `CEFSPlusBinarySelector` declares the legacy `binary_only=True` tag, so
+  sklearn's common checks coerce `y` to two classes rather than tripping the
+  selector's own validation. sklearn 1.6 replaced that flat tag with
+  `Tags.classifier_tags.multi_class`, which only exists for estimators typed as
+  classifiers; the selector remains a transformer and leaves `classifier_tags`
+  unset rather than misdeclaring its estimator type to obtain a tag.
+- Pinned `check_complex_data`, `check_sample_weights_not_an_array`,
+  `check_transformer_data_not_an_array`, and (for the order-strict transforms)
+  `check_dataframe_column_names_consistency` alongside the existing green-check
+  list, plus a duck-array fit regression test for every selector class.
+
 ### Sklearn integration
 
 - All eight public selector classes now subclass `SelectorMixin` and expose

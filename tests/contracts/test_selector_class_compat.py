@@ -230,7 +230,9 @@ def test_filter_selector_default_explicit_and_fitted_contract(
     expected_names = [all_names[expected_index]]
 
     for fitted in (implicit, explicit):
-        assert fitted.feature_names_in_ == all_names
+        assert isinstance(fitted.feature_names_in_, np.ndarray)
+        assert fitted.feature_names_in_.dtype == object
+        assert list(fitted.feature_names_in_) == all_names
         assert fitted.n_features_in_ == 3
         assert fitted.selected_features_ == expected_names
         assert type(fitted.selected_indices_) is np.ndarray

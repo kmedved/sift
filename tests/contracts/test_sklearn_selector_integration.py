@@ -3,25 +3,39 @@
 from __future__ import annotations
 
 import inspect
+import pickle
 import warnings
+from unittest import SkipTest
 
 import numpy as np
+import pandas as pd
 import pytest
 import sklearn
 from scipy import sparse
 from sklearn import config_context
+from sklearn.base import clone
 from sklearn.feature_selection import SelectorMixin
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import GroupKFold, cross_validate
 from sklearn.pipeline import make_pipeline
 from sklearn.utils.estimator_checks import (
+    check_complex_data,
     check_estimators_unfitted,
     check_get_params_invariance,
     check_no_attributes_set_in_init,
     check_parameters_default_constructible,
+    check_sample_weights_not_an_array,
     check_set_params,
+    check_transformer_data_not_an_array,
     check_transformers_unfitted,
 )
+
+try:  # Added in sklearn 1.2; keep the pin tolerant of older/newer layouts.
+    from sklearn.utils.estimator_checks import (
+        check_dataframe_column_names_consistency,
+    )
+except ImportError:  # pragma: no cover - exercised only on unsupported sklearn
+    check_dataframe_column_names_consistency = None
 
 import sift
 
@@ -83,9 +97,75 @@ PINNED_GREEN_CHECKS = (
     check_set_params,
 )
 
+# Checks that exercise duck-typed, complex, and DataFrame-named input.  They fit
+# real data, so they run against the cheap configurations below.
+PINNED_INPUT_CONTRACT_CHECKS = (
+    check_complex_data,
+    check_sample_weights_not_an_array,
+    check_transformer_data_not_an_array,
+)
+
+# sklearn refuses to run transform-equivalence checks against estimators tagged
+# ``non_deterministic``; KnockoffSelector is the only such SIFT selector.
+EXPECTED_CHECK_SKIPS = frozenset(
+    {(sift.KnockoffSelector, "check_transformer_data_not_an_array")}
+)
+
+# BorutaSelector and StabilitySelector deliberately select fitted columns by
+# name in ``transform``, so a reordered or widened DataFrame is honored instead
+# of rejected.  sklearn's column-name check requires strict positional identity,
+# which would contradict that documented contract.
+NAME_BASED_TRANSFORM_CLASSES = (sift.BorutaSelector, sift.StabilitySelector)
+
 SKLEARN_VERSION = tuple(
     int(part) for part in sklearn.__version__.split(".")[:2]
 )
+
+
+def _fast_selector(selector_cls):
+    """Return a cheap but representative instance of ``selector_cls``."""
+    if selector_cls is sift.BorutaSelector:
+        return selector_cls(
+            n_estimators=10,
+            max_iter=2,
+            early_stop_rounds=2,
+            random_state=0,
+            verbose=False,
+        )
+    if selector_cls is sift.StabilitySelector:
+        return selector_cls(n_bootstrap=3, random_state=0, verbose=False)
+    if selector_cls is sift.KnockoffSelector:
+        return selector_cls(verbose=False)
+    return selector_cls(k=2, verbose=False)
+
+
+class _ArrayFunctionRefusingDuckArray:
+    """Local stand-in for sklearn's private ``_NotAnArray`` check helper.
+
+    It is convertible through ``__array__`` but raises from
+    ``__array_function__``, which is exactly what made ``np.iscomplexobj`` on
+    raw fit input crash. The helper is defined here because sklearn's own class
+    is private and has moved between versions.
+    """
+
+    def __init__(self, data):
+        self.data = np.asarray(data)
+
+    def __array__(self, dtype=None, copy=None):
+        return self.data
+
+    def __array_function__(self, func, types, args, kwargs):
+        raise TypeError(f"Don't want to call array_function {func.__name__}!")
+
+
+def _fit_data(selector_cls, n_samples: int = 60, n_features: int = 4):
+    """Return (X, y) that every selector class can fit."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(n_samples, n_features))
+    signal = X[:, 0] + 0.5 * X[:, 1]
+    if selector_cls is sift.CEFSPlusBinarySelector:
+        return X, (signal > 0).astype(np.int64)
+    return X, signal + rng.normal(scale=0.1, size=n_samples)
 
 
 @pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
@@ -96,6 +176,145 @@ def test_selector_mixin_default_and_pinned_green_checks(selector_cls):
     assert selector.output_order == "legacy"
     for check in PINNED_GREEN_CHECKS:
         check(selector_cls.__name__, selector)
+
+
+@pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
+def test_pinned_duck_typed_and_complex_input_checks(selector_cls):
+    """Pin the input-validation checks fixed in the 0.9 sklearn repair."""
+    for check in PINNED_INPUT_CONTRACT_CHECKS:
+        selector = _fast_selector(selector_cls)
+        expected_skip = (selector_cls, check.__name__) in EXPECTED_CHECK_SKIPS
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                check(selector_cls.__name__, selector)
+            except SkipTest:
+                assert expected_skip, f"{check.__name__} was unexpectedly skipped"
+            else:
+                assert not expected_skip, f"{check.__name__} unexpectedly ran"
+
+
+@pytest.mark.skipif(
+    check_dataframe_column_names_consistency is None,
+    reason="check_dataframe_column_names_consistency requires sklearn >= 1.2",
+)
+@pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
+def test_pinned_dataframe_column_names_consistency(selector_cls):
+    """Pin sklearn's feature-name contract for order-strict transforms."""
+    if selector_cls in NAME_BASED_TRANSFORM_CLASSES:
+        pytest.skip(
+            f"{selector_cls.__name__}.transform selects fitted columns by name; "
+            "the ndarray/dtype half of the contract is pinned separately"
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        check_dataframe_column_names_consistency(
+            selector_cls.__name__,
+            _fast_selector(selector_cls),
+        )
+
+
+@pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
+def test_selector_fit_accepts_array_function_refusing_duck_arrays(selector_cls):
+    """Regression: dense validation must not dispatch ``__array_function__``."""
+    X, y = _fit_data(selector_cls)
+    selector = _fast_selector(selector_cls)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = selector.fit(_ArrayFunctionRefusingDuckArray(X), y)
+
+    assert fitted is selector
+    assert fitted.n_features_in_ == X.shape[1]
+    assert fitted.get_support().shape == (X.shape[1],)
+
+
+@pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
+def test_selector_fit_rejects_complex_data_with_sklearn_wording(selector_cls):
+    """sklearn's ``check_complex_data`` matches "Complex data not supported"."""
+    X, y = _fit_data(selector_cls, n_samples=20, n_features=2)
+    X_complex = X.astype(np.complex128) + 1j
+    selector = _fast_selector(selector_cls)
+    with pytest.raises(ValueError, match="Complex data not supported"):
+        selector.fit(X_complex, y)
+
+    frame = pd.DataFrame(X_complex, columns=["a", "b"])
+    with pytest.raises(ValueError, match="Complex data not supported"):
+        _fast_selector(selector_cls).fit(frame, y)
+
+
+@pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)
+def test_feature_names_in_is_object_ndarray_for_named_and_positional_fits(
+    selector_cls,
+):
+    """``feature_names_in_`` follows sklearn's dtype contract in both modes."""
+    X, y = _fit_data(selector_cls)
+    names = [f"col_{i}" for i in range(X.shape[1])]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        named = _fast_selector(selector_cls).fit(pd.DataFrame(X, columns=names), y)
+        positional = _fast_selector(selector_cls).fit(X, y)
+
+    for fitted, expected, generated in (
+        (named, names, False),
+        # Generated ``x0...`` names stay in the public attribute: this is
+        # existing 0.8 behavior, and only the private marker records provenance.
+        (positional, [f"x{i}" for i in range(X.shape[1])], True),
+    ):
+        assert isinstance(fitted.feature_names_in_, np.ndarray)
+        assert fitted.feature_names_in_.ndim == 1
+        assert fitted.feature_names_in_.dtype == object
+        assert list(fitted.feature_names_in_) == expected
+        assert fitted._fit_feature_names_generated_ is generated
+
+        selected = fitted.get_feature_names_out()
+        assert isinstance(selected, np.ndarray)
+        assert selected.dtype == object
+        assert set(selected) <= set(expected)
+
+    # get_params/clone/pickle stay unaffected by the fitted-attribute dtype.
+    assert clone(named).get_params() == _fast_selector(selector_cls).get_params()
+    restored = pickle.loads(pickle.dumps(named))
+    assert list(restored.feature_names_in_) == names
+    assert restored.feature_names_in_.dtype == object
+
+
+def test_cefsplus_binary_declares_binary_only_across_tag_apis():
+    """C6: legacy ``binary_only`` tag plus an honest object-tag representation."""
+    selector = sift.CEFSPlusBinarySelector(k=2, verbose=False)
+
+    # Legacy dict tag API. sklearn <1.6 reads it through ``_safe_tags``; on
+    # newer versions it stays as SIFT's own declaration of the constraint.
+    assert selector._more_tags()["binary_only"] is True
+    # No other selector opts in. sklearn <1.6 seeds the dict with
+    # binary_only=False; on newer versions BaseEstimator contributes no
+    # defaults, so the key is simply absent.
+    assert sift.MRMRSelector()._more_tags().get("binary_only", False) is False
+
+    if SKLEARN_VERSION < (1, 6):
+        from sklearn.utils._tags import _safe_tags
+
+        assert _safe_tags(selector)["binary_only"] is True
+        assert _safe_tags(sift.MRMRSelector())["binary_only"] is False
+    else:
+        from sklearn.utils import get_tags
+
+        tags = get_tags(selector)
+        # sklearn >=1.6 replaced ``binary_only`` with
+        # ``Tags.classifier_tags.multi_class``, which only exists for
+        # estimators typed as classifiers. This selector is a transformer, so
+        # the nearest valid representation leaves ``classifier_tags`` unset
+        # instead of misdeclaring the estimator type to obtain a tag.
+        assert tags.classifier_tags is None
+        assert tags.estimator_type != "classifier"
+        assert tags.transformer_tags is not None
+
+    # Either way the two-class requirement is enforced at fit time.
+    X = np.arange(30, dtype=np.float64).reshape(10, 3)
+    y = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2, 0])
+    with pytest.raises(ValueError, match="exactly two target classes"):
+        selector.fit(X, y)
 
 
 def _fitted_filter_selector(output_order: str):

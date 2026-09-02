@@ -118,7 +118,9 @@ def test_stability_default_explicit_weight_and_metadata_contract(
     )
 
     for fitted in (implicit, explicit):
-        assert fitted.feature_names_in_ == all_names
+        assert isinstance(fitted.feature_names_in_, np.ndarray)
+        assert fitted.feature_names_in_.dtype == object
+        assert list(fitted.feature_names_in_) == all_names
         assert fitted.n_features_in_ == 3
         assert fitted.selected_feature_names_ == expected_names
         assert fitted.n_features_selected_ == 1

@@ -16,6 +16,8 @@ from sklearn.utils.validation import check_is_fitted
 from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback
 from sift._selector_compat import (
+    check_fitted_column_identity,
+    feature_names_array,
     inverse_selected_matrix,
     ordered_indices,
     reject_sparse,
@@ -121,11 +123,22 @@ def _require_2d_x(X) -> None:
 
 
 def _feature_names_or_default(X) -> list[str]:
+    return _feature_names_with_provenance(X)[0]
+
+
+def _feature_names_with_provenance(X) -> tuple[list[str], bool]:
+    """Return fitted feature names plus whether they were generated positionally.
+
+    Generated ``x0...`` names stay in the public ``feature_names_in_`` attribute
+    because that is the established 0.8 behavior; the boolean is the private
+    provenance marker used wherever named and positional fits must be told
+    apart.
+    """
     feature_names = extract_feature_names(X)
     if feature_names is not None:
-        return list(feature_names)
+        return list(feature_names), False
     n_features = np.asarray(X).shape[1]
-    return [f"x{i}" for i in range(n_features)]
+    return [f"x{i}" for i in range(n_features)], True
 
 
 def _slice_rows(X, idx: np.ndarray):
@@ -295,6 +308,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             "categorical_encoding_metadata_",
             "categorical_features_",
             "_categorical_encoding_applied_",
+            "_fit_feature_names_generated_",
             "feature_names_in_",
             "n_features_in_",
             "selected_features_",
@@ -454,7 +468,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             call_params.update(fit_params)
         self._resolve_auto_selector_params(call_params)
 
-        feature_names = _feature_names_or_default(X)
+        feature_names, names_generated = _feature_names_with_provenance(X)
         X_fit = self._fit_transform_categoricals(
             X,
             y,
@@ -495,7 +509,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 selected_features,
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = selected_features
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
@@ -793,8 +808,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             getattr(self, "_row_metadata_columns_", ()),
         )
         if isinstance(X, pd.DataFrame):
-            if list(X.columns) != list(self.feature_names_in_):
-                raise ValueError("DataFrame columns must match fitted columns and order")
+            check_fitted_column_identity(X, self.feature_names_in_)
             X = self._transform_categoricals(X)
             return X.iloc[:, self._output_indices()]
         X_arr = np.asarray(X)
@@ -824,7 +838,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return names of selected features following sklearn's transformer API."""
         check_is_fitted(self, ["selected_indices_", "feature_names_in_", "n_features_in_"])
-        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        fitted_names = feature_names_array(self.feature_names_in_)
         if input_features is not None:
             input_names = np.asarray(input_features, dtype=object)
             if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
@@ -1016,6 +1030,28 @@ class CEFSPlusBinarySelector(_BaseSelector):
     ):
         self._init_selector(select_cefsplus_binary, locals())
 
+    def _more_tags(self):
+        # sklearn <1.6 returns a shared module-level default dict from
+        # BaseEstimator._more_tags, so selector_tags copies it before setting
+        # binary_only=True. The tag makes sklearn's common checks coerce y to
+        # two classes instead of tripping this selector's own validation.
+        return selector_tags(super()._more_tags(), binary_only=True)
+
+    def __sklearn_tags__(self):
+        """Expose the two-class requirement through sklearn's tag APIs.
+
+        sklearn >=1.6 dropped the flat ``binary_only`` key; its replacement,
+        ``Tags.classifier_tags.multi_class``, only exists for estimators typed
+        as classifiers. This selector is a transformer, so the nearest valid
+        representation is to leave ``classifier_tags`` unset (``None``) and let
+        the fit-time two-class validation error stand, rather than misdeclaring
+        the estimator type just to obtain a tag.
+        """
+        parent_tags = getattr(super(), "__sklearn_tags__", None)
+        if parent_tags is None:  # sklearn <1.6 uses the dict API above.
+            return self._more_tags()
+        return selector_tags(parent_tags(), binary_only=True)
+
     def _routes_no_config_auto_k(self) -> bool:
         return True
 
@@ -1097,7 +1133,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
                 "for logistic loo_logit encoding."
             )
 
-        feature_names = _feature_names_or_default(X)
+        feature_names, names_generated = _feature_names_with_provenance(X)
         X_fit = self._fit_transform_categoricals(
             X,
             y,
@@ -1151,7 +1187,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
                 list(result.selected_features),
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = list(result.selected_features)
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
@@ -1284,7 +1321,7 @@ class KnockoffSelector(_BaseSelector):
             call_params.update(fit_params)
         self._resolve_auto_selector_params(call_params)
 
-        feature_names = _feature_names_or_default(X)
+        feature_names, names_generated = _feature_names_with_provenance(X)
         if resolved_cache is None:
             X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
             effective_sample_weight = sample_weight
@@ -1355,7 +1392,8 @@ class KnockoffSelector(_BaseSelector):
                 list(result.selected_features),
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = list(result.selected_features)
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
