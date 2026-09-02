@@ -1413,7 +1413,16 @@ def _append_rows_like(table: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
     dtype.  Aligning dtypes first keeps the concatenation free of pandas'
     all-NA-entry deprecation, which fires whenever an all-missing column would
     otherwise be ignored while inferring the result dtype.
+
+    Widening a column to hold the new missing values is part of that alignment:
+    a numpy ``int64`` or ``bool`` column that the appended rows do not mention
+    (or that they fill with a missing value) is promoted to its nullable
+    counterpart, ``Int64`` or ``boolean``.  That promotion happens **only when
+    rows are actually appended** -- with an empty ``rows`` the helper is an
+    identity and returns ``table`` itself, dtypes and values untouched.
     """
+    if not rows:
+        return table
     missing = pd.DataFrame(rows)
     count = len(missing)
     aligned: dict[str, object] = {}

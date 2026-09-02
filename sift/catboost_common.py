@@ -353,7 +353,7 @@ def _prefilter_features(
     random_state : int, optional
         Random seed.
     verbose : bool
-        Print progress.
+        Emit pre-filter progress at INFO on the ``sift`` logger.
     n_jobs : int
         Parallel jobs for catboost prefilter.
 
