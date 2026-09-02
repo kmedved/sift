@@ -48,6 +48,7 @@ from sift._preprocess import (
     reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
     to_numpy,
+    validate_target_cv_encoding_flags,
 )
 
 from sift.boruta_helpers import (
@@ -645,6 +646,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 delattr(self, attr)
 
     def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
+        validate_target_cv_encoding_flags(
+            self.cat_encoding, self.allow_full_data_target_encoding
+        )
         if self.importance_data == "test" and self.importance == "native":
             raise ValueError(
                 "BorutaSelector(importance_data='test') is not supported with "

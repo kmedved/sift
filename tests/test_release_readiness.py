@@ -11,6 +11,7 @@ import sift.selection.loops as loops_module
 import sift.stability as stability_module
 from sift import (
     BorutaSelector,
+    KnockoffSelector,
     build_cache,
     select_boruta,
     select_boruta_shap,
@@ -261,6 +262,129 @@ def test_function_categorical_defaults_are_safe_and_truthful():
     with pytest.raises(ValueError, match="Non-numeric columns") as exc_info:
         select_mrmr(X, y, k=1, task="regression", verbose=False)
     assert "leakage-prone" not in str(exc_info.value)
+
+
+def _fold_marker_frame(seed: int, n: int = 600):
+    """Unique-ID fixture reproducing the pre-0.9 target_cv fold-marker leak."""
+    rng = np.random.default_rng(seed)
+    cities = np.array([f"city_{i}" for i in range(8)], dtype=object)
+    city = rng.choice(cities, size=n)
+    effects = dict(zip(cities.tolist(), rng.normal(size=8).tolist()))
+    x1 = rng.normal(size=n)
+    y = x1 + np.array([effects[value] for value in city]) + rng.normal(
+        scale=0.3, size=n
+    )
+    X = pd.DataFrame(
+        {
+            "id": [f"id_{i}" for i in range(n)],
+            "city": pd.Series(city, dtype=object),
+            "x1": x1,
+            "x_noise": rng.normal(size=n),
+        }
+    )
+    return X, y
+
+
+def test_target_cv_is_leakage_safe_for_unique_identifier_columns():
+    """Release gate for the §1.1 centering claim across the whole surface.
+
+    Before centering, the unique ``id`` column carried each row's complement
+    folds' prior and entered mRMR's top three in every seed of this design.
+    """
+    for seed in range(8):
+        X, y = _fold_marker_frame(seed)
+        for selector, kwargs in (
+            (select_mrmr, {"task": "regression", "estimator": "classic"}),
+            (select_jmi, {"task": "regression", "estimator": "r2"}),
+            (select_jmim, {"task": "regression", "estimator": "r2"}),
+        ):
+            selected = selector(
+                X,
+                y,
+                3,
+                cat_encoding="target_cv",
+                subsample=None,
+                verbose=False,
+                **kwargs,
+            )
+            assert "id" not in selected, f"{selector.__name__} seed={seed}"
+
+    X, y = _fold_marker_frame(0)
+    selector = BorutaSelector(
+        n_estimators=20,
+        max_iter=2,
+        cat_encoding="target_cv",
+        verbose=False,
+    ).fit(X, y)
+    assert "id" not in selector.selected_features_
+
+
+def test_target_cv_rejects_the_full_data_escape_hatch_across_entry_points():
+    """Release gate for C3: the contradictory combination is never ignored."""
+    X, y = _fold_marker_frame(1, n=120)
+    y_binary = (y > np.median(y)).astype(np.int64)
+    message = "cannot be combined with allow_full_data_target_encoding=True"
+
+    with pytest.raises(ValueError, match=message):
+        select_mrmr(
+            X,
+            y,
+            1,
+            task="regression",
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+    with pytest.raises(ValueError, match=message):
+        select_cefsplus_binary(
+            X,
+            y_binary,
+            1,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+    with pytest.raises(ValueError, match=message):
+        select_boruta(
+            X,
+            y,
+            n_estimators=10,
+            max_iter=2,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+
+
+def test_knockoff_fdr_claims_stay_honest_under_categorical_encoding():
+    """Release gate for C4: no silent Model-X claim on target-derived inputs."""
+    rng = np.random.default_rng(4242)
+    n = 240
+    signal = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "team": pd.Series(
+                np.resize(np.array(["a", "b", "c", "d"], dtype=object), n),
+                dtype=object,
+            ),
+            "signal": signal,
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = (signal + 0.4 * rng.normal(size=n) > 0).astype(np.int64)
+
+    with pytest.raises(ValueError, match="does not support cat_encoding='target_cv'"):
+        KnockoffSelector(q=0.2, cat_encoding="target_cv", verbose=False).fit(X, y)
+
+    # select_fdr deliberately gains no cat_encoding parameter: function parity
+    # is not a valid fix for a claim that does not survive the encoding.
+    assert "cat_encoding" not in inspect.signature(select_fdr).parameters
+
+    legacy = KnockoffSelector(q=0.2, cat_encoding="loo_logit", verbose=False)
+    with pytest.warns(UserWarning, match="no FDR claim applies"):
+        legacy.fit(X, y)
+    assert legacy.result_.selector_metadata["fdr_control"] == "none"
+    assert "validity_note" in legacy.result_.selector_metadata
 
 
 def test_routed_auto_k_metadata_omits_unused_strategy_and_selection_rule():

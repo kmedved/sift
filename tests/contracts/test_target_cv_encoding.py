@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,32 @@ import pytest
 import sift
 from sift._preprocess import TargetCVEncoder
 from sift.selection.auto_k import AutoKConfig, select_k_auto
+
+
+def _fold_marker_data(seed: int, n: int = 600):
+    """Unique-ID fixture used by the §1.1 centering acceptance tests.
+
+    ``id`` is unique per row, so under raw fold-prior emissions every row was
+    encoded with its complement folds' prior and the column became an
+    anti-correlated fold marker that entered mRMR's top three.
+    """
+    rng = np.random.default_rng(seed)
+    cities = np.array([f"city_{i}" for i in range(8)], dtype=object)
+    city = rng.choice(cities, size=n)
+    effects = dict(zip(cities.tolist(), rng.normal(size=8).tolist()))
+    x1 = rng.normal(size=n)
+    y = x1 + np.array([effects[value] for value in city]) + rng.normal(
+        scale=0.3, size=n
+    )
+    X = pd.DataFrame(
+        {
+            "id": [f"id_{i}" for i in range(n)],
+            "city": pd.Series(city, dtype=object),
+            "x1": x1,
+            "x_noise": rng.normal(size=n),
+        }
+    )
+    return X, y
 
 
 def _regression_categorical_data(seed: int = 1701):
@@ -120,7 +148,7 @@ def test_target_cv_binary_function_and_selector_contract():
 
 def test_target_cv_selector_uses_oof_training_and_target_blind_inference():
     n = 50
-    X = pd.DataFrame({"id": [f"row_{i}" for i in range(n)]})
+    X = pd.DataFrame({"team": [f"team_{i % 5}" for i in range(n)]})
     y = np.linspace(-3.0, 4.0, n)
     selector = sift.MRMRSelector(
         k=1,
@@ -135,7 +163,9 @@ def test_target_cv_selector_uses_oof_training_and_target_blind_inference():
 
     assert type(training) is pd.DataFrame
     assert training.index.equals(X.index)
-    assert training.columns.tolist() == ["id"]
+    assert training.columns.tolist() == ["team"]
+    # Out-of-fold training values come from fold-local maps; target-blind
+    # inference reuses the full-fit centered map, so the two differ.
     assert not np.allclose(training.to_numpy(), inference.to_numpy())
     assert selector.categorical_encoding_metadata_ == {
         "kind": "fixed_k",
@@ -143,11 +173,13 @@ def test_target_cv_selector_uses_oof_training_and_target_blind_inference():
     }
 
     restored = pickle.loads(pickle.dumps(selector))
-    probe = pd.DataFrame({"id": ["row_0", "unseen"]})
+    probe = pd.DataFrame({"team": ["team_0", "unseen"]})
     np.testing.assert_allclose(
         restored.transform(probe).to_numpy(),
         selector.transform(probe).to_numpy(),
     )
+    # An unseen inference category emits the zero centered effect.
+    assert float(selector.transform(probe).iloc[1, 0]) == 0.0
 
 
 def test_target_cv_unknown_and_missing_categories_have_stable_inference_rules():
@@ -161,14 +193,22 @@ def test_target_cv_unknown_and_missing_categories_have_stable_inference_rules():
     transformed = encoder.transform(
         pd.DataFrame({"category": ["unseen", None, np.nan, "a"]})
     )
-    global_mean = float(encoder.encoder_.target_mean_)
 
     assert training.index.equals(X.index)
     assert pd.api.types.is_float_dtype(training["category"])
-    assert transformed.iloc[0, 0] == pytest.approx(global_mean)
+    # Values are centered effects, so an unseen category emits exactly zero
+    # (the raw global-mean estimate before centering) instead of a prior that
+    # could identify the fitting rows.
+    assert transformed.iloc[0, 0] == 0.0
+    # Missing values stay one learned category with its own nonzero effect, and
+    # every pandas missing sentinel maps to the same value.
     assert transformed.iloc[1, 0] == pytest.approx(transformed.iloc[2, 0])
-    assert transformed.iloc[1, 0] != pytest.approx(global_mean)
-    assert transformed.iloc[3, 0] != pytest.approx(global_mean)
+    assert transformed.iloc[1, 0] != pytest.approx(0.0)
+    assert transformed.iloc[3, 0] != pytest.approx(0.0)
+    # The full-fit centered map is exactly the raw estimate minus its prior.
+    assert encoder.category_maps_["category"]["a"] == pytest.approx(
+        float(transformed.iloc[3, 0])
+    )
 
 
 def test_target_cv_rejects_multiclass_until_block_expansion_exists():
@@ -331,7 +371,40 @@ def test_target_cv_group_folds_never_use_the_held_out_groups_targets():
     assert first.effective_sample_weight_ is None
 
 
+def _time_fold_fixture():
+    """Two categories over three timestamp blocks.
+
+    With centering a single-category column collapses to all zeros, so the
+    fixture carries two categories and pins the centered contrast instead.
+    """
+    X = pd.DataFrame({"category": ["a", "b", "a", "b", "a", "b"]})
+    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
+    time = np.repeat(np.arange(3), 2)
+    return X, y, time
+
+
 def test_target_cv_time_folds_use_strict_history_and_zero_weight_warmup():
+    X, y, time = _time_fold_fixture()
+
+    encoder = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=0.0, cv=3
+    )
+    training = encoder.fit_transform(X, y, time=time)
+
+    # Block 0 has no history and stays at the neutral centered effect.
+    np.testing.assert_allclose(training.iloc[:2, 0], 0.0)
+    # Block 1 is encoded from block 0 alone: prior 150, so a -> -50, b -> +50.
+    np.testing.assert_allclose(training.iloc[2:4, 0], [-50.0, 50.0])
+    # Block 2 is encoded from blocks 0-1: prior 76, a mean 50.5, b mean 101.5.
+    np.testing.assert_allclose(training.iloc[4:, 0], [-25.5, 25.5])
+    np.testing.assert_array_equal(
+        encoder.effective_sample_weight_,
+        np.array([0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+    )
+    assert encoder.encoding_cv_ == {"kind": "time", "n_splits": 3}
+
+
+def test_target_cv_single_category_time_column_carries_no_signal():
     X = pd.DataFrame({"category": ["a"] * 6})
     y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
     time = np.repeat(np.arange(3), 2)
@@ -341,20 +414,13 @@ def test_target_cv_time_folds_use_strict_history_and_zero_weight_warmup():
     )
     training = encoder.fit_transform(X, y, time=time)
 
-    np.testing.assert_allclose(training.iloc[:2, 0], 0.0)
-    np.testing.assert_allclose(training.iloc[2:4, 0], 150.0)
-    np.testing.assert_allclose(training.iloc[4:, 0], 76.0)
-    np.testing.assert_array_equal(
-        encoder.effective_sample_weight_,
-        np.array([0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
-    )
-    assert encoder.encoding_cv_ == {"kind": "time", "n_splits": 3}
+    # Before centering these rows carried each fold's history prior, which is a
+    # pure timestamp marker. Centered, the constant column is exactly zero.
+    np.testing.assert_allclose(training.to_numpy(), 0.0)
 
 
 def test_target_cv_time_prior_is_target_independent_and_keeps_warmup():
-    X = pd.DataFrame({"category": ["a"] * 6})
-    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
-    time = np.repeat(np.arange(3), 2)
+    X, y, time = _time_fold_fixture()
     encoder = TargetCVEncoder(
         ["category"],
         target_type="continuous",
@@ -365,14 +431,15 @@ def test_target_cv_time_prior_is_target_independent_and_keeps_warmup():
 
     training = encoder.fit_transform(X, y, time=time)
 
-    np.testing.assert_allclose(training.iloc[:2, 0], -7.5)
+    # An explicit target-independent prior lets the warmup rows stay in the
+    # selection fit; centered against their own prior they emit a zero effect.
+    np.testing.assert_allclose(training.iloc[:2, 0], 0.0)
+    np.testing.assert_allclose(training.iloc[2:4, 0], [-50.0, 50.0])
     np.testing.assert_allclose(encoder.effective_sample_weight_, np.ones(len(X)))
 
 
 def test_target_cv_time_exclude_policy_removes_warmup_from_selection_weight():
-    X = pd.DataFrame({"category": ["a"] * 6})
-    y = np.array([100.0, 200.0, 1.0, 3.0, 10.0, 14.0])
-    time = np.repeat(np.arange(3), 2)
+    X, y, time = _time_fold_fixture()
     encoder = TargetCVEncoder(
         ["category"],
         target_type="continuous",
@@ -509,3 +576,491 @@ def test_boruta_target_cv_retains_encoder_for_inference():
     transformed = selector.transform(X.iloc[:4])
     assert isinstance(transformed, pd.DataFrame)
     assert transformed.shape[0] == 4
+
+
+# --- 1.1 centering acceptance ---------------------------------------------
+
+
+def test_unique_id_column_has_one_constant_oof_value_and_zero_variance():
+    """Acceptance 1.1.1."""
+    X, y = _fold_marker_data(0)
+
+    encoder = TargetCVEncoder(["id"], target_type="continuous", cv=5)
+    training = encoder.fit_transform(X.loc[:, ["id"]], y)
+    column = training["id"].to_numpy()
+
+    assert np.unique(column).size == 1
+    assert float(column.var()) == 0.0
+    np.testing.assert_allclose(column, 0.0)
+    # Cross-fitting is still real: the full-fit inference map is not constant.
+    assert float(encoder.transform(X.loc[:, ["id"]])["id"].to_numpy().var()) > 0.0
+
+
+@pytest.mark.parametrize("k", [2, 3])
+def test_unique_id_never_outranks_a_nonconstant_noise_feature_in_mrmr(k):
+    """Acceptance 1.1.2 for mRMR across k>1 on the reproduced 8-seed design."""
+    for seed in range(8):
+        X, y = _fold_marker_data(seed)
+        selected = sift.select_mrmr(
+            X,
+            y,
+            k,
+            task="regression",
+            estimator="classic",
+            mrmr_backend="serial",
+            cat_encoding="target_cv",
+            subsample=None,
+            verbose=False,
+        )
+        assert "id" not in selected, f"seed={seed} k={k} selected {selected}"
+        assert len(selected) == k
+
+
+def test_unique_id_carries_zero_relevance_in_the_reported_ranking():
+    """Acceptance 1.1.2: zero relevance, ranked below nonconstant noise."""
+    X, y = _fold_marker_data(0)
+
+    result = sift.select_mrmr(
+        X,
+        y,
+        3,
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+    ranking = result.ranking_.set_index("feature")
+
+    assert float(ranking.loc["id", "relevance"]) == pytest.approx(0.0, abs=1e-12)
+    assert float(ranking.loc["x_noise", "relevance"]) > 0.0
+    assert int(ranking.loc["id", "rank"]) > int(ranking.loc["x_noise", "rank"])
+
+
+@pytest.mark.parametrize(
+    "auto_k_config",
+    [
+        pytest.param(None, id="no_config_router"),
+        pytest.param(
+            AutoKConfig(k_method="penalized_objective", min_k=1, max_k=4),
+            id="penalized_objective",
+        ),
+        pytest.param(
+            AutoKConfig(k_method="gaussian_cv", strategy="kfold", min_k=1, max_k=4),
+            id="gaussian_cv",
+        ),
+    ],
+)
+def test_unique_id_never_outranks_noise_on_cefsplus_routes(auto_k_config):
+    """Acceptance 1.1.2 for select_cefsplus auto-k routes."""
+    for seed in range(8):
+        X, y = _fold_marker_data(seed)
+        selected = sift.select_cefsplus(
+            X,
+            y,
+            k="auto",
+            auto_k_config=auto_k_config,
+            cat_encoding="target_cv",
+            subsample=None,
+            verbose=False,
+        )
+        # Exclusion is not required once k exhausts every nonconstant
+        # candidate, which cannot happen here: the centered id column is
+        # constant and therefore never a viable candidate at all.
+        assert "id" not in selected, f"seed={seed} selected {selected}"
+
+
+def test_requesting_every_column_still_succeeds_without_requiring_exclusion():
+    """Acceptance 1.1.2 carve-out: exclusion is not required at full width.
+
+    With ``k`` equal to the input width the contract only requires the call to
+    succeed and to keep every nonconstant candidate; whether the constant,
+    zero-relevance id column is returned as filler is not pinned.
+    """
+    X, y = _fold_marker_data(0)
+
+    selected = sift.select_mrmr(
+        X,
+        y,
+        4,
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+    )
+
+    assert {"city", "x1", "x_noise"}.issubset(selected)
+    assert set(selected).issubset(set(X.columns))
+
+
+def test_group_proxy_gains_no_relevance_from_complement_fold_priors():
+    """Acceptance 1.1.3 for grouped folds."""
+    groups = np.repeat(np.arange(20), 30)
+    rng = np.random.default_rng(1710)
+    y = groups.astype(float) + rng.normal(scale=0.5, size=groups.size)
+    X = pd.DataFrame({"group_proxy": [f"g_{value}" for value in groups]})
+
+    encoder = TargetCVEncoder(
+        ["group_proxy"], target_type="continuous", smooth=1.0, cv=5
+    )
+    column = encoder.fit_transform(X, y, groups=groups)["group_proxy"].to_numpy()
+
+    # Under raw fold priors this column reached |corr| ~ 0.38 with y purely
+    # from the complement folds' means.
+    assert float(column.var()) == 0.0
+    np.testing.assert_allclose(column, 0.0)
+
+
+def test_timestamp_proxy_gains_no_relevance_from_complement_fold_priors():
+    """Acceptance 1.1.3 for time folds."""
+    time = np.repeat(np.arange(20), 30)
+    rng = np.random.default_rng(1711)
+    y = time.astype(float) + rng.normal(scale=0.5, size=time.size)
+    X = pd.DataFrame({"time_proxy": [f"t_{value}" for value in time]})
+
+    encoder = TargetCVEncoder(
+        ["time_proxy"], target_type="continuous", smooth=1.0, cv=5
+    )
+    column = encoder.fit_transform(X, y, time=time)["time_proxy"].to_numpy()
+
+    # Under raw history priors this column reached |corr| ~ 0.97 with y.
+    assert float(column.var()) == 0.0
+    np.testing.assert_allclose(column, 0.0)
+
+
+def test_mutating_held_out_group_targets_leaves_centered_effects_unchanged():
+    """Acceptance 1.1.4 for grouped folds."""
+    groups = np.repeat(np.arange(6), 4)
+    X = pd.DataFrame({"category": np.tile(["shared", "other"], 12)})
+    y = np.arange(len(X), dtype=float)
+    mutated = y.copy()
+    mutated[groups == 3] += 1e6
+
+    baseline = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=3
+    ).fit_transform(X, y, groups=groups)
+    changed = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=3
+    ).fit_transform(X, mutated, groups=groups)
+
+    held_out = groups == 3
+    np.testing.assert_allclose(
+        baseline.loc[held_out, "category"].to_numpy(),
+        changed.loc[held_out, "category"].to_numpy(),
+    )
+
+
+def test_mutating_future_targets_leaves_earlier_centered_effects_unchanged():
+    """Acceptance 1.1.4 for time folds."""
+    X, y, time = _time_fold_fixture()
+    mutated = y.copy()
+    mutated[4:] += 1e6
+
+    baseline = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=0.0, cv=3
+    ).fit_transform(X, y, time=time)
+    changed = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=0.0, cv=3
+    ).fit_transform(X, mutated, time=time)
+
+    # Blocks 0 and 1 are encoded from strictly earlier history only.
+    np.testing.assert_allclose(
+        baseline.iloc[:4, 0].to_numpy(), changed.iloc[:4, 0].to_numpy()
+    )
+
+
+def test_inference_categories_are_deterministic_after_pickle_round_trip():
+    """Acceptance 1.1.5."""
+    X = pd.DataFrame(
+        {"category": ["a", "a", "b", "b", None, np.nan, "c", "c", "a", "b"]}
+    )
+    y = np.array([0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 1.0, 3.0, 5.0, 7.0])
+    encoder = TargetCVEncoder(["category"], target_type="continuous", cv=2)
+    encoder.fit_transform(X, y)
+
+    probe = pd.DataFrame({"category": ["a", None, np.nan, pd.NA, "unseen"]})
+    before = encoder.transform(probe).to_numpy()
+    restored = pickle.loads(pickle.dumps(encoder))
+    after = restored.transform(probe).to_numpy()
+
+    np.testing.assert_array_equal(before, after)
+    # Known, missing, and unseen each keep a stable, distinct rule.
+    assert before[4, 0] == 0.0
+    assert before[1, 0] == before[2, 0] == before[3, 0]
+    assert before[0, 0] != before[1, 0]
+    np.testing.assert_array_equal(before, encoder.transform(probe).to_numpy())
+
+
+# --- 1.2 metadata acceptance ----------------------------------------------
+
+
+def _binary_time_block_fixture():
+    """Six timestamp blocks with the two earliest zero-weighted."""
+    rng = np.random.default_rng(1712)
+    n = 120
+    time = np.repeat(np.arange(6), 20)
+    category = np.resize(np.array(["p", "q", "r"], dtype=object), n)
+    y = np.resize(np.array([0, 1, 1, 0], dtype=np.int64), n)
+    X = pd.DataFrame(
+        {
+            "category": pd.Series(category, dtype=object),
+            "noise": rng.normal(size=n),
+        }
+    )
+    sample_weight = np.ones(n)
+    sample_weight[time < 2] = 0.0
+    return X, y, time, sample_weight
+
+
+def test_binary_time_route_reports_the_encoders_active_fold_count():
+    """§1.2: the encoder and the public result both report four active folds."""
+    X, y, time, sample_weight = _binary_time_block_fixture()
+
+    encoder = TargetCVEncoder(
+        ["category"], target_type="binary", smooth=2.0, cv=5
+    )
+    encoder.fit_transform(
+        X, y.astype(float), sample_weight=sample_weight, time=time
+    )
+    result = sift.select_cefsplus_binary(
+        X,
+        y,
+        k="auto",
+        auto_k_config=AutoKConfig(
+            k_method="evaluate",
+            strategy="time_holdout",
+            min_k=1,
+            max_k=2,
+            n_splits=2,
+            selection_rule="best",
+        ),
+        time=time,
+        sample_weight=sample_weight,
+        cat_encoding="target_cv",
+        target_cv_smoothing=2.0,
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    # Two of the six timestamp blocks carry zero weight, so only four blocks
+    # are active. Reconstructing the count from all rows reported five.
+    assert encoder.encoding_cv_ == {"kind": "time", "n_splits": 4}
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": "time",
+        "n_splits": 4,
+    }
+
+
+@pytest.mark.parametrize(("selector", "kwargs"), FUNCTION_ROUTES)
+def test_target_cv_metadata_emits_no_stray_top_level_fold_keys(selector, kwargs):
+    """§1.2: only the nested encoding_cv shape survives."""
+    X, y = _regression_categorical_data(1713)
+
+    result = selector(
+        X,
+        y,
+        k=1,
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+        **kwargs,
+    )
+
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": "fixed_k",
+        "n_splits": 5,
+    }
+    assert "kind" not in result.selector_metadata
+    assert "n_splits" not in result.selector_metadata
+
+
+def test_requested_but_absent_categorical_column_does_not_break_rich_results():
+    """§1.2: matches the silent legacy convention instead of raising."""
+    rng = np.random.default_rng(1714)
+    X = pd.DataFrame({"a": rng.normal(size=60), "b": rng.normal(size=60)})
+    y = rng.normal(size=60)
+    y_binary = (y > 0).astype(np.int64)
+
+    binary_result = sift.select_cefsplus_binary(
+        X,
+        y_binary,
+        k=2,
+        cat_features=["missing_cat"],
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+    filter_result = sift.select_mrmr(
+        X,
+        y,
+        k=2,
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_features=["missing_cat"],
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    # No encoding ran, so no encoding metadata is attached anywhere.
+    assert "encoding_cv" not in binary_result.selector_metadata
+    assert "encoding_cv" not in filter_result.selector_metadata
+    assert len(binary_result.selected_features) == 2
+    assert len(filter_result.selected_features) == 2
+
+
+# --- C3 / C4 rejections ----------------------------------------------------
+
+
+def test_function_routes_reject_target_cv_with_full_data_escape_hatch():
+    """C3 at the function entry points."""
+    X, y = _regression_categorical_data(1715)
+    y_binary = (y > np.median(y)).astype(np.int64)
+    message = "cannot be combined with allow_full_data_target_encoding=True"
+
+    for selector, kwargs in (
+        (sift.select_mrmr, {"task": "regression"}),
+        (sift.select_jmi, {"task": "regression"}),
+        (sift.select_jmim, {"task": "regression"}),
+        (sift.select_cefsplus, {}),
+    ):
+        with pytest.raises(ValueError, match=message):
+            selector(
+                X,
+                y,
+                k=1,
+                cat_encoding="target_cv",
+                allow_full_data_target_encoding=True,
+                verbose=False,
+                **kwargs,
+            )
+
+    with pytest.raises(ValueError, match=message):
+        sift.select_cefsplus_binary(
+            X,
+            y_binary,
+            k=1,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+
+
+def test_selector_classes_and_boruta_reject_the_full_data_escape_hatch():
+    """C3 at the selector-class and Boruta entry points."""
+    X, y = _regression_categorical_data(1716)
+    message = "cannot be combined with allow_full_data_target_encoding=True"
+
+    with pytest.raises(ValueError, match=message):
+        sift.MRMRSelector(
+            k=1,
+            task="regression",
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        ).fit(X, y)
+
+    with pytest.raises(ValueError, match=message):
+        sift.CEFSPlusSelector(
+            k=1,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        ).fit(X, y)
+
+    with pytest.raises(ValueError, match=message):
+        sift.CEFSPlusBinarySelector(
+            k=1,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        ).fit(X, (y > np.median(y)).astype(np.int64))
+
+    with pytest.raises(ValueError, match=message):
+        sift.BorutaSelector(
+            n_estimators=10,
+            max_iter=2,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        ).fit(X, y)
+
+    with pytest.raises(ValueError, match=message):
+        sift.select_boruta(
+            X,
+            y,
+            n_estimators=10,
+            max_iter=2,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+
+
+def _knockoff_categorical_data(seed: int = 1717, n: int = 240):
+    rng = np.random.default_rng(seed)
+    signal = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "team": pd.Series(
+                np.resize(np.array(["a", "b", "c", "d"], dtype=object), n),
+                dtype=object,
+            ),
+            "signal": signal,
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = signal + 0.4 * rng.normal(size=n)
+    return X, y
+
+
+def test_knockoff_selector_rejects_target_cv():
+    """C4: target-derived preprocessing has no Model-X claim."""
+    X, y = _knockoff_categorical_data()
+
+    with pytest.raises(ValueError, match="does not support cat_encoding='target_cv'"):
+        sift.KnockoffSelector(q=0.2, cat_encoding="target_cv", verbose=False).fit(X, y)
+
+    # Function parity is deliberately not the fix: select_fdr gains no
+    # cat_encoding parameter.
+    assert "cat_encoding" not in inspect.signature(sift.select_fdr).parameters
+
+
+def test_knockoff_legacy_supervised_encoding_warns_and_drops_the_fdr_claim():
+    """C4: 0.8 compatibility retained only with a warning and no FDR claim."""
+    X, y = _knockoff_categorical_data()
+    y_binary = (y > 0).astype(np.int64)
+
+    selector = sift.KnockoffSelector(q=0.2, cat_encoding="loo_logit", verbose=False)
+    with pytest.warns(UserWarning, match="no FDR claim applies"):
+        selector.fit(X, y_binary)
+
+    metadata = selector.result_.selector_metadata
+    assert metadata["fdr_control"] == "none"
+    assert metadata["per_draw_fdr_control"] == "none"
+    assert metadata["aggregation_preserves_per_draw_fdr"] is False
+    assert metadata["cat_encoding"] == "loo_logit"
+    assert "Model-X exchangeability" in metadata["validity_note"]
+
+
+def test_knockoff_without_supervised_encoding_keeps_its_fdr_claim():
+    """C4 guard: the downgrade is scoped to supervised encodings only."""
+    X, y = _knockoff_categorical_data()
+    numeric = X.drop(columns=["team"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        selector = sift.KnockoffSelector(q=0.2, verbose=False).fit(numeric, y)
+
+    metadata = selector.result_.selector_metadata
+    assert metadata["fdr_control"] == "approximate_plugin"
+    assert "validity_note" not in metadata

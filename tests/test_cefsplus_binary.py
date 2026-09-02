@@ -357,7 +357,7 @@ def test_binary_target_cv_propagates_resolved_sample_weights():
     y = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=float)
     sample_weight = np.array([1.0, 2.0, 1.5, 0.5, 3.0, 1.0, 2.0, 4.0])
 
-    encoded, effective_weight = encode_categoricals_for_binary_selector(
+    encoded, effective_weight, encoding_cv = encode_categoricals_for_binary_selector(
         X,
         y,
         ["team"],
@@ -374,6 +374,8 @@ def test_binary_target_cv_propagates_resolved_sample_weights():
 
     assert isinstance(encoded, pd.DataFrame)
     np.testing.assert_array_equal(effective_weight, sample_weight)
+    # The fitted encoder owns the fold metadata carried into result payloads.
+    assert encoding_cv == {"kind": "fixed_k", "n_splits": 2}
 
 
 def test_binary_target_cv_time_warmup_weights_are_local_to_path(monkeypatch):

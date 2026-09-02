@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import importlib.util
+import warnings
+from dataclasses import replace
 from typing import Callable, Literal
 
 import numpy as np
@@ -29,6 +31,7 @@ from sift._preprocess import (
     ensure_weights,
     extract_feature_names,
     suppress_category_encoder_pandas_warnings,
+    validate_target_cv_encoding_flags,
 )
 from sift.api import (
     select_fdr,
@@ -326,6 +329,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         y_arr = np.asarray(y).reshape(-1)
         return ensure_weights(sample_weight, len(y_arr), normalize=True)
 
+    def _validate_categorical_encoding_params(self) -> None:
+        validate_target_cv_encoding_flags(
+            getattr(self, "cat_encoding", "none"),
+            getattr(self, "allow_full_data_target_encoding", False),
+        )
+
     def _would_fit_supervised_categoricals(self, X) -> bool:
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding not in _SUPERVISED_CLASS_ENCODINGS or not isinstance(X, pd.DataFrame):
@@ -523,6 +532,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     ):
         _require_2d_x(X)
         validate_output_order(self.output_order)
+        self._validate_categorical_encoding_params()
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         resolved_auto_k = auto_k_config
         if resolved_auto_k is None:
@@ -1163,6 +1173,16 @@ class CEFSPlusBinarySelector(_BaseSelector):
         return self
 
 
+_KNOCKOFF_LEGACY_CAT_ENCODINGS = frozenset(
+    {"loo", "target", "james_stein", "loo_logit"}
+)
+_KNOCKOFF_SUPERVISED_ENCODING_NOTE = (
+    "supervised categorical encoding derives features from y, so the Model-X "
+    "exchangeability assumption behind the knockoff filter no longer holds and "
+    "no FDR claim applies to this result"
+)
+
+
 class KnockoffSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_fdr`.
 
@@ -1171,6 +1191,12 @@ class KnockoffSelector(_BaseSelector):
     subsample values are not valid with a cache. The stochastic knockoff
     construction is sensitive to input row order, so this estimator is
     explicitly marked non-deterministic for sklearn estimator checks.
+
+    ``cat_encoding="target_cv"`` is rejected: cross-fitted target encoding is
+    still target-derived preprocessing and would silently invalidate the
+    Model-X claim. The 0.8 supervised encodings remain available for
+    compatibility, but only with an explicit :class:`UserWarning` and result
+    metadata that downgrades ``fdr_control`` to ``"none"``.
     """
 
     _subsample_auto_is_cache_default = True
@@ -1211,6 +1237,19 @@ class KnockoffSelector(_BaseSelector):
 
     def _supports_auto_k(self) -> bool:
         return False
+
+    def _validate_categorical_encoding_params(self) -> None:
+        if self.cat_encoding == "target_cv":
+            raise ValueError(
+                "KnockoffSelector does not support cat_encoding='target_cv'. "
+                "Cross-fitted target encoding is still target-derived "
+                "preprocessing, which breaks the Model-X exchangeability the "
+                "knockoff FDR claim rests on. Pre-encode categoricals "
+                "leakage-safely outside the selector and pass "
+                "cat_encoding='none', or use a filter selector when you need "
+                "target_cv."
+            )
+        super()._validate_categorical_encoding_params()
 
     def _more_tags(self):
         # sklearn <1.6 returns a module-level default dict here.  Copy it
@@ -1254,6 +1293,7 @@ class KnockoffSelector(_BaseSelector):
             raise ValueError("KnockoffSelector does not support time-aware fitting.")
         if auto_k_config is not None:
             raise ValueError("KnockoffSelector is q-based and does not support auto_k_config.")
+        self._validate_categorical_encoding_params()
 
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         if resolved_cache is not None and sample_weight is not None:
@@ -1348,6 +1388,7 @@ class KnockoffSelector(_BaseSelector):
                 **call_params,
             )
 
+        result = self._downgrade_fdr_claim_for_supervised_encoding(result)
         selected_indices = result.selected_indices
         if selected_indices is None:
             selected_indices = _coerce_selection_indices(
@@ -1366,6 +1407,37 @@ class KnockoffSelector(_BaseSelector):
                 self._output_indices(),
             )
         return self
+
+    def _downgrade_fdr_claim_for_supervised_encoding(self, result):
+        """Warn and drop the FDR claim when 0.8 supervised encoding was used.
+
+        The legacy encodings stay available for 0.8 compatibility, but their
+        target-derived columns are not exchangeable with their knockoffs, so the
+        result must not keep advertising an FDR guarantee.
+        """
+        if not getattr(self, "_categorical_encoding_applied_", False):
+            return result
+        if self.cat_encoding not in _KNOCKOFF_LEGACY_CAT_ENCODINGS:
+            return result
+        warnings.warn(
+            f"KnockoffSelector(cat_encoding={self.cat_encoding!r}): "
+            f"{_KNOCKOFF_SUPERVISED_ENCODING_NOTE}. The result reports "
+            "fdr_control='none'. Pre-encode categoricals leakage-safely and "
+            "pass cat_encoding='none' to keep the Model-X FDR claim.",
+            UserWarning,
+            stacklevel=3,
+        )
+        metadata = dict(result.selector_metadata)
+        metadata.update(
+            {
+                "fdr_control": "none",
+                "per_draw_fdr_control": "none",
+                "aggregation_preserves_per_draw_fdr": False,
+                "cat_encoding": self.cat_encoding,
+                "validity_note": _KNOCKOFF_SUPERVISED_ENCODING_NOTE,
+            }
+        )
+        return replace(result, selector_metadata=metadata)
 
 
 __all__ = [

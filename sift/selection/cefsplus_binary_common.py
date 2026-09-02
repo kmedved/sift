@@ -68,6 +68,10 @@ class BinaryPathRun:
     row_idx: np.ndarray
     top_m_eff: int | None
     cat_features: list[str] | None
+    #: The fitted encoder's own ``encoding_cv_``, or ``None`` when no
+    #: categorical encoding ran.  Result metadata reads this instead of
+    #: reconstructing a split count from rows the encoder never used.
+    encoding_cv: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -222,7 +226,7 @@ def build_binary_logloss_path(
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
-    X_encoded, encoding_weights = encode_categoricals_for_binary_selector(
+    X_encoded, encoding_weights, encoding_cv = encode_categoricals_for_binary_selector(
         X,
         problem.y01,
         cat_features,
@@ -280,6 +284,7 @@ def build_binary_logloss_path(
         row_idx=row_idx,
         top_m_eff=top_m_eff,
         cat_features=cat_features,
+        encoding_cv=encoding_cv,
     )
 
 
@@ -489,16 +494,31 @@ def encode_categoricals_for_binary_selector(
 ) -> Union[
     pd.DataFrame,
     np.ndarray,
-    tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None],
+    tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None, dict | None],
 ]:
+    """Encode binary-route categoricals.
+
+    With ``return_effective_weights=True`` the result is
+    ``(X_encoded, effective_weights, encoding_cv)``, where ``encoding_cv`` is
+    the fitted ``target_cv`` encoder's own fold metadata or ``None`` when no
+    encoding was applied.
+    """
     effective_weights = None
+    encoding_cv: dict | None = None
     if not cat_features or cat_encoding == "none":
-        return (X, effective_weights) if return_effective_weights else X
+        return (
+            (X, effective_weights, encoding_cv) if return_effective_weights else X
+        )
     if not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
     present_cat_features = [col for col in cat_features if col in X.columns]
     if not present_cat_features:
-        return (X, effective_weights) if return_effective_weights else X
+        # A requested-but-absent categorical column is silently ignored, exactly
+        # as the legacy supervised encodings do; no encoding metadata is
+        # attached because no encoding ran.
+        return (
+            (X, effective_weights, encoding_cv) if return_effective_weights else X
+        )
     if cat_encoding in {"target", "loo", "james_stein", "loo_logit"} and not allow_full_data_target_encoding:
         raise ValueError(
             f"cat_encoding='{cat_encoding}' fits a supervised categorical encoder "
@@ -524,6 +544,7 @@ def encode_categoricals_for_binary_selector(
             time=time,
         )
         effective_weights = getattr(encoder, "effective_sample_weight_", None)
+        encoding_cv = dict(encoder.encoding_cv_)
     else:
         X_encoded = encode_categoricals(
             X,
@@ -537,7 +558,7 @@ def encode_categoricals_for_binary_selector(
             target_type="binary",
         )
     return (
-        (X_encoded, effective_weights)
+        (X_encoded, effective_weights, encoding_cv)
         if return_effective_weights
         else X_encoded
     )

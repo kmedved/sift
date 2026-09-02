@@ -2,6 +2,56 @@
 
 ## 0.9.0 (2026-08-31)
 
+### Stage 1 — target-encoding correction
+
+- **`cat_encoding="target_cv"` now emits centered category effects.**
+  Out-of-fold training rows emit `fold_encoding - fold_training_prior` and
+  inference rows emit `full_fit_encoding - full_training_prior`. An unknown or
+  unseen category maps to a zero centered effect, i.e. the global-mean estimate
+  before centering, rather than to a prior that identifies its own fold. This is
+  a behavior change: encoded values are now effects around zero, not raw
+  category means.
+- This closes a real leak. A unique-ID column, a group proxy under
+  `groups`/GroupKFold, and a timestamp proxy under `time` were each encoded with
+  their complement folds' prior, which is anti-correlated with the row's own
+  fold. On a 600-row, 8-seed regression fixture the ID entered `select_mrmr`'s
+  top three in 8/8 seeds with `corr(enc(id), y) ~ -0.09`; group proxies reached
+  `|corr| 0.38` and timestamp proxies `0.97`. After centering all three columns
+  are constant zero, carry zero relevance, and are selected in 0/8 seeds.
+- All `target_cv` routing now goes through SIFT's own encoder so one engine
+  carries the guarantee; sklearn's `TargetEncoder` does not expose the per-fold
+  priors the contract needs. Unweighted fixed-k folds keep the previous split
+  construction (`KFold`/`StratifiedKFold(shuffle=True, random_state=...)`) and
+  reproduce sklearn's `smooth="auto"` empirical-Bayes shrinkage exactly, now
+  generalized to weighted rows. Smoothing options, group exclusion, strict-history
+  time folds, tied timestamps, effective weights, the
+  one-raw-column/one-encoded-column contract, and missing-as-its-own-category are
+  unchanged.
+- Earliest temporal rows with an explicit target-independent `target_prior` now
+  emit a centered neutral effect (zero) instead of the raw prior value; without
+  one they still retain zero effective selection weight.
+- Encoding metadata is producer-owned. Results carry only the nested
+  `encoding_cv={"kind": ..., "n_splits": ...}` shape read from the fitted
+  encoder; the stray top-level `kind`/`n_splits` keys that classic and Gaussian
+  function results emitted are gone. `BinaryPathRun` now carries the encoder's
+  actual metadata, so the binary time route reports the four active folds
+  instead of reconstructing five from zero-weight rows.
+- Encoding metadata is attached only when encoding actually ran. A requested but
+  absent `cat_features` column is ignored silently, matching the legacy
+  `loo`/`loo_logit` convention, instead of raising `KeyError: 'encoding_cv'`
+  from `select_cefsplus_binary(..., return_result=True)`.
+- `allow_full_data_target_encoding=True` combined with
+  `cat_encoding="target_cv"` now raises a clear `ValueError` at the function,
+  selector-class, binary, and Boruta entry points instead of being silently
+  ignored.
+- `KnockoffSelector` rejects `cat_encoding="target_cv"`: target-derived
+  preprocessing undermines Model-X exchangeability. The 0.8 supervised encodings
+  (`"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`) remain available there
+  for compatibility, but now emit a `UserWarning` and report
+  `fdr_control="none"` with a `validity_note` in the result metadata. Function
+  parity is deliberately not the fix: `select_fdr` gains no `cat_encoding`
+  parameter.
+
 ### Sklearn integration
 
 - All eight public selector classes now subclass `SelectorMixin` and expose
@@ -29,12 +79,11 @@
 ### Leakage-safe categorical encoding
 
 - Added `cat_encoding="target_cv"` for regression and binary DataFrame inputs.
-  The unweighted, ungrouped path reuses sklearn's cross-fitted `TargetEncoder`;
-  weighted, grouped, and time-aware paths use SIFT's fold-local weighted
-  m-estimate encoder. Neither requires the `category_encoders` extra. Both
-  preserve one output column per raw feature, normalize missing values to one
-  learned category, and map unseen inference categories to the fitted global
-  target mean.
+  One SIFT encoder serves every fold kind; it requires no `category_encoders`
+  extra, preserves one output column per raw feature, normalizes missing values
+  to one learned category, and maps unseen inference categories to a zero
+  centered effect (the global-mean estimate before centering). See the Stage 1
+  section below for the centering correction and its metadata repairs.
 - Function filter results conditionally record the fixed-fold encoding kind and
   effective split count. Selector classes and Boruta retain the full-training
   encoder for target-blind `transform`, expose the same information through

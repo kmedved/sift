@@ -212,21 +212,28 @@ Categorical encoding:
 
 - Filter selectors support `cat_features=[...]` and `cat_encoding="target_cv"`,
   `"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
-- `cat_encoding="target_cv"` is built into SIFT. For unweighted, ungrouped
-  regression and binary targets it delegates to sklearn's `TargetEncoder`;
-  weighted, grouped, and time-aware calls use SIFT's fold-local weighted
-  m-estimate encoder. It maps unseen inference categories to the fitted target
-  mean, treats missing values as one learned category, and needs no optional
-  dependency.
+- `cat_encoding="target_cv"` is built into SIFT and needs no optional
+  dependency. Every fold kind (`fixed_k`, `group`, `time`) runs through one
+  SIFT encoder that emits **centered category effects**: out-of-fold training
+  rows get `fold_encoding - fold_training_prior` and inference rows get
+  `full_fit_encoding - full_training_prior`. Unknown or unseen categories
+  therefore map to a zero centered effect, i.e. the global-mean estimate before
+  centering, so a unique-ID, group-proxy, or timestamp-proxy column cannot
+  identify its own fold through the complement folds' prior. Missing values
+  stay one learned category. The unweighted fixed-k folds reproduce sklearn's
+  `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
+  shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
+  m-estimates.
 - Configure target encoding with `target_cv_n_splits=5` and
   `target_cv_smoothing="auto"`. Custom weighted/group/time modes require an
   explicit non-negative smoothing float. Group folds never use targets from a
   held-out group. Time folds keep tied timestamps together and use only
   strictly earlier history.
 - Earliest time-fold rows have no history. Supply a target-independent
-  `target_prior`, or leave it unset and choose
-  `warmup_policy="zero_weight"` (default) or `"exclude"`; both policies remove
-  those warmup rows from the selection fit through zero effective weight.
+  `target_prior` and they emit a centered neutral effect (zero) while staying in
+  the fit, or leave it unset and choose `warmup_policy="zero_weight"` (default)
+  or `"exclude"`; both policies remove those warmup rows from the selection fit
+  through zero effective weight.
 - `cat_encoding="loo"`, `"target"`, and `"james_stein"` require the
   `category_encoders` package. `cat_encoding="loo_logit"` is built into SIFT
   and is intended for binary targets.
@@ -234,7 +241,14 @@ Categorical encoding:
   encodings (`"loo"`, `"target"`, `"james_stein"`, and `"loo_logit"`) raise unless
   `allow_full_data_target_encoding=True` is passed. That flag preserves the old
   full-dataset encoding behavior and should only be used when leakage has been
-  handled outside the selector.
+  handled outside the selector. It is rejected with `cat_encoding="target_cv"`,
+  which is cross-fitted by construction, at every function, selector-class,
+  binary, and Boruta entry point.
+- `KnockoffSelector` rejects `cat_encoding="target_cv"`: target-derived
+  preprocessing breaks the Model-X exchangeability the FDR claim rests on. The
+  0.8 supervised encodings still work there, but emit a `UserWarning` and
+  report `fdr_control="none"` with a `validity_note` in the result metadata.
+  `select_fdr` has no `cat_encoding` parameter.
 - Fixed-k calls still reject `groups`/`time`; contextual encoding is available
   through auto-k evaluate routes (and nested evaluate mode for selector
   classes). Multiclass remains rejected until block-aware expansion exists.
@@ -1617,14 +1631,16 @@ Important options:
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
   fitting Boruta. `"target_cv"` is the built-in regression/binary cross-fitted
-  option, supports weights and group/time context with explicit custom
-  smoothing, and retains a target-blind inference encoder. Existing
+  option, emits prior-centered category effects (unknown maps to a zero
+  centered effect), supports weights and group/time context with explicit
+  custom smoothing, and retains a target-blind inference encoder. Existing
   supervised encodings (`"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`)
   are fitted on the full dataset, which tree learners can
   invert (leave-one-out values within a category are monotone in the row's own
   target), so Boruta requires `allow_full_data_target_encoding=True` before
-  applying them, exactly like the filter selectors. Prefer pre-encoding
-  categoricals out-of-fold and passing `cat_encoding="none"`.
+  applying them, exactly like the filter selectors. That flag is rejected with
+  `"target_cv"`. Prefer pre-encoding categoricals out-of-fold and passing
+  `cat_encoding="none"`.
   In `importance_data="test"` mode, supervised encodings are rejected outright.
   `cat_encoding="none"` is allowed only when the categorical columns are
   already numeric/pre-encoded; raw object/category columns still fail the
@@ -2104,7 +2120,7 @@ Utility behavior:
 - `check_regression_only`: blocks regression-only estimators for classification.
 - `resolve_jmi_estimator`: maps `estimator="auto"` to `"r2"` or `"binned"`.
 - `subsample_xy`: row-subsamples features, target, and weights.
-- `encode_categoricals`: built-in sklearn `target_cv` plus the optional
+- `encode_categoricals`: built-in centered `target_cv` plus the optional
   target/LOO/James-Stein `category_encoders` backends and binary LOO-logit.
 
 ## Permutation Utilities

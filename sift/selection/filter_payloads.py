@@ -19,7 +19,6 @@ from sift._preprocess import (
     encode_categoricals,
     ensure_weights,
     subsample_xy,
-    target_cv_n_splits,
     to_numpy,
     validate_inputs,
 )
@@ -621,58 +620,30 @@ def standard_extra(aggregation: str | None = None) -> Callable[["FilterContext"]
                 extra[name] = _kw(ctx, name)
         if aggregation is not None:
             extra["aggregation"] = aggregation
-        extra.update(_target_cv_metadata(ctx))
         return extra
 
     return metadata_extra
 
 
-def no_extra(ctx: "FilterContext") -> dict:
-    return _target_cv_metadata(ctx)
+def no_extra(_ctx: "FilterContext") -> dict:
+    return {}
 
 
-def _target_cv_metadata(
-    ctx: "FilterContext", encoding_cv: dict | None = None
-) -> dict:
-    if _kw(ctx, "cat_encoding", "none") != "target_cv":
-        return {}
-    cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
-    if not isinstance(ctx.request.X, pd.DataFrame) or not cat_features:
-        return {}
-    present = [col for col in cat_features if col in ctx.request.X.columns]
-    if not present:
-        return {}
-    target_type = "binary" if ctx.request.task == "classification" else "continuous"
-    if encoding_cv is None:
-        requested_cv = _kw(ctx, "target_cv_n_splits", 5)
-        if ctx.groups is not None:
-            n_splits = min(int(requested_cv), int(pd.unique(ctx.groups).size))
-            kind = "group"
-        elif ctx.time is not None:
-            n_splits = min(int(requested_cv), int(pd.unique(ctx.time).size))
-            kind = "time"
-        else:
-            y_arr = np.asarray(ctx.request.y).reshape(-1)
-            if ctx.request.sample_weight is not None:
-                weights = ensure_weights(
-                    ctx.request.sample_weight, ctx.n_rows, normalize=False
-                )
-                y_arr = y_arr[weights > 0.0]
-            n_splits = target_cv_n_splits(
-                y_arr,
-                target_type=target_type,
-                cv=requested_cv,
-            )
-            kind = "fixed_k"
-        encoding_cv = {"kind": kind, "n_splits": int(n_splits)}
-    else:
-        encoding_cv = {
-            "kind": encoding_cv["kind"],
-            "n_splits": int(encoding_cv["n_splits"]),
-        }
+def target_cv_metadata_from_encoder(encoding_cv: dict | None) -> dict | None:
+    """Normalize a fitted encoder's ``encoding_cv_`` into result metadata.
+
+    The fitted encoder is the only authority on the fold kind and the effective
+    split count, so metadata is never reconstructed from the request.  ``None``
+    means no categorical encoding ran and nothing is attached.
+    """
+    if not encoding_cv:
+        return None
     return {
         "cat_encoding": "target_cv",
-        "encoding_cv": encoding_cv,
+        "encoding_cv": {
+            "kind": encoding_cv["kind"],
+            "n_splits": int(encoding_cv["n_splits"]),
+        },
     }
 
 
@@ -814,8 +785,9 @@ def _binary_payload_from_selection(
         "loo_clip_min": options.loo_clip_min,
         "loo_clip_max": options.loo_clip_max,
     }
-    if _kw(ctx, "cat_encoding") == "target_cv" and run.cat_features:
-        metadata_extra["encoding_cv"] = _target_cv_metadata(ctx)["encoding_cv"]
+    encoding_metadata = target_cv_metadata_from_encoder(run.encoding_cv)
+    if encoding_metadata is not None:
+        metadata_extra.update(encoding_metadata)
     if options.k_value == "auto" and ctx.auto_k_config is not None:
         metadata_extra.update(_binary_auto_metadata(ctx.auto_k_config))
     return SelectionPayload(
@@ -957,7 +929,11 @@ def _encode_categoricals_for_selector(
             groups=groups,
             time=time,
         )
-        return encoded, encoder.effective_sample_weight_, dict(encoder.encoding_cv_)
+        return (
+            encoded,
+            encoder.effective_sample_weight_,
+            target_cv_metadata_from_encoder(encoder.encoding_cv_),
+        )
     return encode_categoricals(
         X,
         y,
