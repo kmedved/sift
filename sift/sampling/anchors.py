@@ -194,7 +194,73 @@ def panel_config(
     time_col: Optional[str] = None,
     sample_frac: float = 0.15
 ) -> SmartSamplerConfig:
-    """Generic preset for panel/longitudinal data."""
+    """Generic preset for panel/longitudinal data.
+
+    Builds a :class:`~sift.SmartSamplerConfig` for repeated observations of the
+    same entities: rows are grouped by ``group_col``, at least two rows per
+    group survive, and the first and last observation of every group are
+    anchored so each entity keeps its endpoints instead of being reduced to a
+    random interior slice. Use it whenever ``smart_sample`` runs on
+    entity-over-time data (customers, patients, tickers, players); use
+    :func:`cross_section_config` when rows are independent.
+
+    Parameters
+    ----------
+    group_col : str
+        Column naming the entity each row belongs to.
+    time_col : str, optional
+        Column ordering rows inside a group. When given, "first" and "last"
+        anchors follow that order; when omitted, they fall back to the frame's
+        own row order.
+    sample_frac : float, default=0.15
+        Target fraction of rows to keep, a finite float in ``(0, 1]``. Anchors
+        and the per-group minimum can push the realized fraction above it.
+
+    Returns
+    -------
+    SmartSamplerConfig
+        A config with ``sample_frac``, ``group_col`` and ``time_col`` set from
+        the arguments, ``anchor_fn=first_and_last_per_group`` and
+        ``min_per_group=2``. Every other field keeps the dataclass default:
+        ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
+        ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
+        ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
+        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=True``.
+        The returned config is a mutable dataclass, so override any of those
+        in place or through ``dataclasses.replace``.
+
+    Raises
+    ------
+    TypeError
+        If ``group_col`` or ``time_col`` is not a string or None, raised by the
+        config's own validation.
+    ValueError
+        If ``sample_frac`` is not a finite value in ``(0, 1]``.
+
+    See Also
+    --------
+    cross_section_config : Preset for independent, non-grouped rows.
+    sift.smart_sample : Consumer of this config.
+    sift.SmartSamplerConfig : The dataclass and its full field list.
+
+    Notes
+    -----
+    ``smart_sample`` combines leverage-based geometric sampling with
+    residual-based hard-case detection and attaches an approximate
+    inverse-probability ``sample_weight`` column, so downstream selectors
+    should pass those weights on. Anchored rows are kept with probability one
+    but are capped at ``anchor_max_share`` of each group's quota. Keyword
+    overrides passed to ``smart_sample`` win over the config's fields.
+
+    Examples
+    --------
+    >>> from sift import panel_config
+    >>> config = panel_config("entity_id", "date", sample_frac=0.25)
+    >>> config.sample_frac, config.group_col, config.time_col
+    (0.25, 'entity_id', 'date')
+    >>> config.min_per_group, config.anchor_fn.__name__
+    (2, 'first_and_last_per_group')
+    """
     return SmartSamplerConfig(
         sample_frac=sample_frac,
         group_col=group_col,
@@ -205,7 +271,65 @@ def panel_config(
 
 
 def cross_section_config(sample_frac: float = 0.15) -> SmartSamplerConfig:
-    """Preset for cross-sectional (non-grouped) data."""
+    """Preset for cross-sectional (non-grouped) data.
+
+    Builds a :class:`~sift.SmartSamplerConfig` for independent rows: no entity
+    column, no time ordering and no anchoring, so ``smart_sample`` treats the
+    whole frame as one group and keeps rows purely on leverage and residual
+    evidence. Use it for one-row-per-subject tables; use
+    :func:`panel_config` when the same entity appears repeatedly, because
+    ignoring that structure lets a large entity crowd the sample.
+
+    Parameters
+    ----------
+    sample_frac : float, default=0.15
+        Target fraction of rows to keep, a finite float in ``(0, 1]``. The
+        realized fraction can exceed it slightly, because deterministic top-up
+        enforces the per-group minimum.
+
+    Returns
+    -------
+    SmartSamplerConfig
+        A config with ``sample_frac`` set from the argument, ``group_col``,
+        ``time_col`` and ``anchor_fn`` all None, and ``min_per_group=1``.
+        Every other field keeps the dataclass default:
+        ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
+        ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
+        ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
+        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=True``.
+        The returned config is a mutable dataclass, so override any of those
+        in place or through ``dataclasses.replace``.
+
+    Raises
+    ------
+    ValueError
+        If ``sample_frac`` is not a finite value in ``(0, 1]``.
+    TypeError
+        If ``sample_frac`` is not a real number, raised by the config's own
+        validation.
+
+    See Also
+    --------
+    panel_config : Preset for grouped, repeated-observation data.
+    sift.smart_sample : Consumer of this config.
+    sift.SmartSamplerConfig : The dataclass and its full field list.
+
+    Notes
+    -----
+    ``smart_sample`` attaches an approximate inverse-probability
+    ``sample_weight`` column, so downstream selectors should pass those weights
+    on. With no ``anchor_fn`` the ``anchor_max_share`` field is inert here.
+    Keyword overrides passed to ``smart_sample`` win over the config's fields.
+
+    Examples
+    --------
+    >>> from sift import cross_section_config
+    >>> config = cross_section_config(sample_frac=0.2)
+    >>> config.sample_frac, config.group_col, config.time_col
+    (0.2, None, None)
+    >>> config.min_per_group, config.anchor_fn is None
+    (1, True)
+    """
     return SmartSamplerConfig(
         sample_frac=sample_frac,
         group_col=None,
