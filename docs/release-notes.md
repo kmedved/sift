@@ -19,6 +19,12 @@
   private `_fit_feature_names_generated_` marker (already present on
   `StabilitySelector`) now records named-versus-positional provenance on the
   filter selectors, `KnockoffSelector`, and `BorutaSelector` as well.
+  **Migration note:** because the attribute is an ndarray rather than a list,
+  `selector.feature_names_in_ == ["a", "b"]` is now an element-wise comparison,
+  and asserting on it raises `ValueError: The truth value of an array with more
+  than one element is ambiguous`. Compare with
+  `list(selector.feature_names_in_) == ["a", "b"]` or
+  `np.array_equal(selector.feature_names_in_, ["a", "b"])` instead.
 - Filter and Knockoff `transform` now raise sklearn's standard feature-name
   mismatch message for all-string DataFrame columns, naming the unexpected and
   missing labels instead of only reporting that columns differ. Non-string
@@ -50,6 +56,20 @@
   top three in 8/8 seeds with `corr(enc(id), y) ~ -0.09`; group proxies reached
   `|corr| 0.38` and timestamp proxies `0.97`. After centering all three columns
   are constant zero, carry zero relevance, and are selected in 0/8 seeds.
+- **Scope of that guarantee: centering neutralizes only unseen-in-fold
+  emissions.** It removes the fold marker; it is not a defence against high
+  cardinality as such. A level that appears two or more times in a fold's
+  training rows still transmits those sibling rows' targets — ordinary
+  target-encoding behavior — so a *near*-unique identifier can still be
+  selected. Measured on a 300-identifier / 2-rows-each fixture whose rows share
+  a latent target, `corr(enc(id), y) ~ 0.88` and `select_mrmr(k=2)` picks `id`.
+  That is genuine cross-row information, not leakage, so the numerics are
+  deliberately unchanged. If it must not reach selection, drop ID-like columns
+  or pass `groups=` so all of an identifier's rows land in one fold — with
+  `groups=` the same column encodes to exactly zero. The boundary is pinned by
+  `test_near_unique_ids_with_a_shared_target_stay_selectable_by_design`,
+  `test_near_unique_ids_without_a_shared_target_are_not_selected`, and
+  `test_grouping_an_identifiers_rows_into_one_fold_removes_the_residual`.
 - All `target_cv` routing now goes through SIFT's own encoder so one engine
   carries the guarantee; sklearn's `TargetEncoder` does not expose the per-fold
   priors the contract needs. Unweighted fixed-k folds keep the previous split
@@ -59,6 +79,23 @@
   time folds, tied timestamps, effective weights, the
   one-raw-column/one-encoded-column contract, and missing-as-its-own-category are
   unchanged.
+- **`target_cv_smoothing="auto"` now works on the weighted, grouped, and
+  time-aware paths too**, which is what the weighted generalization above always
+  described. Those calls previously raised `ValueError: target_cv_smoothing must
+  be an explicit non-negative float ...`, so
+  `select_mrmr(..., cat_encoding="target_cv", sample_weight=...)` and
+  `select_cefsplus_binary(..., cat_encoding="target_cv",
+  class_weight="balanced")` failed on the default smoothing. The weighted prior
+  is the integer formula with every count replaced by weighted row mass
+  (`prior = sum(w*y)/sum(w)`, `s2y = sum(w*(y-prior)^2)/sum(w)`, `w_i` the
+  category's weighted mass, `ssd_i` its weighted sum of squared deviations), so
+  weight `m` and `m` duplicated rows give identical encodings — verified exactly
+  (0.0 max difference), and the full-fit map still matches sklearn's `"auto"` to
+  2.8e-17. No case was found in which `"auto"` is undefined but an explicit
+  float is not: `ensure_weights` already rejects negative, non-finite, and
+  all-zero weights, and a fitting slice with no positive weight mass — the one
+  genuinely undefined case, where neither the weighted prior nor the weighted
+  target variance exists — still raises for both.
 - Earliest temporal rows with an explicit target-independent `target_prior` now
   emit a centered neutral effect (zero) instead of the raw prior value; without
   one they still retain zero effective selection weight.
@@ -159,11 +196,17 @@
   `timeout-minutes` on every job, and a top-level `concurrency` group that
   cancels superseded pull-request runs while letting branch and scheduled runs
   finish. The scheduled `benchmark-smoke` job now also regenerates the Auto-K
-  G1-G6 gate table from the committed raw CSVs, `cmp`s it against the committed
-  artifact, and uploads it as `sift-auto-k-gate-table`; it checks out with
-  `fetch-depth: 0` because the summarizer verifies its provenance sidecar by
-  hashing recorded sources at the commit the sidecar names, which a shallow
-  clone cannot resolve.
+  G1-G6 gate table from the committed raw CSVs, verifies it against the
+  committed artifact with `summarize_auto_k_gates.py --verify-against`, and
+  uploads it as `sift-auto-k-gate-table`; it checks out with `fetch-depth: 0`
+  because the summarizer verifies its provenance sidecar by hashing recorded
+  sources at the commit the sidecar names, which a shallow clone cannot
+  resolve. The comparison is **not** a byte-for-byte `cmp`: gate floats are
+  rendered with 12 significant digits and compared with `rtol=1e-9`, which
+  absorbs last-ulp summation differences between BLAS builds and operating
+  systems (a raw `repr` differed in the 17th digit between macOS/arm64 and
+  Linux CI). Every non-float cell must still match exactly, and the summarizer's
+  own fixture test still pins exact output bytes.
 - Added a `min-pins` job that installs every direct runtime floor exactly
   (numpy 1.24, pandas 2.0, scikit-learn 1.3, scipy 1.10, numba 0.59, joblib 1.3,
   threadpoolctl 3.1) and then `pip install -e . --no-deps`. **These floors had
@@ -275,8 +318,10 @@ was added to `pyproject.toml`.
   `categorical_encoding_metadata_`, and return the cross-fitted selected
   training columns from `fit_transform` where applicable.
 - Added `target_cv_n_splits`, `target_cv_smoothing`, `target_prior`, and
-  `warmup_policy` to filter and Boruta entry points. Custom weighted/group/time
-  folds require explicit numeric smoothing. Group folds exclude held-out
+  `warmup_policy` to filter and Boruta entry points. Weighted, grouped, and
+  time-aware folds accept `target_cv_smoothing="auto"` alongside an explicit
+  numeric value (see the Stage 1 note above; they briefly required the explicit
+  value). Group folds exclude held-out
   groups; time folds keep ties together, use strictly earlier history, and
   remove earliest no-history rows from selection unless a target-independent
   prior is supplied. Contextual filter calls remain limited to auto-k evaluate

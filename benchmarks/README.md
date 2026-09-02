@@ -128,6 +128,12 @@ python benchmarks/summarize_auto_k_gates.py \
   --output benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
 ```
 
+Add `--verify-against <committed table>` to check a regenerated table against
+the committed one; this is what the scheduled `benchmark-smoke` CI job runs. The
+check is numeric, not `cmp`: floats are rendered with 12 significant digits and
+compared at `rtol=1e-9` while every other cell must match exactly, because a raw
+`repr` differs in the 17th digit between macOS/arm64 and Linux CI.
+
 The path-timing seeds must exactly match the D9 method-timing CSV. `mean` is the
 declared convention for the dated canonical recomputation. The clean full run
 recorded 0.1373203751 s for seed 0 and 0.1353520839 s for seed 1 (mean

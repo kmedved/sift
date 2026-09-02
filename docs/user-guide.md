@@ -320,6 +320,18 @@ high-cardinality columns: a unique ID, a group proxy, or a timestamp proxy is
 never present in its own fold's training rows, so it emits a constant zero and
 carries no relevance instead of encoding a fold-identifying prior.
 
+**Know the boundary of that guarantee.** Centering neutralizes only
+*unseen-in-fold* emissions. It removes the fold marker; it is not a defence
+against high cardinality as such. A level that appears two or more times in a
+fold's training rows still transmits those sibling rows' targets — ordinary
+target-encoding behavior — so a *near*-unique identifier stays selectable when
+its rows share a latent target. On a 300-identifier fixture with two rows each,
+`corr(enc(id), y)` is about 0.88 and `select_mrmr(k=2)` picks `id` first. That
+is genuine cross-row information rather than leakage, so SIFT does not remove
+it. If it must not reach selection, drop ID-like columns, or pass `groups=` so
+all of an identifier's rows land in the same fold — under `groups=` the same
+column encodes to exactly zero.
+
 ```python
 selected = select_mrmr(
     X,
@@ -333,8 +345,11 @@ selected = select_mrmr(
 
 Selector classes retain the full-training encoder for target-blind inference,
 while `fit_transform` returns the cross-fitted training columns used for
-selection. Weighted calls use SIFT's weighted m-estimate folds and require an
-explicit smoothing value:
+selection. Weighted calls use SIFT's weighted m-estimate folds. The default
+`target_cv_smoothing="auto"` works there too — the empirical-Bayes prior is the
+unweighted formula with every count replaced by weighted row mass, so weight
+`m` and `m` duplicated rows encode identically — and an explicit float remains
+available when you want to fix the shrinkage:
 
 ```python
 selected = select_mrmr(
@@ -343,7 +358,7 @@ selected = select_mrmr(
     k=10,
     task="regression",
     cat_encoding="target_cv",
-    target_cv_smoothing=20.0,
+    target_cv_smoothing=20.0,  # or leave it at the default "auto"
     sample_weight=weights,
     verbose=False,
 )

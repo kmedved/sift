@@ -639,12 +639,24 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
     fold markers.
 
+    **What centering does and does not guarantee.**  Centering neutralizes only
+    *unseen-in-fold* emissions: a level absent from a fold's training rows emits
+    exactly zero instead of a prior that identifies the complement folds.  It is
+    not a defence against high cardinality as such.  A level that appears two or
+    more times in a fold's training rows still transmits those sibling rows'
+    targets, which is ordinary target-encoding behavior, so a near-unique
+    identifier whose rows share a latent target remains a selectable feature.
+    Drop ID-like columns, or pass ``groups=`` so all of an identifier's rows land
+    in one fold, if that cross-row information must not reach selection.
+
     All fold kinds (``fixed_k``, ``group``, ``time``) run through this one
     engine.  sklearn's ``TargetEncoder`` does not expose the per-fold priors the
     centering contract needs, so it is not used as a backend; the fixed-k folds
     reproduce its ``KFold``/``StratifiedKFold(shuffle=True, random_state=...)``
     split construction and its ``smooth="auto"`` empirical-Bayes shrinkage,
-    generalized to weighted rows.
+    generalized to weighted rows.  ``smooth="auto"`` is available on every fold
+    kind, weighted or not, because that generalization replaces integer counts
+    with weighted row mass (see :meth:`_auto_smoothed_encoding`).
 
     The encoder intentionally preserves one output column per raw categorical
     feature.  sklearn's multiclass target encoding expands every input feature
@@ -680,9 +692,6 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         if missing:
             raise ValueError(f"target_cv columns are missing from X: {missing[:5]}")
 
-    def _effective_cv(self, y) -> int:
-        return target_cv_n_splits(y, target_type=self.target_type, cv=self.cv)
-
     def _requested_cv(self) -> int:
         if isinstance(self.cv, (bool, np.bool_)) or not isinstance(
             self.cv, (int, np.integer)
@@ -693,28 +702,35 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             raise ValueError("target_cv cv must be an integer >= 2")
         return requested
 
-    def _validate_smoothing(self, *, allow_auto: bool) -> Literal["auto"] | float:
-        """Resolve ``target_cv_smoothing`` for the requested fold mode."""
+    def _validate_smoothing(self) -> Literal["auto"] | float:
+        """Resolve ``target_cv_smoothing`` for every fold kind.
+
+        ``"auto"`` is accepted on all of them.  The empirical-Bayes prior it
+        needs is defined by *weighted row mass* rather than integer counts (see
+        :meth:`_auto_smoothed_encoding`), and every quantity that definition
+        requires -- the weighted prior ``sum(w*y)/sum(w)``, the weighted target
+        variance ``sum(w*(y-prior)^2)/sum(w)``, each category's weighted mass and
+        its weighted sum of squared deviations -- exists for any fitting slice
+        with positive total weight.  ``ensure_weights`` already rejects negative,
+        non-finite, and all-zero weights, so there is no weighted, grouped, or
+        time-aware case in which ``"auto"`` is undefined but an explicit float
+        would not be.
+        """
         if self.smooth == "auto":
-            if allow_auto:
-                if self.warmup_policy not in {"exclude", "zero_weight"}:
-                    raise ValueError("warmup_policy must be 'exclude' or 'zero_weight'")
-                return "auto"
-            raise ValueError(
-                "target_cv_smoothing must be an explicit non-negative float for "
-                "weighted, grouped, or time-aware target_cv encoding; "
-                "smooth='auto' is supported only on the unweighted fixed-k path"
-            )
-        if isinstance(self.smooth, (bool, np.bool_)) or not isinstance(
-            self.smooth, (int, float, np.integer, np.floating)
-        ):
-            raise ValueError("target_cv_smoothing must be 'auto' or a non-negative float")
-        smooth = float(self.smooth)
-        if not np.isfinite(smooth) or smooth < 0.0:
-            raise ValueError("target_cv_smoothing must be finite and >= 0")
+            resolved: Literal["auto"] | float = "auto"
+        else:
+            if isinstance(self.smooth, (bool, np.bool_)) or not isinstance(
+                self.smooth, (int, float, np.integer, np.floating)
+            ):
+                raise ValueError(
+                    "target_cv_smoothing must be 'auto' or a non-negative float"
+                )
+            resolved = float(self.smooth)
+            if not np.isfinite(resolved) or resolved < 0.0:
+                raise ValueError("target_cv_smoothing must be finite and >= 0")
         if self.warmup_policy not in {"exclude", "zero_weight"}:
             raise ValueError("warmup_policy must be 'exclude' or 'zero_weight'")
-        return smooth
+        return resolved
 
     def _target_values(self, y) -> tuple[np.ndarray, str]:
         from sklearn.preprocessing import LabelEncoder
@@ -769,6 +785,14 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         (possibly weighted) row mass and ``ssd_i`` its within-category weighted
         sum of squared deviations.  With unit weights this reduces exactly to
         sklearn's integer-count formula.
+
+        The weighted definition is the integer formula with every count replaced
+        by weighted row mass: ``prior = sum(w*y)/sum(w)``,
+        ``s2y = sum(w*(y-prior)^2)/sum(w)``, ``w_i = sum_{rows in i} w``,
+        ``ssd_i = sum_{rows in i} w*(y - mean_i)^2``.  Duplicating a row ``m``
+        times and giving it weight ``m`` therefore produce identical encodings,
+        which is what makes ``smooth="auto"`` well defined for the weighted,
+        grouped, and time-aware paths and not only for unweighted fixed-k folds.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             means = sums / counts
@@ -848,6 +872,23 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             X_out[col] = series.map(mappings[col]).fillna(0.0).astype(np.float64)
         return X_out
 
+    def _active_split_count(
+        self,
+        y: np.ndarray,
+        target_kind: str,
+        active: np.ndarray,
+    ) -> int:
+        """Effective fixed-k fold count over the active (positive-weight) rows.
+
+        ``fit`` and ``fit_transform`` share this so the split count ``fit``
+        advertises is the one ``fit_transform`` would actually cross-fit with.
+        """
+        return target_cv_n_splits(
+            y[active],
+            target_type="binary" if target_kind == "binary" else "continuous",
+            cv=self.cv,
+        )
+
     def _fixed_splits(
         self,
         y: np.ndarray,
@@ -857,11 +898,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         from sklearn.model_selection import KFold, StratifiedKFold
 
         active_idx = np.flatnonzero(active)
-        requested = target_cv_n_splits(
-            y[active],
-            target_type="binary" if target_kind == "binary" else "continuous",
-            cv=self.cv,
-        )
+        requested = self._active_split_count(y, target_kind, active)
         if target_kind == "binary":
             splitter = StratifiedKFold(
                 n_splits=requested,
@@ -980,7 +1017,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 "target_prior and warmup_policy are only meaningful for time-aware "
                 "target_cv fit_transform"
             )
-        smooth = self._validate_smoothing(allow_auto=sample_weight is None)
+        smooth = self._validate_smoothing()
         y_values, target_kind = self._target_values(y_arr)
         weights = ensure_weights(sample_weight, len(X), normalize=False)
         self.category_maps_, self.global_prior_ = self._fit_custom_maps(
@@ -992,8 +1029,10 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         self.target_kind_ = target_kind
         self.fit_mode_ = "sift"
         # ``fit`` alone builds only the target-blind inference maps; the split
-        # count it reports is the one ``fit_transform`` would cross-fit with.
-        self.n_splits_ = self._effective_cv(y_arr)
+        # count it reports is the one ``fit_transform`` would cross-fit with, so
+        # it is computed over the same active (positive-weight) rows rather than
+        # over all rows.  Zero-weight rows never enter a fold.
+        self.n_splits_ = self._active_split_count(y_values, target_kind, weights > 0.0)
         self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
         return self
 
@@ -1025,8 +1064,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             raise ValueError(
                 "target_prior and warmup_policy='exclude' are mutually exclusive"
             )
-        contextual = sample_weight is not None or groups is not None or time is not None
-        smooth = self._validate_smoothing(allow_auto=not contextual)
+        smooth = self._validate_smoothing()
         y_values, target_kind = self._target_values(y_arr)
         raw_weights = ensure_weights(sample_weight, len(X), normalize=False)
         active = raw_weights > 0.0

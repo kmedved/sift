@@ -70,16 +70,24 @@ jobs:
         if: matrix.python-version == '3.12'
         run: ruff check sift tests
 
-  # A Python 3.13 job is DEFERRED, not forgotten. The interpreter itself is not
-  # the blocker: numba ships cp313 wheels from 0.61.0 (llvmlite 0.44.0), above
-  # the 0.59 floor, and a local 3.13.15 run with numba 0.67 reached 1,565 passed
-  # / 3 failed. Those 3 failures, plus 10 more, come from dependency versions
-  # that the current library code does not yet support -- scikit-learn 1.9 and
-  # NumPy 2.5 -- and they break the 3.11/3.12 matrix above in exactly the same
-  # way, because `scikit-learn>=1.3,<2` and `numpy>=1.24,<3` resolve to them.
-  # Adding a 3.13 job today would add a job that cannot pass. See
-  # docs/development.md ("Python 3.13") for the measured support band and the
-  # job definition to enable once the library supports that dependency set.
+  # A Python 3.13 job is DEFERRED, and the reason is now only that it has never
+  # been run in CI -- not that it cannot pass.
+  #
+  # The dependency blockers are gone. The newest resolution `pyproject.toml`
+  # allows -- numpy 2.5.2 / pandas 3.0.5 / scikit-learn 1.9.0 / scipy 1.18.1 /
+  # numba 0.67.0 -- is green at 1,680 passed / 30 skipped, and the `test` matrix
+  # above installs exactly that band, so the whole declared range is exercised
+  # on every run. See docs/development.md ("Verified dependency band").
+  #
+  # The interpreter is not a blocker either: numba ships cp313 wheels from
+  # 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local 3.13.15 run with
+  # numba 0.67 reached 1,565 passed / 3 failed -- those 3 were the numpy 2.5
+  # failures, now closed. `numba>=0.61` is the only 3.13-specific pin the job
+  # needs, because pip otherwise resolves an older numba with no cp313 wheel.
+  #
+  # What is missing is evidence, so the job stays out until someone enables it
+  # and reads its first run rather than assuming it is green. The ready-to-paste
+  # definition is in docs/development.md ("Enabling a Python 3.13 job").
 
   # The advertised dependency floors, actually executed. Every direct runtime
   # requirement is pinned to its declared minimum; `--no-deps` keeps pip from
@@ -137,8 +145,34 @@ jobs:
           pip install -e ".[all,test]"
       - name: Run full suite with CatBoost
         run: pytest -q
+      # `pytest --collect-only -m "catboost or categorical"` was too weak: the
+      # disjunction passes while *either* marker matches, so one of them could
+      # lose every test unnoticed, and "did anything match?" was left to pytest's
+      # exit-code-5 convention instead of being asserted. Count each marker.
       - name: Confirm the optional-dependency markers actually selected tests
-        run: pytest -q -m "catboost or categorical" --collect-only
+        run: |
+          python - <<'PY'
+          import pytest
+
+
+          class CollectedCounter:
+              def __init__(self):
+                  self.count = 0
+
+              def pytest_collection_finish(self, session):
+                  self.count = len(session.items)
+
+
+          empty = []
+          for marker in ("catboost", "categorical"):
+              counter = CollectedCounter()
+              pytest.main(["-q", "--collect-only", "-m", marker], plugins=[counter])
+              print(f"marker {marker!r} selected {counter.count} tests")
+              if counter.count == 0:
+                  empty.append(marker)
+          if empty:
+              raise SystemExit(f"optional-dependency markers selected no tests: {empty}")
+          PY
 
   test-latest-deps:
     if: github.event_name == 'schedule'

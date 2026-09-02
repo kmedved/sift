@@ -345,6 +345,46 @@ def test_target_cv_zero_weight_targets_do_not_affect_custom_encoding():
     )
 
 
+def test_target_cv_fit_reports_the_split_count_fit_transform_would_use():
+    """``fit`` counts folds over active rows, exactly like ``fit_transform``.
+
+    ``fit`` used to run the effective-split calculation over *all* rows, so a
+    frame whose first six rows carry zero weight advertised ``n_splits=5`` while
+    ``fit_transform`` cross-fitted with four.
+    """
+    X = pd.DataFrame({"category": list("aabbccddee")})
+    y = np.arange(10, dtype=np.float64)
+    weight = np.array([0.0] * 6 + [1.0] * 4)
+
+    fitted = TargetCVEncoder(["category"], target_type="continuous", smooth=1.0, cv=5)
+    fitted.fit(X, y, sample_weight=weight)
+    cross_fitted = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth=1.0, cv=5
+    )
+    cross_fitted.fit_transform(X, y, sample_weight=weight)
+
+    assert fitted.encoding_cv_ == {"kind": "fixed_k", "n_splits": 4}
+    assert fitted.encoding_cv_ == cross_fitted.encoding_cv_
+    assert fitted.n_splits_ == cross_fitted.n_splits_
+
+
+def test_target_cv_fit_split_count_matches_fit_transform_on_a_binary_target():
+    X = pd.DataFrame({"category": list("aabbccddeeff")})
+    y = np.array([0, 1] * 6)
+    # Only three rows of each class stay active, so both routes must clamp to 3.
+    weight = np.array([0.0] * 6 + [1.0] * 6)
+
+    fitted = TargetCVEncoder(["category"], target_type="binary", smooth=1.0, cv=5)
+    fitted.fit(X, y, sample_weight=weight)
+    cross_fitted = TargetCVEncoder(["category"], target_type="binary", smooth=1.0, cv=5)
+    cross_fitted.fit_transform(X, y, sample_weight=weight)
+
+    assert fitted.encoding_cv_ == cross_fitted.encoding_cv_ == {
+        "kind": "fixed_k",
+        "n_splits": 3,
+    }
+
+
 def test_target_cv_group_folds_never_use_the_held_out_groups_targets():
     groups = np.repeat(np.arange(6), 3)
     X = pd.DataFrame(
@@ -456,14 +496,137 @@ def test_target_cv_time_exclude_policy_removes_warmup_from_selection_weight():
     )
 
 
-def test_target_cv_custom_modes_require_explicit_smoothing():
+@pytest.mark.parametrize(
+    ("context_name", "context", "expected_kind"),
+    [
+        ("sample_weight", np.linspace(0.5, 2.0, 90), "fixed_k"),
+        ("groups", np.repeat(np.arange(9), 10), "group"),
+        ("time", np.repeat(np.arange(9), 10), "time"),
+    ],
+)
+def test_target_cv_auto_smoothing_is_available_on_every_contextual_mode(
+    context_name,
+    context,
+    expected_kind,
+):
+    """``smooth="auto"`` is defined by weighted row mass, so it works everywhere.
+
+    Before this was fixed, every contextual call raised
+    ``ValueError: target_cv_smoothing must be an explicit non-negative float``,
+    which made the documented weighted generalization unreachable.
+    """
     X, y = _regression_categorical_data(1705)
-    with pytest.raises(ValueError, match="target_cv_smoothing.*explicit"):
-        TargetCVEncoder(["category"], target_type="continuous").fit_transform(
-            X,
-            y,
-            groups=np.repeat(np.arange(9), 10),
-        )
+    encoder = TargetCVEncoder(["category"], target_type="continuous", smooth="auto")
+
+    encoded = encoder.fit_transform(X, y, **{context_name: context})
+
+    assert encoder.encoding_cv_["kind"] == expected_kind
+    assert np.isfinite(encoded["category"].to_numpy()).all()
+
+
+def test_target_cv_auto_smoothing_weighted_map_matches_integer_row_replication():
+    """The weighted ``"auto"`` prior is the integer formula with weighted mass.
+
+    Mirrors ``test_target_cv_weighted_map_matches_integer_row_replication`` for
+    the empirical-Bayes path: replicating a row ``m`` times must equal giving it
+    weight ``m``.
+    """
+    X = pd.DataFrame({"category": ["a", "a", "b", "b", None, None]})
+    y = np.array([0.0, 4.0, 3.0, 9.0, -2.0, 2.0])
+    weight = np.array([1, 3, 2, 1, 4, 2])
+    probe = pd.DataFrame({"category": ["a", "b", None, "unseen"]})
+
+    weighted = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth="auto", cv=3
+    ).fit(X, y, sample_weight=weight)
+    repeated = TargetCVEncoder(
+        ["category"], target_type="continuous", smooth="auto", cv=3
+    ).fit(X.loc[X.index.repeat(weight)].reset_index(drop=True), np.repeat(y, weight))
+
+    np.testing.assert_allclose(
+        weighted.transform(probe).to_numpy(),
+        repeated.transform(probe).to_numpy(),
+        rtol=1e-13,
+        atol=1e-13,
+    )
+
+
+def test_target_cv_auto_smoothing_unit_weights_match_the_unweighted_path():
+    X, y = _regression_categorical_data(1706)
+
+    weighted = TargetCVEncoder(["category"], target_type="continuous", smooth="auto")
+    unweighted = TargetCVEncoder(["category"], target_type="continuous", smooth="auto")
+    weighted_oof = weighted.fit_transform(X, y, sample_weight=np.ones(len(X)))
+    unweighted_oof = unweighted.fit_transform(X, y)
+
+    np.testing.assert_array_equal(
+        weighted_oof.to_numpy(dtype=np.float64),
+        unweighted_oof.to_numpy(dtype=np.float64),
+    )
+    assert weighted.encoding_cv_ == unweighted.encoding_cv_
+
+
+def test_target_cv_auto_smoothing_binary_route_accepts_balanced_class_weight():
+    """``class_weight="balanced"`` feeds weights in, which used to reject "auto"."""
+    X, y_reg = _regression_categorical_data(1709)
+    y = (y_reg > np.median(y_reg)).astype(np.int64)
+
+    result = sift.select_cefsplus_binary(
+        X,
+        y,
+        1,
+        cat_encoding="target_cv",
+        class_weight="balanced",
+        subsample=None,
+        verbose=False,
+        return_result=True,
+    )
+
+    assert result.selected_features == ["category"]
+    assert result.selector_metadata["encoding_cv"] == {
+        "kind": "fixed_k",
+        "n_splits": 5,
+    }
+
+    selector = sift.CEFSPlusBinarySelector(
+        k=1,
+        cat_features=["category"],
+        cat_encoding="target_cv",
+        class_weight="balanced",
+        subsample=None,
+        verbose=False,
+    )
+    selector.fit(X, y)
+    assert list(selector.get_feature_names_out()) == ["category"]
+
+
+def test_target_cv_auto_smoothing_still_rejects_a_massless_fit():
+    """The one genuinely undefined case: no positive weight mass.
+
+    Neither the weighted prior ``sum(w*y)/sum(w)`` nor the weighted target
+    variance the empirical-Bayes shrinkage needs exists then, so ``"auto"``
+    keeps raising -- for exactly the same reason an explicit float does.
+    """
+    X, y = _regression_categorical_data(1710)
+
+    for smooth in ("auto", 2.0):
+        with pytest.raises(ValueError, match="at least one positive value"):
+            TargetCVEncoder(
+                ["category"], target_type="continuous", smooth=smooth
+            ).fit_transform(X, y, sample_weight=np.zeros(len(X)))
+
+
+def test_target_cv_rejects_smoothing_values_that_are_neither_auto_nor_a_float():
+    X, y = _regression_categorical_data(1711)
+
+    with pytest.raises(ValueError, match="'auto' or a non-negative float"):
+        TargetCVEncoder(
+            ["category"], target_type="continuous", smooth="soft"
+        ).fit_transform(X, y)
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        TargetCVEncoder(
+            ["category"], target_type="continuous", smooth=-1.0
+        ).fit_transform(X, y)
 
 
 @pytest.mark.parametrize(("selector", "kwargs"), FUNCTION_ROUTES)
@@ -637,6 +800,102 @@ def test_unique_id_carries_zero_relevance_in_the_reported_ranking():
     assert float(ranking.loc["id", "relevance"]) == pytest.approx(0.0, abs=1e-12)
     assert float(ranking.loc["x_noise", "relevance"]) > 0.0
     assert int(ranking.loc["id", "rank"]) > int(ranking.loc["x_noise", "rank"])
+
+
+def _near_unique_id_data(seed: int, *, shared_target: bool, rows_per_id: int = 2):
+    """300 identifiers x ``rows_per_id`` rows, so every level recurs in-fold.
+
+    With ``shared_target``, an identifier's rows share a latent target, so the
+    encoding legitimately carries sibling rows' targets.  Without it, the target
+    is independent of the identifier and only fold-marker leakage could make the
+    column relevant.
+    """
+    rng = np.random.default_rng(seed)
+    n_ids = 300
+    ids = np.repeat(np.arange(n_ids), rows_per_id)
+    n = ids.size
+    if shared_target:
+        y = np.repeat(rng.normal(size=n_ids), rows_per_id) + rng.normal(
+            scale=0.05, size=n
+        )
+    else:
+        y = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "id": [f"id_{value}" for value in ids],
+            "real": 0.5 * y + rng.normal(size=n),
+        }
+    )
+    return X, y
+
+
+def test_near_unique_ids_with_a_shared_target_stay_selectable_by_design():
+    """The documented boundary of the centering guarantee.
+
+    Centering neutralizes only *unseen-in-fold* emissions.  A level that appears
+    twice in training still transmits its sibling row's target, which is
+    ordinary high-cardinality target-encoding behavior rather than the fold
+    marker 1.1 closed -- so this column is genuinely informative here and is
+    expected to be selected.  Callers who must not have that cross-row
+    information reach selection drop ID-like columns or pass ``groups=``.
+    """
+    X, y = _near_unique_id_data(11, shared_target=True)
+
+    encoded = TargetCVEncoder(
+        ["id"], target_type="continuous", smooth="auto"
+    ).fit_transform(X.loc[:, ["id"]], y)["id"].to_numpy()
+
+    assert float(np.var(encoded)) > 0.0
+    assert abs(float(np.corrcoef(encoded, y)[0, 1])) > 0.5
+
+    selected = sift.select_mrmr(
+        X,
+        y,
+        2,
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+    )
+    assert "id" in selected
+
+
+def test_near_unique_ids_without_a_shared_target_are_not_selected():
+    """The same shape, no real signal: the residual is information, not a marker."""
+    X, y = _near_unique_id_data(12, shared_target=False)
+
+    encoded = TargetCVEncoder(
+        ["id"], target_type="continuous", smooth="auto"
+    ).fit_transform(X.loc[:, ["id"]], y)["id"].to_numpy()
+
+    assert abs(float(np.corrcoef(encoded, y)[0, 1])) < 0.1
+
+    selected = sift.select_mrmr(
+        X,
+        y,
+        1,
+        task="regression",
+        estimator="classic",
+        mrmr_backend="serial",
+        cat_encoding="target_cv",
+        subsample=None,
+        verbose=False,
+    )
+    assert selected == ["real"]
+
+
+def test_grouping_an_identifiers_rows_into_one_fold_removes_the_residual():
+    """``groups=`` is the documented remedy: no sibling row is ever in-fold."""
+    X, y = _near_unique_id_data(11, shared_target=True)
+    ids = X["id"].to_numpy()
+
+    encoded = TargetCVEncoder(
+        ["id"], target_type="continuous", smooth="auto"
+    ).fit_transform(X.loc[:, ["id"]], y, groups=ids)["id"].to_numpy()
+
+    np.testing.assert_allclose(encoded, 0.0)
 
 
 @pytest.mark.parametrize(

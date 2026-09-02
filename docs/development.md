@@ -276,8 +276,15 @@ the supported dependency set, not a 3.13/min-pins combination.
 The scheduled `benchmark-smoke` job regenerates the Auto-K G1-G6 gate table from
 the committed raw campaign CSVs and uploads it as the `sift-auto-k-gate-table`
 artifact. The summarizer is deterministic — `tests/test_auto_k_gate_summary.py`
-pins the exact output bytes — so the job also `cmp`s the regenerated table against
-the committed one. Run it locally with:
+pins the exact output bytes of a synthetic fixture — so the job also verifies the
+regenerated table against the committed one.
+
+That verification is **numeric, not `cmp`**. Gate floats are rendered with 12
+significant digits and compared with `rtol=1e-9`; every other cell must match
+exactly. A raw `repr` differed in the 17th digit between macOS/arm64 and Linux
+CI, so a byte-for-byte comparison would fail on platform-dependent last-ulp
+summation rather than on a real change to the inputs or the aggregation. Use
+`--verify-against` rather than `cmp`:
 
 ```bash
 python benchmarks/summarize_auto_k_gates.py \
@@ -286,9 +293,8 @@ python benchmarks/summarize_auto_k_gates.py \
   --timing benchmarks/results/auto_k_v2_d9.csv \
   --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
   --oracle-aggregation mean \
-  --output /tmp/auto_k_v2_gates_mean_oracle.csv
-cmp /tmp/auto_k_v2_gates_mean_oracle.csv \
-  benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
+  --output /tmp/auto_k_v2_gates_mean_oracle.csv \
+  --verify-against benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
 ```
 
 Every argument is required, including `--oracle-aggregation`, so the denominator

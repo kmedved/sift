@@ -224,11 +224,21 @@ Categorical encoding:
   `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
   shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
   m-estimates.
+- **What centering does and does not guarantee.** It neutralizes only
+  *unseen-in-fold* emissions. It is not a defence against high cardinality as
+  such: a level appearing two or more times in a fold's training rows still
+  transmits those sibling rows' targets, which is ordinary target-encoding
+  behavior. A near-unique identifier whose rows share a latent target therefore
+  remains selectable (measured: 300 IDs x 2 rows, `corr(enc, y) ~ 0.88`, picked
+  first by `select_mrmr`). Drop ID-like columns, or pass `groups=` so all of an
+  identifier's rows land in one fold, if that cross-row information must not
+  reach selection.
 - Configure target encoding with `target_cv_n_splits=5` and
-  `target_cv_smoothing="auto"`. Custom weighted/group/time modes require an
-  explicit non-negative smoothing float. Group folds never use targets from a
-  held-out group. Time folds keep tied timestamps together and use only
-  strictly earlier history.
+  `target_cv_smoothing="auto"`. `"auto"` is available on every fold kind,
+  weighted or not, because the empirical-Bayes prior is defined by weighted row
+  mass; an explicit non-negative float is also accepted everywhere. Group folds
+  never use targets from a held-out group. Time folds keep tied timestamps
+  together and use only strictly earlier history.
 - Earliest time-fold rows have no history. Supply a target-independent
   `target_prior` and they emit a centered neutral effect (zero) while staying in
   the fit, or leave it unset and choose `warmup_policy="zero_weight"` (default)
