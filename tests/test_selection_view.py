@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import builtins
+import dataclasses
 from dataclasses import fields
+import datetime
 import json
 import pickle
 
@@ -13,7 +15,7 @@ import pytest
 
 import sift
 from sift.catboost_common import CatBoostSelectionResult
-from sift.selection.view import CURVE_COLUMNS
+from sift.selection.view import CURVE_COLUMNS, _json_safe
 
 
 @pytest.fixture(scope="module")
@@ -1288,3 +1290,411 @@ def test_catboost_legacy_shape_and_pickle_remain_unchanged():
     assert restored.higher_is_better == result.higher_is_better
     assert restored.all_scores == result.all_scores
     assert restored.selection_patience == result.selection_patience
+
+
+# --------------------------------------------------------------------------
+# Stage 1.4 / R2: auto-k producers retain a full ranking and a normalized curve
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def auto_k_frame() -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(
+        rng.normal(size=(400, 12)),
+        columns=[f"f{i}" for i in range(12)],
+    )
+    y = (
+        2.0 * X["f0"].to_numpy()
+        - 1.5 * X["f3"].to_numpy()
+        + rng.normal(scale=0.5, size=len(X))
+    )
+    return X, y
+
+
+def test_auto_k_filter_view_is_complete_and_carries_a_normalized_curve(auto_k_frame):
+    X, y = auto_k_frame
+    result = sift.select_cefsplus(X, y, k="auto", return_result=True, verbose=False)
+    view = sift.as_result(result)
+
+    assert len(view.table) == X.shape[1]
+    assert view.metadata["table_complete"] is True
+    assert view.table["selected_index"].tolist() == list(range(X.shape[1]))
+
+    curve = view.curve
+    assert list(curve.columns) == list(CURVE_COLUMNS)
+    assert not curve.empty
+    assert view.metadata["curve_available"] is True
+    assert view.metadata["criterion"] == "penalized_score"
+    assert view.metadata["criterion_direction"] == "higher_is_better"
+    assert curve.loc[curve["selected"], "k"].tolist() == [len(view.features)]
+
+    # The legacy result keeps its own fields; the curve lives in diagnostics_.
+    assert type(result) is sift.FilterSelectionResult
+    assert result.ranking_ is not None
+    payload = result.diagnostics_["auto_k_curve"]
+    assert payload["available"] is True
+    assert payload["criterion"] == "penalized_score"
+
+
+@pytest.mark.parametrize(
+    ("k_method", "config_kwargs", "criterion", "direction"),
+    [
+        ("elbow", {}, "objective", "higher_is_better"),
+        ("penalized_objective", {}, "penalized_score", "higher_is_better"),
+        ("k_posterior", {}, "post", "higher_is_better"),
+        ("chi2_stop", {}, "p_max", "lower_is_better"),
+        ("forward_stop", {}, "Y_running_mean", "lower_is_better"),
+        ("changepoint", {}, "log_scaled_gain", "higher_is_better"),
+        ("perm_gap", {}, "gap", "higher_is_better"),
+        ("stability", {}, "phi", "higher_is_better"),
+        ("gaussian_cv", {"strategy": "kfold"}, "score", "higher_is_better"),
+        ("xfit_objective", {"strategy": "kfold"}, "score", "higher_is_better"),
+    ],
+)
+def test_auto_k_routes_publish_their_criterion_curve(
+    auto_k_frame, k_method, config_kwargs, criterion, direction
+):
+    X, y = auto_k_frame
+    config = sift.AutoKConfig(k_method=k_method, max_k=8, **config_kwargs)
+    result = sift.select_cefsplus(
+        X, y, k="auto", auto_k_config=config, return_result=True, verbose=False
+    )
+    view = sift.as_result(result)
+
+    assert view.metadata["curve_available"] is True
+    assert view.metadata["criterion"] == criterion
+    assert view.metadata["criterion_direction"] == direction
+    curve = view.curve
+    assert list(curve.columns) == list(CURVE_COLUMNS)
+    assert curve["k"].is_monotonic_increasing
+    assert not curve["k"].duplicated().any()
+
+    diagnostics = result.diagnostics_["auto_k_diagnostics"]
+    assert curve["k"].tolist() == sorted(int(k) for k in diagnostics["k"])
+    # ``selected`` marks the k the route actually returned.
+    selected_k = curve.loc[curve["selected"], "k"].tolist()
+    assert selected_k in ([], [len(view.features)])
+    assert view.metadata["table_complete"] is True
+    assert len(view.table) == X.shape[1]
+
+
+@pytest.mark.parametrize("k_method", ["knockoff_path", "consensus"])
+def test_routes_without_a_k_curve_say_why(auto_k_frame, k_method):
+    X, y = auto_k_frame
+    config = sift.AutoKConfig(k_method=k_method, max_k=8)
+    result = sift.select_cefsplus(
+        X, y, k="auto", auto_k_config=config, return_result=True, verbose=False
+    )
+    view = sift.as_result(result)
+
+    assert view.metadata["curve_available"] is False
+    assert view.curve.empty
+    assert list(view.curve.columns) == list(CURVE_COLUMNS)
+    reason = view.metadata["curve_unavailable_reason"]
+    assert "one row per" in reason
+    # The route is still fully ranked and its table is complete.
+    assert view.metadata["table_complete"] is True
+    assert result.ranking_ is not None
+
+
+def test_auto_k_router_curve_follows_the_routed_method(auto_k_frame):
+    X, y = auto_k_frame
+    result = sift.select_cefsplus(
+        X,
+        y,
+        k="auto",
+        auto_k_config=sift.AutoKConfig(k_method="auto", max_k=8),
+        return_result=True,
+        verbose=False,
+    )
+    payload = result.diagnostics_["auto_k_curve"]
+    routed = result.diagnostics_["auto_k"]["routed_method"]
+
+    assert payload["route"] == routed
+    assert payload["available"] is True
+    view = sift.as_result(result)
+    assert view.metadata["curve_route"] == routed
+
+
+def test_classic_auto_k_retains_ranking_and_curve(auto_k_frame):
+    X, y = auto_k_frame
+    groups = np.repeat(np.arange(5), len(X) // 5)
+    result = sift.select_mrmr(
+        X,
+        y,
+        k="auto",
+        task="regression",
+        estimator="classic",
+        auto_k_config=sift.AutoKConfig(
+            k_method="evaluate", max_k=6, strategy="group_cv"
+        ),
+        groups=groups,
+        subsample=None,
+        n_jobs=1,
+        return_result=True,
+        verbose=False,
+    )
+    view = sift.as_result(result)
+
+    assert result.ranking_ is not None
+    assert list(result.ranking_["feature"]) != []
+    assert view.metadata["table_complete"] is True
+    assert len(view.table) == X.shape[1]
+    assert view.metadata["curve_available"] is True
+    assert view.metadata["criterion"] == "score"
+    assert view.metadata["criterion_direction"] == "higher_is_better"
+
+
+def test_fixed_k_filter_view_keeps_legacy_ranking_and_no_curve(selection_data):
+    X, y = selection_data
+    result = sift.select_mrmr(
+        X,
+        y,
+        k=2,
+        task="regression",
+        estimator="classic",
+        subsample=None,
+        n_jobs=1,
+        return_result=True,
+        verbose=False,
+    )
+    view = sift.as_result(result)
+
+    assert "auto_k_curve" not in (result.diagnostics_ or {})
+    assert view.metadata["curve_available"] is False
+    assert "criterion" not in view.metadata
+    assert view.curve.empty
+    assert list(view.curve.columns) == list(CURVE_COLUMNS)
+
+
+def test_malformed_auto_k_curve_payloads_are_rejected(auto_k_frame):
+    X, y = auto_k_frame
+    result = sift.select_cefsplus(X, y, k="auto", return_result=True, verbose=False)
+    good = result.diagnostics_["auto_k_curve"]
+
+    result.diagnostics_["auto_k_curve"] = "not-a-mapping"
+    with pytest.raises(ValueError, match="curve payload must be a mapping"):
+        sift.as_result(result)
+
+    result.diagnostics_["auto_k_curve"] = {**good, "criterion_direction": "maximize"}
+    with pytest.raises(ValueError, match="criterion_direction must be"):
+        sift.as_result(result)
+
+    result.diagnostics_["auto_k_curve"] = {**good, "curve": None}
+    with pytest.raises(ValueError, match="must carry a DataFrame curve"):
+        sift.as_result(result)
+
+    result.diagnostics_["auto_k_curve"] = {
+        **good,
+        "curve": good["curve"].drop(columns=["criterion_se"]),
+    }
+    with pytest.raises(ValueError, match="missing required columns"):
+        sift.as_result(result)
+
+
+# --------------------------------------------------------------------------
+# Stage 1.4 / R3: knockoff raw width without input_features
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def knockoff_constant_result(auto_k_frame):
+    X, y = auto_k_frame
+    X = X.copy()
+    X["f7"] = 1.0
+    return X, sift.select_fdr(X, y, q=0.3, verbose=False)
+
+
+def test_knockoff_metadata_separates_raw_and_post_filter_width(
+    knockoff_constant_result,
+):
+    X, result = knockoff_constant_result
+    metadata = result.selector_metadata
+
+    assert metadata["n_features_input"] == X.shape[1]
+    assert metadata["n_features"] == X.shape[1] - 1
+    assert metadata["dropped_feature_positions"] == [7]
+    assert metadata["dropped_feature_reasons"] == ["constant"]
+
+
+def test_knockoff_view_builds_raw_support_without_input_features(
+    knockoff_constant_result,
+):
+    X, result = knockoff_constant_result
+    view = sift.as_result(result)
+
+    assert view.support_ is not None
+    assert view.support_.shape == (X.shape[1],)
+    assert view.raw_input["n_features"] == X.shape[1]
+    assert view.metadata["table_complete"] is True
+
+    table = view.table
+    assert len(table) == X.shape[1]
+    assert table["selected_index"].tolist() == list(range(X.shape[1]))
+    dropped = table.loc[table["reason_dropped"].notna()]
+    assert dropped["selected_index"].tolist() == [7]
+    assert dropped["reason_dropped"].tolist() == ["constant"]
+    # A dropped column is never reported as selected.
+    assert not bool(dropped["selected"].any())
+    assert not bool(view.support_[7])
+
+
+def test_knockoff_view_names_dropped_columns_when_identity_is_supplied(
+    knockoff_constant_result,
+):
+    X, result = knockoff_constant_result
+    named = sift.as_result(result, input_features=X.columns)
+
+    dropped = named.table.loc[named.table["reason_dropped"].notna()]
+    assert dropped["feature"].tolist() == ["f7"]
+    assert named.metadata["table_complete"] is True
+    assert named.raw_features == list(X.columns)
+
+
+def test_knockoff_view_rejects_input_features_of_the_wrong_raw_width(
+    knockoff_constant_result,
+):
+    X, result = knockoff_constant_result
+    with pytest.raises(ValueError, match="n_features_input"):
+        sift.as_result(result, input_features=list(X.columns) + ["extra"])
+
+
+def test_legacy_knockoff_results_without_raw_width_stay_partial():
+    W = pd.DataFrame(
+        {
+            "feature": ["a", "c"],
+            "selected_index": [0, 2],
+            "W": [2.0, -0.5],
+            "selected": [True, False],
+        }
+    )
+    result = sift.KnockoffSelectionResult(
+        selected_features=["a"],
+        selected_indices=[0],
+        selector_metadata={"selector": "knockoff_fdr", "n_features": 2},
+        W=W,
+        threshold=1.0,
+        selection_frequency=None,
+    )
+    view = sift.as_result(result)
+
+    assert view.support_ is None
+    assert view.metadata["table_complete"] is False
+    assert "reason_dropped" not in view.table.columns
+
+
+# --------------------------------------------------------------------------
+# Stage 1.4 / R4: collision-free JSON conversion, no repr() fallback
+# --------------------------------------------------------------------------
+
+
+def test_mixed_key_mapping_survives_a_json_round_trip():
+    payload = _json_safe({1: "int", "1": "str"})
+    restored = json.loads(json.dumps(payload))
+
+    assert restored["__sift_mapping__"] == "typed_key_entries"
+    entries = restored["entries"]
+    assert len(entries) == 2
+    assert entries[0] == {"key": {"type": "builtins.int", "value": 1}, "value": "int"}
+    assert entries[1] == {"key": {"type": "builtins.str", "value": "1"}, "value": "str"}
+
+    # Both entries survive; the legacy str(key) form merged them into one.
+    rebuilt = {
+        (entry["key"]["type"], entry["key"]["value"]): entry["value"]
+        for entry in entries
+    }
+    assert rebuilt == {("builtins.int", 1): "int", ("builtins.str", "1"): "str"}
+
+
+def test_ordinary_string_key_mappings_keep_their_plain_json_shape():
+    payload = _json_safe({"a": 1, "b": [1, 2], "c": {"d": None}})
+
+    assert payload == {"a": 1, "b": [1, 2], "c": {"d": None}}
+    assert "__sift_mapping__" not in payload
+    assert "__sift_mapping__" not in payload["c"]
+
+
+def test_view_payload_root_and_metadata_stay_plain_json_objects(selection_data):
+    X, y = selection_data
+    result = sift.select_mrmr(
+        X,
+        y,
+        k=2,
+        task="regression",
+        estimator="classic",
+        subsample=None,
+        n_jobs=1,
+        return_result=True,
+        verbose=False,
+    )
+    payload = sift.as_result(result, input_features=X.columns).to_dict()
+
+    assert "__sift_mapping__" not in payload
+    assert "__sift_mapping__" not in payload["metadata"]
+    assert payload["schema_version"] == "1"
+    assert payload["metadata"]["schema_version"] == "1"
+    assert all(isinstance(key, str) for key in payload)
+    json.dumps(payload, allow_nan=False)
+
+
+def test_nested_mixed_key_mapping_is_wrapped_where_it_occurs():
+    payload = _json_safe({"outer": {2: "two", "2": "str-two"}})
+
+    assert set(payload) == {"outer"}
+    assert payload["outer"]["__sift_mapping__"] == "typed_key_entries"
+    assert [entry["value"] for entry in payload["outer"]["entries"]] == [
+        "two",
+        "str-two",
+    ]
+    assert json.loads(json.dumps(payload)) == payload
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (pd.NA, None),
+        (pd.NaT, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (datetime.datetime(2020, 1, 2, 3, 4, 5), "2020-01-02T03:04:05"),
+        (datetime.date(2020, 1, 2), "2020-01-02"),
+        (datetime.time(3, 4, 5), "03:04:05"),
+        (datetime.timedelta(days=1, seconds=5), "P1DT0H0M5S"),
+        (np.datetime64("2020-01-02"), "2020-01-02"),
+        (pd.Timestamp("2020-01-02T03:04:05"), "2020-01-02T03:04:05"),
+    ],
+)
+def test_scalar_conversions_are_json_native(value, expected):
+    assert _json_safe({"v": value}) == {"v": expected}
+
+
+def test_dataclasses_serialize_through_asdict():
+    @dataclasses.dataclass
+    class Inner:
+        count: int
+        when: datetime.datetime
+
+    @dataclasses.dataclass
+    class Outer:
+        name: str
+        inner: Inner
+
+    payload = _json_safe(Outer("x", Inner(1, datetime.datetime(2021, 5, 6))))
+
+    assert payload == {
+        "name": "x",
+        "inner": {"count": 1, "when": "2021-05-06T00:00:00"},
+    }
+    assert json.loads(json.dumps(payload)) == payload
+
+
+@pytest.mark.parametrize("value", [b"ab", bytearray(b"ab"), object(), 1 + 2j])
+def test_unsupported_objects_raise_instead_of_leaking_repr(value):
+    with pytest.raises(TypeError, match="no JSON-safe representation"):
+        _json_safe(value)
+
+
+def test_unsupported_mapping_keys_raise_too():
+    with pytest.raises(TypeError, match="no JSON-safe representation"):
+        _json_safe({object(): 1, "ok": 2})

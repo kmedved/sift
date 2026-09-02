@@ -140,6 +140,7 @@ BINARY_DIAGNOSTIC_KEYS = {
     "cat_features_used",
     "auto_k",
     "auto_k_diagnostics",
+    "auto_k_curve",
 }
 
 
@@ -257,12 +258,37 @@ def test_auto_k_split_context_matrix(
     assert ranking["feature"].iloc[: len(expected_features)].tolist() == expected_features
     assert ranking.loc[ranking["selected"], "selected_index"].tolist() == expected_indices
 
+    # Stage 1.4/R2: auto-k producers retain the complete ranking and the
+    # normalized curve payload they already computed.
     if route.name in {"mrmr", "jmi", "jmim"}:
-        assert result.ranking_ is None
-        assert result.diagnostics_ is None
+        assert list(result.ranking_.columns) == [
+            "feature",
+            "rank",
+            "selected",
+            "selected_index",
+            "relevance",
+            "selector",
+        ]
+        assert set(result.diagnostics_) == {
+            "path_relevance",
+            "auto_k",
+            "auto_k_diagnostics",
+            "auto_k_curve",
+        }
     elif route.name == "cefsplus":
-        assert result.ranking_ is None
-        assert set(result.diagnostics_) == {"auto_k", "auto_k_diagnostics"}
+        assert list(result.ranking_.columns) == [
+            "feature",
+            "rank",
+            "selected",
+            "selected_index",
+            "relevance",
+            "selector",
+        ]
+        assert set(result.diagnostics_) == {
+            "auto_k",
+            "auto_k_diagnostics",
+            "auto_k_curve",
+        }
     else:
         assert result.selector_metadata["weighted"] is weighted
         assert list(result.ranking_.columns) == [
@@ -288,6 +314,17 @@ def test_auto_k_split_context_matrix(
         assert diagnostics.loc[diagnostics["selected"], "k"].tolist() == [
             len(expected_indices)
         ]
+
+        curve_payload = result.diagnostics_["auto_k_curve"]
+        assert curve_payload["available"] is True
+        assert curve_payload["route"] == "evaluate"
+        assert curve_payload["criterion"] == "score"
+        assert curve_payload["criterion_direction"] == "higher_is_better"
+        curve = curve_payload["curve"]
+        assert list(curve.columns) == ["k", "criterion", "criterion_se", "selected"]
+        assert curve.loc[curve["selected"], "k"].tolist() == [len(expected_indices)]
+        assert curve["k"].tolist() == diagnostics["k"].tolist()
+        assert curve["criterion"].tolist() == diagnostics["score"].tolist()
 
 
 @pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)

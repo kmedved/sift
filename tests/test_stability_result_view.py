@@ -372,3 +372,74 @@ def test_malformed_fitted_configuration_is_rejected(
 
     with pytest.raises(ValueError, match=match):
         _ = selector.result_view_
+
+
+def _differing_order_selector():
+    """Fit a selector whose legacy order really differs from original order."""
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame(
+        rng.normal(size=(150, 8)),
+        columns=[f"f{i}" for i in range(8)],
+    )
+    # Signal strength grows with column position, so descending-frequency
+    # (legacy) order is the reverse of ascending-position (original) order.
+    y = (
+        0.35 * X["f1"].to_numpy()
+        + 0.9 * X["f4"].to_numpy()
+        + 2.5 * X["f7"].to_numpy()
+        + rng.normal(size=len(X))
+    )
+    return X, y
+
+
+@pytest.mark.parametrize("output_order", ["legacy", "original"])
+def test_view_follows_the_fitted_output_order(output_order):
+    X, y = _differing_order_selector()
+    selector = _selector(
+        n_bootstrap=40,
+        alpha=0.05,
+        threshold=0.5,
+        output_order=output_order,
+    ).fit(X, y)
+    view = selector.result_view_
+
+    expected_names = list(selector.get_feature_names_out())
+    expected_indices = [int(index) for index in selector.get_support(indices=True)]
+
+    assert view.metadata["output_order"] == output_order
+    assert view.features == expected_names
+    assert view.indices == expected_indices
+
+    table = view.table
+    ranked = table.loc[table["path_rank"].notna()].sort_values("path_rank")
+    assert ranked["feature"].tolist() == expected_names
+
+    # A frozen transform must reproduce the fitted selector's column order.
+    np.testing.assert_array_equal(view.transform(X), selector.transform(X))
+    np.testing.assert_array_equal(view.support_, selector.get_support())
+
+
+def test_non_default_output_order_actually_reorders_the_view():
+    """Guard the regression: the two orders must not be trivially identical."""
+    X, y = _differing_order_selector()
+    legacy = _selector(
+        n_bootstrap=40, alpha=0.05, threshold=0.5, output_order="legacy"
+    ).fit(X, y)
+    original = _selector(
+        n_bootstrap=40, alpha=0.05, threshold=0.5, output_order="original"
+    ).fit(X, y)
+
+    legacy_view = legacy.result_view_
+    original_view = original.result_view_
+
+    assert set(legacy_view.features) == set(original_view.features)
+    assert legacy_view.features != original_view.features
+    assert original_view.indices == sorted(original_view.indices)
+    assert legacy_view.indices != sorted(legacy_view.indices)
+    # The frozen transformer must not silently fall back to the default order.
+    np.testing.assert_array_equal(
+        original_view.transform(X), original.transform(X)
+    )
+    assert not np.array_equal(
+        original_view.transform(X), legacy_view.transform(X)
+    )

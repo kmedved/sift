@@ -84,6 +84,49 @@
   parity is deliberately not the fix: `select_fdr` gains no `cat_encoding`
   parameter.
 
+### Stage 1 — result views
+
+- A fitted `StabilitySelector` view now applies the selector's own
+  `output_order`. `view.features`, `view.indices`, the raw table's `path_rank`,
+  and the frozen `view.transform` follow the same order as
+  `get_feature_names_out()`, `get_support(indices=True)`, and `transform`; the
+  frozen transformer copies `output_order` instead of silently reverting to the
+  `"legacy"` default, and `metadata["output_order"]` records which order applied.
+- Automatic-k filter producers keep the complete feature ranking they already
+  computed. `select_mrmr`/`select_jmi`/`select_jmim` with `k="auto"`, every
+  Gaussian auto-k route, and binary CEFS+ auto-k now populate `ranking_`, so an
+  auto-k `SelectionView` has one row per raw column and
+  `metadata["table_complete"] is True` instead of only the selected rows.
+- Automatic-k routes publish a normalized curve with exactly the columns `k`,
+  `criterion`, `criterion_se`, and `selected`, built producer-side from each
+  route's diagnostics and stored in `diagnostics_["auto_k_curve"]`.
+  `metadata["criterion"]` names the source diagnostic column,
+  `metadata["criterion_direction"]` is `"higher_is_better"` or
+  `"lower_is_better"`, and `metadata["curve_route"]` records the routed method.
+  `knockoff_path` and `consensus` report `curve_available=False` with an
+  explicit `metadata["curve_unavailable_reason"]`, because their diagnostics are
+  per-feature draws and per-method votes rather than a k-indexed criterion path.
+  Adapters consume only the normalized payload; `view.py` no longer guesses
+  method-specific diagnostic columns.
+- `select_fdr` metadata gains `n_features_input` (the raw input width) plus
+  `dropped_feature_positions`/`dropped_feature_reasons`, all distinct from the
+  existing post-screening `n_features`. Knockoff views therefore build
+  `support_` and a complete raw table without requiring `input_features`, and
+  every dropped column gets an explicit `reason_dropped` row (`"constant"` or
+  `"zero_weight_variance"`). Legacy results without the new keys keep the
+  previous partial behavior.
+- `view.to_dict()` no longer merges mapping keys or emits `repr()` fallbacks.
+  Ordinary string-key mappings — including the payload root and metadata — stay
+  plain JSON objects; only a mapping containing a non-string key uses a tagged,
+  ordered `{"__sift_mapping__": "typed_key_entries", "entries": [...]}` envelope
+  with typed key tokens, so `1` and `"1"` both survive a JSON round trip.
+  `pd.NA`/`pd.NaT` become `null`, datetimes become ISO strings, dataclasses use
+  `dataclasses.asdict`, and unsupported objects raise a clear `TypeError`.
+  `schema_version` stays `"1"`; mixed-key envelopes are part of schema 1.
+- Legacy `FilterSelectionResult` and `KnockoffSelectionResult` fields, defaults,
+  and pickle formats are unchanged, and fixed-k `ranking_` semantics are
+  unchanged.
+
 ### Sklearn integration
 
 - All eight public selector classes now subclass `SelectorMixin` and expose
