@@ -136,24 +136,45 @@ This is a 0.9.0 release gate, not a style preference: the docstrings are the
 source the generated API reference will be built from in 0.9.1, so an export
 without one silently removes a page from that reference.
 
-The docstring coverage test enforces two mechanical floors:
+Two tests enforce the standard. `__version__` is exempt from both; every other
+name in `sift.__all__` is in scope.
+
+`tests/test_docstring_coverage.py` checks structure:
 
 | requirement | applies to |
 | --- | --- |
-| a `Parameters` section | every callable export (functions and classes) |
-| at least 8 non-empty lines | every export, callables and data alike |
+| a non-empty summary line | every export |
+| at least 8 non-empty docstring lines | every export |
+| every signature parameter named as a `name : type` entry | functions, under `Parameters`; classes, under `Parameters` or `Attributes`, read off `__init__` |
+| a `Returns` or `Yields` section | functions |
+| an `Examples` section | every export |
 
-Those are floors, not targets. A good docstring also has a one-line summary, a
-`Returns` section naming the concrete type, `Raises` for the validation errors
-the entry point owns, and an `Examples` section for anything a caller reaches
-first. A class documents its constructor parameters and its fitted attributes
-(the trailing-underscore ones) rather than repeating the function docstring it
-wraps. Keep parameter descriptions honest about defaults that are scheduled to
-change in 1.0 — the deprecation ledger in
+The parameter check includes `*args` and `**kwargs`: a variadic in the signature
+has to appear as its own entry, spelled with the stars. For a class the two
+sections are pooled, so a constructor argument documented under `Attributes`
+rather than `Parameters` still satisfies the check.
+
+`tests/test_docstring_examples.py` checks that the examples run. It parses each
+docstring with `doctest` and executes the `>>>` statements under
+warnings-as-errors, so an example that emits an unasserted `UserWarning` or
+`FutureWarning` fails the suite. It deliberately does **not** compare printed
+output: NumPy 2 scalar reprs differ across the CI matrix, so an expected-output
+line would pin the docstring to one interpreter. Only two kinds of example are
+left unrun — one carrying an explicit `# doctest: +SKIP`, and one that depends
+on CatBoost.
+
+**What neither test checks: defaults and accepted values.** Nothing compares the
+`default=...` text or the listed choices in a description against the actual
+signature, so a docstring can name a stale default and stay green. That stays a
+review responsibility.
+
+Beyond the mechanical floors, a good docstring also has a `Returns` section
+naming the concrete type rather than a bare `object`, and `Raises` for the
+validation errors the entry point owns. A class documents its constructor
+parameters and its fitted attributes (the trailing-underscore ones) rather than
+repeating the function docstring it wraps. Keep parameter descriptions honest
+about defaults that are scheduled to change in 1.0 — the deprecation ledger in
 [docs/release-notes.md](release-notes.md) is the list.
-
-`__version__` is the one data export in `sift.__all__`; it is not a callable, so
-the `Parameters` requirement does not reach it.
 
 ### Executable documentation blocks
 
@@ -193,9 +214,9 @@ result cannot copy it.
 `bash` blocks are not executed; neither are blocks in the specs, the release
 notes, `docs/architecture.md`, `docs/ALGORITHMS.md`, or `CONTRIBUTING.md`.
 
-Both gates — docstring coverage and block execution — run as part of the ordinary
-`python -m pytest -q`, so a docs-only change still needs a suite run before it
-ships.
+All three gates — docstring coverage, docstring examples, and manual block
+execution — run as part of the ordinary `python -m pytest -q`, so a docs-only
+change still needs a suite run before it ships.
 
 ### Stale references
 

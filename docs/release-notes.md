@@ -465,6 +465,27 @@ published, and both are folded into this single section.
 - Finite weighted knockoff-variance reductions use `np.dot` instead of NumPy's
   matmul ufunc path, avoiding false divide/overflow warnings observed with
   NumPy 2.2 while preserving selections and statistics.
+- `StabilitySelector.get_coef_stability` no longer emits NumPy's 0/0
+  `RuntimeWarning` for a feature no bootstrap ever selected. The coefficient of
+  variation `coef_std / |coef_mean|` was computed inside `np.where`, which
+  evaluates both branches, so a feature with a zero mean and a zero standard
+  deviation divided 0 by 0 before the guard could pick the `inf` fallback. The
+  ratio is now computed under `np.errstate(divide="ignore", invalid="ignore")`
+  and the `np.where` fallback still yields `inf`. This surfaced as a `DOCS.MD`
+  example failure on the Python 3.11 CI job (NumPy 2.4.6), where the lasso path
+  left a feature entirely unselected.
+- `sift.as_result` on a `KnockoffSelectionResult` with dropped inputs no longer
+  triggers pandas' all-NA concat `FutureWarning`. The dropped-column rows were
+  concatenated as an object-typed all-NA frame onto the typed table, which
+  pandas 2.x flags and warnings-as-errors turns into a failure. The new
+  `_append_rows_like` helper in `sift/selection/view.py` builds each appended row
+  column by column in the table's own dtype. One visible consequence: when
+  dropped rows are appended, a NumPy `int64` or `bool` column that the new rows
+  do not carry becomes the nullable `Int64` or `boolean` dtype, because those
+  NumPy dtypes have no missing value. Float columns keep their dtype and take
+  `NaN`; object and extension-dtype columns are unchanged.
+- Removed an unused `gaussian_mi_from_corr` import from
+  `sift/selection/auto_k_xfit.py`.
 
 ### CI and packaging
 
@@ -612,16 +633,40 @@ was added to `pyproject.toml`.
   stochastic row-order sensitivity of `KnockoffSelector`. Knockoff statistic
   power comparisons are intentionally left data-dependent pending a committed
   quality bakeoff.
-- Every public export now carries a substantive numpydoc docstring — summary,
-  parameters, returns, and worked examples where the behavior warrants one —
-  across the whole of `sift.__all__`, replacing the one-line stubs that made
-  `help(select_mrmr)` useless. A coverage test pins the surface, so a new export
-  cannot ship undocumented.
+- Every public export now carries a substantive numpydoc docstring, replacing
+  the one-line stubs that made `help(select_mrmr)` useless. Two tests pin the
+  surface for every name in `sift.__all__` except `__version__`, so a new export
+  cannot ship undocumented. `tests/test_docstring_coverage.py` requires a
+  non-empty summary line, at least 8 non-empty docstring lines, every signature
+  parameter — `*args` and `**kwargs` included — named as a `name : type` entry
+  under `Parameters` for functions or under `Parameters`/`Attributes` for classes
+  (read off `__init__`), a `Returns` or `Yields` section for functions, and an
+  `Examples` section for every export. `tests/test_docstring_examples.py` parses
+  each docstring with `doctest` and executes the `>>>` statements under
+  warnings-as-errors; it does not compare printed output, because NumPy 2 scalar
+  reprs differ across the CI matrix, and it leaves unrun only examples marked
+  `# doctest: +SKIP` and those that need CatBoost. Neither test compares
+  documented defaults or accepted values against the signature — that stays a
+  review responsibility.
 - Every fenced `python` code block in the manual now executes in CI. The README
   blocks already ran; `DOCS.MD`, `docs/API.md`, `docs/user-guide.md`,
   `docs/ADVANCED.md`, `docs/troubleshooting.md`, and `docs/results.md` join them,
-  and each block was made standalone rather than inheriting variables defined
-  paragraphs earlier.
+  for 118 blocks in total: 108 execute in the base environment and 10 are gated
+  on an optional dependency by a `requires=` marker (`catboost`, `matplotlib`).
+  Blocks are standalone by default — a fresh namespace per block, building its
+  own imports and data. Nine blocks carry a `continues` marker and inherit the
+  previous block's namespace; every one of them is an honest inspect-after-fit
+  step, where the narrative fits a selector in one block and reads the fitted
+  object in the next (three in `DOCS.MD`, three in `docs/API.md`, one each in
+  `docs/user-guide.md`, `docs/ADVANCED.md`, and `docs/results.md`). No block is
+  skipped for a reason the runner cannot see: a bare `skip` directive must state
+  a reason or the suite fails, and the manual set currently uses none.
+- The CatBoost row-context example in `docs/user-guide.md` now pairs `groups`
+  with `GroupKFold`. It previously passed `groups` to a `TimeSeriesSplit`, which
+  ignores them and makes scikit-learn warn — a warnings-as-errors failure on the
+  CatBoost CI job. The surrounding prose now says which splitter goes with which
+  row context: pass `time=` alone when chronological validation is what you
+  want, and the default splitter stays random.
 - README and `TODO.MD` were refreshed for the 0.9 surface: `SelectionView` and
   `sift.as_result`, `cat_encoding="target_cv"`, `output_order`, sklearn metadata
   routing, the Auto-K presets and option groups, and `sift.experimental`. The

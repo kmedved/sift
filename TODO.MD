@@ -13,9 +13,20 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
   and attaches the artifacts; tagging `v` + `sift.__version__` and creating the
   Release stay explicit owner actions. Pre-release checks: `docs/development.md`.
-- [ ] Remaining 0.9.0 gate: a numpydoc docstring for every `sift.__all__` export
-      with its coverage test, CI execution of every manual code block, then the
-      release PR (version bump, release-notes retitle, pre-release smoke).
+- [x] A numpydoc docstring for every `sift.__all__` export, pinned by two tests:
+      `tests/test_docstring_coverage.py` for structure (summary line, 8 non-empty
+      lines, a `name : type` entry for every signature parameter including
+      `*args`/`**kwargs`, `Returns`/`Yields` for functions, `Examples` for every
+      export) and `tests/test_docstring_examples.py`, which executes each
+      docstring's `>>>` statements under warnings-as-errors.
+- [x] CI execution of every fenced `python` block in the manual set:
+      `tests/test_docs_examples.py` for the six `docs/` manuals and `DOCS.MD`,
+      `tests/test_docs_smoke.py` for the README.
+- [ ] Remaining 0.9.0 gate: the release PR. Bump `sift.__version__` from
+      `0.9.0a1` to `0.9.0`, retitle the release-notes section, run the
+      pre-release smoke (`docs/development.md`), and merge. The owner then cuts
+      the `v0.9.0` tag and GitHub Release; a separate commit afterwards moves
+      `__version__` to `0.9.1.dev0`.
 
 ## Target encoding status
 
@@ -36,9 +47,10 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Re-scoped to 0.9.1 (owner decision, 2026-09-02)
 
-0.9.0 keeps two G-docs items: a numpydoc docstring for every `sift.__all__`
-export, and CI execution of every fenced `python` block in the manual set. The
-rest of §G-docs in `docs/specs/0.9-product-layer.md` moves to 0.9.1:
+0.9.0 kept two G-docs items — a numpydoc docstring for every `sift.__all__`
+export, and CI execution of every fenced `python` block in the manual set — and
+both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves to
+0.9.1:
 
 - [ ] Generated API reference from those docstrings, which retires `docs/API.md`.
 - [ ] One selector decision tree replacing the five "which selector" tables.
