@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
+from sift._metadata import resolve_row_metadata
+from sift._progress import ProgressCallback
 from sift._preprocess import (
     CatEncoding,
     EstimatorJMI,
@@ -19,6 +21,7 @@ from sift._preprocess import (
     RelevanceMethod,
     Task,
     resolve_jmi_estimator,
+    validate_target_cv_encoding_flags,
     validate_task,
     validate_k,
 )
@@ -66,7 +69,11 @@ from sift.selection.filter_payloads import (
     validate_standard,
 )
 from sift.selection.loops import MrmrBackend, resolve_mrmr_backend
-from sift.selection.result import FilterSelectionResult, build_selector_metadata
+from sift.selection.result import (
+    _PROXY_CORRELATIONS_ATTR,
+    FilterSelectionResult,
+    build_selector_metadata,
+)
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -128,7 +135,9 @@ class FilterRequest:
     auto_k_config: Optional[AutoKConfig] = None
     sample_weight: np.ndarray | None = None
     return_result: bool = False
+    store_proxies: bool = False
     selector_kwargs: dict[str, Any] | None = None
+    callback: ProgressCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +180,9 @@ _COMMON_REQUEST_LOCAL_NAMES = frozenset(
         "time",
         "auto_k_config",
         "sample_weight",
+        "callback",
         "return_result",
+        "store_proxies",
     }
 )
 
@@ -182,6 +193,10 @@ MRMR_SELECTOR_KWARGS = (
     "top_m",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -195,6 +210,10 @@ JMI_SELECTOR_KWARGS = (
     "top_m",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -205,6 +224,10 @@ CEFSPLUS_SELECTOR_KWARGS = (
     "corr_prune",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "allow_full_data_target_encoding",
     "subsample",
     "random_state",
@@ -219,6 +242,10 @@ CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "refit_every",
     "cat_features",
     "cat_encoding",
+    "target_cv_n_splits",
+    "target_cv_smoothing",
+    "target_prior",
+    "warmup_policy",
     "loo_smoothing",
     "loo_clip_min",
     "loo_clip_max",
@@ -235,17 +262,34 @@ def _request_from_public_locals(
     task: Task,
     selector_names: tuple[str, ...],
 ) -> FilterRequest:
-    return FilterRequest(
+    metadata = resolve_row_metadata(
         values["X"],
+        groups=values.get("groups"),
+        time=values.get("time"),
+        sample_weight=values.get("sample_weight"),
+    )
+    validate_target_cv_encoding_flags(
+        values.get("cat_encoding", "none"),
+        values.get("allow_full_data_target_encoding", False),
+    )
+    store_proxies = values.get("store_proxies", False)
+    if not isinstance(store_proxies, (bool, np.bool_)):
+        raise ValueError("store_proxies must be a boolean")
+    if store_proxies and not bool(values.get("return_result", False)):
+        raise ValueError("store_proxies=True requires return_result=True")
+    return FilterRequest(
+        metadata.X,
         values["y"],
         values["k"],
         task,
         cache=values.get("cache"),
-        groups=values.get("groups"),
-        time=values.get("time"),
+        groups=metadata.groups,
+        time=metadata.time,
         auto_k_config=values.get("auto_k_config"),
-        sample_weight=values.get("sample_weight"),
+        sample_weight=metadata.sample_weight,
+        callback=values.get("callback"),
         return_result=bool(values.get("return_result", False)),
+        store_proxies=bool(store_proxies),
         selector_kwargs={name: values[name] for name in selector_names},
     )
 
@@ -259,10 +303,14 @@ def select_mrmr(
     relevance: RelevanceMethod = "f", estimator: EstimatorMRMR = "classic",
     formula: Formula = "quotient", top_m: Optional[int] = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
-    verbose: bool = True, return_result: bool = False,
+    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Minimum Redundancy Maximum Relevance feature selection."""
     request = _request_from_public_locals(
@@ -282,9 +330,13 @@ def select_jmi(
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False,
+    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Joint Mutual Information feature selection."""
     request = _request_from_public_locals(
@@ -304,9 +356,13 @@ def select_jmim(
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False,
+    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation."""
     request = _request_from_public_locals(
@@ -328,9 +384,13 @@ def select_cefsplus(
     sample_weight: np.ndarray | None = None,
     top_m: Optional[int] = None, corr_prune: float | None = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False,
+    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """CEFS+ feature selection using log-det Gaussian MI proxy."""
     request = _request_from_public_locals(
@@ -351,11 +411,15 @@ def select_cefsplus_binary(
     class_weight=None,
     ridge: float = 1e-4, refit_every: int = 1,
     cat_features: Optional[list[str]] = None, cat_encoding: str = "none",
+    target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     loo_smoothing: float = 20.0, loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = None, random_state: int = 0,
-    verbose: bool = True, return_result: bool = False,
+    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy."""
     request = _request_from_public_locals(
@@ -390,11 +454,17 @@ def _select_filter(
                 f"{spec.display_name} does not support k_method="
                 f"{ctx.auto_k_config.k_method!r}"
             )
+        _require_context_auto_k_compatibility(ctx)
         _require_auto_k_eval_context(ctx)
     else:
         handler = spec.fixed_handler
 
     spec.validate(ctx)
+    if request.store_proxies and ctx.estimator != "gaussian":
+        raise ValueError(
+            "store_proxies=True is currently supported only by Gaussian/cached "
+            "filter routes; choose estimator='gaussian' or omit store_proxies"
+        )
     payload = handler(ctx)
     if (
         ctx.k == "auto"
@@ -567,13 +637,20 @@ def _format_payload(
         auto_k=ctx.k == "auto",
         extra=extra,
     )
-    return FilterSelectionResult(
+    result = FilterSelectionResult(
         selected_features=payload.selected_features,
         selected_indices=payload.selected_indices,
         selector_metadata=metadata,
         ranking_=payload.ranking,
         diagnostics_=payload.diagnostics,
     )
+    if payload.proxy_correlations is not None:
+        object.__setattr__(
+            result,
+            _PROXY_CORRELATIONS_ATTR,
+            payload.proxy_correlations.copy(deep=True),
+        )
+    return result
 
 
 def _require_auto_k_eval_context(ctx: FilterContext) -> None:
@@ -582,6 +659,21 @@ def _require_auto_k_eval_context(ctx: FilterContext) -> None:
         return
     _require_evaluate_context(config, ctx.groups, ctx.time)
     _require_unique_evaluate_feature_names(config, ctx.request.X)
+
+
+def _require_context_auto_k_compatibility(ctx: FilterContext) -> None:
+    """Contextual target encoding is safe only in split-based evaluation."""
+    if (
+        (ctx.groups is None and ctx.time is None)
+        or (ctx.selector_kwargs or {}).get("cat_encoding") != "target_cv"
+    ):
+        return
+    assert ctx.auto_k_config is not None
+    if ctx.auto_k_config.k_method != "evaluate":
+        raise ValueError(
+            "groups and time are supported only with k='auto' and "
+            "AutoKConfig(k_method='evaluate')"
+        )
 
 
 def _require_evaluate_context(
@@ -666,11 +758,17 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         corr_prune=options.corr_prune,
         cat_features=kw("cat_features"),
         cat_encoding=cat_encoding_eff,
+        target_cv_n_splits=kw("target_cv_n_splits"),
+        target_cv_smoothing=kw("target_cv_smoothing"),
+        target_prior=kw("target_prior"),
+        warmup_policy=kw("warmup_policy"),
         allow_full_data_target_encoding=kw("allow_full_data_target_encoding"),
         subsample=options.subsample,
         random_state=kw("random_state"),
         verbose=kw("verbose"),
+        callback=request.callback,
         return_result=request.return_result,
+        store_proxies=request.store_proxies,
     )
     if not request.return_result:
         return result
@@ -691,13 +789,21 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
             "cat_encoding": cat_encoding_eff,
         }
     )
-    return FilterSelectionResult(
+    delegated = FilterSelectionResult(
         selected_features=result.selected_features,
         selected_indices=result.selected_indices,
         selector_metadata=metadata,
         ranking_=result.ranking_,
         diagnostics_=result.diagnostics_,
     )
+    proxy_correlations = getattr(result, _PROXY_CORRELATIONS_ATTR, None)
+    if proxy_correlations is not None:
+        object.__setattr__(
+            delegated,
+            _PROXY_CORRELATIONS_ATTR,
+            proxy_correlations.copy(deep=True),
+        )
+    return delegated
 
 
 def _validate_groups_time(

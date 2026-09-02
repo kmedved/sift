@@ -14,6 +14,7 @@ import pandas as pd
 from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from threadpoolctl import threadpool_limits
 
+from sift._logging import logger
 from sift._preprocess import to_numpy
 from sift.estimators.copula import (
     FeatureCache,
@@ -114,6 +115,12 @@ class KnockoffSelectionResult:
         )
         return ranking[columns]
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
 
 @dataclass(frozen=True)
 class KnockoffStatContext:
@@ -211,7 +218,7 @@ def _warn_if_integer_multiclass_target(y: Any) -> None:
             "3-20 unique values look multiclass. For multiclass discovery, run "
             "one-vs-rest targets and combine the selected features.",
             UserWarning,
-            stacklevel=3,
+            stacklevel=4,
         )
 
 
@@ -239,13 +246,10 @@ def _validate_cache_rxx(Rxx: np.ndarray, p: int) -> np.ndarray:
 def _reject_duplicate_feature_names(cache: FeatureCache) -> None:
     if cache.feature_names is None or cache.feature_names_are_synthetic:
         return
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for name in cache.feature_names:
-        if name in seen:
-            duplicates.append(name)
-        seen.add(name)
-    if duplicates:
+    names = pd.Index(cache.feature_names, dtype=object, tupleize_cols=False)
+    duplicate_mask = names.duplicated(keep="first")
+    if duplicate_mask.any():
+        duplicates = names[duplicate_mask].tolist()
         sample = duplicates[:5]
         suffix = "..." if len(duplicates) > 5 else ""
         raise ValueError(f"Duplicate feature names are not supported: {sample}{suffix}")
@@ -255,6 +259,49 @@ def _feature_names_for_valid_cols(cache: FeatureCache) -> list[Any]:
     if cache.feature_names is None:
         return [f"x{int(i)}" for i in cache.valid_cols]
     return [cache.feature_names[int(i)] for i in cache.valid_cols]
+
+
+def _input_width_provenance(
+    cache: FeatureCache,
+    *,
+    inactive_valid_positions: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Describe the raw input width and the columns knockoffs could not use.
+
+    ``n_features`` counts the post-screening columns the knockoff filter
+    actually ran on, so it cannot establish the caller's raw matrix width once
+    constant columns are dropped.  ``n_features_input`` is that raw width, and
+    the dropped-position lists say which raw columns are missing and why:
+
+    ``"constant"``
+        Removed while building the copula cache (zero standard deviation), so
+        the column has no row in ``W`` at all.
+    ``"zero_weight_variance"``
+        Kept in the cache but carrying no weighted variance, so it takes no
+        part in knockoff construction.  These columns still have a ``W`` row.
+
+    The keys are omitted when the cache cannot prove the raw width, which
+    happens only for a prebuilt cache that carries no ``feature_names``.
+    """
+    if cache.feature_names is None:
+        return {}
+    n_input = len(cache.feature_names)
+    valid = np.asarray(cache.valid_cols, dtype=np.int64)
+    dropped: list[tuple[int, str]] = [
+        (int(position), "constant")
+        for position in set(range(n_input)).difference(valid.tolist())
+    ]
+    if inactive_valid_positions is not None:
+        dropped.extend(
+            (int(valid[int(position)]), "zero_weight_variance")
+            for position in np.asarray(inactive_valid_positions, dtype=np.int64)
+        )
+    dropped.sort(key=lambda item: item[0])
+    return {
+        "n_features_input": int(n_input),
+        "dropped_feature_positions": [position for position, _ in dropped],
+        "dropped_feature_reasons": [reason for _, reason in dropped],
+    }
 
 
 def _stable_group_codes(groups: Sequence[Any]) -> tuple[list[Any], np.ndarray]:
@@ -316,8 +363,12 @@ def _weighted_variance(Z: np.ndarray, w: np.ndarray, *, batch_size: int = 50_000
         stop = min(Z_arr.shape[0], start + batch_size)
         Zb = np.asarray(Z_arr[start:stop], dtype=np.float64)
         wb = w64[start:stop]
-        sums += wb @ Zb
-        sq_sums += wb @ (Zb * Zb)
+        # ``np.matmul`` can emit spurious floating-point warnings for finite
+        # vector-matrix products with some NumPy 2.x/BLAS combinations.  Dot
+        # has the same BLAS-backed reduction semantics without that ufunc
+        # warning path.
+        sums += np.dot(wb, Zb)
+        sq_sums += np.dot(wb, Zb * Zb)
     mean = sums / w_sum
     var = sq_sums / w_sum - mean * mean
     np.maximum(var, 0.0, out=var)
@@ -498,7 +549,7 @@ def _build_active_rxx(cache: FeatureCache, active: np.ndarray, *, verbose: bool)
         return np.ascontiguousarray(_validate_cache_rxx(R_active, active_count), dtype=np.float64)
 
     if verbose:
-        print("cache.Rxx is None; computing a local weighted correlation matrix.")
+        logger.info("cache.Rxx is None; computing a local weighted correlation matrix.")
     Z_active = (
         np.asarray(cache.Z)
         if bool(active.all())
@@ -1284,7 +1335,7 @@ def _select_fdr_cluster_representatives(
         feature_names_are_synthetic=cache.feature_names_are_synthetic,
     )
     if verbose:
-        print(
+        logger.info(
             f"feature_groups='auto': {p_valid} features -> {reps_sorted.shape[0]} "
             f"clusters at |corr| >= {group_corr_threshold:g}; running knockoffs on representatives"
         )
@@ -1377,6 +1428,13 @@ def _select_fdr_cluster_representatives(
             "n_representatives": int(reps_sorted.shape[0]),
         }
     )
+    # The representative run only saw one column per cluster, so its dropped
+    # positions describe the reduced cache.  This result expands back to every
+    # valid column, so recompute the provenance against the full cache.
+    metadata.pop("n_features_input", None)
+    metadata.pop("dropped_feature_positions", None)
+    metadata.pop("dropped_feature_reasons", None)
+    metadata.update(_input_width_provenance(cache))
     diagnostics = dict(rep_result.diagnostics_ or {})
     diagnostics.update(
         {
@@ -1532,7 +1590,7 @@ def select_fdr(
             "feature_groups for collinear clusters, or pruning near-duplicate "
             "columns before select_fdr.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
     active_positions = np.flatnonzero(active).astype(np.int64)
     path_depth_requested = options.get("path_depth")
@@ -1614,6 +1672,12 @@ def select_fdr(
         "group_mode": None if group_labels is None else "signed_max_heuristic",
         "group_fdr_control": None if group_labels is None else "none",
     }
+    metadata.update(
+        _input_width_provenance(
+            resolved_cache,
+            inactive_valid_positions=np.flatnonzero(~active),
+        )
+    )
 
     if zy_var <= 1e-12:
         return _all_zero_result(
@@ -1697,11 +1761,11 @@ def select_fdr(
         )
         if metadata["path_depth_saturated"]:
             warnings.warn(
-                "The CEFS+ knockoff discovery set reached the configured "
+                "The CEFS+ knockoff discovery set reached the effective "
                 f"path_depth={metadata['path_depth']}; increasing path_depth may "
                 "yield additional discoveries.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
 
     mean_W = W_draws.mean(axis=0)
@@ -1760,7 +1824,7 @@ def select_fdr(
     if verbose:
         threshold_text = "derandomized" if threshold_out is None else f"threshold={threshold_out:.6g}"
         threshold_name = "knockoff+" if offset_int == 1 else "knockoff"
-        print(
+        logger.info(
             f"{threshold_name} q={q_float:.3g}: selected {len(selected_features)} features "
             f"({threshold_text}, s_mean={metadata['s_mean']:.3g})"
         )

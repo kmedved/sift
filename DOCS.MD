@@ -147,8 +147,22 @@ from sift import (
     catboost_select,
     catboost_regression,
     catboost_classif,
+    set_verbosity,
+    SelectionView,
+    as_result,
 )
 ```
+
+The 0.9 surface currently contains 58 top-level exports: the 55 legacy names,
+`set_verbosity`, `SelectionView`, and `as_result`.
+
+## Logging
+
+Calls with `verbose=True` emit INFO records on the `sift` logger and remain
+visible by default. Use `set_verbosity("debug")`, `set_verbosity("info")`, or
+`set_verbosity(None)` to select debug, normal progress, or silence globally;
+per-call `verbose=False` remains silent. Application logging handlers can
+capture `sift` records normally.
 
 ## Data Requirements
 
@@ -196,8 +210,40 @@ Sample weights:
 
 Categorical encoding:
 
-- Filter selectors support `cat_features=[...]` and `cat_encoding="loo"`,
-  `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
+- Filter selectors support `cat_features=[...]` and `cat_encoding="target_cv"`,
+  `"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`, or `"none"`.
+- `cat_encoding="target_cv"` is built into SIFT and needs no optional
+  dependency. Every fold kind (`fixed_k`, `group`, `time`) runs through one
+  SIFT encoder that emits **centered category effects**: out-of-fold training
+  rows get `fold_encoding - fold_training_prior` and inference rows get
+  `full_fit_encoding - full_training_prior`. Unknown or unseen categories
+  therefore map to a zero centered effect, i.e. the global-mean estimate before
+  centering, so a unique-ID, group-proxy, or timestamp-proxy column cannot
+  identify its own fold through the complement folds' prior. Missing values
+  stay one learned category. The unweighted fixed-k folds reproduce sklearn's
+  `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
+  shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
+  m-estimates.
+- **What centering does and does not guarantee.** It neutralizes only
+  *unseen-in-fold* emissions. It is not a defence against high cardinality as
+  such: a level appearing two or more times in a fold's training rows still
+  transmits those sibling rows' targets, which is ordinary target-encoding
+  behavior. A near-unique identifier whose rows share a latent target therefore
+  remains selectable (measured: 300 IDs x 2 rows, `corr(enc, y) ~ 0.88`, picked
+  first by `select_mrmr`). Drop ID-like columns, or pass `groups=` so all of an
+  identifier's rows land in one fold, if that cross-row information must not
+  reach selection.
+- Configure target encoding with `target_cv_n_splits=5` and
+  `target_cv_smoothing="auto"`. `"auto"` is available on every fold kind,
+  weighted or not, because the empirical-Bayes prior is defined by weighted row
+  mass; an explicit non-negative float is also accepted everywhere. Group folds
+  never use targets from a held-out group. Time folds keep tied timestamps
+  together and use only strictly earlier history.
+- Earliest time-fold rows have no history. Supply a target-independent
+  `target_prior` and they emit a centered neutral effect (zero) while staying in
+  the fit, or leave it unset and choose `warmup_policy="zero_weight"` (default)
+  or `"exclude"`; both policies remove those warmup rows from the selection fit
+  through zero effective weight.
 - `cat_encoding="loo"`, `"target"`, and `"james_stein"` require the
   `category_encoders` package. `cat_encoding="loo_logit"` is built into SIFT
   and is intended for binary targets.
@@ -205,7 +251,18 @@ Categorical encoding:
   encodings (`"loo"`, `"target"`, `"james_stein"`, and `"loo_logit"`) raise unless
   `allow_full_data_target_encoding=True` is passed. That flag preserves the old
   full-dataset encoding behavior and should only be used when leakage has been
-  handled outside the selector.
+  handled outside the selector. It is rejected with `cat_encoding="target_cv"`,
+  which is cross-fitted by construction, at every function, selector-class,
+  binary, and Boruta entry point.
+- `KnockoffSelector` rejects `cat_encoding="target_cv"`: target-derived
+  preprocessing breaks the Model-X exchangeability the FDR claim rests on. The
+  0.8 supervised encodings still work there, but emit a `UserWarning` and
+  report `fdr_control="none"` with a `validity_note` in the result metadata.
+  `select_fdr` has no `cat_encoding` parameter.
+- Fixed-k calls still reject `groups`/`time`; contextual encoding is available
+  through auto-k evaluate routes (and nested evaluate mode for selector
+  classes). Multiclass remains rejected until block-aware expansion exists.
+  No target-CV route falls back to full-data training values.
 - If `cat_features` is omitted and `X` is a DataFrame, object/category/string
   columns are auto-detected for Gaussian/JMI/CEFS+ paths in the places where the
   code supports it.
@@ -329,12 +386,49 @@ metadata = result.selector_metadata
 ranking = result.get_feature_ranking()
 ```
 
+The additive A2d result view supports `FilterSelectionResult`,
+`KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, and
+`CatBoostSelectionResult` without replacing any class. It also supports the
+opt-in `ImportanceResult` from `permutation_importance`; a fitted
+`StabilitySelector` exposes the same view through `selector.result_view_`:
+
+```python
+view = as_result(result, input_features=X.columns)
+
+view.features
+view.indices
+view.k
+view.table
+view.metadata
+```
+
 `return_result=True` is available on `select_mrmr`, `select_jmi`,
 `select_jmim`, and `select_cefsplus`. The default remains `list[str]`. The
 result object currently contains selected feature names, best-effort input-column
 indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
 reported as `NaN` rather than guessed.
+
+The six legacy adapters that do not wrap fitted state are result-only:
+`metadata["input_kind"]` is `"unknown"`,
+and transform and inverse-transform are unavailable. Feature-path evaluation
+and CatBoost supply normalized score curves;
+the other supported legacy results have no retained route-level curve. CatBoost
+views remain partial without an explicit raw feature identity and distinguish
+the target curve count from the number of stable features actually returned.
+The fitted stability adapter has a complete candidate-feature table and a
+frozen fitted column-subset transform; inverse transform remains unavailable.
+`ImportanceResult` records named-versus-positional provenance and retains
+repeat-level score drops without retaining the model or input matrix. See
+[Reading Results](docs/results.md) for the current completeness
+matrix and versioned JSON contract.
+
+Cached selectors and Gaussian filter routes can opt into proxy lookup with
+`return_result=True, store_proxies=True`. The view retains only a bounded
+`float32` candidate-by-selected copula-correlation block (at most 64 MiB), not
+`X` or the cache. Use `view.proxies(feature)` for unique labels and
+`view.proxies_at(selected_index)` when labels repeat. Classic and binary
+log-loss routes reject this option.
 
 ### `select_jmi`
 
@@ -638,8 +732,9 @@ Available classes:
 - `CEFSPlusBinarySelector`
 - `KnockoffSelector`
 
-Each class supports `fit`, `transform`, `fit_transform`, and
-`get_support(indices=False)`. After fitting, the selectors expose:
+Each listed class subclasses sklearn's `SelectorMixin` and supports `fit`, `transform`,
+`fit_transform`, `get_support(indices=False)`, `get_feature_names_out()`, and
+dense `inverse_transform`. After fitting, the selectors expose:
 
 - `selected_features_`
 - `selected_indices_`
@@ -647,6 +742,24 @@ Each class supports `fit`, `transform`, `fit_transform`, and
 - `n_features_in_`
 - `get_feature_names_out()` for the selected columns
 - `result_` on `KnockoffSelector`
+
+All eight public selector classes, including Boruta and Stability, accept
+`output_order="legacy"` (default) to preserve each family's historical
+order: filter and knockoff path order, Boruta input order, and Stability
+descending selection-frequency order with stable input-position ties. Set
+`output_order="original"` for ascending fitted-column order. `transform`,
+`get_support(indices=True)`, and `get_feature_names_out()` follow that order;
+the boolean mask remains positional. `inverse_transform` returns a dense,
+full-width array with unselected columns filled with zero and is unavailable
+after supervised categorical encoding. Sparse matrices are rejected during
+fit, transform, and inverse transform.
+
+Metadata routing is additive and explicit. On sklearn 1.4+, enable routing and
+call `set_fit_request(...)` for metadata the configured fit path accepts before
+using `cross_validate(..., params=...)`. Fixed-k filter selectors reject
+`groups`/`time`; group/time requests require `k="auto"`. Knockoff exposes only
+`sample_weight`. Sklearn 1.3 callers continue to pass accepted metadata
+directly to `fit`.
 
 For pandas inputs, `transform` validates that columns match the fitted columns
 and order before selecting by stored positions.
@@ -659,15 +772,16 @@ overrides are rejected. `KnockoffSelector` uses the same `subsample="auto"`
 contract, while its numeric `random_state` continues to seed each fresh
 knockoff draw.
 
-Selector classes default to `cat_encoding="none"`. When you explicitly set
-`cat_encoding` to `"target"`, `"loo"`, `"james_stein"`, or `"loo_logit"`, the
-encoder is fitted only inside `fit(X_train, y_train)` and reused by
-`transform(X_test)` without access to test targets. `fit_transform(X_train,
-y_train)` returns the selected columns from the y-aware encoded matrix used
-during selection, so sklearn pipeline training does not silently switch to
-target-blind transform semantics.
-These fitted encoders are not cross-fitted; use external cross-fitting or
-selector-class `auto_k_mode="nested"` when you need fold-local evaluation.
+Selector classes default to `cat_encoding="none"`. With
+`cat_encoding="target_cv"`, `fit_transform(X_train, y_train)` returns the
+selected cross-fitted columns used during selection, while
+`transform(X_test)` reuses the full-training fitted encoder without access to
+test targets. The fitted `categorical_encoding_metadata_` records the fold
+kind/count. Existing `"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"`
+encoders retain their 0.8 behavior: they are fitted only inside
+`fit(X_train, y_train)` and reused target-blind at transform time, but are not
+all internally cross-fitted. Use `target_cv`, external cross-fitting, or
+selector-class `auto_k_mode="nested"` when you need fold-local training values.
 Function-style selectors still reject supervised full-data categorical encoding
 by default unless `allow_full_data_target_encoding=True` is passed explicitly.
 
@@ -721,6 +835,59 @@ selected = select_mrmr(
 )
 ```
 
+Four additive presets cover the common intent-first cases without changing the
+flat constructor:
+
+```python
+router = AutoKConfig.default()
+predictive = AutoKConfig.predictive(strategy="kfold", rule="best", n_folds=5)
+discovery = AutoKConfig.discovery(alpha=0.05)
+downstream = AutoKConfig.downstream("group_cv", "rmse", "best")
+```
+
+`predictive(..., n_folds=...)` writes `xfit_folds`; it does not overwrite the
+distinct evaluate/nested field `n_splits`. `downstream` retains the current
+evaluate contract and therefore rejects `strategy="kfold"`.
+
+For larger configurations, module-scoped frozen option objects can be flattened
+through `from_groups`:
+
+```python
+from sift.selection.auto_k_options import AutoKCVOptions, AutoKPermutationOptions
+
+config = AutoKConfig.from_groups(
+    k_method="perm_gap",
+    min_k=0,
+    cv=AutoKCVOptions(strategy="group_cv"),
+    perm=AutoKPermutationOptions(perm_B=50, perm_null="within_group"),
+)
+```
+
+The 49 original flat fields remain the only stored dataclass fields. Group
+views such as `config.cv` and `config.perm` are immutable snapshots; they do
+not change constructor signatures, equality, `repr`, `dataclasses.replace`, or
+pickle state. `from_groups` rejects unknown fields, wrong group types, and a
+field supplied both flat and through a group.
+
+| Owner | Canonical flat fields |
+| --- | --- |
+| Core | `k_method`, `max_k`, `min_k`, `random_state` |
+| `objective` | `objective_penalty`, `objective_penalty_weight`, `objective_n_eff`, `n_eff_mode`, `ebic_gamma`, `binary_objective_mode` |
+| `test` | `alpha`, `m_mode`, `stop_patience` |
+| `perm` | `perm_B`, `perm_null`, `gap_rule` |
+| `knockoff` | `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` |
+| `cv` | `strategy`, `metric`, `val_frac`, `n_splits`, `xfit_folds`, `xfit_mode`, `xfit_ridge`, `selection_rule`, `one_se_multiplier`, `score_abs_tol`, `score_rel_tol`, `plateau_prefer`, `plateau_min_points` |
+| `stability` | `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` |
+| `experimental` | `auto_k_mode`, `elbow_min_rel_gain`, `elbow_patience`, `posterior_level`, `posterior_pick`, `floor_z`, `floor_window`, `consensus_methods`, `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` |
+
+The similarly named fields remain distinct: `n_splits` controls evaluate and
+nested folds while `xfit_folds` controls Gaussian fold curves;
+`elbow_patience` confirms an elbow while `stop_patience` controls sequential
+stops; `objective_n_eff` is an explicit override while `n_eff_mode` chooses
+the effective-sample-size rule. Non-default fields that the chosen method does
+not consume emit a caller-facing `UserWarning`; internally routed copies do not
+repeat or invent those warnings.
+
 `AutoKConfig` fields:
 
 - `k_method="auto"` delegates to the measured router. CEFS+ and binary CEFS+
@@ -737,7 +904,11 @@ selected = select_mrmr(
   `auto_dense_check=True` to have large EBIC picks cross-checked against
   `gaussian_cv` with `selection_rule="best"`; the router warns when EBIC's
   detectable-feature count and the Gaussian CV sufficiency pick disagree
-  sharply.
+  sharply. The dense check is a Gaussian CEFS+ diagnostic: binary log-loss
+  CEFS+ automatic routing has no dense-regime diagnostic and rejects
+  non-default `auto_dense_*` settings with a `ValueError` instead of silently
+  ignoring them. Binary Brier selection delegates to Gaussian CEFS+ and
+  therefore follows the Gaussian dense-check contract.
 - `k_method="evaluate"` evaluates prefixes of the selected path with a simple
   downstream model. `selection_rule="best"` preserves the historical argmin
   behavior. `selection_rule="plateau"` and `"tolerance"` require
@@ -823,12 +994,18 @@ selected = select_mrmr(
   distinct timestamps for evaluate/fold-curve methods.
 - `strategy="group_cv"` requires `groups` and uses `GroupKFold`.
 - `strategy="kfold"` is available for `gaussian_cv` and `xfit_objective`.
+- Wherever the route accepts row context, DataFrame callers may use
+  `groups="column_name"` or `time="column_name"`. SIFT extracts that column
+  positionally and removes it from the feature matrix; direct arrays remain
+  positional and fixed-k filter calls still reject row context.
 - If `auto_k_config` is omitted, CEFS+ and binary CEFS+ use
   `k_method="auto"`. Other selectors keep the legacy inference:
   `strategy="time_holdout"` when `time` is supplied and `strategy="group_cv"`
   when only `groups` is supplied.
 - `metric="auto"` resolves to RMSE for regression and log loss for
-  classification.
+  classification. `metric=` also accepts estimator-style sklearn scorer
+  objects; their signed higher-is-better output is negated into SIFT's
+  historical lower-is-better curve.
 - `min_k` may be zero for discovery/error-controlled methods. Mean-one weight
   normalization makes `n_eff_mode="weight_sum"` equal to the row count even
   under skewed weights; v2 inference methods use Kish effective sample size
@@ -838,17 +1015,21 @@ Important v2 knobs:
 
 | Field | Used by | Meaning |
 | --- | --- | --- |
-| `alpha`, `m_mode`, `stop_patience` | `chi2_stop`, `forward_stop`, `perm_gap`, `changepoint` | Path-test level, max-candidate correction width, and consecutive-stop patience. |
+| `alpha` | `chi2_stop`, `forward_stop`; `perm_gap` with `gap_rule="gain_envelope"` | Path-test level. |
+| `m_mode` | `chi2_stop`, `forward_stop` | Max-candidate correction width. |
+| `stop_patience` | `chi2_stop`, `changepoint`; `perm_gap` with `gap_rule="gain_envelope"` | Consecutive-stop patience. |
 | `perm_B`, `perm_null`, `gap_rule` | `perm_gap` | Number of null paths, structure-preserving null type, and gap decision rule. |
 | `knockoff_q`, `knockoff_draws`, `knockoff_s_method`, `knockoff_return` | `knockoff_path` | Target q, derandomized draws, sampler construction, and set-vs-prefix return contract. |
 | `xfit_folds`, `xfit_mode` | `gaussian_cv`, `xfit_objective` | Fold count and shared-copula mode. |
 | `xfit_ridge` | `gaussian_cv` | Gaussian linear-risk ridge. |
-| `ebic_gamma`, `n_eff_mode` | `penalized_objective`, `k_posterior` | Multiplicity penalty strength and effective-sample-size source. |
+| `ebic_gamma` | EBIC `penalized_objective`, `k_posterior` | Multiplicity penalty strength. |
+| `objective_n_eff`, `n_eff_mode` | Objective/posterior and gain-test methods | Explicit effective sample size and its fallback rule. |
 | `posterior_level`, `posterior_pick` | `k_posterior` | HPD mass and MAP-vs-smallest-HPD selection rule. |
-| `boot_B`, `boot_mode`, `stability_rule`, `stability_pi` | `stability` | Bootstrap count/mode, max-one-SE or pi-threshold sizing, and a Phi floor for chance-level agreement. |
+| `boot_B`, `boot_mode`, `stability_rule` | `stability` | Bootstrap count/mode and sizing rule. |
+| `stability_pi` | `stability` with `stability_rule="pi_threshold"` | Selection-frequency threshold. |
 | `floor_z`, `floor_window` | `changepoint` | Experimental noise-floor diagnostic parameters. |
 | `consensus_methods` | `consensus` | Submethods included in the lower-median consensus. |
-| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
+| `auto_dense_check`, `auto_dense_min_k`, `auto_dense_min_frac`, `auto_dense_disagreement_ratio` | `auto` (Gaussian CEFS+, including the binary Brier delegate; binary log-loss rejects non-default values) | Optional dense-regime EBIC-vs-`gaussian_cv/best` warning thresholds. |
 
 Supported function-style routes:
 
@@ -930,6 +1111,21 @@ best_k, ic_diagnostics = select_k_penalized_objective(
 )
 ```
 
+Research-oriented auto-k helpers are also available through an additive staged
+namespace:
+
+```python
+import sift.experimental as experimental
+
+curves = experimental.gaussian_cv_curves(...)
+```
+
+Accessing one of the 16 names through `sift.experimental` emits a
+`FutureWarning` because those helpers may change before 1.0. Their existing
+top-level imports remain available and warning-free throughout 0.9;
+`sift.__all__` remains the same ordered 58-name surface. The option-group types
+remain module-scoped and are not added to either top-level export list.
+
 ### Explicit feature-path evaluation
 
 Use `evaluate_feature_path` when you already have an ordered feature path and
@@ -945,7 +1141,7 @@ path_result = evaluate_feature_path(
     feature_path=selected_path,
     k_grid=[5, 10, 20, 40],
     estimator=Ridge(alpha=1.0),
-    scoring="rmse",           # "rmse", "mae", or callable
+    scoring="rmse",           # "rmse", "mae", sklearn scorer, or callable
     splitter=(train_idx, val_idx),
     sample_weight=weights,
 )
@@ -961,6 +1157,11 @@ explicit train/validation split, sklearn-style splitter objects, or a random
 holdout controlled by `val_frac` and `random_state`. It returns
 `FeaturePathEvaluationResult` with the resolved path, tested `k` values, average
 scores, best `k`, best-prefix features, and diagnostics.
+Estimator-style sklearn scorers are evaluated against the fitted estimator and
+negated into the result's historical lower-is-better score convention. A
+weighted evaluation requires a scorer whose score function accepts
+`sample_weight`; incompatible scorers raise instead of producing an all-infinite
+curve.
 
 ## Gaussian Feature Cache
 
@@ -1034,6 +1235,10 @@ filtering. Pass a float such as `corr_prune=0.95` to opt into duplicate-oriented
 pruning for any cached method.
 
 `select_cached(..., return_objective=True)` returns `(features, objective_path)`.
+`select_cached(..., return_result=True)` instead returns a complete
+`SelectionView` with selected positions, cache provenance, relevance, and the
+objective path. It cannot be combined with `return_objective` or
+`return_indices`; all four historical list/tuple shapes remain the default.
 
 ## Stability Selection
 
@@ -1080,6 +1285,10 @@ When `alpha=None`, the default `alpha_rule="one_se"` chooses the strongest
 regularization within one standard error of the best CV score. This is a
 selection-oriented default that reduces noise-variable frequency; use
 `alpha_rule="best"` when predictive CV error is the primary objective.
+For compatibility, 0.9 passes sample weights to the sparse model fits in this
+alpha search but retains the historical unweighted validation score and scaler.
+By contrast, `tune_threshold` forwards fit weights and scores validation rows
+with the supplied weights.
 
 The lower-level convenience function `sift.stability.stability_select` returns
 `(selected_indices, selection_frequencies)`:
@@ -1119,9 +1328,37 @@ info = selector.get_feature_info()
 coef_stability = selector.get_coef_stability()
 mask = selector.get_support()
 X_reduced = selector.transform(X)
+X_restored = selector.inverse_transform(X_reduced)
 # sklearn-compatible selected names:
 selected_names_out = selector.get_feature_names_out()
+# normalized, non-cached fitted view:
+view = selector.result_view_
 ```
+
+`output_order="legacy"` preserves descending selection-frequency order;
+`output_order="original"` emits selected columns in fitted input order. The
+same order governs transform, selected support indices, feature names, and
+dense inverse transformation. The fitted selector can invert a reduced dense
+matrix by zero-filling unselected columns; its frozen result view cannot.
+
+`StabilitySelector.transform` always returns an ndarray. A selector fitted on
+a DataFrame selects transformed DataFrames by fitted column name, so extra or
+reordered columns are accepted; duplicate labels and missing selected columns
+raise clear errors. `tune_threshold` applies the same identity checks while
+requiring every fitted feature. The same named paths are available when fitting
+an ndarray with explicit `feature_names`. By contrast, a selector fitted on an
+unnamed positional ndarray rejects DataFrame input to either method because its
+generated `x0`, `x1`, ... names cannot establish column identity. Keep using
+same-width ndarrays, provide explicit names when fitting the ndarray, or refit
+on a DataFrame. Ndarray transforms are positional and must retain the fit-time
+feature count.
+
+The fitted view's `features` are names while `indices` preserve the legacy
+integer positions. Its complete table is over `feature_names_in_`, which is the
+fitted candidate-feature namespace when an explicit subset or smart sampler is
+used. `view.transform(X)` freezes the selected identity at view creation,
+preserves the selector's `set_output` configuration, and does not retain
+training rows or the bootstrap coefficient matrix.
 
 Important options:
 
@@ -1130,6 +1367,7 @@ Important options:
   rounded panel-wide draw budget allocated across groups.
 - `threshold`: minimum selection frequency.
 - `alpha`: regularization strength. If `None`, Sift estimates it by CV.
+- `penalty`: additive alias for `alpha`; pass one or give both the same value.
 - `l1_ratio`: regression only; use values below `1.0` for ElasticNet.
 - `max_features`: hard cap after thresholding.
 - `store_coefs=False`: lowers memory use but disables coefficient stability
@@ -1152,6 +1390,10 @@ fig, axes = selector.plot_coef_distributions(top_n=12)
 original `fit` used `sample_weight`, `groups`, or `time`, pass those same arrays
 to `tune_threshold`; it requires the fit-time context, uses group-disjoint or
 time-ordered outer folds, and forwards the context to each fold-local selector.
+Its `scoring=` argument accepts sklearn scorer objects as well as scorer names.
+With DataFrames, `groups="column"` and `time="column"` are equivalent to
+passing the corresponding positional arrays while excluding those columns from
+the fitted feature namespace.
 
 ### Block bootstrap for panels/time series
 
@@ -1255,8 +1497,20 @@ selector = StabilitySelector(
 selector.fit(df, y)
 ```
 
-When `use_smart_sampler=True`, `X` must be a DataFrame. The sampler uses numeric
-feature columns only and drops group/time columns from the feature matrix.
+When `use_smart_sampler=True`, `X` must be a DataFrame. An explicit
+`fit(..., feature_names=[...])` sequence is preserved as an ordered feature
+subset rather than widened to every numeric column. Explicit feature names must
+refer to numeric columns after the sampler's metadata exclusions. Pass an
+ordered iterable such as a list, tuple, pandas Index, or one-dimensional NumPy
+array; strings, bytes-like objects, mappings, sets, scalar arrays, and
+matrix-like containers are rejected. Tuple and MultiIndex column labels remain
+single feature names in `get_feature_names_out`. Configured `group_col` and
+`time_col` columns remain metadata and are excluded from the feature matrix even
+if they appear in `feature_names`. Without explicit names, the sampler uses
+numeric columns other than those group/time columns. Datetime and timedelta
+feature columns are rejected before numeric coercion; a configured datetime
+`time_col` remains valid sampler metadata. Fold-local `tune_threshold` fits
+retain the configured group/time metadata while scoring only fitted features.
 
 ### Anchor utilities and presets
 
@@ -1386,12 +1640,17 @@ Important options:
 - `shap_sample_size`: optional SHAP row subsample.
 - `early_stop_rounds`: stop after repeated no-decision iterations.
 - `cat_features` and `cat_encoding`: encode categorical DataFrame columns before
-  fitting Boruta. Supervised encodings (`"loo"`, `"target"`, `"james_stein"`,
-  `"loo_logit"`) are fitted on the full dataset, which tree learners can
+  fitting Boruta. `"target_cv"` is the built-in regression/binary cross-fitted
+  option, emits prior-centered category effects (unknown maps to a zero
+  centered effect), supports weights and group/time context with explicit
+  custom smoothing, and retains a target-blind inference encoder. Existing
+  supervised encodings (`"loo"`, `"target"`, `"james_stein"`, `"loo_logit"`)
+  are fitted on the full dataset, which tree learners can
   invert (leave-one-out values within a category are monotone in the row's own
   target), so Boruta requires `allow_full_data_target_encoding=True` before
-  applying them, exactly like the filter selectors. Prefer pre-encoding
-  categoricals out-of-fold and passing `cat_encoding="none"`.
+  applying them, exactly like the filter selectors. That flag is rejected with
+  `"target_cv"`. Prefer pre-encoding categoricals out-of-fold and passing
+  `cat_encoding="none"`.
   In `importance_data="test"` mode, supervised encodings are rejected outright.
   `cat_encoding="none"` is allowed only when the categorical columns are
   already numeric/pre-encoded; raw object/category columns still fail the
@@ -1419,7 +1678,9 @@ has already been fit.
 
 For pandas inputs, Sift preserves the DataFrame path when calling
 `model.predict`, so feature names and categorical/object dtypes remain available
-to models that require them. NumPy inputs keep the ndarray path.
+to models that require them. NumPy inputs keep the ndarray path. DataFrame
+callers may pass `groups="column"` and `time="column"`; those metadata columns
+are removed before prediction. Direct arrays remain positional.
 
 ```python
 from sklearn.ensemble import RandomForestRegressor
@@ -1440,6 +1701,18 @@ importance = permutation_importance(
     time=df["game_date"].to_numpy(),
     random_state=0,
 )
+
+rich_importance = permutation_importance(
+    model,
+    X,
+    y,
+    scoring="neg_rmse",
+    n_repeats=20,
+    random_state=0,
+    return_result=True,
+)
+repeat_drops = rich_importance.importances_  # raw feature positions × repeats
+view = rich_importance.result_view()
 ```
 
 Output columns:
@@ -1448,6 +1721,13 @@ Output columns:
 - `importance_mean`
 - `importance_std`
 - `baseline_score`
+
+The four-column DataFrame remains the default return. With
+`return_result=True`, `ImportanceResult.ranking_` is exactly that summary and
+`ImportanceResult.importances_` retains each normalized score drop in original
+feature-position order. `result_view()` exposes all evaluated features in
+importance order with `selection_semantics="ranking_only"`; it does not invent
+a cutoff or retain the fitted model or input matrix.
 
 Scoring options:
 
@@ -1521,6 +1801,9 @@ result = sift.catboost_select(
     eval_metric="RMSE",
     random_state=0,
     verbose=True,
+    groups=None,
+    time=None,
+    sample_weight=None,
 )
 
 selected = result.selected_features
@@ -1566,11 +1849,18 @@ Prefiltering:
 Cross-validation:
 
 - Pass any sklearn-compatible splitter via `cv=`.
-- If `group_col` is set, that column is extracted from `X`, dropped from the
-  feature matrix, and passed as groups to supported splitters.
+- `groups`, `time`, and `sample_weight` accept direct positional arrays.
+- DataFrame `groups="column"` and `time="column"` extract and remove those
+  columns. `group_col` and `sample_weight_col` remain compatibility aliases;
+  direct-plus-alias combinations raise.
+- Supplied `time` is validated and stably orders every aligned row before the
+  configured splitter. Use an explicitly time-aware splitter for chronological
+  validation; the default remains the legacy random split.
 - `sample_weight_col` is extracted and used as CatBoost weights.
 - Misspelled `group_col` or `sample_weight_col` names raise `ValueError`
   instead of silently disabling groups or weights.
+- `catboost_params` collisions with translated SIFT arguments emit one
+  `UserWarning` while retaining the 0.9 dictionary-wins precedence.
 
 ```python
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
@@ -1653,6 +1943,16 @@ mean, std = result.score_at_k(20)
 small_set = result.features_within_tolerance(tolerance=0.01)
 fig, ax = result.plot_scores_vs_k()
 ```
+
+### Progress callbacks
+
+Long-running filter paths (including `select_cached` and the filter selector
+classes), stability, Boruta, and CatBoost selectors accept
+`callback(step, total, info)`. Steps are one-based and are reported after each
+completed greedy-path step, bootstrap, Boruta iteration, or CatBoost split,
+respectively. Each call receives a fresh snapshot dictionary; callback
+exceptions propagate, and callbacks supplement rather than replace `verbose`
+logging. The default `callback=None` makes no calls.
 
 ## Low-Level Selection Utilities
 
@@ -1830,8 +2130,8 @@ Utility behavior:
 - `check_regression_only`: blocks regression-only estimators for classification.
 - `resolve_jmi_estimator`: maps `estimator="auto"` to `"r2"` or `"binned"`.
 - `subsample_xy`: row-subsamples features, target, and weights.
-- `encode_categoricals`: target/LOO/James-Stein encoding through
-  `category_encoders`.
+- `encode_categoricals`: built-in centered `target_cv` plus the optional
+  target/LOO/James-Stein `category_encoders` backends and binary LOO-logit.
 
 ## Permutation Utilities
 
@@ -2039,6 +2339,17 @@ Set `random_state` wherever available:
 
 For exact comparisons, also keep `subsample`, `top_m`, `n_bootstrap`,
 `feature_counts`, and CV splitters fixed.
+
+In 0.9, omitted/`None` `random_state` values on `StabilitySelector`,
+`permutation_importance`, and CatBoost selectors emit a `FutureWarning` but
+remain nondeterministic. SIFT 1.0 will resolve those defaults to seed 0. The
+literal-42 defaults on `AutoKConfig`, `SmartSamplerConfig`, and
+`evaluate_feature_path` remain unchanged and warning-free in 0.9.
+
+Parallel defaults also remain unchanged in 0.9: filter/cache entry points use
+`n_jobs=1`, while Stability, permutation importance, and CatBoost use
+`n_jobs=-1`. CatBoost GPU execution does not translate `n_jobs` into a CPU
+thread count.
 
 ## Development
 

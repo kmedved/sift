@@ -11,6 +11,7 @@ import sift.selection.loops as loops_module
 import sift.stability as stability_module
 from sift import (
     BorutaSelector,
+    KnockoffSelector,
     build_cache,
     select_boruta,
     select_boruta_shap,
@@ -261,6 +262,129 @@ def test_function_categorical_defaults_are_safe_and_truthful():
     with pytest.raises(ValueError, match="Non-numeric columns") as exc_info:
         select_mrmr(X, y, k=1, task="regression", verbose=False)
     assert "leakage-prone" not in str(exc_info.value)
+
+
+def _fold_marker_frame(seed: int, n: int = 600):
+    """Unique-ID fixture reproducing the pre-0.9 target_cv fold-marker leak."""
+    rng = np.random.default_rng(seed)
+    cities = np.array([f"city_{i}" for i in range(8)], dtype=object)
+    city = rng.choice(cities, size=n)
+    effects = dict(zip(cities.tolist(), rng.normal(size=8).tolist()))
+    x1 = rng.normal(size=n)
+    y = x1 + np.array([effects[value] for value in city]) + rng.normal(
+        scale=0.3, size=n
+    )
+    X = pd.DataFrame(
+        {
+            "id": [f"id_{i}" for i in range(n)],
+            "city": pd.Series(city, dtype=object),
+            "x1": x1,
+            "x_noise": rng.normal(size=n),
+        }
+    )
+    return X, y
+
+
+def test_target_cv_is_leakage_safe_for_unique_identifier_columns():
+    """Release gate for the §1.1 centering claim across the whole surface.
+
+    Before centering, the unique ``id`` column carried each row's complement
+    folds' prior and entered mRMR's top three in every seed of this design.
+    """
+    for seed in range(8):
+        X, y = _fold_marker_frame(seed)
+        for selector, kwargs in (
+            (select_mrmr, {"task": "regression", "estimator": "classic"}),
+            (select_jmi, {"task": "regression", "estimator": "r2"}),
+            (select_jmim, {"task": "regression", "estimator": "r2"}),
+        ):
+            selected = selector(
+                X,
+                y,
+                3,
+                cat_encoding="target_cv",
+                subsample=None,
+                verbose=False,
+                **kwargs,
+            )
+            assert "id" not in selected, f"{selector.__name__} seed={seed}"
+
+    X, y = _fold_marker_frame(0)
+    selector = BorutaSelector(
+        n_estimators=20,
+        max_iter=2,
+        cat_encoding="target_cv",
+        verbose=False,
+    ).fit(X, y)
+    assert "id" not in selector.selected_features_
+
+
+def test_target_cv_rejects_the_full_data_escape_hatch_across_entry_points():
+    """Release gate for C3: the contradictory combination is never ignored."""
+    X, y = _fold_marker_frame(1, n=120)
+    y_binary = (y > np.median(y)).astype(np.int64)
+    message = "cannot be combined with allow_full_data_target_encoding=True"
+
+    with pytest.raises(ValueError, match=message):
+        select_mrmr(
+            X,
+            y,
+            1,
+            task="regression",
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+    with pytest.raises(ValueError, match=message):
+        select_cefsplus_binary(
+            X,
+            y_binary,
+            1,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+    with pytest.raises(ValueError, match=message):
+        select_boruta(
+            X,
+            y,
+            n_estimators=10,
+            max_iter=2,
+            cat_encoding="target_cv",
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        )
+
+
+def test_knockoff_fdr_claims_stay_honest_under_categorical_encoding():
+    """Release gate for C4: no silent Model-X claim on target-derived inputs."""
+    rng = np.random.default_rng(4242)
+    n = 240
+    signal = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "team": pd.Series(
+                np.resize(np.array(["a", "b", "c", "d"], dtype=object), n),
+                dtype=object,
+            ),
+            "signal": signal,
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = (signal + 0.4 * rng.normal(size=n) > 0).astype(np.int64)
+
+    with pytest.raises(ValueError, match="does not support cat_encoding='target_cv'"):
+        KnockoffSelector(q=0.2, cat_encoding="target_cv", verbose=False).fit(X, y)
+
+    # select_fdr deliberately gains no cat_encoding parameter: function parity
+    # is not a valid fix for a claim that does not survive the encoding.
+    assert "cat_encoding" not in inspect.signature(select_fdr).parameters
+
+    legacy = KnockoffSelector(q=0.2, cat_encoding="loo_logit", verbose=False)
+    with pytest.warns(UserWarning, match="no FDR claim applies"):
+        legacy.fit(X, y)
+    assert legacy.result_.selector_metadata["fdr_control"] == "none"
+    assert "validity_note" in legacy.result_.selector_metadata
 
 
 def test_routed_auto_k_metadata_omits_unused_strategy_and_selection_rule():
@@ -563,3 +687,610 @@ def test_stability_selection_frequencies_are_float64():
     ).fit(X, y)
 
     assert np.asarray(selector.selection_frequencies_).dtype == np.float64
+
+
+def test_binary_auto_router_rejects_auto_dense_options():
+    from sift import AutoKConfig
+
+    rng = np.random.default_rng(27)
+    X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"f{i}" for i in range(12)])
+    y = (X["f0"].to_numpy() + 0.2 * rng.normal(size=len(X)) > 0).astype(int)
+    config = AutoKConfig(
+        k_method="auto",
+        auto_dense_check=True,
+        auto_dense_min_k=2,
+        auto_dense_min_frac=0.05,
+    )
+
+    # Binary CEFS+ has no dense-regime diagnostic; silently ignoring the opt-in
+    # (or warning about fields the router "consumed") would both be dishonest.
+    with pytest.raises(ValueError, match="not supported for binary log-loss CEFS"):
+        select_cefsplus_binary(X, y, k="auto", auto_k_config=config, verbose=False)
+
+    # The default (unset) fields keep routing cleanly with no unused-field noise.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        select_cefsplus_binary(
+            X, y, k="auto", auto_k_config=AutoKConfig(k_method="auto"), verbose=False
+        )
+    assert [w for w in caught if "does not use it" in str(w.message)] == []
+
+    # Brier mode is intentionally different: it delegates to Gaussian CEFS+
+    # and therefore retains the Gaussian dense-check behavior. Pin the routing
+    # diagnostics rather than requiring data-dependent disagreement to warn.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = select_cefsplus_binary(
+            X,
+            y,
+            k="auto",
+            loss="brier",
+            auto_k_config=config,
+            verbose=False,
+            return_result=True,
+        )
+
+    assert "f0" in result.selected_features
+    dense_check = result.diagnostics_["auto_k"]["auto_routing"]["dense_check"]
+    assert dense_check["enabled"] is True
+    assert dense_check["ran"] is True
+    assert [w for w in caught if "does not use it" in str(w.message)] == []
+
+
+def test_gaussian_router_fallback_dispatch_strips_router_only_fields(monkeypatch):
+    # Exercises the real fallback call site in select_gaussian_auto_path: the
+    # primary routed run degenerates, and the SECOND dispatched config (built
+    # from the caller's original config) must not carry the auto_dense_* fields
+    # the router already consumed.
+    from sift import AutoKConfig
+    import sift.selection.filter_auto_k as filter_auto_k
+
+    class DummyCache:
+        sample_weight = np.ones(20, dtype=np.float64)
+        valid_cols = np.arange(5, dtype=np.int64)
+
+    dispatched = []
+    dense_check_calls = []
+
+    def fake_runner(routed_config, **_kwargs):
+        dispatched.append(routed_config)
+        if len(dispatched) == 1:
+            return [], [], pd.DataFrame(), {
+                "selected_k": 0,
+                "stopped_by": "degenerate_folds",
+            }
+        return ["x0"], [0], pd.DataFrame(), {"selected_k": 1}
+
+    def capture_dense_check(**kwargs):
+        dense_check_calls.append(kwargs)
+
+    monkeypatch.setattr(filter_auto_k, "_run_gaussian_routed_path", fake_runner)
+    monkeypatch.setattr(filter_auto_k, "_run_auto_dense_check", capture_dense_check)
+
+    requested_config = AutoKConfig(
+        k_method="auto",
+        min_k=1,
+        max_k=4,
+        auto_dense_check=True,
+        auto_dense_min_k=2,
+        auto_dense_min_frac=0.05,
+        auto_dense_disagreement_ratio=9.0,
+    )
+
+    _selected, _indices, _diag, summary = filter_auto_k.select_gaussian_auto_path(
+        cache=DummyCache(),
+        y=np.zeros(20),
+        method="mrmr_quot",
+        max_k=4,
+        top_m=10,
+        auto_k_config=requested_config,
+        verbose=False,
+    )
+
+    assert len(dispatched) == 2
+    assert len(dense_check_calls) == 1
+    dense_check_config = dense_check_calls[0]["config"]
+    assert dense_check_config is requested_config
+    assert dense_check_config.auto_dense_check is True
+    assert dense_check_config.auto_dense_min_k == 2
+    assert dense_check_config.auto_dense_min_frac == 0.05
+    assert dense_check_config.auto_dense_disagreement_ratio == 9.0
+    assert summary["auto_routing"]["fallback"]["chosen"] == "penalized_objective"
+    defaults = AutoKConfig()
+    for config in dispatched:
+        assert config.auto_dense_check == defaults.auto_dense_check
+        assert config.auto_dense_min_k == defaults.auto_dense_min_k
+        assert config.auto_dense_min_frac == defaults.auto_dense_min_frac
+        assert (
+            config.auto_dense_disagreement_ratio
+            == defaults.auto_dense_disagreement_ratio
+        )
+
+
+def test_stability_transform_dataframe_contract():
+    from sift import StabilitySelector
+
+    rng = np.random.default_rng(28)
+    X = pd.DataFrame(rng.normal(size=(150, 6)), columns=list("abcdef"))
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=len(X))
+    options = dict(n_bootstrap=5, alpha=0.3, n_jobs=1, verbose=False, random_state=0)
+
+    fitted = StabilitySelector(**options).fit(X, y)
+    assert fitted.selected_feature_names_  # sanity: something was selected
+
+    # Name-based selection tolerates extra and reordered columns.
+    extra = fitted.transform(X.assign(zz=1.0))
+    reordered = fitted.transform(X[list(X.columns[::-1])])
+    np.testing.assert_array_equal(extra, fitted.transform(X))
+    np.testing.assert_array_equal(reordered, fitted.transform(X))
+
+    # Missing or renamed selected columns raise a clear ValueError, not KeyError.
+    with pytest.raises(ValueError, match="missing selected feature column"):
+        fitted.transform(X.drop(columns=[fitted.selected_feature_names_[0]]))
+    with pytest.raises(ValueError, match="missing selected feature column"):
+        fitted.transform(X.rename(columns=lambda c: c + "_x"))
+
+    # A selector fitted on a positional array rejects DataFrame transform input.
+    positional = StabilitySelector(**options).fit(X.to_numpy(), y)
+    with pytest.raises(ValueError, match="positional array"):
+        positional.transform(X)
+    generated_names = pd.DataFrame(
+        X.to_numpy(), columns=positional.feature_names_in_
+    )
+    with pytest.raises(ValueError, match="positional array"):
+        positional.tune_threshold(
+            generated_names,
+            y,
+            thresholds=[0.5],
+            cv=2,
+        )
+    np.testing.assert_array_equal(
+        positional.transform(X.to_numpy()),
+        X.to_numpy()[:, positional.selected_features_],
+    )
+
+    # Explicit feature_names with ndarray input keep the named DataFrame path.
+    named = StabilitySelector(**options).fit(
+        X.to_numpy(), y, feature_names=list(X.columns)
+    )
+    np.testing.assert_array_equal(named.transform(X), named.transform(X.to_numpy()))
+
+    duplicate_extra = pd.concat([X, X[["f"]]], axis=1)
+    with pytest.raises(ValueError, match="Duplicate DataFrame column labels"):
+        fitted.tune_threshold(
+            duplicate_extra,
+            y,
+            thresholds=[0.5],
+            cv=2,
+        )
+
+
+def test_stability_smart_sampler_honors_explicit_feature_subset():
+    from sift.sampling.smart import SmartSamplerConfig
+
+    rng = np.random.default_rng(31)
+    X = pd.DataFrame(rng.normal(size=(120, 3)), columns=["a", "b", "c"])
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=len(X))
+    selector = StabilitySelector(
+        n_bootstrap=4,
+        sample_frac=0.7,
+        threshold=0.0,
+        alpha=0.1,
+        use_smart_sampler=True,
+        sampler_config=SmartSamplerConfig(
+            sample_frac=0.8,
+            residual_weight_cap=0.0,
+            random_state=0,
+            verbose=False,
+        ),
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=["a"])
+
+    assert list(selector.feature_names_in_) == ["a"]
+    assert set(selector.selected_feature_names_) <= {"a"}
+    transformed = selector.transform(X)
+    assert transformed.shape == (len(X), len(selector.selected_feature_names_))
+
+    ordered = StabilitySelector(
+        n_bootstrap=2,
+        sample_frac=0.7,
+        threshold=0.0,
+        alpha=0.1,
+        use_smart_sampler=True,
+        sampler_config=SmartSamplerConfig(
+            sample_frac=0.8,
+            residual_weight_cap=0.0,
+            random_state=0,
+            verbose=False,
+        ),
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=("c", "a"))
+    assert list(ordered.feature_names_in_) == ["c", "a"]
+    assert set(ordered.selected_feature_names_) <= {"c", "a"}
+
+
+def test_stability_smart_sampler_rejects_explicit_nonnumeric_feature_names():
+    rng = np.random.default_rng(32)
+    X = pd.DataFrame(
+        {
+            "a": rng.normal(size=120),
+            "category": np.resize(["left", "right"], 120),
+        }
+    )
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=len(X))
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.1,
+        use_smart_sampler=True,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    )
+    with pytest.raises(ValueError, match="must reference numeric.*non-numeric"):
+        selector.fit(X, y, feature_names=["a", "category"])
+
+
+def test_stability_smart_sampler_excludes_explicit_metadata_names():
+    from sift.sampling.smart import SmartSamplerConfig
+
+    rng = np.random.default_rng(33)
+    n = 120
+    X = pd.DataFrame(
+        {
+            "a": rng.normal(size=n),
+            "group": np.repeat(np.arange(12), 10),
+            "time": np.tile(np.arange(10), 12),
+            "c": rng.normal(size=n),
+        }
+    )
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=n)
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.1,
+        use_smart_sampler=True,
+        sampler_config=SmartSamplerConfig(
+            group_col="group",
+            time_col="time",
+            sample_frac=0.8,
+            residual_weight_cap=0.0,
+            random_state=0,
+            verbose=False,
+        ),
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=["a", "group", "time", "c"])
+
+    assert list(selector.feature_names_in_) == ["a", "c"]
+    assert set(selector.selected_feature_names_) <= {"a", "c"}
+
+
+def test_stability_smart_sampler_tune_threshold_retains_metadata_columns():
+    from sift.sampling.smart import SmartSamplerConfig
+
+    rng = np.random.default_rng(36)
+    n = 120
+    X = pd.DataFrame(
+        {
+            "a": rng.normal(size=n),
+            "group": np.repeat(np.arange(12), 10),
+            "time": pd.date_range("2020-01-01", periods=n, freq="h"),
+            "c": rng.normal(size=n),
+            "unused_numeric": rng.normal(size=n),
+        }
+    )
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=n)
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        sample_frac=0.7,
+        threshold=0.0,
+        alpha=0.1,
+        use_smart_sampler=True,
+        sampler_config=SmartSamplerConfig(
+            group_col="group",
+            time_col="time",
+            sample_frac=0.8,
+            residual_weight_cap=0.0,
+            random_state=0,
+            verbose=False,
+        ),
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=["a", "group", "time"])
+
+    best, results = selector.tune_threshold(X, y, thresholds=[0.0], cv=2)
+
+    assert best == 0.0
+    assert list(selector.feature_names_in_) == ["a"]
+    assert results.loc[0, "n_features"] == 1.0
+    assert results.loc[0, "n_finite"] == 2
+
+
+@pytest.mark.parametrize(
+    ("use_smart_sampler", "feature_names"),
+    [
+        (False, None),
+        (True, None),
+        (True, ["a", "elapsed"]),
+    ],
+)
+def test_stability_rejects_timedelta_feature_columns(
+    use_smart_sampler,
+    feature_names,
+):
+    rng = np.random.default_rng(37)
+    X = pd.DataFrame(
+        {
+            "a": rng.normal(size=100),
+            "elapsed": pd.to_timedelta(np.arange(100), unit="h"),
+        }
+    )
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=len(X))
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.1,
+        use_smart_sampler=use_smart_sampler,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="Datetime or timedelta feature columns"):
+        selector.fit(X, y, feature_names=feature_names)
+
+
+@pytest.mark.parametrize(
+    "feature_names",
+    [
+        "ab",
+        b"ab",
+        bytearray(b"ab"),
+        memoryview(b"ab"),
+        {"a", "b"},
+        {"a": 1, "b": 2},
+        np.array("ab"),
+        np.array([["a", "b"]]),
+        pd.DataFrame([[1, 2]], columns=["a", "b"]),
+    ],
+    ids=[
+        "str",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "set",
+        "mapping",
+        "scalar-array",
+        "matrix-array",
+        "dataframe",
+    ],
+)
+def test_stability_rejects_scalar_or_unordered_feature_name_containers(feature_names):
+    rng = np.random.default_rng(34)
+    X = pd.DataFrame(rng.normal(size=(100, 4)), columns=list("abcd"))
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=len(X))
+
+    with pytest.raises(ValueError, match="ordered, one-dimensional iterable"):
+        StabilitySelector(
+            n_bootstrap=2,
+            alpha=0.1,
+            n_jobs=1,
+            random_state=0,
+            verbose=False,
+        ).fit(X, y, feature_names=feature_names)
+
+
+@pytest.mark.parametrize(
+    ("feature_names", "expected"),
+    [
+        (pd.Index(["a", "c"]), ["a", "c"]),
+        (np.array(["c", "a"]), ["c", "a"]),
+    ],
+    ids=["pandas-index", "one-dimensional-array"],
+)
+def test_stability_accepts_ordered_one_dimensional_feature_name_containers(
+    feature_names,
+    expected,
+):
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.normal(size=(100, 3)), columns=["a", "b", "c"])
+    y = X["a"].to_numpy() + 0.05 * rng.normal(size=len(X))
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.1,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=feature_names)
+
+    assert list(selector.feature_names_in_) == expected
+    assert selector.get_feature_names_out(feature_names).shape == (2,)
+
+
+def test_stability_rejects_unhashable_feature_name_entry():
+    rng = np.random.default_rng(38)
+    X = rng.normal(size=(100, 2))
+    y = X[:, 0] + 0.05 * rng.normal(size=len(X))
+
+    with pytest.raises(ValueError, match="entries must be hashable"):
+        StabilitySelector(
+            n_bootstrap=2,
+            alpha=0.1,
+            n_jobs=1,
+            random_state=0,
+            verbose=False,
+        ).fit(
+            X,
+            y,
+            feature_names=[memoryview(bytearray(b"a")), "b"],
+        )
+
+
+def test_stability_feature_names_out_preserves_tuple_labels():
+    rng = np.random.default_rng(35)
+    columns = pd.MultiIndex.from_tuples(
+        [("left", "a"), ("left", "b"), ("right", "c")]
+    )
+    X = pd.DataFrame(rng.normal(size=(120, 3)), columns=columns)
+    y = X[("left", "a")].to_numpy() + 0.05 * rng.normal(size=len(X))
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.1,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+
+    output_names = selector.get_feature_names_out()
+    supplied_names = selector.get_feature_names_out(list(columns))
+    assert output_names.ndim == 1
+    assert supplied_names.ndim == 1
+    assert output_names.tolist() == selector.selected_feature_names_
+    assert supplied_names.tolist() == selector.selected_feature_names_
+    assert selector.transform(X).shape == (len(X), len(output_names))
+
+
+@pytest.mark.parametrize(
+    "missing_label",
+    [float("nan"), pd.NaT, pd.NA],
+    ids=["nan", "nat", "pd-na"],
+)
+def test_stability_feature_names_out_accepts_matching_missing_labels(missing_label):
+    rng = np.random.default_rng(39)
+    columns = pd.Index([missing_label, "b", "c"], dtype=object)
+    X = pd.DataFrame(rng.normal(size=(100, 3)), columns=columns)
+    y = X.iloc[:, 0].to_numpy() + 0.05 * rng.normal(size=len(X))
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.1,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+
+    output_names = selector.get_feature_names_out(list(columns))
+
+    assert output_names.ndim == 1
+    assert output_names.shape == (3,)
+    assert selector.transform(X).shape == (len(X), 3)
+
+
+def test_stability_requires_exact_multiindex_feature_labels():
+    rng = np.random.default_rng(40)
+    X_fit = rng.normal(size=(100, 1))
+    y = X_fit[:, 0] + 0.05 * rng.normal(size=len(X_fit))
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.1,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X_fit, y, feature_names=[("left",)])
+    ambiguous = pd.DataFrame(
+        rng.normal(size=(100, 2)),
+        columns=pd.MultiIndex.from_tuples(
+            [("left", "a"), ("left", "b")]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="missing selected feature column"):
+        selector.transform(ambiguous)
+    with pytest.raises(ValueError, match="missing fitted feature column"):
+        selector.tune_threshold(ambiguous, y, thresholds=[0.5], cv=2)
+
+
+def test_stability_distinguishes_distinct_tuple_feature_labels():
+    rng = np.random.default_rng(41)
+    X = rng.normal(size=(100, 2))
+    y = X[:, 0] + 0.05 * rng.normal(size=len(X))
+    feature_names = [("c",), ("c", float("nan"))]
+
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        threshold=0.0,
+        alpha=0.1,
+        n_jobs=1,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y, feature_names=feature_names)
+
+    assert selector.get_feature_names_out(feature_names).shape == (2,)
+
+
+def test_stability_rejects_duplicate_and_empty_feature_names():
+    from sift import StabilitySelector
+
+    rng = np.random.default_rng(29)
+    X = pd.DataFrame(rng.normal(size=(120, 3)), columns=["a", "b", "c"])
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=len(X))
+    options = dict(n_bootstrap=4, alpha=0.3, n_jobs=1, verbose=False, random_state=0)
+
+    # Duplicate DataFrame columns previously widened transform output silently
+    # (selecting 'a' from columns [a, a, b] returned both copies).
+    X_dup = pd.concat([X[["a"]], X], axis=1)
+    with pytest.raises(ValueError, match="Duplicate DataFrame column labels"):
+        StabilitySelector(**options).fit(X_dup, y)
+
+    fitted = StabilitySelector(**options).fit(X, y)
+    with pytest.raises(ValueError, match="Duplicate DataFrame column labels"):
+        fitted.transform(X_dup)
+
+    with pytest.raises(ValueError, match="feature_names must be unique"):
+        StabilitySelector(**options).fit(X.to_numpy(), y, feature_names=["a", "a", "b"])
+
+    # feature_names=[] is explicit-but-wrong, not "absent": reject it up front
+    # for arrays and DataFrames alike instead of failing deep inside sklearn.
+    with pytest.raises(ValueError, match="non-empty"):
+        StabilitySelector(**options).fit(X.to_numpy(), y, feature_names=[])
+    with pytest.raises(ValueError, match="non-empty"):
+        StabilitySelector(**options).fit(X, y, feature_names=[])
+
+    # Repeated NaN labels are duplicates even though NaN != NaN defeats set().
+    with pytest.raises(ValueError, match="feature_names must be unique"):
+        StabilitySelector(**options).fit(
+            X.to_numpy(), y, feature_names=[float("nan"), float("nan"), "b"]
+        )
+
+    # Explicit names must reference existing DataFrame columns.
+    with pytest.raises(ValueError, match="missing"):
+        StabilitySelector(**options).fit(X, y, feature_names=["a", "zzz"])
+
+
+def test_stability_failed_fit_leaves_selector_unfitted():
+    from sklearn.utils.validation import check_is_fitted
+    from sklearn.exceptions import NotFittedError
+    from sift import StabilitySelector
+
+    rng = np.random.default_rng(30)
+    X = pd.DataFrame(rng.normal(size=(120, 3)), columns=["a", "b", "c"])
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=len(X))
+    X_dup = pd.concat([X[["a"]], X], axis=1)
+    options = dict(n_bootstrap=4, alpha=0.3, n_jobs=1, verbose=False, random_state=0)
+
+    # Failed initial fit: no attribute may make the generic fitted-check pass.
+    selector = StabilitySelector(**options)
+    with pytest.raises(ValueError, match="Duplicate DataFrame column labels"):
+        selector.fit(X_dup, y)
+    with pytest.raises(NotFittedError):
+        check_is_fitted(selector)
+
+    # Failed refit clears the previous fitted state (matching the existing
+    # cleanup contract for failures later in fit).
+    selector.fit(X, y)
+    check_is_fitted(selector)
+    with pytest.raises(ValueError, match="Duplicate DataFrame column labels"):
+        selector.fit(X_dup, y)
+    with pytest.raises(NotFittedError):
+        check_is_fitted(selector)

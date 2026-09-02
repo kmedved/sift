@@ -183,7 +183,7 @@ def _solve_beta(R: np.ndarray, r: np.ndarray, ridge: float) -> np.ndarray:
                 warnings.warn(
                     "gaussian_cv train correlation solve was singular; increasing ridge.",
                     UserWarning,
-                    stacklevel=3,
+                    stacklevel=5,
                 )
     return np.linalg.pinv(base + lam * np.eye(k)) @ r
 
@@ -213,7 +213,7 @@ def _gaussian_cv_scores(
                 warnings.warn(
                     "gaussian_cv train correlation Cholesky was singular; increasing ridge.",
                     UserWarning,
-                    stacklevel=3,
+                    stacklevel=4,
                 )
     if chol is None:
         for k in range(1, L + 1):
@@ -352,14 +352,14 @@ def _curve_from_fold_scores(
         warnings.warn(
             f"{score_kind} dropped {dropped} degenerate fold(s) with no finite scores.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
     elif dropped and len(healthy_scores) < 2:
         warnings.warn(
             f"{score_kind} has only {len(healthy_scores)} healthy fold(s) after dropping "
             "degenerate folds; falling back to the method floor.",
             UserWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         diag = pd.DataFrame()
         diag.attrs["stopped_by"] = "degenerate_folds"

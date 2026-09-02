@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
+from sift._deprecate import warn_external, warn_random_state_none
+from sift._logging import logger
+from sift._metadata import resolve_row_metadata
+from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import best_score_from_dict, infer_higher_is_better
 from sift.catboost_common import (
     CatBoostClassifier,
@@ -48,29 +52,55 @@ def _normalize_catboost_target(y, index: pd.Index) -> pd.Series:
     return y
 
 
-def _extract_weight_and_group_columns(
-    X: pd.DataFrame,
+def _catboost_row_series(
+    values: Any,
+    index: pd.Index,
     *,
-    sample_weight_col: Optional[str],
-    group_col: Optional[str],
-) -> tuple[pd.DataFrame, Optional[pd.Series], Optional[pd.Series]]:
-    X_work = X.copy()
-    sample_weights = None
-    groups = None
+    argument: str,
+) -> Optional[pd.Series]:
+    if values is None:
+        return None
+    array = np.asarray(values)
+    if array.ndim != 1:
+        raise ValueError(f"{argument} must be a one-dimensional row array")
+    if array.shape[0] != len(index):
+        raise ValueError(
+            f"{argument} has {array.shape[0]} rows but X has {len(index)}"
+        )
+    return pd.Series(array, index=index, copy=True)
 
-    if sample_weight_col is not None:
-        if sample_weight_col not in X_work.columns:
-            raise ValueError(f"sample_weight_col={sample_weight_col!r} not found in X")
-        sample_weights = X_work[sample_weight_col]
-        X_work = X_work.drop(columns=[sample_weight_col])
 
-    if group_col is not None:
-        if group_col not in X_work.columns:
-            raise ValueError(f"group_col={group_col!r} not found in X")
-        groups = X_work[group_col]
-        X_work = X_work.drop(columns=[group_col])
-
-    return X_work, sample_weights, groups
+def _sort_catboost_rows_by_time(
+    X: pd.DataFrame,
+    y: pd.Series,
+    sample_weight: Optional[pd.Series],
+    groups: Optional[pd.Series],
+    time: Optional[pd.Series],
+) -> tuple[
+    pd.DataFrame,
+    pd.Series,
+    Optional[pd.Series],
+    Optional[pd.Series],
+]:
+    if time is None:
+        return X, y, sample_weight, groups
+    if pd.isna(time).any():
+        raise ValueError("time must not contain missing values")
+    try:
+        order = np.argsort(time.to_numpy(), kind="mergesort")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("time values must be mutually orderable") from exc
+    X_sorted = X.iloc[order].reset_index(drop=True)
+    y_sorted = y.iloc[order].reset_index(drop=True)
+    weight_sorted = (
+        None
+        if sample_weight is None
+        else sample_weight.iloc[order].reset_index(drop=True)
+    )
+    groups_sorted = (
+        None if groups is None else groups.iloc[order].reset_index(drop=True)
+    )
+    return X_sorted, y_sorted, weight_sorted, groups_sorted
 
 
 def _resolve_catboost_feature_types(
@@ -92,7 +122,11 @@ def _resolve_catboost_feature_types(
     if cat_features is not None:
         missing = [f for f in cat_features if f not in all_features]
         if missing:
-            warnings.warn(f"cat_features not found in X (ignoring): {missing[:5]}")
+            warnings.warn(
+                f"cat_features not found in X (ignoring): {missing[:5]}",
+                UserWarning,
+                stacklevel=3,
+            )
         cat_features_final = [f for f in cat_features if f in all_features]
         for f in detected_cat:
             if f not in cat_features_final:
@@ -110,7 +144,9 @@ def _resolve_catboost_feature_types(
                 f"treat_object_as_categorical=False but {len(orphan_obj)} object column(s) "
                 f"are not in text_features or cat_features: {orphan_obj[:5]}. "
                 "Auto-treating them as categorical to avoid CatBoost errors. "
-                "To exclude them, drop from X before calling."
+                "To exclude them, drop from X before calling.",
+                UserWarning,
+                stacklevel=3,
             )
             cat_features_final = list(cat_features_final)
             for c in orphan_obj:
@@ -118,7 +154,7 @@ def _resolve_catboost_feature_types(
                     cat_features_final.append(c)
 
     if verbose and cat_features_final:
-        print(f"  Categorical features: {len(cat_features_final)}")
+        logger.info(f"  Categorical features: {len(cat_features_final)}")
 
     return cat_features_final, text_feat
 
@@ -166,6 +202,14 @@ def _build_catboost_model_params(
         model_params['thread_count'] = n_jobs
 
     if catboost_params:
+        collisions = sorted(set(model_params).intersection(catboost_params))
+        if collisions:
+            warn_external(
+                "catboost_params overrides translated SIFT arguments for: "
+                f"{collisions}. The catboost_params values continue to win in "
+                "SIFT 0.9; conflicting values will be rejected in SIFT 1.0.",
+                UserWarning,
+            )
         model_params.update(catboost_params)
         if 'eval_metric' in catboost_params:
             resolved_metric = str(catboost_params['eval_metric'])
@@ -240,7 +284,7 @@ def _build_catboost_splits(
         )
         if verbose:
             group_msg = " (group-aware)" if groups is not None else ""
-            print(f"  Stability selection: {n_bootstrap} resampled splits{group_msg}")
+            logger.info(f"  Stability selection: {n_bootstrap} resampled splits{group_msg}")
         return splits
 
     if cv is not None:
@@ -255,7 +299,7 @@ def _build_catboost_splits(
         )
         if groups_array is not None and not accepts_groups:
             raise TypeError(
-                "group_col was provided, but custom cv.split does not accept groups"
+                "groups were provided, but custom cv.split does not accept groups"
             )
         splits = list(
             cv.split(X_work, y, groups=groups_array)
@@ -263,7 +307,7 @@ def _build_catboost_splits(
             else cv.split(X_work, y)
         )
         if verbose:
-            print(f"  Custom CV: {type(cv).__name__} ({len(splits)} splits)")
+            logger.info(f"  Custom CV: {type(cv).__name__} ({len(splits)} splits)")
         return splits
 
     if groups is not None:
@@ -274,7 +318,7 @@ def _build_catboost_splits(
         )
         splits = list(splitter.split(X_work, y, groups))
         if verbose:
-            print(f"  Group-aware splits: {n_splits}")
+            logger.info(f"  Group-aware splits: {n_splits}")
         return splits
 
     if task == 'classification':
@@ -316,6 +360,7 @@ def _run_catboost_split_evaluation(
     steps: int,
     k_req: Optional[int],
     verbose: bool,
+    callback: ProgressCallback | None = None,
 ) -> tuple[Dict[int, List[float]], Dict[int, List[List[str]]], Optional[List[str]]]:
     all_scores: Dict[int, List[float]] = defaultdict(list)
     all_features_by_k: Dict[int, List[List[str]]] = defaultdict(list)
@@ -333,7 +378,7 @@ def _run_catboost_split_evaluation(
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         if verbose:
-            print(f"  Split {fold_idx + 1}/{len(splits)}...", end=" ", flush=True)
+            logger.info(f"  Split {fold_idx + 1}/{len(splits)}...")
 
         X_train, X_val = X_work.iloc[train_idx], X_work.iloc[val_idx]
         y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
@@ -436,9 +481,34 @@ def _run_catboost_split_evaluation(
         if verbose:
             if scores:
                 best_k_fold, best_score_fold = best_score_from_dict(scores, resolved_hib)
-                print(f"best k={best_k_fold}, score={best_score_fold:.4f}")
+                logger.info(
+                    f"  Split {fold_idx + 1}/{len(splits)}: "
+                    f"best k={best_k_fold}, score={best_score_fold:.4f}"
+                )
             else:
-                print("no valid scores")
+                logger.info(f"  Split {fold_idx + 1}/{len(splits)}: no valid scores")
+
+        if callback is not None:
+            if scores:
+                callback_best_k, callback_best_score = best_score_from_dict(
+                    scores, resolved_hib
+                )
+                callback_best_k = int(callback_best_k)
+                callback_best_score = float(callback_best_score)
+            else:
+                callback_best_k, callback_best_score = None, None
+            report_progress(
+                callback,
+                fold_idx + 1,
+                len(splits),
+                stage="split",
+                train_rows=int(len(train_idx)),
+                validation_rows=int(len(val_idx)),
+                candidate_features=int(len(features)),
+                evaluated_counts=int(len(scores)),
+                best_k=callback_best_k,
+                best_score=callback_best_score,
+            )
 
     return all_scores, all_features_by_k, prefilter_features_first
 
@@ -499,7 +569,7 @@ def _choose_catboost_target_k(
     )
 
     if verbose:
-        print(
+        logger.info(
             f"  Best score {best_score:.4f} at k={best_k}; "
             f"parsimony rule (tolerance={tolerance_float:g}) selected "
             f"k={parsimonious_k}"
@@ -510,7 +580,9 @@ def _choose_catboost_target_k(
         if k_req > max_eval_k:
             warnings.warn(
                 f"k={k_req} exceeds max evaluated feature count ({max_eval_k}) after "
-                f"prefiltering/fit failures; using k={max_eval_k} instead."
+                f"prefiltering/fit failures; using k={max_eval_k} instead.",
+                UserWarning,
+                stacklevel=3,
             )
             target_k = max_eval_k
         else:
@@ -615,7 +687,11 @@ def _compute_final_catboost_importances(
             method=importance_method,
         )
     except Exception as exc:
-        warnings.warn(f"Failed to compute final importances: {exc}")
+        warnings.warn(
+            f"Failed to compute final importances: {exc}",
+            UserWarning,
+            stacklevel=3,
+        )
         return pd.Series(dtype=float)
 
 
@@ -668,8 +744,15 @@ def catboost_select(
     higher_is_better: Optional[bool] = None,
     random_state: Optional[int] = None,
     verbose: bool = True,
+    callback: ProgressCallback | None = None,
+    groups: Any = None,
+    time: Any = None,
+    sample_weight: Any = None,
 ) -> CatBoostSelectionResult:
-    """Run CatBoost feature selection and return scores, paths, and final importances."""
+    """Run CatBoost feature selection and return scores, paths, and final importances.
+
+    ``callback(step, total, info)`` is called after each completed split.
+    """
     k_req = k
     if CatBoostRegressor is None:
         raise ImportError(
@@ -686,11 +769,39 @@ def catboost_select(
 
     y = _normalize_catboost_target(y, X.index)
     n_samples, n_features_orig = X.shape
-    X_work, sample_weights, groups = _extract_weight_and_group_columns(
+    metadata = resolve_row_metadata(
         X,
-        sample_weight_col=sample_weight_col,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
         group_col=group_col,
+        sample_weight_col=sample_weight_col,
     )
+    X_work = metadata.X
+    sample_weights = _catboost_row_series(
+        metadata.sample_weight,
+        X.index,
+        argument="sample_weight",
+    )
+    groups = _catboost_row_series(
+        metadata.groups,
+        X.index,
+        argument="groups",
+    )
+    time_values = _catboost_row_series(
+        metadata.time,
+        X.index,
+        argument="time",
+    )
+    X_work, y, sample_weights, groups = _sort_catboost_rows_by_time(
+        X_work,
+        y,
+        sample_weights,
+        groups,
+        time_values,
+    )
+    if random_state is None:
+        warn_random_state_none("catboost_select")
     all_features = list(X_work.columns)
 
     model_params, resolved_metric, resolved_hib = _build_catboost_model_params(
@@ -710,8 +821,10 @@ def catboost_select(
 
     if verbose:
         direction = "up" if resolved_hib else "down"
-        print(f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features")
-        print(f"  Metric: {resolved_metric} ({direction} better)")
+        logger.info(
+            f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features"
+        )
+        logger.info(f"  Metric: {resolved_metric} ({direction} better)")
 
     cat_features_final, text_feat = _resolve_catboost_feature_types(
         X_work,
@@ -731,8 +844,8 @@ def catboost_select(
     )
 
     if verbose:
-        print(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
-        print(f"  Algorithm: {algorithm}")
+        logger.info(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
+        logger.info(f"  Algorithm: {algorithm}")
 
     splits = _build_catboost_splits(
         X_work=X_work,
@@ -770,6 +883,7 @@ def catboost_select(
         steps=steps,
         k_req=k_req,
         verbose=verbose,
+        callback=callback,
     )
     target_k, best_k, best_score, scores_mean, scores_std = _choose_catboost_target_k(
         all_scores,
@@ -803,7 +917,7 @@ def catboost_select(
 
     if verbose:
         score = scores_mean.get(target_k, best_score)
-        print(
+        logger.info(
             f"Selected {len(selected_features)} features (k={target_k}, score={score:.4f}; "
             f"best-scoring k={best_k}, score={best_score:.4f})"
         )
@@ -836,14 +950,32 @@ def _catboost_task_features(
     return catboost_select(X, y, k=k, task=task, **kwargs).selected_features
 
 
-def catboost_regression(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+def catboost_regression(
+    X: pd.DataFrame,
+    y: pd.Series,
+    k: int,
+    *,
+    callback: ProgressCallback | None = None,
+    **kwargs,
+) -> List[str]:
     """CatBoost feature selection for regression."""
-    return _catboost_task_features(X, y, k, task='regression', **kwargs)
+    return _catboost_task_features(
+        X, y, k, task='regression', callback=callback, **kwargs
+    )
 
 
-def catboost_classif(X: pd.DataFrame, y: pd.Series, k: int, **kwargs) -> List[str]:
+def catboost_classif(
+    X: pd.DataFrame,
+    y: pd.Series,
+    k: int,
+    *,
+    callback: ProgressCallback | None = None,
+    **kwargs,
+) -> List[str]:
     """CatBoost feature selection for classification."""
-    return _catboost_task_features(X, y, k, task='classification', **kwargs)
+    return _catboost_task_features(
+        X, y, k, task='classification', callback=callback, **kwargs
+    )
 
 
 __all__ = [

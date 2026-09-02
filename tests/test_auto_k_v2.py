@@ -129,7 +129,6 @@ def _call_direct_cache_auto_k_api(api, cache, y):
                 strategy="kfold",
                 min_k=1,
                 max_k=2,
-                n_splits=2,
             ),
             top_m=5,
             corr_prune="auto",
@@ -144,7 +143,6 @@ def _call_direct_cache_auto_k_api(api, cache, y):
                 strategy="kfold",
                 min_k=1,
                 max_k=2,
-                n_splits=2,
             ),
             top_m=5,
             corr_prune="auto",
@@ -450,6 +448,7 @@ def test_benchmark_gaussian_cv_best_group_cv_spelling(monkeypatch):
         )
 
 
+@pytest.mark.slow
 def test_d10_dense_design_exposes_grouped_production_scale_metadata():
     X, y, meta = DESIGNS["D10"].make(0, False)
 
@@ -875,6 +874,7 @@ def test_cefsplus_public_dispatch_supports_phase2_path_methods():
     assert weighted.diagnostics_["auto_k"]["n_eff_source"] == "kish"
 
 
+@pytest.mark.slow
 def test_auto_k_null_calibration_and_signal_recovery_sims():
     null_results = {"chi2": [], "perm": [], "knockoff": [], "ebic": []}
     for seed in range(5):
@@ -1418,7 +1418,6 @@ def test_xfit_helpers_slice_full_length_metadata_to_cache_rows():
         selection_rule="best",
         min_k=1,
         max_k=4,
-        random_state=7,
     )
     curves = gaussian_cv_curves(
         cache,

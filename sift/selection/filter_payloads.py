@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import (
     CatEncoding,
     RelevanceMethod,
     Task,
+    TargetCVEncoder,
     check_regression_only,
     encode_categoricals,
     ensure_weights,
@@ -28,6 +30,7 @@ from sift.estimators.copula import (
     weighted_corr_with_vector,
     weighted_rank_gauss_1d,
 )
+from sift.selection import auto_k as auto_k_module
 from sift.selection.cefsplus import select_cached
 from sift.selection.cefsplus_binary import make_diagnostics
 from sift.selection.cefsplus_binary_common import (
@@ -41,7 +44,11 @@ from sift.selection.cefsplus_binary_common import (
     validate_binary_options,
 )
 from sift.selection.filter_auto_k import (
+    _AUTOK_FIELD_DEFAULTS,
+    _strip_router_only_fields,
+    AUTO_K_CURVE_KEY,
     auto_k_mode_label,
+    build_auto_k_curve_payload,
     prepare_filter_eval_data,
     select_binary_changepoint,
     select_binary_elbow,
@@ -65,6 +72,8 @@ from sift.selection.filter_auto_k import (
     select_gaussian_xfit_objective_path,
 )
 from sift.selection.loops import jmi_select, mrmr_select
+from sift.selection.panel import build_candidate_panel
+from sift.selection.proxies import proxy_frame_from_panel
 
 if TYPE_CHECKING:
     from sift.selection.filter_api import FilterContext
@@ -78,6 +87,8 @@ class ClassicPrepared:
     mi_w: np.ndarray
     feature_names: list[str]
     row_idx: np.ndarray
+    target_cv_metadata: dict | None = None
+    eval_sample_weight: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +100,7 @@ class SelectionPayload:
     metadata_extra: dict | None = None
     ranking: pd.DataFrame | None = None
     diagnostics: dict | None = None
+    proxy_correlations: pd.DataFrame | None = None
 
 
 ClassicPath = Callable[["FilterContext", ClassicPrepared, int, int], np.ndarray]
@@ -102,7 +114,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} classic: selecting {k} features from "
                 f"{prep.X_arr.shape[1]} (top_m={top_m})"
             )
@@ -136,6 +148,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             n_features=ctx.n_features_input,
             ranking=ranking,
             diagnostics=diagnostics,
+            metadata_extra=prep.target_cv_metadata,
         )
 
     return fixed_classic
@@ -148,7 +161,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
         max_k = int(ctx.auto_k_config.max_k)
         top_m = _default_top_m(_kw(ctx, "top_m"), max_k)
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} classic auto-k: building path to {max_k} "
                 f"features (top_m={top_m})"
             )
@@ -159,7 +172,8 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             else pd.DataFrame(ctx.request.X, columns=prep.feature_names)
         )
         X_eval = X_eval.iloc[prep.row_idx]
-        selected, selected_indices = select_filter_classic_auto_k(
+        want_result = bool(ctx.request.return_result)
+        outcome = select_filter_classic_auto_k(
             y_arr=prep.y_arr,
             eval_X=X_eval,
             feature_names=prep.feature_names,
@@ -167,18 +181,57 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             auto_k_config=ctx.auto_k_config,
             eval_groups=ctx.groups[prep.row_idx] if ctx.groups is not None else None,
             eval_time=ctx.time[prep.row_idx] if ctx.time is not None else None,
-            sample_weight=prep.w,
+            sample_weight=prep.eval_sample_weight,
             task=ctx.request.task,
             cat_features=_kw(ctx, "cat_features"),
             cat_encoding=_kw(ctx, "cat_encoding"),
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
             verbose=_kw(ctx, "verbose"),
             return_indices=True,
+            return_diagnostics=want_result,
         )
+        ranking = None
+        diagnostics = None
+        if not want_result:
+            selected, selected_indices = outcome
+        else:
+            selected, selected_indices, auto_diag, auto_summary = outcome
+            relevance = _compute_relevance(
+                prep.X_arr,
+                prep.y_arr,
+                prep.w,
+                ctx.request.task,
+                _kw(ctx, "relevance"),
+            )
+            ranking = _path_ranking(
+                prep.feature_names,
+                np.asarray(selected_indices, dtype=np.int64),
+                relevance,
+                ctx.spec.selector,
+            )
+            diagnostics = {
+                "path_relevance": relevance[
+                    np.asarray(selected_indices, dtype=np.int64)
+                ].astype(float).tolist(),
+                "auto_k": auto_summary,
+                "auto_k_diagnostics": auto_diag,
+                AUTO_K_CURVE_KEY: build_auto_k_curve_payload(
+                    k_method=ctx.auto_k_config.k_method,
+                    diagnostics=auto_diag,
+                    summary=auto_summary,
+                ),
+            }
         return SelectionPayload(
             selected_features=selected,
             selected_indices=selected_indices,
             top_m=top_m,
             n_features=len(prep.feature_names),
+            ranking=ranking,
+            diagnostics=diagnostics,
+            metadata_extra=prep.target_cv_metadata,
         )
 
     return auto_classic
@@ -186,12 +239,12 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
 
 def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext"], SelectionPayload]:
     def fixed_gaussian(ctx: "FilterContext") -> SelectionPayload:
-        cache, _ = _cache_for_gaussian(ctx)
+        cache, _, _, target_cv_metadata = _cache_for_gaussian(ctx)
         method = method_func(ctx)
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
         if _kw(ctx, "verbose"):
-            print(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
+            logger.info(f"{ctx.spec.display_name}: selecting {k} features (top_m={top_m})")
         if ctx.request.return_result:
             selected, selected_indices, objective = select_cached(
                 cache,
@@ -202,6 +255,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 corr_prune=_kw(ctx, "corr_prune", "auto"),
                 return_indices=True,
                 return_objective=True,
+                callback=ctx.request.callback,
             )
         else:
             selected, selected_indices = select_cached(
@@ -212,6 +266,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 top_m=top_m,
                 corr_prune=_kw(ctx, "corr_prune", "auto"),
                 return_indices=True,
+                callback=ctx.request.callback,
             )
             objective = None
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
@@ -219,6 +274,14 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             cache,
             selected,
             selected_indices,
+        )
+        proxy_correlations = _gaussian_proxy_correlations(
+            ctx,
+            cache=cache,
+            method=method,
+            k=k,
+            top_m=top_m,
+            selected_indices=selected_indices,
         )
         ranking = None
         diagnostics = None
@@ -245,6 +308,8 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             n_features=n_features,
             ranking=ranking,
             diagnostics=diagnostics,
+            proxy_correlations=proxy_correlations,
+            metadata_extra=target_cv_metadata,
         )
 
     return fixed_gaussian
@@ -259,10 +324,10 @@ def make_auto_gaussian(
 ) -> Callable[["FilterContext"], SelectionPayload]:
     def auto_gaussian(ctx: "FilterContext") -> SelectionPayload:
         assert ctx.auto_k_config is not None
-        cache, cat_features = _cache_for_gaussian(ctx)
+        cache, cat_features, effective_weight, target_cv_metadata = _cache_for_gaussian(ctx)
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
-            print(
+            logger.info(
                 f"{ctx.spec.display_name} auto-k ({auto_k_mode_label(ctx.auto_k_config)}): "
                 f"building path to {ctx.auto_k_config.max_k} features (top_m={top_m})"
             )
@@ -272,13 +337,14 @@ def make_auto_gaussian(
             cache,
             ctx.groups,
             ctx.time,
-            ctx.request.sample_weight,
+            effective_weight,
             feature_names=ctx.feature_names,
         )
+        method = method_func(ctx)
         selected, selected_indices, auto_diag, auto_summary = runner(
             cache=cache,
             y=ctx.request.y,
-            method=method_func(ctx),
+            method=method,
             max_k=int(ctx.auto_k_config.max_k),
             top_m=top_m,
             auto_k_config=ctx.auto_k_config,
@@ -294,6 +360,11 @@ def make_auto_gaussian(
             corr_prune=_kw(ctx, "corr_prune", "auto"),
             feature_names=ctx.feature_names,
             verbose=_kw(ctx, "verbose"),
+            callback=ctx.request.callback,
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         )
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
             ctx,
@@ -301,10 +372,38 @@ def make_auto_gaussian(
             selected,
             selected_indices,
         )
+        proxy_correlations = _gaussian_proxy_correlations(
+            ctx,
+            cache=cache,
+            method=method,
+            k=int(ctx.auto_k_config.max_k),
+            top_m=top_m,
+            selected_indices=selected_indices,
+        )
+        ranking = None
         diagnostics = None
-        if include_diagnostics and ctx.request.return_result:
-            diagnostics = {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
+        if ctx.request.return_result:
+            diagnostics = {}
+            if include_diagnostics:
+                diagnostics.update(
+                    {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
+                )
+            diagnostics[AUTO_K_CURVE_KEY] = build_auto_k_curve_payload(
+                k_method=ctx.auto_k_config.k_method,
+                diagnostics=auto_diag,
+                summary=auto_summary,
+            )
+            if selected_indices is not None:
+                relevance = _gaussian_relevance_for_input(ctx, cache)
+                ranking = _path_ranking(
+                    ctx.feature_names,
+                    selected_indices,
+                    relevance,
+                    ctx.spec.selector,
+                )
         metadata_extra = {}
+        if target_cv_metadata:
+            metadata_extra.update(target_cv_metadata)
         if include_objective_penalty:
             metadata_extra["objective_penalty"] = ctx.auto_k_config.objective_penalty
         return SelectionPayload(
@@ -313,10 +412,42 @@ def make_auto_gaussian(
             top_m=top_m,
             n_features=n_features,
             metadata_extra=metadata_extra,
+            ranking=ranking,
             diagnostics=diagnostics,
+            proxy_correlations=proxy_correlations,
         )
 
     return auto_gaussian
+
+
+def _gaussian_proxy_correlations(
+    ctx: "FilterContext",
+    *,
+    cache: FeatureCache,
+    method: str,
+    k: int,
+    top_m: int,
+    selected_indices: list[int] | None,
+) -> pd.DataFrame | None:
+    if not ctx.request.store_proxies:
+        return None
+    if selected_indices is None:
+        raise ValueError(
+            "store_proxies=True requires unambiguous raw selected-feature positions"
+        )
+    panel = build_candidate_panel(
+        cache,
+        ctx.request.y,
+        k,
+        top_m=top_m,
+        corr_prune=_kw(ctx, "corr_prune", "auto"),
+        method=method,
+    )
+    return proxy_frame_from_panel(
+        panel.R,
+        candidate_indices=panel.original,
+        selected_indices=selected_indices,
+    )
 
 
 def binary_fixed_payload(ctx: "FilterContext") -> SelectionPayload:
@@ -345,15 +476,49 @@ def binary_auto_changepoint_payload(ctx: "FilterContext") -> SelectionPayload:
     return _binary_auto_payload(ctx, select_binary_changepoint)
 
 
+def _reject_binary_auto_dense_options(config) -> None:
+    """Binary CEFS+ has no dense-regime diagnostic; reject the opt-in explicitly.
+
+    Silently ignoring ``auto_dense_check`` would let a user believe the
+    EBIC-vs-CV cross-check ran when it cannot; keep the contract honest until a
+    binary dense diagnostic exists.
+    """
+    defaults = _AUTOK_FIELD_DEFAULTS
+    fields = (
+        "auto_dense_check",
+        "auto_dense_min_k",
+        "auto_dense_min_frac",
+        "auto_dense_disagreement_ratio",
+    )
+    changed = [
+        name for name in fields if getattr(config, name) != getattr(defaults, name)
+    ]
+    if changed:
+        raise ValueError(
+            "auto_dense_* options are not supported for binary log-loss CEFS+ "
+            f"automatic routing (no log-loss dense-regime diagnostic exists): {changed}. "
+            "Remove them, use loss='brier' for Gaussian-proxy binary selection, "
+            "or run the Gaussian select_cefsplus router for the dense check."
+        )
+
+
 def binary_auto_auto_payload(ctx: "FilterContext") -> SelectionPayload:
     assert ctx.auto_k_config is not None
-    routed = replace(
-        ctx.auto_k_config,
-        k_method="penalized_objective",
-        objective_penalty="ebic",
-        min_k=0,
+    auto_k_module.validate_auto_k_config(ctx.auto_k_config)
+    _reject_binary_auto_dense_options(ctx.auto_k_config)
+    routed = _strip_router_only_fields(
+        replace(
+            ctx.auto_k_config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        )
     )
-    payload = _binary_auto_payload(replace(ctx, auto_k_config=routed), select_binary_penalized)
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        payload = _binary_auto_payload(
+            replace(ctx, auto_k_config=routed),
+            select_binary_penalized,
+        )
     if payload.diagnostics and "auto_k" in payload.diagnostics:
         summary = dict(payload.diagnostics["auto_k"])
         summary["method"] = "auto"
@@ -394,6 +559,7 @@ def make_jmi_classic_path(*, aggregation: str, pass_sample_weight: bool) -> Clas
             )
             if pass_sample_weight
             else None,
+            callback=ctx.request.callback,
         )
 
     return jmi_classic_path
@@ -498,7 +664,7 @@ def _warn_if_multiclass_labels_as_regression_target(y_arr: np.ndarray) -> None:
             "one-vs-rest targets with select_cefsplus_binary) for categorical "
             "targets; ignore this warning if y is a genuine numeric target.",
             UserWarning,
-            stacklevel=4,
+            stacklevel=5,
         )
 
 
@@ -519,12 +685,38 @@ def no_extra(_ctx: "FilterContext") -> dict:
     return {}
 
 
+def target_cv_metadata_from_encoder(encoding_cv: dict | None) -> dict | None:
+    """Normalize a fitted encoder's ``encoding_cv_`` into result metadata.
+
+    The fitted encoder is the only authority on the fold kind and the effective
+    split count, so metadata is never reconstructed from the request.  ``None``
+    means no categorical encoding ran and nothing is attached.
+    """
+    if not encoding_cv:
+        return None
+    return {
+        "cat_encoding": "target_cv",
+        "encoding_cv": {
+            "kind": encoding_cv["kind"],
+            "n_splits": int(encoding_cv["n_splits"]),
+        },
+    }
+
+
 def _binary_auto_payload(
     ctx: "FilterContext",
     handler: Callable[..., BinarySelection],
 ) -> SelectionPayload:
     assert ctx.auto_k_config is not None
     problem, options, run = _build_binary_run(ctx)
+    handler_kwargs = {}
+    if ctx.auto_k_config.k_method == "evaluate":
+        handler_kwargs.update(
+            target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+            target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+            target_prior=_kw(ctx, "target_prior"),
+            warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+        )
     selection = handler(
         ctx.request.X,
         problem,
@@ -533,6 +725,7 @@ def _binary_auto_payload(
         auto_k_config=ctx.auto_k_config,
         cat_encoding=_kw(ctx, "cat_encoding"),
         verbose=_kw(ctx, "verbose"),
+        **handler_kwargs,
     )
     return _binary_payload_from_selection(ctx, problem, options, run, selection)
 
@@ -557,6 +750,11 @@ def _build_binary_run(ctx: "FilterContext") -> tuple[BinaryProblem, BinaryOption
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         random_state=_kw(ctx, "random_state"),
         verbose=_kw(ctx, "verbose"),
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+        callback=ctx.request.callback,
     )
     return problem, options, run
 
@@ -606,8 +804,14 @@ def _binary_payload_from_selection(
         }
     )
     if options.k_value == "auto":
+        assert ctx.auto_k_config is not None
         diagnostics["auto_k"] = selection.auto_summary
         diagnostics["auto_k_diagnostics"] = selection.auto_diag
+        diagnostics[AUTO_K_CURVE_KEY] = build_auto_k_curve_payload(
+            k_method=ctx.auto_k_config.k_method,
+            diagnostics=selection.auto_diag,
+            summary=selection.auto_summary,
+        )
         if selection.auto_objective is not None:
             diagnostics["auto_k_objective"] = selection.auto_objective.tolist()
 
@@ -643,6 +847,9 @@ def _binary_payload_from_selection(
         "loo_clip_min": options.loo_clip_min,
         "loo_clip_max": options.loo_clip_max,
     }
+    encoding_metadata = target_cv_metadata_from_encoder(run.encoding_cv)
+    if encoding_metadata is not None:
+        metadata_extra.update(encoding_metadata)
     if options.k_value == "auto" and ctx.auto_k_config is not None:
         metadata_extra.update(_binary_auto_metadata(ctx.auto_k_config))
     return SelectionPayload(
@@ -666,10 +873,20 @@ def _binary_auto_metadata(auto_k_config) -> dict:
     }
 
 
-def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] | None]:
+def _cache_for_gaussian(
+    ctx: "FilterContext",
+) -> tuple[FeatureCache, list[str] | None, np.ndarray | None, dict | None]:
     cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
     if ctx.request.cache is not None:
-        return ctx.request.cache, cat_features
+        if (
+            _kw(ctx, "cat_encoding", "none") == "target_cv"
+            and cat_features
+        ):
+            raise ValueError(
+                "cat_encoding='target_cv' cannot be combined with a prebuilt "
+                "Gaussian cache because the cache has no target-encoding provenance"
+            )
+        return ctx.request.cache, cat_features, ctx.request.sample_weight, None
     X_encoded = _encode_categoricals_for_selector(
         ctx.request.X,
         ctx.request.y,
@@ -677,17 +894,27 @@ def _cache_for_gaussian(ctx: "FilterContext") -> tuple[FeatureCache, list[str] |
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         sample_weight=ctx.request.sample_weight,
+        task=ctx.request.task,
+        groups=ctx.groups,
+        time=ctx.time,
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
     )
+    X_encoded, effective_weight, target_cv_metadata = X_encoded
     return (
         build_cache(
             X_encoded,
-            sample_weight=ctx.request.sample_weight,
+            sample_weight=effective_weight,
             subsample=_kw(ctx, "subsample", 50_000),
             random_state=_kw(ctx, "random_state", 0),
             n_jobs=ctx.n_jobs,
             rank_backend=ctx.rank_backend,
         ),
         cat_features,
+        effective_weight,
+        target_cv_metadata,
     )
 
 
@@ -702,6 +929,7 @@ def _mrmr_classic_path(ctx: "FilterContext", prep: ClassicPrepared, k: int, top_
         sample_weight=prep.w,
         n_jobs=ctx.n_jobs,
         mrmr_backend=ctx.mrmr_backend,
+        callback=ctx.request.callback,
     )
 
 
@@ -720,12 +948,21 @@ def _encode_categoricals_for_selector(
     cat_features: Optional[list[str]], cat_encoding: CatEncoding, *,
     allow_full_data_target_encoding: bool,
     sample_weight=None,
-) -> Union[pd.DataFrame, np.ndarray]:
+    task: Task = "regression",
+    groups=None,
+    time=None,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: str | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: str = "zero_weight",
+) -> tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None, dict | None]:
     if not cat_features or cat_encoding == "none":
-        return X
+        return X, sample_weight, None
     if not isinstance(X, pd.DataFrame):
         raise TypeError("cat_features/cat_encoding require X to be a pandas DataFrame.")
     present_cat_features = [col for col in cat_features if col in X.columns]
+    if not present_cat_features:
+        return X, sample_weight, None
     if (
         present_cat_features
         and cat_encoding in _SUPERVISED_CAT_ENCODINGS
@@ -738,7 +975,35 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
-    return encode_categoricals(X, y, cat_features, cat_encoding, sample_weight=sample_weight)
+    if cat_encoding == "target_cv":
+        encoder = TargetCVEncoder(
+            present_cat_features,
+            target_type="binary" if task == "classification" else "continuous",
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
+        encoded = encoder.fit_transform(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+        )
+        return (
+            encoded,
+            encoder.effective_sample_weight_,
+            target_cv_metadata_from_encoder(encoder.encoding_cv_),
+        )
+    return encode_categoricals(
+        X,
+        y,
+        cat_features,
+        cat_encoding,
+        sample_weight=sample_weight,
+        target_type="binary" if task == "classification" else "continuous",
+    ), sample_weight, None
 
 
 def _default_top_m(top_m: Optional[int], k: int) -> int:
@@ -758,7 +1023,15 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         _kw(ctx, "cat_encoding"),
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
         sample_weight=ctx.request.sample_weight,
+        task=ctx.request.task,
+        groups=ctx.groups,
+        time=ctx.time,
+        target_cv_n_splits=_kw(ctx, "target_cv_n_splits", 5),
+        target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
+        target_prior=_kw(ctx, "target_prior"),
+        warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
     )
+    X_encoded, effective_weight, target_cv_metadata = X_encoded
     X_arr, y_arr, feature_names = validate_inputs(
         X_encoded,
         ctx.request.y,
@@ -769,19 +1042,33 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         y_arr,
         _kw(ctx, "subsample"),
         _kw(ctx, "random_state"),
-        sample_weight=ctx.request.sample_weight,
+        sample_weight=effective_weight,
         return_idx=True,
     )
-    if ctx.request.sample_weight is None:
+    if effective_weight is None:
         mi_w = np.ones(row_idx.size, dtype=np.float64)
     else:
         raw_weight = ensure_weights(
-            ctx.request.sample_weight,
+            effective_weight,
             ctx.n_rows,
             normalize=False,
         )
         mi_w = raw_weight[row_idx]
-    return ClassicPrepared(X_arr, y_arr, w, mi_w, feature_names, row_idx)
+    eval_sample_weight = (
+        None
+        if effective_weight is None
+        else np.asarray(w, dtype=np.float64)
+    )
+    return ClassicPrepared(
+        X_arr,
+        y_arr,
+        w,
+        mi_w,
+        feature_names,
+        row_idx,
+        target_cv_metadata,
+        eval_sample_weight,
+    )
 
 
 def _compute_relevance(

@@ -99,6 +99,19 @@ def test_plot_coef_distributions_rejects_empty_feature_list():
         selector.plot_coef_distributions(features=[])
 
 
+def test_plot_coef_distributions_matches_equivalent_nan_feature_name():
+    # matplotlib is not a declared runtime or test dependency; skip rather than error.
+    plt = pytest.importorskip("matplotlib.pyplot")
+
+    selector = StabilitySelector(verbose=False)
+    selector.coef_bootstrap_ = np.array([[0.2, 0.0], [0.3, 0.1]])
+    selector.feature_names_in_ = [float("nan"), "b"]
+    selector.selection_frequencies_ = np.array([1.0, 0.5])
+
+    fig, _axes = selector.plot_coef_distributions(features=[float("nan")])
+    plt.close(fig)
+
+
 def test_stability_select_convenience():
     np.random.seed(42)
     X = np.random.randn(100, 10)
@@ -145,7 +158,14 @@ def test_stability_regression_wrapper():
     assert all(isinstance(f, str) for f in selected)
 
 
-@pytest.mark.parametrize("X", [np.arange(20.0), list(np.arange(20.0))])
+@pytest.mark.parametrize(
+    "X",
+    [
+        np.arange(20.0),
+        list(np.arange(20.0)),
+        pd.Series(np.arange(20.0)),
+    ],
+)
 def test_stability_selector_rejects_one_dimensional_X_cleanly(X):
     selector = StabilitySelector(
         n_bootstrap=2,
@@ -155,6 +175,25 @@ def test_stability_selector_rejects_one_dimensional_X_cleanly(X):
     )
 
     with pytest.raises(ValueError, match="2-dimensional"):
+        selector.fit(X, np.arange(20.0))
+
+
+@pytest.mark.parametrize(
+    "X",
+    [
+        pd.Series(pd.date_range("2024-01-01", periods=20)),
+        pd.Series(pd.to_timedelta(np.arange(20), unit="D")),
+    ],
+)
+def test_stability_selector_rejects_temporal_series_cleanly(X):
+    selector = StabilitySelector(
+        n_bootstrap=2,
+        alpha=0.01,
+        n_jobs=1,
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="Datetime or timedelta"):
         selector.fit(X, np.arange(20.0))
 
 
@@ -185,6 +224,7 @@ def test_stability_selector_validates_feature_name_count():
         alpha=0.01,
         n_jobs=1,
         verbose=False,
+        random_state=0,
     )
 
     with pytest.raises(ValueError, match="feature_names has 2 entries"):
@@ -237,6 +277,7 @@ def test_stability_selector_validates_sample_weight():
             alpha=0.1,
             n_jobs=1,
             verbose=False,
+            random_state=0,
         )
         with pytest.raises(ValueError, match="sample_weight"):
             selector.fit(X, y, sample_weight=weights)
@@ -634,7 +675,8 @@ def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
         threshold=0.3,
         use_smart_sampler=False,
         sampler_config=config,
-        verbose=False
+        verbose=False,
+        random_state=0,
     )
     selector.fit(X, y)
 

@@ -11,6 +11,7 @@ from joblib import Parallel, delayed, effective_n_jobs
 from threadpoolctl import threadpool_limits
 
 from sift._numba import njit_optional_cache
+from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, validate_k
 
 FLOOR = 1e-6
@@ -164,12 +165,99 @@ def mrmr_loop_incremental(
     return selected
 
 
+@njit_optional_cache(cache=True)
+def _mrmr_serial_callback_step(
+    Z: np.ndarray,
+    relevance: np.ndarray,
+    use_quotient: bool,
+    w: np.ndarray,
+    t: int,
+    last: int,
+    is_selected: np.ndarray,
+    red_sum: np.ndarray,
+) -> tuple[int, float]:
+    """Advance one serial mRMR step while the callback stays in Python."""
+    p = Z.shape[1]
+    new_red = _weighted_corr_with_last(Z, last, p, w)
+    for j in range(p):
+        if not is_selected[j]:
+            red_sum[j] += new_red[j]
+
+    best_idx = -1
+    best_score = -1e300
+    for j in range(p):
+        if is_selected[j]:
+            continue
+        mean_red = red_sum[j] / t
+        if use_quotient:
+            score = relevance[j] / max(mean_red, FLOOR)
+        else:
+            score = relevance[j] - mean_red
+        if score > best_score:
+            best_score = score
+            best_idx = j
+    return best_idx, best_score
+
+
+def _mrmr_loop_serial_with_callback(
+    Z: np.ndarray,
+    relevance: np.ndarray,
+    k: int,
+    use_quotient: bool,
+    w: np.ndarray,
+    callback: ProgressCallback,
+) -> np.ndarray:
+    """Run the compiled serial state one step at a time for live callbacks."""
+    _n, p = Z.shape
+    k = min(k, p)
+    if k <= 0 or p == 0:
+        return np.empty(0, dtype=np.int64)
+
+    selected = np.empty(k, dtype=np.int64)
+    is_selected = np.zeros(p, dtype=np.bool_)
+    red_sum = np.zeros(p, dtype=np.float64)
+    best = 0
+    best_val = relevance[0]
+    for j in range(1, p):
+        if relevance[j] > best_val:
+            best_val = relevance[j]
+            best = j
+    selected[0] = best
+    is_selected[best] = True
+    count = 1
+    report_progress(
+        callback, count, k, stage="path", selector="mrmr", backend="serial"
+    )
+
+    for t in range(1, k):
+        best_idx, _ = _mrmr_serial_callback_step(
+            Z,
+            relevance,
+            use_quotient,
+            w,
+            t,
+            int(selected[t - 1]),
+            is_selected,
+            red_sum,
+        )
+        if best_idx < 0:
+            break
+        selected[t] = best_idx
+        is_selected[best_idx] = True
+        count += 1
+        report_progress(
+            callback, count, k, stage="path", selector="mrmr", backend="serial"
+        )
+    return selected[:count]
+
+
 def _mrmr_loop_blas(
     Z: np.ndarray,
     relevance: np.ndarray,
     k: int,
     use_quotient: bool,
     w: np.ndarray,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """mRMR loop using BLAS matrix-vector redundancy updates."""
     n, p = Z.shape
@@ -186,6 +274,10 @@ def _mrmr_loop_blas(
     selected[0] = best
     is_selected[best] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback, count, k, stage="path", selector="mrmr", backend="blas"
+        )
 
     for t in range(1, k):
         last = int(selected[t - 1])
@@ -208,6 +300,10 @@ def _mrmr_loop_blas(
         selected[t] = best_idx
         is_selected[best_idx] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback, count, k, stage="path", selector="mrmr", backend="blas"
+            )
 
     return selected[:count]
 
@@ -247,6 +343,7 @@ def _mrmr_loop_processes(
     use_quotient: bool,
     w: np.ndarray,
     n_jobs: int,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """mRMR loop using process-backed redundancy updates."""
     n, p = Z.shape
@@ -262,6 +359,15 @@ def _mrmr_loop_processes(
     selected[0] = best
     is_selected[best] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="mrmr",
+            backend="processes",
+        )
     if k <= 1:
         return selected[:count]
 
@@ -313,6 +419,15 @@ def _mrmr_loop_processes(
             selected[t] = best_idx
             is_selected[best_idx] = True
             count += 1
+            if callback is not None:
+                report_progress(
+                    callback,
+                    count,
+                    k,
+                    stage="path",
+                    selector="mrmr",
+                    backend="processes",
+                )
 
     return selected[:count]
 
@@ -326,6 +441,7 @@ def mrmr_select(
     sample_weight: np.ndarray | None = None,
     n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """mRMR feature selection with incremental redundancy."""
     k = validate_k(k, allow_auto=False)
@@ -363,11 +479,20 @@ def mrmr_select(
     use_quot = formula == "quotient"
 
     if backend == "serial":
-        sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot, w)
+        if callback is None:
+            sel_local = mrmr_loop_incremental(Z, rel_sub, k, use_quot, w)
+        else:
+            sel_local = _mrmr_loop_serial_with_callback(
+                Z, rel_sub, k, use_quot, w, callback
+            )
     elif backend == "blas":
-        sel_local = _mrmr_loop_blas(Z, rel_sub, k, use_quot, w)
+        sel_local = _mrmr_loop_blas(
+            Z, rel_sub, k, use_quot, w, callback=callback
+        )
     elif backend == "processes":
-        sel_local = _mrmr_loop_processes(Z, rel_sub, k, use_quot, w, n_jobs)
+        sel_local = _mrmr_loop_processes(
+            Z, rel_sub, k, use_quot, w, n_jobs, callback=callback
+        )
     else:  # pragma: no cover - guarded by resolve_mrmr_backend
         raise ValueError(f"Unknown mRMR backend: {backend}")
 
@@ -389,6 +514,7 @@ def jmi_select(
     top_m: Optional[int] = None,
     y_kind: Literal["discrete", "continuous"] = "continuous",
     sample_weight: np.ndarray | None = None,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """JMI/JMIM selection with incremental scoring."""
     from sift.estimators import joint_mi as jmi_est
@@ -522,6 +648,15 @@ def jmi_select(
     selected[0] = best
     is_selected[best] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="jmi" if aggregation == "sum" else "jmim",
+            estimator=mi_estimator,
+        )
 
     for t in range(1, k):
         last = int(selected[t - 1])
@@ -560,5 +695,14 @@ def jmi_select(
         selected[t] = best_idx
         is_selected[best_idx] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                k,
+                stage="path",
+                selector="jmi" if aggregation == "sum" else "jmim",
+                estimator=mi_estimator,
+            )
 
     return idx_map[selected[:count]]

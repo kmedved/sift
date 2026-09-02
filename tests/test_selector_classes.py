@@ -222,8 +222,23 @@ def test_selector_dataframe_transform_rejects_reordered_columns():
 
     selector = MRMRSelector(k=2, task="regression", verbose=False).fit(X, y)
 
-    with pytest.raises(ValueError, match="columns"):
+    # String columns use sklearn's standard feature-name mismatch wording so
+    # check_dataframe_column_names_consistency passes.
+    with pytest.raises(
+        ValueError,
+        match="Feature names must be in the same order as they were in fit",
+    ):
         selector.transform(X[list(reversed(X.columns))])
+
+    # Non-string labels fall back to SIFT's own strict order/identity message.
+    numeric = pd.DataFrame(X.to_numpy(), columns=range(5))
+    numeric_selector = MRMRSelector(k=2, task="regression", verbose=False).fit(
+        numeric, y
+    )
+    with pytest.raises(
+        ValueError, match="DataFrame columns must match fitted columns and order"
+    ):
+        numeric_selector.transform(numeric[list(reversed(numeric.columns))])
 
 
 def test_gaussian_selector_requires_positional_x_for_unnamed_cache():
@@ -270,6 +285,7 @@ def test_selector_set_params_updates_fit_call():
     assert len(selector.selected_features_) == 3
 
 
+@pytest.mark.categorical
 def test_selector_class_fits_supervised_categorical_encoder_on_train_only():
     pytest.importorskip("category_encoders")
 
@@ -299,6 +315,7 @@ def test_selector_class_fits_supervised_categorical_encoder_on_train_only():
     assert np.isclose(float(X_out.iloc[2, 0]), float(np.mean(y_train)))
 
 
+@pytest.mark.categorical
 def test_selector_loo_fit_transform_uses_training_fit_transform_matrix():
     pytest.importorskip("category_encoders")
 
@@ -333,6 +350,7 @@ def test_selector_loo_fit_transform_uses_training_fit_transform_matrix():
     )
 
 
+@pytest.mark.categorical
 def test_selector_prefix_auto_k_rejects_supervised_class_encoder():
     pytest.importorskip("category_encoders")
 
@@ -362,6 +380,42 @@ def test_selector_prefix_auto_k_rejects_supervised_class_encoder():
 
     with pytest.raises(ValueError, match="prefix_only auto-k"):
         selector.fit(X, y, time=np.arange(len(X)))
+
+
+def test_selector_nested_target_cv_passes_context_to_fold_local_encoder():
+    X = pd.DataFrame(
+        {
+            "category": np.tile(["a", "b"], 40),
+            "signal": np.linspace(0.0, 1.0, 80),
+        }
+    )
+    y = X["signal"].to_numpy()
+    config = AutoKConfig(
+        k_method="evaluate",
+        auto_k_mode="nested",
+        strategy="time_holdout",
+        min_k=1,
+        max_k=2,
+    )
+
+    selector = MRMRSelector(
+        k="auto",
+        cat_features=["category"],
+        cat_encoding="target_cv",
+        target_cv_n_splits=3,
+        target_cv_smoothing=1.0,
+        auto_k_config=config,
+        verbose=False,
+    ).fit(X, y, time=np.arange(len(X)))
+
+    assert selector.categorical_encoding_metadata_ == {
+        "kind": "time",
+        "n_splits": 3,
+    }
+    np.testing.assert_array_equal(
+        selector.categorical_encoder_.effective_sample_weight_[:3],
+        np.zeros(3),
+    )
 
 
 def test_selector_nested_auto_k_time_holdout():
@@ -458,6 +512,7 @@ def test_cefsplus_selector_nested_auto_k_distinguishes_best_and_selected(monkeyp
     assert selector.k_ == 1
 
 
+@pytest.mark.categorical
 def test_selector_nested_auto_k_allows_supervised_class_encoder():
     pytest.importorskip("category_encoders")
 
@@ -492,6 +547,7 @@ def test_selector_nested_auto_k_allows_supervised_class_encoder():
     assert not selector.nested_auto_k_diagnostics_["scores"].empty
 
 
+@pytest.mark.categorical
 def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
     pytest.importorskip("category_encoders")
 
@@ -527,6 +583,7 @@ def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
         task,
         metric,
         k_grid,
+        **_kwargs,  # tolerate library-side keywords such as sample_weight_supplied
     ):
         captured.append(X_train_path.copy())
         return {k: float(k - 1) for k in k_grid}
@@ -645,7 +702,8 @@ def test_selector_nested_auto_k_handles_empty_fold_paths(monkeypatch):
         auto_k_config=cfg,
         verbose=False,
     )
-    selector.fit(X, y, time=np.arange(len(X)))
+    with pytest.warns(UserWarning, match="candidate score-curve values are non-finite"):
+        selector.fit(X, y, time=np.arange(len(X)))
 
     scores = selector.nested_auto_k_diagnostics_["scores"]
     assert np.isinf(scores["score"]).all()
@@ -741,6 +799,7 @@ def test_selector_nested_auto_k_passes_fit_params_to_fold_and_final_paths(monkey
     assert calls == [1, 1]
 
 
+@pytest.mark.categorical
 def test_selector_supervised_encoding_rejects_prebuilt_cache():
     pytest.importorskip("category_encoders")
 

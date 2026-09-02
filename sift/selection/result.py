@@ -9,6 +9,9 @@ import numpy as np
 import pandas as pd
 
 
+_PROXY_CORRELATIONS_ATTR = "_proxy_correlations"
+
+
 @dataclass(frozen=True)
 class FilterSelectionResult:
     """Result object for conservative filter selection APIs.
@@ -61,6 +64,12 @@ class FilterSelectionResult:
                 "selector": self.selector_metadata.get("selector"),
             }
         )
+
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
 
 
 def build_selector_metadata(

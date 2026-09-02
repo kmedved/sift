@@ -24,6 +24,7 @@ from sift.selection.auto_k_core import (
     split_weights,
     time_holdout_split,
 )
+from sift.scoring import is_sklearn_scorer, sklearn_scorer_label
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ def select_k_nested(
     min_k = max(1, min(int(config.min_k), max_k))
     k_grid = build_k_grid(min_k, max_k)
     metric = resolve_metric(config.metric, task)
+    sample_weight_supplied = sample_weight is not None
     w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
     splits = _build_nested_splits(X, y_arr, groups=groups, time=time, config=config)
 
@@ -128,6 +130,7 @@ def select_k_nested(
             task=task,
             metric=metric,
             k_grid=k_grid,
+            sample_weight_supplied=sample_weight_supplied,
         )
 
         for k, score in split_scores.items():
@@ -159,7 +162,11 @@ def select_k_nested(
         diagnostics={
             "mode": "nested",
             "strategy": config.strategy,
-            "metric": metric,
+            "metric": (
+                sklearn_scorer_label(metric)
+                if is_sklearn_scorer(metric)
+                else str(metric)
+            ),
             "selection_rule": config.selection_rule,
             "selection_rule_effective": (
                 None

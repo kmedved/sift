@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from typing import Any, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 
 EstimatorJMI = Literal["auto", "binned", "r2", "ksg", "gaussian"]
 EstimatorMRMR = Literal["classic", "gaussian"]
 RelevanceMethod = Literal["f", "ks", "rf"]
-CatEncoding = Literal["none", "target", "loo", "james_stein", "loo_logit"]
+CatEncoding = Literal[
+    "none",
+    "target_cv",
+    "target",
+    "loo",
+    "james_stein",
+    "loo_logit",
+]
 Formula = Literal["quotient", "difference"]
 Task = Literal["regression", "classification"]
 
@@ -149,23 +158,72 @@ def extract_feature_names(X) -> Optional[List[str]]:
     return None
 
 
+def _is_temporal_feature_dtype(dtype) -> bool:
+    """Recognize NumPy, pandas, and Arrow-backed datetime/duration dtypes."""
+    arrow_dtype = getattr(dtype, "pyarrow_dtype", None)
+    arrow_kind = (
+        str(arrow_dtype).partition("[")[0]
+        if arrow_dtype is not None
+        else None
+    )
+    return (
+        pd.api.types.is_datetime64_any_dtype(dtype)
+        or pd.api.types.is_timedelta64_dtype(dtype)
+        # pandas 2.2 does not classify Arrow duration dtypes as timedelta,
+        # but they retain NumPy's temporal dtype kind.
+        or getattr(dtype, "kind", None) in {"M", "m"}
+        # Arrow time-of-day dtypes instead report object kind.
+        or arrow_kind in {"date32", "date64", "duration", "time32", "time64", "timestamp"}
+    )
+
+
 def reject_datetime_like_features(X) -> None:
-    """Reject pandas datetime/timedelta features before numeric coercion."""
-    if hasattr(X, "dtypes"):
+    """Reject NumPy, pandas, and Arrow temporal features before coercion."""
+    temporal_object_types = (
+        date,
+        datetime,
+        timedelta,
+        np.datetime64,
+        np.timedelta64,
+        pd.Timestamp,
+        pd.Timedelta,
+    )
+
+    def contains_temporal_objects(values) -> bool:
+        try:
+            flat = np.asarray(values, dtype=object).ravel()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            value is pd.NaT or isinstance(value, temporal_object_types)
+            for value in flat
+        )
+
+    if isinstance(X, pd.DataFrame):
         datetime_like = [
             name
-            for name, column_dtype in X.dtypes.items()
-            if pd.api.types.is_datetime64_any_dtype(column_dtype)
-            or pd.api.types.is_timedelta64_dtype(column_dtype)
+            for i, (name, column_dtype) in enumerate(X.dtypes.items())
+            if _is_temporal_feature_dtype(column_dtype)
+            or (
+                pd.api.types.is_object_dtype(column_dtype)
+                and contains_temporal_objects(X.iloc[:, i])
+            )
         ]
     else:
-        dtype = getattr(X, "dtype", None)
+        try:
+            array = np.asarray(X)
+        except (TypeError, ValueError):
+            array = None
+        dtype = None if array is None else array.dtype
         datetime_like = (
             ["<array>"]
             if dtype is not None
             and (
-                pd.api.types.is_datetime64_any_dtype(dtype)
-                or pd.api.types.is_timedelta64_dtype(dtype)
+                _is_temporal_feature_dtype(dtype)
+                or (
+                    pd.api.types.is_object_dtype(dtype)
+                    and contains_temporal_objects(array)
+                )
             )
             else []
         )
@@ -173,7 +231,8 @@ def reject_datetime_like_features(X) -> None:
         sample = datetime_like[:5]
         suffix = "..." if len(datetime_like) > 5 else ""
         raise ValueError(
-            "Datetime or timedelta feature columns are not supported: "
+            "Datetime or timedelta feature columns (including time-of-day values) "
+            "are not supported: "
             f"{sample}{suffix}. Convert them to numeric features explicitly."
         )
 
@@ -275,8 +334,8 @@ def validate_inputs(
             suffix = "..." if len(non_numeric) > 5 else ""
             raise ValueError(
                 f"Non-numeric columns found: {sample}{suffix}. "
-                "Either encode them first or set cat_encoding to 'loo', "
-                "'target', 'james_stein', or binary-only 'loo_logit'."
+                "Either encode them first or set cat_encoding to 'target_cv', "
+                "'loo', 'target', 'james_stein', or binary-only 'loo_logit'."
             )
     X_arr = to_numpy(X, dtype=np.float64)
 
@@ -505,6 +564,647 @@ class LeaveOneOutLogitEncoder:
         return X_out
 
 
+def validate_target_cv_encoding_flags(
+    cat_encoding, allow_full_data_target_encoding
+) -> None:
+    """Reject ``target_cv`` combined with the full-data escape hatch.
+
+    ``allow_full_data_target_encoding=True`` opts into fitting a supervised
+    encoder on every row, which directly contradicts the cross-fitted
+    ``target_cv`` contract.  Silently ignoring the flag would leave callers
+    believing they had opted out of cross-fitting.
+    """
+    if cat_encoding == "target_cv" and bool(allow_full_data_target_encoding):
+        raise ValueError(
+            "cat_encoding='target_cv' cannot be combined with "
+            "allow_full_data_target_encoding=True: target_cv is cross-fitted by "
+            "construction, so the full-data escape hatch contradicts it. Drop "
+            "allow_full_data_target_encoding, or choose a legacy supervised "
+            "encoding ('target', 'loo', 'james_stein', 'loo_logit') if you "
+            "really want full-data fitting."
+        )
+
+
+def target_cv_n_splits(
+    y,
+    *,
+    target_type: Literal["auto", "continuous", "binary"] = "auto",
+    cv: int = 5,
+) -> int:
+    """Return the usable deterministic fold count for native target encoding."""
+    from sklearn.utils.multiclass import type_of_target
+
+    if isinstance(cv, (bool, np.bool_)) or not isinstance(cv, (int, np.integer)):
+        raise ValueError("target_cv cv must be an integer >= 2")
+    requested = int(cv)
+    if requested < 2:
+        raise ValueError("target_cv cv must be an integer >= 2")
+    if target_type not in {"auto", "continuous", "binary"}:
+        raise ValueError("target_cv target_type must be 'auto', 'continuous', or 'binary'")
+
+    y_arr = np.asarray(y).reshape(-1)
+    if y_arr.size < 2:
+        raise ValueError("target_cv requires at least two rows")
+    inferred_kind = type_of_target(y_arr)
+    target_kind = inferred_kind if target_type == "auto" else target_type
+    if inferred_kind == "multiclass" and target_type != "continuous":
+        raise ValueError(
+            "cat_encoding='target_cv' does not yet support multiclass targets: "
+            "sklearn expands each categorical feature to one column per class, "
+            "which requires block-aware selection"
+        )
+    if target_kind == "binary":
+        _, counts = np.unique(y_arr, return_counts=True)
+        if counts.size != 2:
+            raise ValueError("target_cv target_type='binary' requires exactly two classes")
+        effective = min(requested, int(counts.min()))
+    else:
+        effective = min(requested, int(y_arr.size))
+    if effective < 2:
+        raise ValueError(
+            "target_cv requires at least two rows per class for binary targets"
+        )
+    return effective
+
+
+class TargetCVEncoder(TransformerMixin, BaseEstimator):
+    """Cross-fitted, prior-centered target encoder with DataFrame output.
+
+    Every emitted value is a *centered category effect*: the fold-local (or
+    full-fit) category estimate minus the training prior that produced it.
+    Out-of-fold training rows emit ``fold_encoding - fold_training_prior`` and
+    inference rows emit ``full_fit_encoding - full_training_prior``.  A category
+    that the fitting rows never saw therefore emits a zero centered effect (the
+    raw global-mean estimate before centering) instead of a fold-identifying
+    prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
+    fold markers.
+
+    **What centering does and does not guarantee.**  Centering neutralizes only
+    *unseen-in-fold* emissions: a level absent from a fold's training rows emits
+    exactly zero instead of a prior that identifies the complement folds.  It is
+    not a defence against high cardinality as such.  A level that appears two or
+    more times in a fold's training rows still transmits those sibling rows'
+    targets, which is ordinary target-encoding behavior, so a near-unique
+    identifier whose rows share a latent target remains a selectable feature.
+    Drop ID-like columns, or pass ``groups=`` so all of an identifier's rows land
+    in one fold, if that cross-row information must not reach selection.
+
+    All fold kinds (``fixed_k``, ``group``, ``time``) run through this one
+    engine.  sklearn's ``TargetEncoder`` does not expose the per-fold priors the
+    centering contract needs, so it is not used as a backend; the fixed-k folds
+    reproduce its ``KFold``/``StratifiedKFold(shuffle=True, random_state=...)``
+    split construction and its ``smooth="auto"`` empirical-Bayes shrinkage,
+    generalized to weighted rows.  ``smooth="auto"`` is available on every fold
+    kind, weighted or not, because that generalization replaces integer counts
+    with weighted row mass (see :meth:`_auto_smoothed_encoding`).
+
+    The encoder intentionally preserves one output column per raw categorical
+    feature.  sklearn's multiclass target encoding expands every input feature
+    to one column per class, which cannot be represented by SIFT's current
+    feature-selection contract until block-aware selection lands.
+    """
+
+    def __init__(
+        self,
+        cols: List[str],
+        *,
+        target_type: Literal["auto", "continuous", "binary"] = "auto",
+        smooth: Literal["auto"] | float = "auto",
+        cv: int = 5,
+        random_state: int = 0,
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    ):
+        self.cols = cols
+        self.target_type = target_type
+        self.smooth = smooth
+        self.cv = cv
+        self.random_state = random_state
+        self.target_prior = target_prior
+        self.warmup_policy = warmup_policy
+
+    def _validate_frame(self, X: pd.DataFrame) -> None:
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("target_cv encoding requires X to be a pandas DataFrame")
+        if not X.columns.is_unique:
+            raise ValueError("target_cv encoding requires unique DataFrame column names")
+        missing = [col for col in self.cols if col not in X.columns]
+        if missing:
+            raise ValueError(f"target_cv columns are missing from X: {missing[:5]}")
+
+    def _requested_cv(self) -> int:
+        if isinstance(self.cv, (bool, np.bool_)) or not isinstance(
+            self.cv, (int, np.integer)
+        ):
+            raise ValueError("target_cv cv must be an integer >= 2")
+        requested = int(self.cv)
+        if requested < 2:
+            raise ValueError("target_cv cv must be an integer >= 2")
+        return requested
+
+    def _validate_smoothing(self) -> Literal["auto"] | float:
+        """Resolve ``target_cv_smoothing`` for every fold kind.
+
+        ``"auto"`` is accepted on all of them.  The empirical-Bayes prior it
+        needs is defined by *weighted row mass* rather than integer counts (see
+        :meth:`_auto_smoothed_encoding`), and every quantity that definition
+        requires -- the weighted prior ``sum(w*y)/sum(w)``, the weighted target
+        variance ``sum(w*(y-prior)^2)/sum(w)``, each category's weighted mass and
+        its weighted sum of squared deviations -- exists for any fitting slice
+        with positive total weight.  ``ensure_weights`` already rejects negative,
+        non-finite, and all-zero weights, so there is no weighted, grouped, or
+        time-aware case in which ``"auto"`` is undefined but an explicit float
+        would not be.
+        """
+        if self.smooth == "auto":
+            resolved: Literal["auto"] | float = "auto"
+        else:
+            if isinstance(self.smooth, (bool, np.bool_)) or not isinstance(
+                self.smooth, (int, float, np.integer, np.floating)
+            ):
+                raise ValueError(
+                    "target_cv_smoothing must be 'auto' or a non-negative float"
+                )
+            resolved = float(self.smooth)
+            if not np.isfinite(resolved) or resolved < 0.0:
+                raise ValueError("target_cv_smoothing must be finite and >= 0")
+        if self.warmup_policy not in {"exclude", "zero_weight"}:
+            raise ValueError("warmup_policy must be 'exclude' or 'zero_weight'")
+        return resolved
+
+    def _target_values(self, y) -> tuple[np.ndarray, str]:
+        from sklearn.preprocessing import LabelEncoder
+        from sklearn.utils.multiclass import type_of_target
+
+        y_arr = np.asarray(y).reshape(-1)
+        inferred = type_of_target(y_arr)
+        target_kind = inferred if self.target_type == "auto" else self.target_type
+        if inferred == "multiclass" and self.target_type != "continuous":
+            raise ValueError(
+                "cat_encoding='target_cv' does not yet support multiclass targets: "
+                "sklearn expands each categorical feature to one column per class, "
+                "which requires block-aware selection"
+            )
+        if target_kind == "binary":
+            label_encoder = LabelEncoder().fit(y_arr)
+            if label_encoder.classes_.size != 2:
+                raise ValueError("target_cv target_type='binary' requires exactly two classes")
+            self.classes_ = label_encoder.classes_
+            values = label_encoder.transform(y_arr).astype(np.float64)
+            if self.target_prior is not None and not 0.0 <= float(self.target_prior) <= 1.0:
+                raise ValueError("target_prior must be between 0 and 1 for binary targets")
+            return values, "binary"
+        if target_kind != "continuous":
+            raise ValueError(
+                "target_cv supports only continuous regression and binary classification targets"
+            )
+        try:
+            values = np.asarray(y_arr, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("continuous target_cv targets must be numeric") from exc
+        if not np.isfinite(values).all():
+            raise ValueError("target_cv y contains non-finite values")
+        return values, "continuous"
+
+    @staticmethod
+    def _normalized_series(series: pd.Series) -> pd.Series:
+        return series.astype(object).where(~series.isna(), np.nan)
+
+    @staticmethod
+    def _centered_targets(
+        y_active: np.ndarray,
+        weights: np.ndarray,
+        total_weight: float,
+    ) -> tuple[np.ndarray, float]:
+        """Return ``(y - prior, prior)`` with a refined weighted prior.
+
+        A single ``sum(w*y)/sum(w)`` pass is only accurate to about
+        ``eps * |y|``, which is ~1e-8 for a target offset by 1e8 -- the same
+        order as the category effects being estimated.  Re-running the weighted
+        mean on the residuals gives a correction that is itself accurate to
+        ``eps * |y - prior|``, and applying it to the *residuals* rather than to
+        ``prior`` keeps it off the coarse ulp grid at ``|y|``'s magnitude, where
+        it would simply be rounded away.  ``y_active - prior`` is exact whenever
+        the two are within a factor of two of each other, so the returned
+        centered targets carry no offset-induced error.
+        """
+        prior = float(np.dot(weights, y_active) / total_weight)
+        residual = y_active - prior
+        correction = float(np.dot(weights, residual) / total_weight)
+        return residual - correction, prior + correction
+
+    @staticmethod
+    def _weighted_group_ssd(
+        codes: np.ndarray,
+        weights: np.ndarray,
+        centered_y: np.ndarray,
+        counts: np.ndarray,
+        sums: np.ndarray,
+    ) -> np.ndarray:
+        """Two-pass weighted within-category sum of squared deviations.
+
+        ``sums``/``counts`` are the first pass, so ``centered_y - means[codes]``
+        is exactly ``y - mean_i`` whatever offset ``centered_y`` was centered by.
+        The deviations are formed *before* they are squared and accumulated, so
+        no ``E[y^2] - E[y]^2`` cancellation can occur: an offset target such as
+        ``y + 1e8`` makes ``sum(w*y^2)`` and ``count * mean^2`` agree to ~16
+        digits while their difference is the small quantity being sought, which
+        is what used to leave ``lambda_i`` -- and therefore the encoding --
+        dominated by rounding error.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            means = sums / counts
+        deviations = centered_y - means[codes]
+        return np.bincount(
+            codes,
+            weights=weights * np.square(deviations),
+            minlength=counts.size,
+        )
+
+    @staticmethod
+    def _auto_smoothed_encoding(
+        counts: np.ndarray,
+        sums: np.ndarray,
+        ssd: np.ndarray,
+        y_variance: float,
+    ) -> np.ndarray:
+        """Empirical-Bayes shrinkage matching sklearn's ``smooth='auto'``.
+
+        ``lambda_i = w_i * s2y / (w_i * s2y + ssd_i / w_i)`` shrinks each
+        category mean toward the training prior, where ``w_i`` is the category's
+        (possibly weighted) row mass and ``ssd_i`` its within-category weighted
+        sum of squared deviations.  With unit weights this reduces exactly to
+        sklearn's integer-count formula.
+
+        The weighted definition is the integer formula with every count replaced
+        by weighted row mass: ``prior = sum(w*y)/sum(w)``,
+        ``s2y = sum(w*(y-prior)^2)/sum(w)``, ``w_i = sum_{rows in i} w``,
+        ``ssd_i = sum_{rows in i} w*(y - mean_i)^2``.  Duplicating a row ``m``
+        times and giving it weight ``m`` therefore produce identical encodings,
+        which is what makes ``smooth="auto"`` well defined for the weighted,
+        grouped, and time-aware paths and not only for unweighted fixed-k folds.
+
+        ``sums`` carries the *prior-centered* weighted target sum, so ``means``
+        is ``mean_i - prior`` and the returned value is the centered category
+        effect ``lambda_i * (mean_i - prior)`` that the encoder emits, not the
+        uncentered estimate.  Shrinking in centered space also removes the final
+        ``estimate - prior`` cancellation, which is why the emitted effects are
+        invariant to an additive shift of ``y``.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            means = sums / counts
+            lam = (y_variance * counts) / (y_variance * counts + ssd / counts)
+        encoded = lam * means
+        # A NaN lambda means either an empty category or a degenerate
+        # zero-variance target; sklearn falls back to the prior in both cases,
+        # which is the zero effect in centered space.
+        return np.where(np.isfinite(encoded), encoded, 0.0)
+
+    def _fit_custom_maps(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        sample_weight: np.ndarray,
+        smooth: Literal["auto"] | float,
+    ) -> tuple[dict[str, dict[object, float]], float]:
+        """Fit centered category effects and return them with their prior.
+
+        Every mapped value is ``category_estimate - prior`` so that a category
+        the fitting rows never saw maps to zero rather than to the prior itself.
+
+        Because the emitted quantity is that difference, every moment below is
+        accumulated on ``y - prior`` rather than on ``y``: the centered sums,
+        the global target variance, and the within-category sums of squared
+        deviations.  Nothing is ever reconstructed as ``E[y^2] - E[y]^2``, so an
+        offset target (``y + 1e8``) produces the same effects as ``y`` instead of
+        losing the leading digits of every moment to cancellation.  This is the
+        single engine behind the fixed-k, grouped, and time-aware fold kinds and
+        behind both the out-of-fold and full-fit inference maps, so all of them
+        inherit the invariance.
+        """
+        active = sample_weight > 0.0
+        if not bool(np.any(active)):
+            raise ValueError("target_cv fit rows have zero total sample_weight")
+        weights = sample_weight[active]
+        y_active = y[active]
+        total_weight = float(weights.sum())
+        centered_y, prior = self._centered_targets(y_active, weights, total_weight)
+        auto = smooth == "auto"
+        if auto:
+            y_variance = float(
+                np.dot(weights, np.square(centered_y)) / total_weight
+            )
+        mappings: dict[str, dict[object, float]] = {}
+        for col in self.cols:
+            series = self._normalized_series(X.loc[active, col])
+            codes, categories = pd.factorize(
+                series,
+                sort=False,
+                use_na_sentinel=False,
+            )
+            counts = np.bincount(codes, weights=weights, minlength=len(categories))
+            sums = np.bincount(
+                codes,
+                weights=weights * centered_y,
+                minlength=len(categories),
+            )
+            if auto:
+                ssd = self._weighted_group_ssd(
+                    codes, weights, centered_y, counts, sums
+                )
+                effects = self._auto_smoothed_encoding(counts, sums, ssd, y_variance)
+            else:
+                # ``(sums_raw + smooth*prior) / (counts + smooth) - prior``
+                # rewritten on the centered sums; algebraically identical and
+                # free of the same cancellation.
+                effects = sums / (counts + smooth)
+            mappings[col] = {
+                category: float(value)
+                for category, value in zip(categories.tolist(), effects.tolist())
+            }
+        return mappings, prior
+
+    def _apply_custom_maps(
+        self,
+        X: pd.DataFrame,
+        mappings: dict[str, dict[object, float]],
+    ) -> pd.DataFrame:
+        """Emit centered effects; unseen categories map to a zero effect."""
+        X_out = X.copy()
+        for col in self.cols:
+            series = self._normalized_series(X_out[col])
+            X_out[col] = series.map(mappings[col]).fillna(0.0).astype(np.float64)
+        return X_out
+
+    def _active_split_count(
+        self,
+        y: np.ndarray,
+        target_kind: str,
+        active: np.ndarray,
+    ) -> int:
+        """Effective fixed-k fold count over the active (positive-weight) rows.
+
+        ``fit`` and ``fit_transform`` share this so the split count ``fit``
+        advertises is the one ``fit_transform`` would actually cross-fit with.
+        """
+        return target_cv_n_splits(
+            y[active],
+            target_type="binary" if target_kind == "binary" else "continuous",
+            cv=self.cv,
+        )
+
+    def _fixed_splits(
+        self,
+        y: np.ndarray,
+        target_kind: str,
+        active: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        from sklearn.model_selection import KFold, StratifiedKFold
+
+        active_idx = np.flatnonzero(active)
+        requested = self._active_split_count(y, target_kind, active)
+        if target_kind == "binary":
+            splitter = StratifiedKFold(
+                n_splits=requested,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            split_iter = splitter.split(active_idx, y[active])
+        else:
+            splitter = KFold(
+                n_splits=requested,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+            split_iter = splitter.split(active_idx)
+        return [
+            (active_idx[train_local], active_idx[valid_local])
+            for train_local, valid_local in split_iter
+        ]
+
+    def _group_splits(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups,
+        active: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        from sklearn.model_selection import GroupKFold
+
+        group_arr = np.asarray(groups).reshape(-1)
+        if group_arr.size != len(X):
+            raise ValueError(f"groups has {group_arr.size} rows but X has {len(X)}")
+        if bool(np.asarray(pd.isna(group_arr), dtype=bool).any()):
+            raise ValueError("groups must not contain missing values")
+        active_idx = np.flatnonzero(active)
+        n_groups = int(pd.unique(group_arr[active]).size)
+        n_splits = min(self._requested_cv(), n_groups)
+        if n_splits < 2:
+            raise ValueError(f"target_cv group folds require at least 2 groups, got {n_groups}")
+        splitter = GroupKFold(n_splits=n_splits)
+        return [
+            (active_idx[train_local], active_idx[valid_local])
+            for train_local, valid_local in splitter.split(
+                X.iloc[active_idx],
+                y[active_idx],
+                group_arr[active_idx],
+            )
+        ]
+
+    def _time_splits(
+        self,
+        time,
+        active: np.ndarray,
+    ) -> tuple[list[tuple[np.ndarray, np.ndarray]], np.ndarray]:
+        values = np.asarray(time).reshape(-1)
+        if values.size != active.size:
+            raise ValueError(f"time has {values.size} rows but X has {active.size}")
+        if bool(np.asarray(pd.isna(values), dtype=bool).any()):
+            raise ValueError("time values must not contain missing values")
+        active_idx = np.flatnonzero(active)
+        active_values = values[active_idx]
+        try:
+            order_local = np.argsort(active_values, kind="mergesort")
+            ordered = active_values[order_local]
+            if ordered.dtype.kind == "O":
+                for previous, current in zip(ordered[:-1], ordered[1:]):
+                    if bool(current < previous):
+                        raise TypeError
+            elif np.asarray(ordered[1:] < ordered[:-1], dtype=bool).any():
+                raise TypeError
+            distinct = np.asarray(ordered[1:] != ordered[:-1], dtype=bool)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("time values must be orderable") from exc
+        boundaries = np.flatnonzero(distinct) + 1
+        timestamp_groups = np.split(active_idx[order_local], boundaries)
+        n_timestamps = len(timestamp_groups)
+        n_splits = min(self._requested_cv(), n_timestamps)
+        if n_splits < 2:
+            raise ValueError(
+                "target_cv time folds require at least 2 distinct timestamps"
+            )
+        block_groups = np.array_split(np.arange(n_timestamps), n_splits)
+        blocks = [
+            np.concatenate([timestamp_groups[int(i)] for i in block]).astype(
+                np.int64,
+                copy=False,
+            )
+            for block in block_groups
+        ]
+        warmup = blocks[0]
+        splits: list[tuple[np.ndarray, np.ndarray]] = []
+        history: list[np.ndarray] = [blocks[0]]
+        for block in blocks[1:]:
+            splits.append((np.concatenate(history), block))
+            history.append(block)
+        return splits, warmup
+
+    def _replace_columns(self, X: pd.DataFrame, values: np.ndarray) -> pd.DataFrame:
+        encoded = np.asarray(values, dtype=np.float64)
+        if encoded.ndim != 2 or encoded.shape[1] != len(self.cols):
+            raise ValueError(
+                "cat_encoding='target_cv' must preserve one encoded column per "
+                "categorical feature; multiclass expansion is not supported"
+            )
+        X_out = X.copy()
+        for index, col in enumerate(self.cols):
+            X_out[col] = encoded[:, index]
+        return X_out
+
+    def fit(self, X: pd.DataFrame, y, sample_weight=None):
+        self._validate_frame(X)
+        y_arr = np.asarray(y).reshape(-1)
+        if len(X) != y_arr.size:
+            raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
+        if self.target_prior is not None or self.warmup_policy != "zero_weight":
+            raise ValueError(
+                "target_prior and warmup_policy are only meaningful for time-aware "
+                "target_cv fit_transform"
+            )
+        smooth = self._validate_smoothing()
+        y_values, target_kind = self._target_values(y_arr)
+        weights = ensure_weights(sample_weight, len(X), normalize=False)
+        self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+            X,
+            y_values,
+            weights,
+            smooth,
+        )
+        self.target_kind_ = target_kind
+        self.fit_mode_ = "sift"
+        # ``fit`` alone builds only the target-blind inference maps; the split
+        # count it reports is the one ``fit_transform`` would cross-fit with, so
+        # it is computed over the same active (positive-weight) rows rather than
+        # over all rows.  Zero-weight rows never enter a fold.
+        self.n_splits_ = self._active_split_count(y_values, target_kind, weights > 0.0)
+        self.encoding_cv_ = {"kind": "fixed_k", "n_splits": self.n_splits_}
+        return self
+
+    def fit_transform(
+        self,
+        X: pd.DataFrame,
+        y,
+        sample_weight=None,
+        groups=None,
+        time=None,
+    ) -> pd.DataFrame:
+        self._validate_frame(X)
+        y_arr = np.asarray(y).reshape(-1)
+        if len(X) != y_arr.size:
+            raise ValueError(f"X has {len(X)} rows but y has {y_arr.size}")
+        if groups is not None and time is not None:
+            raise ValueError(
+                "cat_encoding='target_cv' does not support groups and time together"
+            )
+        if time is None and self.target_prior is not None:
+            raise ValueError("target_prior is only meaningful for time-aware target_cv")
+        if time is None and self.warmup_policy != "zero_weight":
+            raise ValueError("warmup_policy is only meaningful for time-aware target_cv")
+        if (
+            time is not None
+            and self.target_prior is not None
+            and self.warmup_policy == "exclude"
+        ):
+            raise ValueError(
+                "target_prior and warmup_policy='exclude' are mutually exclusive"
+            )
+        smooth = self._validate_smoothing()
+        y_values, target_kind = self._target_values(y_arr)
+        raw_weights = ensure_weights(sample_weight, len(X), normalize=False)
+        active = raw_weights > 0.0
+        # Centered effects, so a row no fold could encode stays at the neutral
+        # zero effect instead of carrying a fold-identifying prior.
+        values = np.zeros((len(X), len(self.cols)), dtype=np.float64)
+        if groups is not None:
+            splits = self._group_splits(X, y_values, groups, active)
+            kind = "group"
+            warmup = np.empty(0, dtype=np.int64)
+        elif time is not None:
+            splits, warmup = self._time_splits(time, active)
+            kind = "time"
+            if self.target_prior is not None:
+                prior = float(self.target_prior)
+                if not np.isfinite(prior):
+                    raise ValueError("target_prior must be finite")
+                if target_kind == "binary" and not 0.0 <= prior <= 1.0:
+                    raise ValueError(
+                        "target_prior must be between 0 and 1 for binary targets"
+                    )
+                # The warmup rows are encoded against this explicit
+                # target-independent prior, so their centered effect is the zero
+                # already sitting in ``values``; only their selection weight
+                # differs from the no-prior case below.
+        else:
+            splits = self._fixed_splits(y_values, target_kind, active)
+            kind = "fixed_k"
+            warmup = np.empty(0, dtype=np.int64)
+
+        for train_idx, valid_idx in splits:
+            mappings, _ = self._fit_custom_maps(
+                X.iloc[train_idx],
+                y_values[train_idx],
+                raw_weights[train_idx],
+                smooth,
+            )
+            fold_values = self._apply_custom_maps(X.iloc[valid_idx], mappings)
+            values[valid_idx, :] = fold_values.loc[:, self.cols].to_numpy(
+                dtype=np.float64,
+            )
+
+        effective_weights = raw_weights.copy()
+        if time is not None and self.target_prior is None:
+            effective_weights[warmup] = 0.0
+        if not bool(np.any(effective_weights > 0.0)):
+            raise ValueError(
+                "target_cv warmup handling leaves no positive selection weight"
+            )
+        self.effective_sample_weight_ = (
+            effective_weights
+            if sample_weight is not None or warmup.size > 0
+            else None
+        )
+        self.warmup_mask_ = np.ones(len(X), dtype=bool)
+        self.warmup_mask_[warmup] = False
+        self.category_maps_, self.global_prior_ = self._fit_custom_maps(
+            X,
+            y_values,
+            raw_weights,
+            smooth,
+        )
+        self.target_kind_ = target_kind
+        self.fit_mode_ = "sift"
+        self.n_splits_ = len(splits) + (1 if time is not None else 0)
+        self.encoding_cv_ = {"kind": kind, "n_splits": self.n_splits_}
+        return self._replace_columns(X, values)
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        from sklearn.utils.validation import check_is_fitted
+
+        check_is_fitted(self, ["fit_mode_", "encoding_cv_"])
+        self._validate_frame(X)
+        return self._apply_custom_maps(X, self.category_maps_)
+
+
 def encode_categoricals(
     X: pd.DataFrame,
     y: pd.Series,
@@ -515,10 +1215,33 @@ def encode_categoricals(
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     sample_weight=None,
+    target_type: Literal["auto", "continuous", "binary"] = "auto",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    groups=None,
+    time=None,
 ) -> pd.DataFrame:
     """Apply target encoding to categorical features."""
     if method == "none":
         return X
+    if method == "target_cv":
+        encoder = TargetCVEncoder(
+            cat_features,
+            target_type=target_type,
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
+        return encoder.fit_transform(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+        )
     if method == "loo_logit":
         encoder = LeaveOneOutLogitEncoder(
             cat_features,

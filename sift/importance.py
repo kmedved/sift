@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Callable, Literal
+import copy
+import hashlib
+import os
+import pickle
+from collections.abc import Mapping, Set
+from dataclasses import dataclass, field
+from numbers import Real
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed, effective_n_jobs
 
+from sift._deprecate import warn_random_state_none
+from sift._metadata import resolve_row_metadata
 from sift._permute import (
     PermutationMethod,
     build_group_info,
@@ -20,6 +29,278 @@ from sift.scoring import ScoringSpec, get_scoring
 
 ParallelBackend = Literal["threads", "processes"]
 _VALID_PARALLEL_BACKENDS: tuple[ParallelBackend, ...] = ("threads", "processes")
+
+
+def _importance_labels_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, np.generic):
+        left = left.item()
+    if isinstance(right, np.generic):
+        right = right.item()
+    if type(left) is not type(right):
+        return False
+    values = np.empty(2, dtype=object)
+    values[:] = [left, right]
+    try:
+        return bool(
+            pd.Index(values, dtype=object, tupleize_cols=False).duplicated()[1]
+        )
+    except (TypeError, ValueError):
+        try:
+            return bool(left == right)
+        except (TypeError, ValueError):
+            return repr(left) == repr(right)
+
+
+class _ImportanceFeatureNames(list):
+    def __init__(self, values: list[Any], source_identity: tuple[int, tuple[int, ...]]):
+        super().__init__(values)
+        self._sift_source_identity = source_identity
+        self._sift_accessor_ids = tuple(id(value) for value in values)
+        self._sift_content_digest = _importance_feature_digest(values)
+
+
+def _importance_feature_digest(values: list[Any]) -> str:
+    try:
+        payload = pickle.dumps(values, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        fallback = []
+        for value in values:
+            try:
+                state = vars(value)
+            except TypeError:
+                state = None
+            fallback.append(
+                (
+                    f"{type(value).__module__}.{type(value).__qualname__}",
+                    repr(value),
+                    repr(state),
+                )
+            )
+        payload = repr(fallback).encode("utf-8", errors="backslashreplace")
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, init=False, eq=False)
+class ImportanceResult:
+    """Rich permutation-importance result with repeat-level diagnostics.
+
+    The default :func:`permutation_importance` return remains its historical
+    four-column DataFrame.  Request this object with ``return_result=True``
+    when repeat-level importance drops or a normalized result view are needed.
+    All array, table, and mapping accessors return defensive copies.
+    """
+
+    _ranking: pd.DataFrame = field(repr=False)
+    _importances: np.ndarray = field(repr=False)
+    _feature_names: tuple[Any, ...] = field(repr=False)
+    _feature_source_identity: tuple[int, tuple[int, ...]] = field(repr=False)
+    _ranking_indices: tuple[int, ...] = field(repr=False)
+    baseline_score: float
+    _selector_metadata: dict[str, Any] = field(repr=False)
+    _diagnostics: dict[str, Any] = field(repr=False)
+
+    def __init__(
+        self,
+        *,
+        ranking: pd.DataFrame,
+        importances: np.ndarray,
+        feature_names: list[Any],
+        ranking_indices: list[int],
+        baseline_score: float,
+        selector_metadata: dict[str, Any],
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        if not isinstance(ranking, pd.DataFrame):
+            raise TypeError("ranking must be a pandas DataFrame")
+        expected_columns = [
+            "feature",
+            "importance_mean",
+            "importance_std",
+            "baseline_score",
+        ]
+        if list(ranking.columns) != expected_columns:
+            raise ValueError(
+                f"ranking must have exactly the columns {expected_columns}"
+            )
+        if isinstance(feature_names, (str, bytes, bytearray, Mapping, Set)):
+            raise TypeError("feature_names must be an ordered iterable")
+        try:
+            names = list(feature_names)
+        except TypeError as exc:
+            raise TypeError("feature_names must be an ordered iterable") from exc
+        if isinstance(ranking_indices, (str, bytes, bytearray, Mapping, Set)):
+            raise TypeError("ranking_indices must be an ordered iterable")
+        try:
+            raw_indices = list(ranking_indices)
+        except TypeError as exc:
+            raise TypeError("ranking_indices must be an ordered iterable") from exc
+        indices: list[int] = []
+        for value in raw_indices:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, np.integer)
+            ):
+                raise ValueError("ranking_indices must contain integer positions")
+            indices.append(int(value))
+        if (
+            len(ranking) != len(names)
+            or len(indices) != len(names)
+            or set(indices) != set(range(len(names)))
+        ):
+            raise ValueError(
+                "ranking and ranking_indices must cover every feature position exactly once"
+            )
+        for row, position in enumerate(indices):
+            if not _importance_labels_equal(
+                ranking["feature"].iloc[row],
+                names[position],
+            ):
+                raise ValueError(
+                    "ranking feature identities must match ranking_indices"
+                )
+
+        raw_importances = np.asarray(importances)
+        if raw_importances.ndim != 2 or raw_importances.shape[0] != len(names):
+            raise ValueError(
+                "importances must be a two-dimensional matrix with one row per feature"
+            )
+        if raw_importances.dtype.kind not in {"i", "u", "f"}:
+            raise ValueError(
+                "importances must contain real non-boolean numeric values"
+            )
+        converted_importances = raw_importances.astype(np.float64, copy=True)
+        if isinstance(baseline_score, (bool, np.bool_)) or not isinstance(
+            baseline_score,
+            (Real, np.integer, np.floating),
+        ):
+            raise ValueError("baseline_score must be a real non-boolean number")
+        if not isinstance(selector_metadata, Mapping):
+            raise TypeError("selector_metadata must be a mapping")
+        if diagnostics is not None and not isinstance(diagnostics, Mapping):
+            raise TypeError("diagnostics must be a mapping or None")
+
+        source_identity = (os.getpid(), tuple(id(name) for name in names))
+        stored_names = copy.deepcopy(names)
+        stored_ranking = ranking.copy(deep=True)
+        feature_column = stored_ranking["feature"].copy(deep=True)
+        for row, position in enumerate(indices):
+            feature_column.iat[row] = stored_names[position]
+        stored_ranking["feature"] = feature_column
+        object.__setattr__(self, "_ranking", stored_ranking)
+        object.__setattr__(
+            self,
+            "_importances",
+            converted_importances,
+        )
+        object.__setattr__(self, "_feature_names", tuple(stored_names))
+        object.__setattr__(self, "_feature_source_identity", source_identity)
+        object.__setattr__(
+            self,
+            "_ranking_indices",
+            tuple(indices),
+        )
+        object.__setattr__(self, "baseline_score", float(baseline_score))
+        object.__setattr__(
+            self,
+            "_selector_metadata",
+            copy.deepcopy(dict(selector_metadata)),
+        )
+        object.__setattr__(
+            self,
+            "_diagnostics",
+            copy.deepcopy(dict(diagnostics or {})),
+        )
+
+    @property
+    def ranking_(self) -> pd.DataFrame:
+        """Legacy-compatible summary table, ranked by mean importance."""
+        ranking, _ = self._copy_ranking_and_names()
+        return ranking
+
+    @property
+    def importances_(self) -> np.ndarray:
+        """Importance drops with raw feature positions on rows and repeats on columns."""
+        return self._importances.copy()
+
+    @property
+    def feature_names(self) -> list[Any]:
+        """Feature identities in original input-position order."""
+        return _ImportanceFeatureNames(
+            copy.deepcopy(list(self._feature_names)),
+            self._feature_source_identity,
+        )
+
+    @property
+    def ranking_indices(self) -> list[int]:
+        """Original feature position for each row of :attr:`ranking_`."""
+        return list(self._ranking_indices)
+
+    @property
+    def selector_metadata(self) -> dict[str, Any]:
+        """Configuration and provenance that do not retain caller data."""
+        return copy.deepcopy(self._selector_metadata)
+
+    @property
+    def diagnostics_(self) -> dict[str, Any]:
+        """Repeat-axis and aggregation conventions."""
+        return copy.deepcopy(self._diagnostics)
+
+    def get_feature_ranking(self) -> pd.DataFrame:
+        """Return the historical permutation-importance summary table."""
+        return self.ranking_
+
+    def _copy_ranking_and_names(self) -> tuple[pd.DataFrame, list[Any]]:
+        names = copy.deepcopy(list(self._feature_names))
+        ranking = self._ranking.copy(deep=True)
+        feature_column = ranking["feature"].copy(deep=True)
+        for row, position in enumerate(self._ranking_indices):
+            feature_column.iat[row] = names[position]
+        ranking["feature"] = feature_column
+        return ranking, names
+
+    def _adapter_snapshot(self) -> dict[str, Any]:
+        ranking, names = self._copy_ranking_and_names()
+        return {
+            "ranking": ranking,
+            "importances": self._importances.copy(),
+            "feature_names": names,
+            "ranking_indices": list(self._ranking_indices),
+            "baseline_score": self.baseline_score,
+            "selector_metadata": copy.deepcopy(self._selector_metadata),
+            "diagnostics": copy.deepcopy(self._diagnostics),
+        }
+
+    def _matches_original_features(self, feature_names: Any) -> bool:
+        if (
+            getattr(feature_names, "_sift_source_identity", None)
+            == self._feature_source_identity
+            and getattr(feature_names, "_sift_accessor_ids", None)
+            == tuple(id(value) for value in feature_names)
+            and getattr(feature_names, "_sift_content_digest", None)
+            == _importance_feature_digest(list(feature_names))
+        ):
+            return True
+        try:
+            supplied = list(feature_names)
+        except TypeError:
+            return False
+        if len(supplied) != len(self._feature_names):
+            return False
+        same_process = os.getpid() == self._feature_source_identity[0]
+        original_ids = self._feature_source_identity[1]
+        for position, (expected, observed) in enumerate(
+            zip(self._feature_names, supplied)
+        ):
+            if same_process and id(observed) == original_ids[position]:
+                continue
+            if not _importance_labels_equal(expected, observed):
+                return False
+        return True
+
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
 
 
 def permutation_importance(
@@ -38,7 +319,8 @@ def permutation_importance(
     n_jobs: int = -1,
     parallel_backend: ParallelBackend = "threads",
     random_state: int | None = None,
-) -> pd.DataFrame:
+    return_result: bool = False,
+) -> pd.DataFrame | ImportanceResult:
     """
     Permutation importance with optional time-series-aware strategies.
 
@@ -85,16 +367,35 @@ def permutation_importance(
         Joblib backend preference. "threads" avoids inter-process copies for
         many estimators; "processes" isolates workers when process parallelism
         is preferred.
+    return_result : bool
+        If ``False`` (default), return the historical four-column DataFrame.
+        If ``True``, return :class:`ImportanceResult`, including the
+        per-feature, per-repeat importance-drop matrix.
 
     Returns
     -------
-    DataFrame with: feature, importance_mean, importance_std, baseline_score
+    DataFrame or ImportanceResult
+        The default DataFrame has columns ``feature``, ``importance_mean``,
+        ``importance_std``, and ``baseline_score``.
     """
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    time = metadata.time
+    sample_weight = metadata.sample_weight
     if isinstance(n_repeats, (bool, np.bool_)) or not isinstance(n_repeats, (int, np.integer)):
         raise ValueError("n_repeats must be a positive integer")
     n_repeats = int(n_repeats)
     if n_repeats < 1:
         raise ValueError("n_repeats must be a positive integer")
+    if not isinstance(return_result, (bool, np.bool_)):
+        raise ValueError("return_result must be a boolean")
+    return_result = bool(return_result)
     parallel_backend = _validate_parallel_backend(parallel_backend)
     sample_weight_supplied = sample_weight is not None
 
@@ -113,9 +414,12 @@ def permutation_importance(
         n_features = X_arr.shape[1]
 
     w = ensure_weights(sample_weight, n, normalize=True)
+    if random_state is None:
+        warn_random_state_none("permutation_importance")
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, 2**31, size=(n_features, n_repeats))
 
+    requested_permute_method = permute_method
     permute_method = resolve_permutation_method(permute_method, groups=groups, time=time)
     if permute_method in ("block", "circular_shift") and time is None:
         raise ValueError(f"permute_method='{permute_method}' requires time")
@@ -123,6 +427,29 @@ def permutation_importance(
         build_group_info(groups, time, n_samples=n) if permute_method != "global" else None
     )
     score_higher_is_better = _higher_is_better(scoring, higher_is_better)
+    selector_metadata = (
+        {
+            "selector": "permutation_importance",
+            "n_features": int(n_features),
+            "n_repeats": n_repeats,
+            "permute_method_requested": requested_permute_method,
+            "permute_method": permute_method,
+            "block_size": _metadata_scalar(block_size),
+            "scoring": _scoring_label(scoring),
+            "higher_is_better": score_higher_is_better,
+            "sample_weight_supplied": sample_weight_supplied,
+            "groups_supplied": groups is not None,
+            "time_supplied": time is not None,
+            "n_jobs": n_jobs,
+            "parallel_backend": parallel_backend,
+            "input_kind": (
+                "dataframe" if isinstance(X, pd.DataFrame) else "positional"
+            ),
+            "selection_semantics": "ranking_only",
+        }
+        if return_result
+        else {}
+    )
 
     if isinstance(X, pd.DataFrame):
         return _permutation_importance_dataframe(
@@ -148,6 +475,8 @@ def permutation_importance(
             sample_weight_supplied=sample_weight_supplied,
             n_jobs=n_jobs,
             parallel_backend=parallel_backend,
+            return_result=return_result,
+            selector_metadata=selector_metadata,
         )
 
     assert X_arr is not None
@@ -174,6 +503,8 @@ def permutation_importance(
         sample_weight_supplied=sample_weight_supplied,
         n_jobs=n_jobs,
         parallel_backend=parallel_backend,
+        return_result=return_result,
+        selector_metadata=selector_metadata,
     )
 
 
@@ -194,12 +525,14 @@ def _permutation_importance_dataframe(
     sample_weight_supplied: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
-) -> pd.DataFrame:
+    return_result: bool,
+    selector_metadata: dict[str, Any],
+) -> pd.DataFrame | ImportanceResult:
     features = list(X.columns)
     row_positions = np.arange(X.shape[0])
     chunks = _feature_chunks(len(features), n_jobs)
 
-    def compute_chunk(feature_indices: np.ndarray) -> list[tuple[int, float, float]]:
+    def compute_chunk(feature_indices: np.ndarray) -> list[tuple]:
         X_work = X.copy()
         chunk_results = []
 
@@ -234,26 +567,29 @@ def _permutation_importance_dataframe(
                     baseline - score if higher_is_better else score - baseline
                 )
 
-            chunk_results.append((feat_idx, float(np.mean(drops)), float(np.std(drops))))
+            summary = (feat_idx, float(np.mean(drops)), float(np.std(drops)))
+            if return_result:
+                chunk_results.append((*summary, np.asarray(drops, dtype=np.float64)))
+            else:
+                chunk_results.append(summary)
 
         return chunk_results
 
     result_chunks = Parallel(n_jobs=n_jobs, prefer=parallel_backend)(
         delayed(compute_chunk)(chunk) for chunk in chunks
     )
-    results = _flatten_feature_results(result_chunks, len(features))
-
-    return (
-        pd.DataFrame(
-            {
-                "feature": features,
-                "importance_mean": [r[0] for r in results],
-                "importance_std": [r[1] for r in results],
-                "baseline_score": baseline,
-            }
-        )
-        .sort_values("importance_mean", ascending=False)
-        .reset_index(drop=True)
+    results, importances = _flatten_feature_results(
+        result_chunks,
+        len(features),
+        n_repeats=n_repeats,
+        return_result=return_result,
+    )
+    return _build_importance_output(
+        features,
+        results,
+        baseline=baseline,
+        importances=importances,
+        selector_metadata=selector_metadata,
     )
 
 
@@ -274,11 +610,13 @@ def _permutation_importance_array(
     sample_weight_supplied: bool,
     n_jobs: int,
     parallel_backend: ParallelBackend,
-) -> pd.DataFrame:
+    return_result: bool,
+    selector_metadata: dict[str, Any],
+) -> pd.DataFrame | ImportanceResult:
     features = list(range(X_arr.shape[1]))
     chunks = _feature_chunks(len(features), n_jobs)
 
-    def compute_chunk(feature_indices: np.ndarray) -> list[tuple[int, float, float]]:
+    def compute_chunk(feature_indices: np.ndarray) -> list[tuple]:
         X_work = X_arr.copy()
         chunk_results = []
 
@@ -311,26 +649,29 @@ def _permutation_importance_array(
                     baseline - score if higher_is_better else score - baseline
                 )
 
-            chunk_results.append((feat_idx, float(np.mean(drops)), float(np.std(drops))))
+            summary = (feat_idx, float(np.mean(drops)), float(np.std(drops)))
+            if return_result:
+                chunk_results.append((*summary, np.asarray(drops, dtype=np.float64)))
+            else:
+                chunk_results.append(summary)
 
         return chunk_results
 
     result_chunks = Parallel(n_jobs=n_jobs, prefer=parallel_backend)(
         delayed(compute_chunk)(chunk) for chunk in chunks
     )
-    results = _flatten_feature_results(result_chunks, len(features))
-
-    return (
-        pd.DataFrame(
-            {
-                "feature": features,
-                "importance_mean": [r[0] for r in results],
-                "importance_std": [r[1] for r in results],
-                "baseline_score": baseline,
-            }
-        )
-        .sort_values("importance_mean", ascending=False)
-        .reset_index(drop=True)
+    results, importances = _flatten_feature_results(
+        result_chunks,
+        len(features),
+        n_repeats=n_repeats,
+        return_result=return_result,
+    )
+    return _build_importance_output(
+        features,
+        results,
+        baseline=baseline,
+        importances=importances,
+        selector_metadata=selector_metadata,
     )
 
 
@@ -355,17 +696,83 @@ def _feature_chunks(n_features: int, n_jobs: int) -> list[np.ndarray]:
 
 
 def _flatten_feature_results(
-    result_chunks: list[list[tuple[int, float, float]]],
+    result_chunks: list[list[tuple]],
     n_features: int,
-) -> list[tuple[float, float]]:
+    *,
+    n_repeats: int,
+    return_result: bool,
+) -> tuple[list[tuple[float, float]], np.ndarray | None]:
     results: list[tuple[float, float] | None] = [None] * n_features
+    importances = (
+        np.empty((n_features, n_repeats), dtype=np.float64)
+        if return_result
+        else None
+    )
     for chunk in result_chunks:
-        for feat_idx, mean, std in chunk:
+        for feature_result in chunk:
+            feat_idx, mean, std = feature_result[:3]
             results[feat_idx] = (mean, std)
+            if importances is not None:
+                importances[feat_idx] = feature_result[3]
 
     if any(result is None for result in results):
         raise RuntimeError("Permutation importance did not return every feature result")
-    return [result for result in results if result is not None]
+    return [result for result in results if result is not None], importances
+
+
+def _build_importance_output(
+    features: list[Any],
+    results: list[tuple[float, float]],
+    *,
+    baseline: float,
+    importances: np.ndarray | None,
+    selector_metadata: dict[str, Any],
+) -> pd.DataFrame | ImportanceResult:
+    unsorted = pd.DataFrame(
+        {
+            "feature": features,
+            "importance_mean": [result[0] for result in results],
+            "importance_std": [result[1] for result in results],
+            "baseline_score": baseline,
+        }
+    )
+    ranked = unsorted.sort_values("importance_mean", ascending=False)
+    ranking_indices = ranked.index.to_numpy(dtype=np.intp, copy=True).tolist()
+    ranking = ranked.reset_index(drop=True)
+    if importances is None:
+        return ranking
+    return ImportanceResult(
+        ranking=ranking,
+        importances=importances,
+        feature_names=features,
+        ranking_indices=ranking_indices,
+        baseline_score=baseline,
+        selector_metadata=selector_metadata,
+        diagnostics={
+            "importance_definition": "score_drop",
+            "importance_rows": "raw_feature_positions",
+            "importance_columns": "permutation_repeats",
+            "std_ddof": 0,
+        },
+    )
+
+
+def _scoring_label(scoring: str | Callable | ScoringSpec) -> str:
+    if isinstance(scoring, str):
+        return scoring
+    if isinstance(scoring, ScoringSpec):
+        return scoring.name
+    name = getattr(scoring, "__qualname__", None) or type(scoring).__qualname__
+    module = getattr(scoring, "__module__", None) or type(scoring).__module__
+    return f"{module}.{name}"
+
+
+def _metadata_scalar(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return _metadata_scalar(value.item())
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return repr(value)
 
 
 def _score(
@@ -435,4 +842,4 @@ def _higher_is_better(
     raise TypeError("scoring must be a scorer name, ScoringSpec, or callable")
 
 
-__all__ = ["permutation_importance"]
+__all__ = ["ImportanceResult", "permutation_importance"]

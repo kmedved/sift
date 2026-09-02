@@ -1,5 +1,6 @@
-__version__ = "0.8.0"
+__version__ = "0.9.0a1"
 
+from sift._logging import set_verbosity
 from sift.api import (
     FeatureCache,
     build_cache,
@@ -53,6 +54,7 @@ from sift.selection.auto_k_xfit import (
 )
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 from sift.selection.result import FilterSelectionResult
+from sift.selection.view import SelectionView, as_result
 from sift.stability import StabilitySelector, stability_classif, stability_regression
 
 
@@ -121,4 +123,7 @@ __all__ = [
     "catboost_select",
     "catboost_regression",
     "catboost_classif",
+    "set_verbosity",
+    "SelectionView",
+    "as_result",
 ]

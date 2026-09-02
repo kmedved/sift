@@ -4,18 +4,36 @@ from __future__ import annotations
 
 import inspect
 import importlib.util
+import warnings
+from dataclasses import replace
 from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator
+from sklearn.feature_selection import SelectorMixin
+from sklearn.utils.metadata_routing import UNUSED
 from sklearn.utils.validation import check_is_fitted
 
+from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
+from sift._progress import ProgressCallback
+from sift._selector_compat import (
+    check_fitted_column_identity,
+    feature_names_array,
+    inverse_selected_matrix,
+    ordered_indices,
+    reject_sparse,
+    selector_tags,
+    validate_fit_matrix,
+    validate_output_order,
+)
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
+    TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
     suppress_category_encoder_pandas_warnings,
+    validate_target_cv_encoding_flags,
 )
 from sift.api import (
     select_fdr,
@@ -37,7 +55,9 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 
-_SUPERVISED_CLASS_ENCODINGS = frozenset({"loo", "target", "james_stein", "loo_logit"})
+_SUPERVISED_CLASS_ENCODINGS = frozenset(
+    {"target_cv", "loo", "target", "james_stein", "loo_logit"}
+)
 _BINARY_PREPROCESSING_FIT_PARAM_OVERRIDES = frozenset(
     {
         "loss",
@@ -102,21 +122,26 @@ def _coerce_selection_indices(
 
 def _require_2d_x(X) -> None:
     """Reject non-2D feature input with a clear error instead of an IndexError."""
-    x_shape = X.shape if hasattr(X, "shape") else np.asarray(X).shape
-    if len(x_shape) != 2:
-        raise ValueError(
-            "X must be a 2D feature matrix; got an array with "
-            f"{len(x_shape)} dimension(s). Reshape your data (e.g. "
-            "X.reshape(-1, 1) for a single feature)."
-        )
+    validate_fit_matrix(X)
 
 
 def _feature_names_or_default(X) -> list[str]:
+    return _feature_names_with_provenance(X)[0]
+
+
+def _feature_names_with_provenance(X) -> tuple[list[str], bool]:
+    """Return fitted feature names plus whether they were generated positionally.
+
+    Generated ``x0...`` names stay in the public ``feature_names_in_`` attribute
+    because that is the established 0.8 behavior; the boolean is the private
+    provenance marker used wherever named and positional fits must be told
+    apart.
+    """
     feature_names = extract_feature_names(X)
     if feature_names is not None:
-        return list(feature_names)
+        return list(feature_names), False
     n_features = np.asarray(X).shape[1]
-    return [f"x{i}" for i in range(n_features)]
+    return [f"x{i}" for i in range(n_features)], True
 
 
 def _slice_rows(X, idx: np.ndarray):
@@ -142,12 +167,26 @@ def _make_category_encoder(
     method: str,
     columns: list[str],
     *,
+    target_type: Literal["continuous", "binary"] = "continuous",
     loo_smoothing: float = 20.0,
     loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ):
     if method == "none" or not columns:
         return None
+    if method == "target_cv":
+        return TargetCVEncoder(
+            columns,
+            target_type=target_type,
+            smooth=target_cv_smoothing,
+            cv=target_cv_n_splits,
+            target_prior=target_prior,
+            warmup_policy=warmup_policy,
+        )
     if method == "loo_logit":
         return LeaveOneOutLogitEncoder(
             columns,
@@ -157,8 +196,8 @@ def _make_category_encoder(
         )
     if method not in {"loo", "target", "james_stein"}:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target', 'loo', 'james_stein', "
-            "or 'loo_logit'. "
+            "cat_encoding must be one of 'none', 'target_cv', 'target', 'loo', "
+            "'james_stein', or 'loo_logit'. "
             f"Got {method!r}."
         )
     if importlib.util.find_spec("category_encoders") is None:
@@ -184,9 +223,13 @@ def _make_category_encoder(
         return Encoder(cols=columns, handle_missing="return_nan")
 
 
-class _BaseSelector(BaseEstimator, TransformerMixin):
+class _BaseSelector(SelectorMixin, BaseEstimator):
     """Sklearn-style compatibility layer for function-based selectors."""
 
+    __metadata_request__fit = {
+        "cache": UNUSED,
+        "auto_k_config": UNUSED,
+    }
     _selector_fn: Callable
     _subsample_auto_is_cache_default = False
     _random_state_auto_is_cache_default = False
@@ -207,6 +250,41 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         # the private identity sentinels inside the function API and expose the
         # literal ``"auto"`` as the estimator-facing omission marker.
         return self._resolve_auto_selector_params(params)
+
+    def _output_indices(self) -> np.ndarray:
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        return ordered_indices(self.selected_indices_, self.output_order)
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        mask = np.zeros(self.n_features_in_, dtype=bool)
+        mask[self.selected_indices_] = True
+        return mask
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags({} if parent is None else parent())
+
+    def __sklearn_tags__(self):
+        parent = getattr(super(), "__sklearn_tags__", None)
+        if parent is None:
+            return self._more_tags()
+        return selector_tags(parent())
+
+    def get_metadata_routing(self):
+        routing = super().get_metadata_routing()
+        if hasattr(self, "k") and self.k != "auto":
+            unsupported = [
+                name
+                for name in ("groups", "time")
+                if routing.fit.requests.get(name) not in (None, False)
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"{self.__class__.__name__} can request groups/time metadata only "
+                    "when k='auto'; fixed-k fitting rejects row context"
+                )
+        return routing
 
     def _resolve_auto_selector_params(self, params: dict) -> dict:
         """Translate sklearn-facing auto tokens only for supporting selectors."""
@@ -230,14 +308,17 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         for attr in (
             "_fit_transform_output_",
             "categorical_encoder_",
+            "categorical_encoding_metadata_",
             "categorical_features_",
             "_categorical_encoding_applied_",
+            "_fit_feature_names_generated_",
             "feature_names_in_",
             "n_features_in_",
             "selected_features_",
             "selected_indices_",
             "k_",
             "nested_auto_k_diagnostics_",
+            "_row_metadata_columns_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -262,13 +343,26 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         y_arr = np.asarray(y).reshape(-1)
         return ensure_weights(sample_weight, len(y_arr), normalize=True)
 
+    def _validate_categorical_encoding_params(self) -> None:
+        validate_target_cv_encoding_flags(
+            getattr(self, "cat_encoding", "none"),
+            getattr(self, "allow_full_data_target_encoding", False),
+        )
+
     def _would_fit_supervised_categoricals(self, X) -> bool:
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding not in _SUPERVISED_CLASS_ENCODINGS or not isinstance(X, pd.DataFrame):
             return False
         return bool(_categorical_columns(X, getattr(self, "cat_features", None)))
 
-    def _fit_transform_categoricals(self, X, y, sample_weight=None):
+    def _fit_transform_categoricals(
+        self,
+        X,
+        y,
+        sample_weight=None,
+        groups=None,
+        time=None,
+    ):
         self.categorical_encoder_ = None
         self.categorical_features_ = []
         self._categorical_encoding_applied_ = False
@@ -285,11 +379,19 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         encoder = _make_category_encoder(
             cat_encoding,
             cat_features,
+            target_type="binary" if self._task() == "classification" else "continuous",
             loo_smoothing=getattr(self, "loo_smoothing", 20.0),
             loo_clip_min=getattr(self, "loo_clip_min", 1e-4),
             loo_clip_max=getattr(self, "loo_clip_max", 1.0 - 1e-4),
+            target_cv_n_splits=getattr(self, "target_cv_n_splits", 5),
+            target_cv_smoothing=getattr(self, "target_cv_smoothing", "auto"),
+            target_prior=getattr(self, "target_prior", None),
+            warmup_policy=getattr(self, "warmup_policy", "zero_weight"),
         )
-        if sample_weight is not None and not isinstance(encoder, LeaveOneOutLogitEncoder):
+        if sample_weight is not None and not isinstance(
+            encoder,
+            (LeaveOneOutLogitEncoder, TargetCVEncoder),
+        ):
             raise ValueError(
                 "sample_weight with selector-class categorical encoding is only "
                 "supported for cat_encoding='loo_logit'. category_encoders-backed "
@@ -303,10 +405,23 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                     y_enc,
                     sample_weight=self._categorical_sample_weight(y, sample_weight),
                 )
+            elif isinstance(encoder, TargetCVEncoder):
+                target_cv_weight = None
+                if sample_weight is not None or getattr(self, "class_weight", None) is not None:
+                    target_cv_weight = self._categorical_sample_weight(y, sample_weight)
+                X_encoded = encoder.fit_transform(
+                    X,
+                    y_enc,
+                    sample_weight=target_cv_weight,
+                    groups=groups,
+                    time=time,
+                )
             else:
                 X_encoded = encoder.fit_transform(X, y_enc)
 
         self.categorical_encoder_ = encoder
+        if hasattr(encoder, "encoding_cv_"):
+            self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
         self._categorical_encoding_applied_ = True
         return X_encoded
 
@@ -334,6 +449,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         call_params = dict(self._selector_params())
 
@@ -360,8 +477,23 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             call_params.update(fit_params)
         self._resolve_auto_selector_params(call_params)
 
-        feature_names = _feature_names_or_default(X)
-        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+        feature_names, names_generated = _feature_names_with_provenance(X)
+        X_fit = self._fit_transform_categoricals(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=encoding_groups,
+            time=encoding_time,
+        )
+        effective_sample_weight = sample_weight
+        if (
+            getattr(self, "cat_encoding", "none") == "target_cv"
+            and getattr(self, "categorical_encoder_", None) is not None
+            and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+            is not None
+        ):
+            effective_sample_weight = self.categorical_encoder_.effective_sample_weight_
+        call_params["sample_weight"] = effective_sample_weight
         if getattr(self, "_categorical_encoding_applied_", False):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
@@ -386,14 +518,15 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 selected_features,
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = selected_features
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
 
@@ -408,16 +541,36 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         cache=None,
         auto_k_config=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
         **fit_params,
     ):
         _require_2d_x(X)
+        validate_output_order(self.output_order)
+        self._validate_categorical_encoding_params()
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         resolved_auto_k = auto_k_config
         if resolved_auto_k is None:
             resolved_auto_k = getattr(self, "auto_k_config", None)
 
         self._clear_fit_state()
+        metadata = resolve_row_metadata(X, groups=groups, time=time)
+        X = metadata.X
+        validate_fit_matrix(X)
+        groups = metadata.groups
+        time = metadata.time
+        self._row_metadata_columns_ = metadata.extracted_columns
         has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
+        if (
+            has_supervised_categoricals
+            and getattr(self, "cat_encoding", "none") == "target_cv"
+            and (groups is not None or time is not None)
+            and self.k != "auto"
+        ):
+            raise ValueError(
+                "cat_encoding='target_cv' with groups/time is supported only for "
+                "k='auto' nested evaluate paths"
+            )
 
         if resolved_cache is not None and has_supervised_categoricals:
             raise ValueError(
@@ -443,6 +596,19 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 groups,
                 allow_nested=True,
             )
+            if (
+                has_supervised_categoricals
+                and getattr(self, "cat_encoding", "none") == "target_cv"
+                and (groups is not None or time is not None)
+                and not (
+                    effective_auto_k.auto_k_mode == "nested"
+                    and effective_auto_k.k_method == "evaluate"
+                )
+            ):
+                raise ValueError(
+                    "contextual cat_encoding='target_cv' requires an explicit "
+                    "AutoKConfig(auto_k_mode='nested', k_method='evaluate')"
+                )
             if effective_auto_k.auto_k_mode == "nested":
                 if effective_auto_k.k_method != "evaluate":
                     raise ValueError(
@@ -486,6 +652,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             auto_k_config=resolved_auto_k,
             fit_params=fit_params,
             capture_training_output=capture_training_output,
+            encoding_groups=encoding_groups,
+            encoding_time=encoding_time,
         )
 
     def fit(
@@ -546,6 +714,14 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             params["cache"] = None
         if "verbose" in params:
             params["verbose"] = False
+        if "callback" in params:
+            # Nested folds each build their own local path. Keep the public
+            # callback sequence reserved for the final refit instead of
+            # emitting several unrelated 1..max_k sequences.
+            params["callback"] = None
+        if "output_order" in params:
+            # Prefix evaluation always follows the learned selector path.
+            params["output_order"] = "legacy"
         return self.__class__(**params)
 
     def _fit_nested_auto_k(
@@ -560,6 +736,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         if cache is not None:
             raise ValueError("auto_k_mode='nested' does not support prebuilt caches")
@@ -573,6 +751,11 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             else None
         )
         eval_w_arr = self._nested_eval_sample_weight(y, sample_weight)
+        fold_fit_params = dict(fit_params or {})
+        # A fit-time callback override belongs to the public fit, just like a
+        # constructor callback. Fold-local paths restart at step one, so keep
+        # them silent and report only the final full-data refit below.
+        fold_fit_params.pop("callback", None)
 
         def build_fold_path(train_idx: np.ndarray, val_idx: np.ndarray, max_k: int):
             fold_selector = self._clone_for_nested_path(max_k)
@@ -581,7 +764,9 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 train_X,
                 y_arr[train_idx],
                 sample_weight=fit_w_arr[train_idx] if fit_w_arr is not None else None,
-                **(fit_params or {}),
+                encoding_groups=groups[train_idx] if groups is not None else None,
+                encoding_time=time[train_idx] if time is not None else None,
+                **fold_fit_params,
             )
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
             return NestedAutoKFold(
@@ -618,6 +803,8 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             auto_k_config=None,
             fit_params=fit_params,
             capture_training_output=capture_training_output,
+            encoding_groups=groups,
+            encoding_time=time,
         )
 
     def transform(self, X):
@@ -625,11 +812,15 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
             self,
             ["selected_indices_", "selected_features_", "feature_names_in_"],
         )
+        reject_sparse(X, operation="transform")
+        X = drop_fitted_metadata_columns(
+            X,
+            getattr(self, "_row_metadata_columns_", ()),
+        )
         if isinstance(X, pd.DataFrame):
-            if list(X.columns) != list(self.feature_names_in_):
-                raise ValueError("DataFrame columns must match fitted columns and order")
+            check_fitted_column_identity(X, self.feature_names_in_)
             X = self._transform_categoricals(X)
-            return X.iloc[:, self.selected_indices_]
+            return X.iloc[:, self._output_indices()]
         X_arr = np.asarray(X)
         if getattr(self, "_categorical_encoding_applied_", False):
             raise ValueError(
@@ -637,27 +828,27 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 "transform also requires a DataFrame."
             )
         if X_arr.ndim != 2:
-            raise ValueError("X must be 2D")
+            raise ValueError(
+                "X must be a 2D feature matrix. Reshape your data with "
+                "X.reshape(-1, 1) for a single feature."
+            )
         if X_arr.shape[1] != self.n_features_in_:
             raise ValueError(
                 f"X has {X_arr.shape[1]} features, but selector was fitted with "
                 f"{self.n_features_in_}"
             )
-        return X_arr[:, self.selected_indices_]
+        return X_arr[:, self._output_indices()]
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         """Return selected-feature mask (default) or indices (indices=True)."""
-        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
         if indices:
-            return self.selected_indices_
-        mask = np.zeros(self.n_features_in_, dtype=bool)
-        mask[self.selected_indices_] = True
-        return mask
+            return self._output_indices()
+        return self._get_support_mask()
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return names of selected features following sklearn's transformer API."""
         check_is_fitted(self, ["selected_indices_", "feature_names_in_", "n_features_in_"])
-        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        fitted_names = feature_names_array(self.feature_names_in_)
         if input_features is not None:
             input_names = np.asarray(input_features, dtype=object)
             if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
@@ -668,7 +859,21 @@ class _BaseSelector(BaseEstimator, TransformerMixin):
                 raise ValueError(
                     "input_features is not equal to feature_names_in_"
                 )
-        return fitted_names[self.selected_indices_]
+        return fitted_names[self._output_indices()]
+
+    def inverse_transform(self, X):
+        """Restore selected values to their fitted raw-column positions."""
+        check_is_fitted(self, ["selected_indices_", "n_features_in_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            raise NotImplementedError(
+                "inverse_transform is unavailable after supervised categorical "
+                "encoding because the fitted encoder is not invertible"
+            )
+        return inverse_selected_matrix(
+            X,
+            n_features=self.n_features_in_,
+            selected_indices=self._output_indices(),
+        )
 
 
 class MRMRSelector(_BaseSelector):
@@ -688,6 +893,10 @@ class MRMRSelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
@@ -696,6 +905,8 @@ class MRMRSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_mrmr, locals())
 
@@ -716,12 +927,18 @@ class JMISelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_jmi, locals())
 
@@ -742,12 +959,18 @@ class JMIMSelector(_BaseSelector):
         top_m: int | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_jmim, locals())
 
@@ -766,12 +989,18 @@ class CEFSPlusSelector(_BaseSelector):
         corr_prune: float | None = None,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_cefsplus, locals())
 
@@ -794,6 +1023,10 @@ class CEFSPlusBinarySelector(_BaseSelector):
         refit_every: int = 1,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
         loo_clip_max: float = 1.0 - 1e-4,
@@ -802,8 +1035,32 @@ class CEFSPlusBinarySelector(_BaseSelector):
         random_state: int = 0,
         verbose: bool = True,
         auto_k_config=None,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_cefsplus_binary, locals())
+
+    def _more_tags(self):
+        # sklearn <1.6 returns a shared module-level default dict from
+        # BaseEstimator._more_tags, so selector_tags copies it before setting
+        # binary_only=True. The tag makes sklearn's common checks coerce y to
+        # two classes instead of tripping this selector's own validation.
+        return selector_tags(super()._more_tags(), binary_only=True)
+
+    def __sklearn_tags__(self):
+        """Expose the two-class requirement through sklearn's tag APIs.
+
+        sklearn >=1.6 dropped the flat ``binary_only`` key; its replacement,
+        ``Tags.classifier_tags.multi_class``, only exists for estimators typed
+        as classifiers. This selector is a transformer, so the nearest valid
+        representation is to leave ``classifier_tags`` unset (``None``) and let
+        the fit-time two-class validation error stand, rather than misdeclaring
+        the estimator type just to obtain a tag.
+        """
+        parent_tags = getattr(super(), "__sklearn_tags__", None)
+        if parent_tags is None:  # sklearn <1.6 uses the dict API above.
+            return self._more_tags()
+        return selector_tags(parent_tags(), binary_only=True)
 
     def _routes_no_config_auto_k(self) -> bool:
         return True
@@ -842,6 +1099,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
         auto_k_config=None,
         fit_params=None,
         capture_training_output: bool = False,
+        encoding_groups=None,
+        encoding_time=None,
     ):
         if cache is not None:
             raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
@@ -884,8 +1143,41 @@ class CEFSPlusBinarySelector(_BaseSelector):
                 "for logistic loo_logit encoding."
             )
 
-        feature_names = _feature_names_or_default(X)
-        X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+        feature_names, names_generated = _feature_names_with_provenance(X)
+        X_fit = self._fit_transform_categoricals(
+            X,
+            y,
+            sample_weight=sample_weight,
+            groups=encoding_groups,
+            time=encoding_time,
+        )
+        effective_sample_weight = sample_weight
+        if (
+            self.cat_encoding == "target_cv"
+            and getattr(self, "categorical_encoder_", None) is not None
+            and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+            is not None
+        ):
+            encoder_weights = self.categorical_encoder_.effective_sample_weight_
+            if self.class_weight is None:
+                effective_sample_weight = encoder_weights
+            else:
+                # Binary filter functions apply class_weight themselves. Preserve
+                # that single application while carrying contextual warmup
+                # exclusions from the encoder into the selector weights.
+                warmup_mask = getattr(
+                    self.categorical_encoder_, "warmup_mask_", None
+                )
+                if warmup_mask is not None and not np.all(warmup_mask):
+                    base_weights = (
+                        np.ones(len(y), dtype=float)
+                        if sample_weight is None
+                        else ensure_weights(sample_weight, len(y), normalize=False)
+                    )
+                    effective_sample_weight = base_weights * np.asarray(
+                        warmup_mask, dtype=float
+                    )
+        call_params["sample_weight"] = effective_sample_weight
         if getattr(self, "_categorical_encoding_applied_", False):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
@@ -905,16 +1197,27 @@ class CEFSPlusBinarySelector(_BaseSelector):
                 list(result.selected_features),
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = list(result.selected_features)
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
+
+
+_KNOCKOFF_LEGACY_CAT_ENCODINGS = frozenset(
+    {"loo", "target", "james_stein", "loo_logit"}
+)
+_KNOCKOFF_SUPERVISED_ENCODING_NOTE = (
+    "supervised categorical encoding derives features from y, so the Model-X "
+    "exchangeability assumption behind the knockoff filter no longer holds and "
+    "no FDR claim applies to this result"
+)
 
 
 class KnockoffSelector(_BaseSelector):
@@ -925,9 +1228,16 @@ class KnockoffSelector(_BaseSelector):
     subsample values are not valid with a cache. The stochastic knockoff
     construction is sensitive to input row order, so this estimator is
     explicitly marked non-deterministic for sklearn estimator checks.
+
+    ``cat_encoding="target_cv"`` is rejected: cross-fitted target encoding is
+    still target-derived preprocessing and would silently invalidate the
+    Model-X claim. The 0.8 supervised encodings remain available for
+    compatibility, but only with an explicit :class:`UserWarning` and result
+    metadata that downgrades ``fdr_control`` to ``"none"``.
     """
 
     _subsample_auto_is_cache_default = True
+    __metadata_request__fit = {"groups": UNUSED, "time": UNUSED}
 
     def __init__(
         self,
@@ -945,6 +1255,10 @@ class KnockoffSelector(_BaseSelector):
         group_corr_threshold: float = 0.7,
         cat_features: list[str] | None = None,
         cat_encoding: str = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
@@ -954,28 +1268,38 @@ class KnockoffSelector(_BaseSelector):
         n_jobs: int = 1,
         verbose: bool = True,
         cache=None,
+        output_order: str = "legacy",
     ):
         self._init_selector(select_fdr, locals())
 
     def _supports_auto_k(self) -> bool:
         return False
 
+    def _validate_categorical_encoding_params(self) -> None:
+        if self.cat_encoding == "target_cv":
+            raise ValueError(
+                "KnockoffSelector does not support cat_encoding='target_cv'. "
+                "Cross-fitted target encoding is still target-derived "
+                "preprocessing, which breaks the Model-X exchangeability the "
+                "knockoff FDR claim rests on. Pre-encode categoricals "
+                "leakage-safely outside the selector and pass "
+                "cat_encoding='none', or use a filter selector when you need "
+                "target_cv."
+            )
+        super()._validate_categorical_encoding_params()
+
     def _more_tags(self):
         # sklearn <1.6 returns a module-level default dict here.  Copy it
         # before overriding one tag, otherwise instantiating this selector
         # changes the non_deterministic tag for every BaseEstimator instance.
-        tags = dict(super()._more_tags())
-        tags["non_deterministic"] = True
-        return tags
+        return selector_tags(super()._more_tags(), non_deterministic=True)
 
     def __sklearn_tags__(self):
         """Expose the row-order sensitivity through sklearn's new tag API."""
         parent_tags = getattr(super(), "__sklearn_tags__", None)
         if parent_tags is None:  # sklearn <1.6 uses the dict API above.
             return self._more_tags()
-        tags = parent_tags()
-        tags.non_deterministic = True
-        return tags
+        return selector_tags(parent_tags(), non_deterministic=True)
 
     def _clear_fit_state(self) -> None:
         super()._clear_fit_state()
@@ -996,6 +1320,7 @@ class KnockoffSelector(_BaseSelector):
         **fit_params,
     ):
         _require_2d_x(X)
+        validate_output_order(self.output_order)
         if groups is not None:
             raise ValueError(
                 "KnockoffSelector does not support row groups. Use feature_groups "
@@ -1005,6 +1330,7 @@ class KnockoffSelector(_BaseSelector):
             raise ValueError("KnockoffSelector does not support time-aware fitting.")
         if auto_k_config is not None:
             raise ValueError("KnockoffSelector is q-based and does not support auto_k_config.")
+        self._validate_categorical_encoding_params()
 
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         if resolved_cache is not None and sample_weight is not None:
@@ -1035,13 +1361,21 @@ class KnockoffSelector(_BaseSelector):
             call_params.update(fit_params)
         self._resolve_auto_selector_params(call_params)
 
-        feature_names = _feature_names_or_default(X)
+        feature_names, names_generated = _feature_names_with_provenance(X)
         if resolved_cache is None:
             X_fit = self._fit_transform_categoricals(X, y, sample_weight=sample_weight)
+            effective_sample_weight = sample_weight
+            if (
+                self.cat_encoding == "target_cv"
+                and getattr(self, "categorical_encoder_", None) is not None
+                and getattr(self.categorical_encoder_, "effective_sample_weight_", None)
+                is not None
+            ):
+                effective_sample_weight = self.categorical_encoder_.effective_sample_weight_
             result = self._selector_fn(
                 X_fit,
                 y,
-                sample_weight=sample_weight,
+                sample_weight=effective_sample_weight,
                 **call_params,
             )
         else:
@@ -1091,6 +1425,7 @@ class KnockoffSelector(_BaseSelector):
                 **call_params,
             )
 
+        result = self._downgrade_fdr_claim_for_supervised_encoding(result)
         selected_indices = result.selected_indices
         if selected_indices is None:
             selected_indices = _coerce_selection_indices(
@@ -1098,7 +1433,8 @@ class KnockoffSelector(_BaseSelector):
                 list(result.selected_features),
             ).tolist()
 
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
+        self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = list(result.selected_features)
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
@@ -1106,9 +1442,40 @@ class KnockoffSelector(_BaseSelector):
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
-                self.selected_indices_,
+                self._output_indices(),
             )
         return self
+
+    def _downgrade_fdr_claim_for_supervised_encoding(self, result):
+        """Warn and drop the FDR claim when 0.8 supervised encoding was used.
+
+        The legacy encodings stay available for 0.8 compatibility, but their
+        target-derived columns are not exchangeable with their knockoffs, so the
+        result must not keep advertising an FDR guarantee.
+        """
+        if not getattr(self, "_categorical_encoding_applied_", False):
+            return result
+        if self.cat_encoding not in _KNOCKOFF_LEGACY_CAT_ENCODINGS:
+            return result
+        warnings.warn(
+            f"KnockoffSelector(cat_encoding={self.cat_encoding!r}): "
+            f"{_KNOCKOFF_SUPERVISED_ENCODING_NOTE}. The result reports "
+            "fdr_control='none'. Pre-encode categoricals leakage-safely and "
+            "pass cat_encoding='none' to keep the Model-X FDR claim.",
+            UserWarning,
+            stacklevel=3,
+        )
+        metadata = dict(result.selector_metadata)
+        metadata.update(
+            {
+                "fdr_control": "none",
+                "per_draw_fdr_control": "none",
+                "aggregation_preserves_per_draw_fdr": False,
+                "cat_encoding": self.cat_encoding,
+                "validity_note": _KNOCKOFF_SUPERVISED_ENCODING_NOTE,
+            }
+        )
+        return replace(result, selector_metadata=metadata)
 
 
 __all__ = [

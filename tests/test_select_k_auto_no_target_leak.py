@@ -170,7 +170,6 @@ def test_select_k_auto_rejects_elbow_method():
         strategy="time_holdout",
         min_k=1,
         max_k=6,
-        val_frac=0.25,
     )
 
     with pytest.raises(ValueError, match="select_k_auto.*k_method='evaluate'"):
@@ -415,12 +414,13 @@ def test_penalized_objective_ignores_irrelevant_plateau_tolerance_validation():
         max_k=3,
     )
 
-    selected_k, diag = select_k_penalized_objective(
-        np.array([0.2, 0.21, 0.205]),
-        cfg,
-        objective_scale=1.0,
-        n_samples=20,
-    )
+    with pytest.warns(UserWarning, match="AutoKConfig.selection_rule is set"):
+        selected_k, diag = select_k_penalized_objective(
+            np.array([0.2, 0.21, 0.205]),
+            cfg,
+            objective_scale=1.0,
+            n_samples=20,
+        )
 
     assert selected_k in {1, 2, 3}
     assert not diag.empty
@@ -973,6 +973,7 @@ def test_gaussian_auto_k_elbow_still_works_without_split_context():
     assert 1 <= len(gaussian_mrmr) <= 4
 
 
+@pytest.mark.categorical
 def test_select_k_auto_target_encoding_not_leaky():
     pytest.importorskip("category_encoders")
 

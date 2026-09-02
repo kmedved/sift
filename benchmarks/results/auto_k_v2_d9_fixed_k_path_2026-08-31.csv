@@ -1,0 +1,3 @@
+design,seed,benchmark,runtime_s
+D9,0,fixed_k_select_cached,0.13732037506997585
+D9,1,fixed_k_select_cached,0.13535208394750953

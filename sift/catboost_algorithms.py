@@ -98,7 +98,11 @@ def _select_features_single_split(
 
         summary = model.select_features(train_pool, **select_kwargs)
     except Exception as e:
-        warnings.warn(f"select_features failed: {e}. Falling back to importance ranking.")
+        warnings.warn(
+            f"select_features failed: {e}. Falling back to importance ranking.",
+            UserWarning,
+            stacklevel=4,
+        )
         # Fallback: train on all features, rank by importance
         _fit_with_eval_set(
             model, train_pool, val_pool, train_early_stopping_rounds
@@ -181,7 +185,11 @@ def _select_features_single_split(
             )
             scores[k] = _extract_score(eval_model, eval_metric)
         except Exception as e:
-            warnings.warn(f"Training failed for k={k}: {e}")
+            warnings.warn(
+                f"Training failed for k={k}: {e}",
+                UserWarning,
+                stacklevel=4,
+            )
             continue
 
     return scores, features_selected
@@ -358,7 +366,9 @@ def _bootstrap_indices(
         if valid_count < n_bootstrap:
             warnings.warn(
                 f"Only generated {valid_count}/{n_bootstrap} valid bootstrap splits. "
-                "Consider more data or fewer classes."
+                "Consider more data or fewer classes.",
+                UserWarning,
+                stacklevel=4,
             )
     else:
         # Standard row-level bootstrap
@@ -398,7 +408,9 @@ def _bootstrap_indices(
 
         if valid_count < n_bootstrap:
             warnings.warn(
-                f"Only generated {valid_count}/{n_bootstrap} valid bootstrap splits."
+                f"Only generated {valid_count}/{n_bootstrap} valid bootstrap splits.",
+                UserWarning,
+                stacklevel=4,
             )
 
 
@@ -481,7 +493,11 @@ def _forward_select_single_split(
             )
             scores[k] = _extract_score(eval_model, eval_metric)
         except Exception as e:
-            warnings.warn(f"Forward selection scoring failed at k={k}: {e}")
+            warnings.warn(
+                f"Forward selection scoring failed at k={k}: {e}",
+                UserWarning,
+                stacklevel=4,
+            )
             continue
 
     return scores, ranked_features[:max_k]

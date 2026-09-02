@@ -6,6 +6,8 @@ import pandas as pd
 
 catboost = pytest.importorskip("catboost")
 
+pytestmark = pytest.mark.catboost
+
 from sift.catboost import (  # noqa: E402
     catboost_select,
     catboost_classif,
@@ -314,6 +316,7 @@ class TestCatBoostInputValidation:
                 prefilter_k=None,
                 n_estimators=10,
                 verbose=False,
+                random_state=0,
             )
 
     def test_cv_and_stability_are_mutually_exclusive(self):
@@ -332,6 +335,7 @@ class TestCatBoostInputValidation:
                 prefilter_k=None,
                 n_estimators=10,
                 verbose=False,
+                random_state=0,
             )
 
     def test_custom_splitter_without_groups_argument_rejects_group_col(self):
@@ -358,6 +362,7 @@ class TestCatBoostInputValidation:
                 prefilter_k=None,
                 n_estimators=10,
                 verbose=False,
+                random_state=0,
             )
 
     def test_internal_custom_splitter_type_error_propagates(self):
@@ -378,6 +383,7 @@ class TestCatBoostInputValidation:
                 prefilter_k=None,
                 n_estimators=10,
                 verbose=False,
+                random_state=0,
             )
 
 
@@ -1218,6 +1224,7 @@ class TestForwardGreedyGuard:
                 prefilter_k=None,  # Don't prefilter
                 n_splits=2,
                 verbose=False,
+                random_state=0,
             )
 
     def test_forward_greedy_k_too_large_raises(self):
@@ -1236,4 +1243,5 @@ class TestForwardGreedyGuard:
                 algorithm='forward_greedy',
                 n_splits=2,
                 verbose=False,
+                random_state=0,
             )

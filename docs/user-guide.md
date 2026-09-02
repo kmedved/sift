@@ -36,6 +36,8 @@ features, invalid scores, `top_m`, or pruning remove candidates.
 For fixed-k filter calls, `groups` and `time` are rejected because they only
 define auto-k evaluation splits; use `k="auto"` with a matching strategy or
 omit those arguments. `KnockoffSelector` rejects row `groups` and `time` too.
+Sklearn-style selector classes accept dense arrays and DataFrames; sparse
+matrices are rejected during fit, transform, and inverse transform.
 
 ## Binary CEFS+
 
@@ -185,6 +187,9 @@ from sift import build_cache, select_cached
 cache = build_cache(X, subsample=None, compute_Rxx=True)
 mrmr = select_cached(cache, y1, k=30, method="mrmr_quot")
 cefs = select_cached(cache, y2, k=30, method="cefsplus")
+cefs_view = select_cached(
+    cache, y2, k=30, method="cefsplus", return_result=True
+)
 ```
 
 Use a cache when many selectors or targets share the same feature matrix. A
@@ -197,6 +202,9 @@ and must omit `subsample` and construction `random_state`; the cache already
 fixes its sampled rows and weights. For `select_fdr`, `random_state` remains
 available because it seeds a fresh knockoff draw; `sample_weight` and
 `subsample` remain forbidden.
+The opt-in cached `SelectionView` includes selected positions, the objective
+path, relevance, and cache provenance. `return_result=True` is mutually
+exclusive with the legacy `return_objective` and `return_indices` tuple flags.
 
 ## Stability Selection
 
@@ -207,19 +215,61 @@ selector = StabilitySelector(
     task="regression",
     n_bootstrap=50,
     threshold=0.6,
+    penalty=None,              # additive alias for alpha
     random_state=0,
     verbose=False,
 )
 selector.fit(X, y)
 stable_features = selector.selected_feature_names_
+X_stable = selector.transform(X)
+X_restored = selector.inverse_transform(X_stable)
 ```
 
 Pass both `groups` and `time` to use block bootstrap for ordered panel data.
+With DataFrames, `groups="column"` and `time="column"` extract and exclude the
+metadata columns; direct arrays remain positional. `penalty` is an alias for
+`alpha`, and both may be supplied only when equal. Threshold tuning accepts
+sklearn scorer objects as well as scorer names.
 `selector.get_feature_names_out()` is the sklearn-compatible equivalent for
 retrieving the selected names after fitting.
+Set `output_order="legacy"` (the default) to keep descending stability-frequency
+order, or `output_order="original"` to emit selected columns in fitted input
+order. The same order is used by `transform`, `get_support(indices=True)`,
+`get_feature_names_out`, and dense `inverse_transform`; inverse output
+zero-fills unselected columns.
 Block draws honor `sample_frac`; the rounded panel-wide draw budget is allocated
 proportionally across groups and block windows are sampled with replacement.
 Time values must be non-missing and orderable within each group.
+
+Leaving `random_state=None` on Stability, permutation importance, or CatBoost
+emits a `FutureWarning`: 0.9 remains nondeterministic, while 1.0 will default to
+seed 0. Their existing `n_jobs=-1` defaults are also unchanged in 0.9.
+
+## CatBoost Row Context
+
+```python
+from sklearn.model_selection import TimeSeriesSplit
+import sift
+
+result = sift.catboost_select(
+    X,
+    y,
+    k=20,
+    groups=group_ids,
+    time=dates,
+    sample_weight=weights,
+    cv=TimeSeriesSplit(n_splits=5),
+    random_state=0,
+)
+```
+
+CatBoost accepts direct positional `groups`, `time`, and `sample_weight`
+arrays. DataFrame callers may instead use `groups="group_column"` or
+`time="date_column"`; `group_col` and `sample_weight_col` remain compatibility
+aliases. A direct value and its alias cannot be combined. Supplied time values
+must be non-missing and mutually orderable and stably order aligned rows before
+the configured splitter. Use a time-aware splitter when chronological
+validation is required; the default splitter remains random.
 
 ## Time-aware Permutation Importance
 
@@ -236,24 +286,107 @@ importance = permutation_importance(
     scoring="neg_rmse",
     n_repeats=10,
 )
+
+rich_importance = permutation_importance(
+    fitted_model,
+    X,
+    y,
+    groups=group_ids,
+    time=dates,
+    n_repeats=10,
+    return_result=True,
+)
+repeat_drops = rich_importance.importances_
+view = rich_importance.result_view()
 ```
 
 With `time` but no `groups`, SIFT treats the dataset as one ordered group for
-time-aware permutations.
+time-aware permutations. The historical DataFrame remains the default;
+`return_result=True` adds the repeat-level matrix and a complete ranking view
+without applying an arbitrary selection threshold.
 
 ## Categorical Features
 
 Function-style selectors default to `cat_encoding="none"` and support
-`cat_features` and explicit encodings. Supervised
-categorical encodings are guarded against full-data target leakage by default;
-use them through train-only wrappers or opt in only when leakage is handled
-outside SIFT. CatBoost selectors handle categorical features natively.
+`cat_features` and explicit encodings. Use `cat_encoding="target_cv"` for the
+built-in leakage-safe regression/binary path; it uses cross-fitted training
+values and needs no optional dependency.
+
+`target_cv` emits **centered category effects**, not raw category means: each
+value is the category estimate minus the training prior that produced it. An
+unknown or unseen category therefore maps to a zero centered effect (the
+global-mean estimate before centering). That is what makes the path safe for
+high-cardinality columns: a unique ID, a group proxy, or a timestamp proxy is
+never present in its own fold's training rows, so it emits a constant zero and
+carries no relevance instead of encoding a fold-identifying prior.
+
+**Know the boundary of that guarantee.** Centering neutralizes only
+*unseen-in-fold* emissions. It removes the fold marker; it is not a defence
+against high cardinality as such. A level that appears two or more times in a
+fold's training rows still transmits those sibling rows' targets — ordinary
+target-encoding behavior — so a *near*-unique identifier stays selectable when
+its rows share a latent target. On a 300-identifier fixture with two rows each,
+`corr(enc(id), y)` is about 0.88 and `select_mrmr(k=2)` picks `id` first. That
+is genuine cross-row information rather than leakage, so SIFT does not remove
+it. If it must not reach selection, drop ID-like columns, or pass `groups=` so
+all of an identifier's rows land in the same fold — under `groups=` the same
+column encodes to exactly zero.
+
+```python
+selected = select_mrmr(
+    X,
+    y,
+    k=10,
+    task="regression",
+    cat_encoding="target_cv",
+    verbose=False,
+)
+```
+
+Selector classes retain the full-training encoder for target-blind inference,
+while `fit_transform` returns the cross-fitted training columns used for
+selection. Weighted calls use SIFT's weighted m-estimate folds. The default
+`target_cv_smoothing="auto"` works there too — the empirical-Bayes prior is the
+unweighted formula with every count replaced by weighted row mass, so weight
+`m` and `m` duplicated rows encode identically — and an explicit float remains
+available when you want to fix the shrinkage:
+
+```python
+selected = select_mrmr(
+    X,
+    y,
+    k=10,
+    task="regression",
+    cat_encoding="target_cv",
+    target_cv_smoothing=20.0,  # or leave it at the default "auto"
+    sample_weight=weights,
+    verbose=False,
+)
+```
+
+Grouped/time-aware encoding is available on auto-k evaluate routes. Set
+`target_cv_n_splits` independently of the outer auto-k fold count. Group folds
+exclude whole groups; time folds keep tied timestamps together and use only
+strictly earlier values. Earliest time rows emit a centered neutral effect
+(zero) when you supply an explicit target-independent `target_prior`, or
+receive zero effective selection weight under `warmup_policy="zero_weight"`
+(default) or `"exclude"`. Fixed-k calls continue to reject `groups`/`time`, and
+multiclass target encoding remains blocked on block-aware selection. Existing
+`"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"` function encodings
+remain guarded against full-data target leakage; opt in only when leakage is
+handled outside SIFT. `allow_full_data_target_encoding=True` is rejected with
+`target_cv`, which is cross-fitted by construction, and `KnockoffSelector`
+rejects `target_cv` entirely because target-derived preprocessing breaks the
+Model-X FDR claim. CatBoost selectors handle categorical features natively.
 
 ## Diagnostics
 
 Many selectors can return richer metadata through `return_result=True` or
-selector-specific diagnostics. The detailed behavior is documented in
-[DOCS.MD](../DOCS.MD).
+selector-specific diagnostics. `sift.as_result(...)` now provides an additive
+common view for `FilterSelectionResult`, `KnockoffSelectionResult`,
+`BorutaResult`, `FeaturePathEvaluationResult`, and `CatBoostSelectionResult`,
+plus fitted `StabilitySelector` and the opt-in `ImportanceResult` from
+`permutation_importance`. Legacy result types and default returns are unchanged.
 
 ```python
 from sift import select_cefsplus_binary
@@ -271,6 +404,39 @@ print(result.selected_features)
 print(result.selector_metadata)
 ```
 
+The common A2d access pattern is:
+
+```python
+view = sift.as_result(result, input_features=X.columns)
+
+view.features
+view.indices
+view.k
+view.table
+view.metadata
+```
+
+These result-only views do not retain fitted preprocessing state, so transform
+and proxy operations are unavailable. See [Reading Results](results.md) for the
+current adapter-completeness matrix and serialization contract, and
+[DOCS.MD](../DOCS.MD) for selector-specific diagnostics.
+
 Sklearn-style selector classes always keep their transform contract stable; pass
 inspection options to the function-style selectors when you need full result
 objects.
+
+A fitted stability selector supplies the same accessors and a frozen transform:
+
+```python
+from sift import StabilitySelector
+
+selector = StabilitySelector(random_state=0, verbose=False).fit(X, y)
+view = selector.result_view_
+X_stable = view.transform(X)
+```
+
+Its table covers the selector's fitted candidate features; `view.indices`
+keeps the existing integer positions and `view.features` supplies names.
+The fitted selector itself supports dense `inverse_transform`; the frozen
+`SelectionView` intentionally does not retain the fitted preprocessing state
+needed for inversion.

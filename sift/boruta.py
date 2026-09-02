@@ -15,11 +15,24 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.feature_selection import SelectorMixin
 from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
+from sift._logging import logger
+from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
+from sift._progress import ProgressCallback, report_progress
+from sift._selector_compat import (
+    feature_names_array,
+    inverse_selected_matrix,
+    ordered_indices,
+    reject_sparse,
+    selector_tags,
+    validate_fit_matrix,
+    validate_output_order,
+)
 from sift._permute import (
     PermutationAxis,
     PermutationMethod,
@@ -30,11 +43,13 @@ from sift._permute import (
 from sift._preprocess import (
     CatEncoding,
     LeaveOneOutLogitEncoder,
+    TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
     reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
     to_numpy,
+    validate_target_cv_encoding_flags,
 )
 
 from sift.boruta_helpers import (
@@ -105,6 +120,12 @@ class BorutaResult:
             kind="mergesort",
         )
 
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
+
 
 @dataclass(frozen=True)
 class BorutaFitData:
@@ -134,7 +155,7 @@ class BorutaLoopResult:
 # =============================================================================
 
 
-class BorutaSelector(BaseEstimator, TransformerMixin):
+class BorutaSelector(SelectorMixin, BaseEstimator):
     """
     Boruta / Boruta-Shap feature selector.
 
@@ -179,11 +200,18 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         Random seed.
     verbose : bool
         Print progress.
+    output_order : {'legacy', 'original'}, default='legacy'
+        Order used by transform, selected support indices, feature names, and
+        inverse transform. Boruta's legacy order is already input order.
+    callback : callable, optional
+        Called after each completed Boruta iteration as
+        ``callback(step, total, info)``.
 
     Attributes
     ----------
-    feature_names_in_ : list[str]
-        Feature names from fit.
+    feature_names_in_ : ndarray of shape (n_features,)
+        One-dimensional object array of fitted feature names. Positional fits
+        keep the generated ``x0...`` names in this attribute.
     status_ : ndarray
         Feature status: -1=rejected, 0=tentative, 1=accepted.
     selected_features_ : list[str]
@@ -209,6 +237,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         block_size: int | str = "auto",
         cat_features: list[str] | None = None,
         cat_encoding: CatEncoding = "none",
+        target_cv_n_splits: int = 5,
+        target_cv_smoothing: Literal["auto"] | float = "auto",
+        target_prior: float | None = None,
+        warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
         importance_data: Literal["train", "test"] = "train",
         test_size: float = 0.3,
@@ -216,6 +248,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         early_stop_rounds: int = 5,
         random_state: int = 0,
         verbose: bool = True,
+        callback: ProgressCallback | None = None,
+        output_order: str = "legacy",
     ):
         self.estimator = estimator
         self.n_estimators = n_estimators
@@ -231,6 +265,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.block_size = block_size
         self.cat_features = cat_features
         self.cat_encoding = cat_encoding
+        self.target_cv_n_splits = target_cv_n_splits
+        self.target_cv_smoothing = target_cv_smoothing
+        self.target_prior = target_prior
+        self.warmup_policy = warmup_policy
         self.allow_full_data_target_encoding = allow_full_data_target_encoding
         self.importance_data = importance_data
         self.test_size = test_size
@@ -238,6 +276,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         self.early_stop_rounds = early_stop_rounds
         self.random_state = random_state
         self.verbose = verbose
+        self.output_order = output_order
+        self.callback = callback
 
     def _get_default_estimator(self, y: np.ndarray | None = None):
         """Get default estimator based on importance backend and task."""
@@ -437,13 +477,28 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def get_support(self, indices: bool = False) -> np.ndarray:
         check_is_fitted(self, ["status_"])
-        mask = self.status_ == 1
-        return np.where(mask)[0] if indices else mask
+        if indices:
+            return ordered_indices(np.flatnonzero(self.status_ == 1), self.output_order)
+        return self._get_support_mask()
+
+    def _get_support_mask(self) -> np.ndarray:
+        check_is_fitted(self, ["status_"])
+        return self.status_ == 1
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags({} if parent is None else parent())
+
+    def __sklearn_tags__(self):
+        parent = getattr(super(), "__sklearn_tags__", None)
+        if parent is None:
+            return self._more_tags()
+        return selector_tags(parent())
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return accepted feature names following sklearn's transformer API."""
         check_is_fitted(self, ["status_", "feature_names_in_", "n_features_in_"])
-        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        fitted_names = feature_names_array(self.feature_names_in_)
         if input_features is not None:
             input_names = np.asarray(input_features, dtype=object)
             if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
@@ -456,6 +511,11 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         check_is_fitted(self, ["status_"])
+        reject_sparse(X, operation="transform")
+        X = drop_fitted_metadata_columns(
+            X,
+            getattr(self, "_row_metadata_columns_", ()),
+        )
         if getattr(self, "_categorical_encoding_applied_", False):
             if not isinstance(X, pd.DataFrame):
                 raise ValueError(
@@ -468,10 +528,53 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         if isinstance(X, pd.DataFrame):
             cols = [self.feature_names_in_[i] for i in keep_idx]
             return X.loc[:, cols]
-        return np.asarray(X)[:, keep_idx]
+        X_arr = np.asarray(X)
+        if X_arr.ndim != 2:
+            raise ValueError(
+                "X must be a 2D feature matrix. Reshape your data with "
+                "X.reshape(-1, 1) for a single feature."
+            )
+        if X_arr.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X_arr.shape[1]} features, but BorutaSelector was fitted "
+                f"with {self.n_features_in_} features"
+            )
+        return X_arr[:, keep_idx]
+
+    def inverse_transform(self, X):
+        """Restore accepted values to their fitted raw-column positions."""
+        check_is_fitted(self, ["status_", "n_features_in_"])
+        if getattr(self, "_categorical_encoding_applied_", False):
+            raise NotImplementedError(
+                "inverse_transform is unavailable after supervised categorical "
+                "encoding because the fitted encoder is not invertible"
+            )
+        return inverse_selected_matrix(
+            X,
+            n_features=self.n_features_in_,
+            selected_indices=self.get_support(indices=True),
+        )
 
     def fit_transform(self, X, y=None, **fit_params):
-        return self.fit(X, y, **fit_params).transform(X)
+        if self.cat_encoding != "target_cv":
+            return self.fit(X, y, **fit_params).transform(X)
+        self._capture_target_cv_training_output_ = True
+        try:
+            self.fit(X, y, **fit_params)
+            captured = getattr(self, "_target_cv_training_output_", None)
+            if captured is None:
+                return self.transform(X)
+            keep_idx = self.get_support(indices=True)
+            if isinstance(captured, pd.DataFrame):
+                return captured.iloc[:, keep_idx].copy()
+            return np.asarray(captured)[:, keep_idx].copy()
+        finally:
+            for attr in (
+                "_capture_target_cv_training_output_",
+                "_target_cv_training_output_",
+            ):
+                if hasattr(self, attr):
+                    delattr(self, attr)
 
     def fit(
         self,
@@ -497,6 +600,13 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         """
         self._clear_fit_state()
         try:
+            metadata = resolve_row_metadata(X, groups=groups, time=time)
+            X = metadata.X
+            validate_fit_matrix(X)
+            validate_output_order(self.output_order)
+            groups = metadata.groups
+            time = metadata.time
+            self._row_metadata_columns_ = metadata.extracted_columns
             fit_data = self._prepare_boruta_fit(X, y, sample_weight, groups, time)
             loop_result = self._run_boruta_iterations(fit_data)
             status = self._resolve_boruta_final_status(
@@ -520,8 +630,11 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
     def _clear_fit_state(self) -> None:
         for attr in (
             "categorical_encoder_",
+            "categorical_encoding_metadata_",
+            "_target_cv_training_output_",
             "categorical_features_",
             "_categorical_encoding_applied_",
+            "_fit_feature_names_generated_",
             "feature_names_in_",
             "n_features_in_",
             "status_",
@@ -530,11 +643,15 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             "shadow_thresholds_",
             "mean_importance_",
             "selected_features_",
+            "_row_metadata_columns_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
 
     def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
+        validate_target_cv_encoding_flags(
+            self.cat_encoding, self.allow_full_data_target_encoding
+        )
         if self.importance_data == "test" and self.importance == "native":
             raise ValueError(
                 "BorutaSelector(importance_data='test') is not supported with "
@@ -576,7 +693,10 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                         "cat_encoding on the full dataset. Pre-encode categoricals "
                         "leakage-safely or use importance_data='train'."
                     )
-                if not self.allow_full_data_target_encoding:
+                if (
+                    self.cat_encoding != "target_cv"
+                    and not self.allow_full_data_target_encoding
+                ):
                     raise ValueError(
                         f"cat_encoding={self.cat_encoding!r} fits a supervised categorical "
                         "encoder on the full dataset before Boruta. Tree learners can read "
@@ -592,13 +712,34 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     )
                 else:
                     y_for_encoder = y
-                if sample_weight is not None and self.cat_encoding != "loo_logit":
+                if (
+                    sample_weight is not None
+                    and self.cat_encoding not in {"loo_logit", "target_cv"}
+                ):
                     raise ValueError(
                         "sample_weight with Boruta categorical encoding is only "
                         "supported for cat_encoding='loo_logit'. category_encoders-backed "
                         "methods ('loo', 'target', 'james_stein') do not consume sample weights."
                     )
-                if self.cat_encoding == "loo_logit":
+                if self.cat_encoding == "target_cv":
+                    encoder = TargetCVEncoder(
+                        cat_features,
+                        target_type="binary"
+                        if self.task == "classification"
+                        else "continuous",
+                        smooth=self.target_cv_smoothing,
+                        cv=self.target_cv_n_splits,
+                        target_prior=self.target_prior,
+                        warmup_policy=self.warmup_policy,
+                    )
+                    X = encoder.fit_transform(
+                        X,
+                        y_for_encoder,
+                        sample_weight=sample_weight,
+                        groups=groups,
+                        time=time,
+                    )
+                elif self.cat_encoding == "loo_logit":
                     encoder = LeaveOneOutLogitEncoder(cat_features)
                     X = encoder.fit_transform(X, y_for_encoder, sample_weight=sample_weight)
                 else:
@@ -611,8 +752,8 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     }
                     if self.cat_encoding not in encoders:
                         raise ValueError(
-                            "cat_encoding must be one of 'none', 'target', 'loo', "
-                            "'james_stein', or 'loo_logit'. "
+                            "cat_encoding must be one of 'none', 'target_cv', "
+                            "'target', 'loo', 'james_stein', or 'loo_logit'. "
                             f"Got {self.cat_encoding!r}."
                         )
                     Encoder = encoders[self.cat_encoding]
@@ -627,9 +768,13 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     with suppress_category_encoder_pandas_warnings():
                         X = encoder.fit_transform(X, y_for_encoder)
                 self.categorical_encoder_ = encoder
+                if hasattr(encoder, "encoding_cv_"):
+                    self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
                 self.categorical_features_ = list(cat_features)
                 self._categorical_encoding_applied_ = True
                 feature_names = extract_feature_names(X)
+                if getattr(self, "_capture_target_cv_training_output_", False):
+                    self._target_cv_training_output_ = X.copy()
 
             non_numeric = X.select_dtypes(
                 include=["object", "category", "string"]
@@ -647,14 +792,24 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         X_arr = to_numpy(X, dtype=np.float64)
 
         n, p = X_arr.shape
+        # Generated names stay in the public ``feature_names_in_`` attribute;
+        # the private marker records that the fit was positional.
+        self._fit_feature_names_generated_ = feature_names is None
         if feature_names is None:
             feature_names = [f"x{i}" for i in range(p)]
 
         if X_arr.shape[0] != y_arr.shape[0]:
             raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
 
-        w_score = ensure_weights(sample_weight, n, normalize=True)
-        w_fit = w_score if sample_weight is not None else None
+        effective_sample_weight = getattr(
+            self.categorical_encoder_, "effective_sample_weight_", None
+        )
+        if effective_sample_weight is not None:
+            effective_sample_weight = np.asarray(effective_sample_weight, dtype=float)
+        else:
+            effective_sample_weight = sample_weight
+        w_score = ensure_weights(effective_sample_weight, n, normalize=True)
+        w_fit = w_score if effective_sample_weight is not None else None
 
         if groups is not None:
             groups = np.asarray(groups).reshape(-1)
@@ -730,7 +885,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             group_info = build_group_info(groups, time, n_samples=n)
 
         if self.verbose:
-            print(
+            logger.info(
                 "Boruta: p={} importance={} shadow={} mode={} max_iter={}".format(
                     p, self.importance, shadow_method, self.shadow_mode, self.max_iter
                 )
@@ -740,7 +895,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
             tentative_idx = np.where(status == 0)[0]
             if tentative_idx.size == 0:
                 if self.verbose:
-                    print(f"  iter={it + 1}: all features decided, stopping")
+                    logger.info(f"  iter={it + 1}: all features decided, stopping")
                 break
 
             active_idx = np.where(status != -1)[0]
@@ -821,28 +976,42 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
                     status[j] = -1
                     decided_this_round += 1
 
-            if self.verbose:
+            if self.verbose or self.callback is not None:
                 n_acc = int((status == 1).sum())
                 n_rej = int((status == -1).sum())
                 n_ten = int((status == 0).sum())
+            if self.verbose:
                 if iter_n_estimators is not None:
-                    print(
+                    logger.info(
                         "  iter={:02d} n_est={} thr={:.4f} acc={} rej={} tent={}".format(
                             it + 1, iter_n_estimators, thr, n_acc, n_rej, n_ten
                         )
                     )
                 else:
-                    print(
+                    logger.info(
                         "  iter={:02d} thr={:.4f} acc={} rej={} tent={}".format(
                             it + 1, thr, n_acc, n_rej, n_ten
                         )
                     )
 
+            if self.callback is not None:
+                report_progress(
+                    self.callback,
+                    n_trials,
+                    self.max_iter,
+                    stage="iteration",
+                    accepted=n_acc,
+                    rejected=n_rej,
+                    tentative=n_ten,
+                    shadow_threshold=thr,
+                    n_estimators=iter_n_estimators,
+                )
+
             if decided_this_round == 0 and n_trials >= decision_horizon:
                 no_progress_count += 1
                 if no_progress_count >= self.early_stop_rounds:
                     if self.verbose:
-                        print(
+                        logger.info(
                             "  Early stop: no decisions for {} rounds".format(
                                 no_progress_count
                             )
@@ -908,7 +1077,7 @@ class BorutaSelector(BaseEstimator, TransformerMixin):
         shadow_thresholds_arr,
         mean_importance,
     ) -> None:
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
         self.n_features_in_ = len(feature_names)
         self.status_ = status
         self.hits_ = hits
@@ -958,6 +1127,10 @@ def select_boruta(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
@@ -966,6 +1139,7 @@ def select_boruta(
     random_state: int = 0,
     verbose: bool = True,
     return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
     """
     Boruta feature selection.
@@ -1003,6 +1177,9 @@ def select_boruta(
     early_stop_rounds : int
     random_state : int
     verbose : bool
+    callback : callable, optional
+        Called after each completed iteration as
+        ``callback(step, total, info)``.
     return_result : bool
         If True, return BorutaResult instead of feature list.
 
@@ -1010,27 +1187,23 @@ def select_boruta(
     -------
     list[str] or BorutaResult
     """
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
+        group_col=group_col,
+        time_col=time_col,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    time = metadata.time
+    sample_weight = metadata.sample_weight
     if isinstance(X, pd.DataFrame):
-        X = X.copy()
-        if group_col is not None:
-            if groups is not None:
-                raise ValueError("Cannot specify both groups and group_col")
-            groups = X[group_col].values
-            X = X.drop(columns=[group_col])
-        if time_col is not None:
-            if time is not None:
-                raise ValueError("Cannot specify both time and time_col")
-            time = X[time_col].values
-            X = X.drop(columns=[time_col])
         if cat_features is not None:
             cat_features = [c for c in cat_features if c in X.columns]
-    else:
-        if group_col is not None:
-            raise ValueError("group_col requires X to be a pandas DataFrame")
-        if time_col is not None:
-            raise ValueError("time_col requires X to be a pandas DataFrame")
-        if cat_features:
-            raise ValueError("cat_features requires X to be a pandas DataFrame")
+    elif cat_features:
+        raise ValueError("cat_features requires X to be a pandas DataFrame")
 
     sel = BorutaSelector(
         estimator=estimator,
@@ -1047,6 +1220,10 @@ def select_boruta(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
         allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,
@@ -1054,6 +1231,7 @@ def select_boruta(
         early_stop_rounds=early_stop_rounds,
         random_state=random_state,
         verbose=verbose,
+        callback=callback,
     )
     sel.fit(X, y, sample_weight=sample_weight, groups=groups, time=time)
 
@@ -1084,6 +1262,10 @@ def select_boruta_shap(
     block_size: int | str = "auto",
     cat_features: list[str] | None = None,
     cat_encoding: CatEncoding = "none",
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
     importance_data: Literal["train", "test"] = "train",
     test_size: float = 0.3,
@@ -1092,6 +1274,7 @@ def select_boruta_shap(
     random_state: int = 0,
     verbose: bool = True,
     return_result: bool = False,
+    callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
     """
     Boruta-Shap feature selection (convenience wrapper for importance='shap').
@@ -1125,6 +1308,10 @@ def select_boruta_shap(
         block_size=block_size,
         cat_features=cat_features,
         cat_encoding=cat_encoding,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
         allow_full_data_target_encoding=allow_full_data_target_encoding,
         importance_data=importance_data,
         test_size=test_size,
@@ -1132,6 +1319,7 @@ def select_boruta_shap(
         early_stop_rounds=early_stop_rounds,
         random_state=random_state,
         verbose=verbose,
+        callback=callback,
         return_result=return_result,
     )
 

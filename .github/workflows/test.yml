@@ -9,51 +9,188 @@ on:
   schedule:
     - cron: "0 6 * * 1"
 
+# One in-flight run per ref. Pull-request runs are superseded by newer pushes;
+# branch and scheduled runs are allowed to finish so their artifacts stay complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+      - name: Verify clean wheel install
+        run: |
+          smoke_dir="$(mktemp -d)"
+          python -m venv "$smoke_dir/venv"
+          "$smoke_dir/venv/bin/python" -m pip install dist/*.whl
+          (cd "$smoke_dir" && "$smoke_dir/venv/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel_install.py")
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
           pip install -e ".[categorical]"
       - name: Run tests
-        run: pytest tests/
+        run: pytest
       - name: Run critical lint checks
         if: matrix.python-version == '3.12'
         run: ruff check sift tests
-  test-catboost:
+
+  # A Python 3.13 job is DEFERRED, and the reason is now only that it has never
+  # been run in CI -- not that it cannot pass.
+  #
+  # The dependency blockers are gone. The newest resolution `pyproject.toml`
+  # allows -- numpy 2.5.2 / pandas 3.0.5 / scikit-learn 1.9.0 / scipy 1.18.1 /
+  # numba 0.67.0 -- is green at 1,680 passed / 30 skipped. The `test (3.12)` job
+  # above resolves to that band on every run (numpy 2.5 ships no cp310/cp311
+  # wheels, so 3.10/3.11 resolve slightly older versions), and `min-pins` covers
+  # the floors, so the declared range is exercised end to end. See
+  # docs/development.md ("Verified dependency band").
+  #
+  # The interpreter is not a blocker either: numba ships cp313 wheels from
+  # 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local 3.13.15 run with
+  # numba 0.67 reached 1,565 passed / 3 failed -- those 3 were the numpy 2.5
+  # failures, now closed. `numba>=0.61` is the only 3.13-specific pin the job
+  # needs, because pip otherwise resolves an older numba with no cp313 wheel.
+  #
+  # What is missing is evidence, so the job stays out until someone enables it
+  # and reads its first run rather than assuming it is green. The ready-to-paste
+  # definition is in docs/development.md ("Enabling a Python 3.13 job").
+
+  # The advertised dependency floors, actually executed. Every direct runtime
+  # requirement is pinned to its declared minimum; `--no-deps` keeps pip from
+  # quietly upgrading them while installing the package itself.
+  min-pins:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: pip
+      - name: Install minimum supported dependency versions
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "numpy==1.24.*" \
+            "pandas==2.0.*" \
+            "scikit-learn==1.3.*" \
+            "scipy==1.10.*" \
+            "numba==0.59.*" \
+            "joblib==1.3.*" \
+            "threadpoolctl==3.1.*" \
+            pytest
+          pip install -e . --no-deps
+      - name: Report resolved floor versions
+        run: |
+          python -c "import numpy, pandas, sklearn, scipy, numba, joblib, threadpoolctl; print('numpy', numpy.__version__); print('pandas', pandas.__version__); print('sklearn', sklearn.__version__); print('scipy', scipy.__version__); print('numba', numba.__version__); print('joblib', joblib.__version__); print('threadpoolctl', threadpoolctl.__version__)"
+      - name: Run tests
+        run: pytest
+
+  test-catboost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[all,test]"
       - name: Run full suite with CatBoost
-        run: pytest tests/ -q
+        run: pytest -q
+      # `pytest --collect-only -m "catboost or categorical"` was too weak: the
+      # disjunction passes while *either* marker matches, so one of them could
+      # lose every test unnoticed, and "did anything match?" was left to pytest's
+      # exit-code-5 convention instead of being asserted. Count each marker.
+      - name: Confirm the optional-dependency markers actually selected tests
+        run: |
+          python - <<'PY'
+          import pytest
+
+
+          class CollectedCounter:
+              def __init__(self):
+                  self.count = 0
+
+              def pytest_collection_finish(self, session):
+                  self.count = len(session.items)
+
+
+          empty = []
+          for marker in ("catboost", "categorical"):
+              counter = CollectedCounter()
+              pytest.main(["-q", "--collect-only", "-m", marker], plugins=[counter])
+              print(f"marker {marker!r} selected {counter.count} tests")
+              if counter.count == 0:
+                  empty.append(marker)
+          if empty:
+              raise SystemExit(f"optional-dependency markers selected no tests: {empty}")
+          PY
+
   test-latest-deps:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: pip
       - name: Install latest pre-release dependencies
         run: |
           python -m pip install --upgrade pip
@@ -61,17 +198,24 @@ jobs:
           pip install -e ".[test,all]" --no-deps
           pip install pytest ruff threadpoolctl category_encoders catboost
       - name: Run tests
-        run: pytest tests/ -q
+        run: pytest -q
 
   benchmark-smoke:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # summarize_auto_k_gates.py verifies the recorded path-timing provenance
+          # by hashing its source files at the commit named in the sidecar, so the
+          # job needs real history rather than a depth-1 checkout.
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -83,3 +227,24 @@ jobs:
         with:
           name: sift-quick-benchmark-results
           path: benchmark-results.json
+      # Regenerates the Auto-K G1-G6 gate table from the committed raw campaign
+      # CSVs. The summarizer renders floats with 12 significant digits and
+      # tests/test_auto_k_gate_summary.py pins the table numerically, so a
+      # drifting table means the inputs or the aggregation changed, not that the
+      # benchmark host was noisy.
+      - name: Regenerate the Auto-K gate table from committed raw CSVs
+        run: |
+          python benchmarks/summarize_auto_k_gates.py \
+            --main benchmarks/results/auto_k_v2_main.csv \
+            --null benchmarks/results/auto_k_v2_null.csv \
+            --timing benchmarks/results/auto_k_v2_d9.csv \
+            --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
+            --oracle-aggregation mean \
+            --output auto_k_v2_gates_mean_oracle.csv \
+            --verify-against benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
+      - name: Upload Auto-K gate table
+        uses: actions/upload-artifact@v4
+        with:
+          name: sift-auto-k-gate-table
+          path: auto_k_v2_gates_mean_oracle.csv
+          if-no-files-found: error

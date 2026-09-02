@@ -47,6 +47,58 @@ python -m ruff check sift tests
 git diff --check
 ```
 
+### Test markers
+
+`pyproject.toml` sets `testpaths = ["tests"]`, so a bare `python -m pytest`
+collects the suite from anywhere in the repository. Three markers are registered:
+
+| marker | meaning |
+| --- | --- |
+| `slow` | Monte-Carlo or large-fixture tests: the `test_knockoff_fdr_control.py` seed loops, the Auto-K null-calibration simulation, the 12k-row D10 design, and the 25k-row knockoff sampler draw. |
+| `catboost` | Needs the optional `catboost` dependency. |
+| `categorical` | Needs the optional `category_encoders` dependency. |
+
+The markers sit beside the existing `pytest.importorskip` gates rather than
+replacing them, so the suite still skips cleanly without the optional packages;
+the markers exist so a run can *select* those tests. Useful selections:
+
+```bash
+python -m pytest -m "not slow" -q          # ~11 tests fewer, ~60s faster
+python -m pytest -m slow -q                # the Monte-Carlo tests only
+python -m pytest -m "catboost or categorical" -q
+```
+
+### Warning policy
+
+`filterwarnings` starts from `error`: any warning that escapes a test fails the
+run. The allowlist is deliberately tiny and every entry names an exact message
+prefix *and* a category — never a bare category. Adding an entry requires a
+comment saying why the project cannot fix the warning at its source.
+
+The current allowlist has one entry: loky's `DeprecationWarning` about calling
+`fork()` from a multi-threaded process. It is emitted by
+`joblib/externals/loky/backend/fork_exec.py` whenever the process backend starts
+workers after a thread pool exists, it depends on how many threads happen to be
+running at fork time (so it appears and disappears between runs on the same
+machine), and nothing in this project can prevent it.
+
+Everything else is handled at the site instead of suite-wide:
+
+- A warning a test *intends* to trigger is asserted with `pytest.warns`. Where a
+  call emits several legitimate warnings, record them all and assert the one you
+  mean — `with pytest.warns(UserWarning) as record:` followed by
+  `assert any("..." in str(w.message) for w in record)`. pytest 7 silently
+  discarded non-matching warnings inside `pytest.warns`; pytest 8+ re-emits them,
+  where `error` turns them into failures, so the plain `match=` form is fragile
+  for calls with more than one advisory.
+- A warning a single test incidentally triggers gets a local
+  `@pytest.mark.filterwarnings("ignore:...")` with a comment, so the exemption
+  stays visible next to the test that needs it.
+- A warning that says an option is inert (`AutoKConfig.<field> is set but
+  k_method=... does not use it`) means the fixture is wrong: drop the inert
+  field. `sift/selection/auto_k.py::_warn_unused_method_fields` is the authority
+  on which field each method consumes.
+
 For selector-layer refactors, keep the dispatcher contract honest with:
 
 ```bash
@@ -63,9 +115,9 @@ nothing.
 ## Documentation Checks
 
 `README.md` is the package long description; its links must therefore be
-absolute and PyPI-safe. `DOCS.MD` is the detailed API manual. The docs smoke
-tests verify the README examples, documented top-level exports, and install
-extras.
+absolute and render correctly outside a repository checkout. `DOCS.MD` is the
+detailed API manual. The docs smoke tests verify the README examples,
+documented top-level exports, and install extras.
 
 ```bash
 python -m pytest tests/test_docs_smoke.py -q
@@ -104,9 +156,152 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus optional CatBoost
-coverage and a scheduled quick benchmark gate. Publishing is triggered from
-GitHub releases through a separate build job and an OIDC-only PyPI job.
+GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus a `min-pins` job on
+the declared dependency floors, optional CatBoost coverage, a clean-wheel
+installation smoke test, a scheduled latest-dependency canary, and a scheduled
+quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
+the workflow declares a `concurrency` group that cancels superseded pull-request
+runs while letting branch and scheduled runs finish so their artifacts stay
+complete. Published GitHub releases build and metadata-check source and wheel
+distributions, clean-install the exact wheel, and attach those distributions to
+the GitHub Release. This project does not publish those artifacts to PyPI.
+
+### The `min-pins` job
+
+`min-pins` installs every direct runtime requirement at its advertised floor and
+then installs the package with `--no-deps` so pip cannot quietly upgrade them:
+
+```bash
+python -m venv /tmp/sift-min-pins
+/tmp/sift-min-pins/bin/python -m pip install \
+  "numpy==1.24.*" "pandas==2.0.*" "scikit-learn==1.3.*" "scipy==1.10.*" \
+  "numba==0.59.*" "joblib==1.3.*" "threadpoolctl==3.1.*" pytest
+/tmp/sift-min-pins/bin/python -m pip install -e . --no-deps
+/tmp/sift-min-pins/bin/python -m pytest -q
+```
+
+The floors are mutually consistent and resolve to numpy 1.24.4, pandas 2.0.3,
+scikit-learn 1.3.2, scipy 1.10.1, numba 0.59.1, joblib 1.3.2 and
+threadpoolctl 3.1.0. numba 0.59 constrains numpy to `<1.27`, which is what makes
+1.24 the binding floor rather than an arbitrary one. CI runs this on Python 3.10;
+3.11 is a valid local stand-in, since every one of these pins ships wheels for
+both.
+
+Two behaviours differ at the floor and are worth knowing before you debug a
+failure there: older LAPACK returns a slightly smaller minimum eigenvalue, so the
+Gaussian knockoff shrinkage advisory fires where it does not on newer NumPy/SciPy;
+and `matplotlib` is not a declared dependency, so the one plotting test skips.
+
+### Python 3.13
+
+Still not enabled, but the reason it was deferred is gone. numba ships cp313
+wheels from 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local Python
+3.13.15 run with numba 0.67 reached 1,565 passed / 3 failed. Those three were
+dependency versions rather than the interpreter — they broke the 3.11/3.12
+matrix identically, because `scikit-learn>=1.3,<2` and `numpy>=1.24,<3` resolve
+straight to them — and they are the numpy 2.5 failures now fixed. A 3.13 run has
+not been repeated since, so enable the job below and read its first result
+rather than assuming it is green.
+
+### Verified dependency band
+
+**The whole declared band is supported — there is no ceiling below what
+`pyproject.toml` allows.** Measured on this tree, each row a full-suite run
+under the warnings-as-errors policy:
+
+| dependency set | result |
+| --- | --- |
+| floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
+| base (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,685 passed / 25 skipped |
+| numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
+| numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+| **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+
+The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
+13 failures are closed and described in `docs/release-notes.md` under
+*Stage 2 — latest-dependency compatibility*; the largest group, nine
+`target_cv` failures on scikit-learn 1.9, were a `FutureWarning` from
+`TargetEncoder(shuffle=..., random_state=...)` that the Stage 1 encoder rewrite
+had already eliminated by dropping that backend entirely.
+
+Reproduce the latest row with:
+
+```bash
+python3.12 -m venv /tmp/sift-latest
+/tmp/sift-latest/bin/pip install "numpy>=2.5" "scikit-learn>=1.9" "pandas>=3" \
+  scipy numba joblib threadpoolctl pytest
+/tmp/sift-latest/bin/pip install -e . --no-deps
+/tmp/sift-latest/bin/python -m pytest -q
+```
+
+numpy 2.5 ships cp312 wheels and above, so this row needs Python 3.12+; on 3.11
+pip resolves numpy 2.4.6 instead.
+
+Two failure modes are worth knowing before pinning anything new. scikit-learn
+1.9 routes dataframe validation through narwhals, which rejects duplicate column
+labels in both `fit` and `predict` — that is an estimator-side limit, not a SIFT
+one, and SIFT still keeps duplicate labels distinct by position. And pinned
+float32 goldens derived from LAPACK plus float32 BLAS are only reproducible to
+about one ulp across NumPy/SciPy builds, so compare them with a tolerance;
+same-seed determinism inside one interpreter is exact and should stay pinned
+exactly.
+
+### Enabling a Python 3.13 job
+
+Now that the newer set is supported, this job can be added to
+`.github/workflows/test.yml`:
+
+```yaml
+  test-python313:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install "numba>=0.61"
+          pip install -e ".[test]"
+      - run: pytest
+```
+
+`numba>=0.61` is the only 3.13-specific pin required. This is a support job on
+the supported dependency set, not a 3.13/min-pins combination.
+
+### Auto-K gate summarizer
+
+The scheduled `benchmark-smoke` job regenerates the Auto-K G1-G6 gate table from
+the committed raw campaign CSVs and uploads it as the `sift-auto-k-gate-table`
+artifact. The summarizer is deterministic — `tests/test_auto_k_gate_summary.py`
+pins the exact output bytes of a synthetic fixture — so the job also verifies the
+regenerated table against the committed one.
+
+That verification is **numeric, not `cmp`**. Gate floats are rendered with 12
+significant digits and compared with `rtol=1e-9`; every other cell must match
+exactly. A raw `repr` differed in the 17th digit between macOS/arm64 and Linux
+CI, so a byte-for-byte comparison would fail on platform-dependent last-ulp
+summation rather than on a real change to the inputs or the aggregation. Use
+`--verify-against` rather than `cmp`:
+
+```bash
+python benchmarks/summarize_auto_k_gates.py \
+  --main benchmarks/results/auto_k_v2_main.csv \
+  --null benchmarks/results/auto_k_v2_null.csv \
+  --timing benchmarks/results/auto_k_v2_d9.csv \
+  --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
+  --oracle-aggregation mean \
+  --output /tmp/auto_k_v2_gates_mean_oracle.csv \
+  --verify-against benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
+```
+
+Every argument is required, including `--oracle-aggregation`, so the denominator
+convention is always recorded rather than inferred. The summarizer verifies the
+path-timing provenance sidecar by hashing its recorded source files *at the commit
+the sidecar names*, which is why the job checks out with `fetch-depth: 0`; a
+shallow clone cannot resolve that commit and the summarizer fails closed.
 
 Before release-oriented promotion, run:
 
@@ -114,17 +309,19 @@ Before release-oriented promotion, run:
 python -m pytest -q
 python -m pytest tests/test_docs_smoke.py -q
 python -m pytest tests/test_benchmarks.py -q
-python -m build
+python -m build --wheel
 python -m twine check dist/*
+python -m venv /tmp/sift-wheel-smoke
+/tmp/sift-wheel-smoke/bin/python -m pip install --force-reinstall dist/*.whl
+(cd /tmp && /tmp/sift-wheel-smoke/bin/python "$OLDPWD/scripts/verify_wheel_install.py")
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
 python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Before the first `sift-feature-selection` upload, configure the PyPI Trusted
-Publisher for repository `kmedved/sift`, workflow
-`.github/workflows/python-publish.yml`, and environment `pypi`. Release tags
-must match `v` plus `sift.__version__`.
+Release tags must match `v` plus `sift.__version__`. The release workflow verifies
+the exact wheel it attaches to the existing GitHub Release; adding an external
+package index is a future owner decision rather than an implicit release step.
 
 For the 0.8.0 release bundle, the focused smoke is:
 

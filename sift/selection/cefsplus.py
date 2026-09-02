@@ -2,24 +2,31 @@
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
 import warnings
 
 import numpy as np
+import pandas as pd
 
 from sift._numba import njit_optional_cache
+from sift._progress import ProgressCallback, report_progress
 from sift.estimators.copula import (
     FeatureCache,
     gaussian_mi_from_corr,
 )
 from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
+from sift.selection.proxies import proxy_frame_from_panel
+from sift.selection.result import _PROXY_CORRELATIONS_ATTR
 from sift.selection.knockoff_filter import (
     _reject_duplicate_feature_names,
     _validate_prebuilt_cache_structure,
 )
 
 CorrPrune = float | None | Literal["auto"]
+
+if TYPE_CHECKING:
+    from sift.selection.view import SelectionView
 
 
 def _gaussian_mrmr_select(
@@ -28,6 +35,7 @@ def _gaussian_mrmr_select(
     k: int,
     use_quotient: bool,
     floor: float = 1e-6,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     m = len(rel)
     k = min(k, m)
@@ -39,6 +47,14 @@ def _gaussian_mrmr_select(
     selected[0] = j0
     is_sel[j0] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="mrmr_quot" if use_quotient else "mrmr_diff",
+        )
 
     for t in range(1, k):
         last = selected[t - 1]
@@ -60,6 +76,14 @@ def _gaussian_mrmr_select(
         selected[t] = j
         is_sel[j] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                k,
+                stage="path",
+                selector="mrmr_quot" if use_quotient else "mrmr_diff",
+            )
 
     return selected[:count]
 
@@ -70,6 +94,7 @@ def _gaussian_jmi_select(
     rel: np.ndarray,
     k: int,
     use_min: bool,
+    callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     m = len(r_y)
     k = min(k, m)
@@ -81,6 +106,14 @@ def _gaussian_jmi_select(
     selected[0] = j0
     is_sel[j0] = True
     count = 1
+    if callback is not None:
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="jmim" if use_min else "jmi",
+        )
 
     # Scratch buffers to avoid per-iteration allocations.
     r2 = np.empty(m, dtype=np.float64)
@@ -120,6 +153,14 @@ def _gaussian_jmi_select(
         selected[t] = j
         is_sel[j] = True
         count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                k,
+                stage="path",
+                selector="jmim" if use_min else "jmi",
+            )
 
     return selected[:count]
 
@@ -239,6 +280,149 @@ def _cefsplus_loop_core(
 
 
 @njit_optional_cache(cache=True)
+def _cefsplus_callback_step(
+    R: np.ndarray,
+    tie_break_rel: np.ndarray,
+    scale: float,
+    eps: float,
+    t: int,
+    L: np.ndarray,
+    Ly: np.ndarray,
+    d: np.ndarray,
+    c: np.ndarray,
+    remaining: np.ndarray,
+    score: np.ndarray,
+    s1: np.ndarray,
+    s2: np.ndarray,
+    dy: float,
+) -> tuple[int, float, float, float]:
+    """Advance one CEFS+ step while keeping the callback in Python space."""
+    m = len(c)
+    if t == 0:
+        j = 0
+        best_rel = tie_break_rel[0]
+        for jj in range(1, m):
+            if tie_break_rel[jj] > best_rel:
+                best_rel = tie_break_rel[jj]
+                j = jj
+        s1_best = 1.0
+        s2_best = max(1.0 - c[j] * c[j], eps)
+    else:
+        best_pos = -1
+        best_score = -np.inf
+        for jj in range(m):
+            if not remaining[jj]:
+                continue
+            s1_j = max(d[jj], eps)
+            s2_j = max(d[jj] - c[jj] * c[jj] / dy, eps)
+            s1[jj] = s1_j
+            s2[jj] = s2_j
+            sc = np.log(s1_j) - np.log(s2_j)
+            score[jj] = sc
+            if best_pos < 0 or sc > best_score:
+                best_score = sc
+                best_pos = jj
+        if best_pos < 0:
+            return -1, dy, 0.0, 0.0
+        j = best_pos
+        best_rel = tie_break_rel[j]
+        for jj in range(m):
+            if remaining[jj] and np.abs(score[jj] - best_score) < 1e-12:
+                if tie_break_rel[jj] > best_rel:
+                    best_rel = tie_break_rel[jj]
+                    j = jj
+        s1_best = s1[j]
+        s2_best = s2[j]
+
+    sq = np.sqrt(s1_best)
+    ly = c[j] / sq
+    Ly[t] = ly
+    dy -= ly * ly
+    for i in range(m):
+        if not remaining[i] or i == j:
+            continue
+        acc = R[i, j] * scale
+        for a in range(t):
+            acc -= L[i, a] * L[j, a]
+        lij = acc / sq
+        L[i, t] = lij
+        d[i] -= lij * lij
+        c[i] -= lij * ly
+
+    remaining[j] = False
+    return j, dy, np.log(s1_best), np.log(s2_best)
+
+
+def _cefsplus_loop_with_callback(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    callback: ProgressCallback,
+    *,
+    want_objective: bool,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run the compiled CEFS+ state machine one step at a time for callbacks."""
+    m = len(r)
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    k = min(k, m)
+
+    scale = 1.0 - shrink
+    selected = np.empty(k, dtype=np.int64)
+    objective = np.empty(k if want_objective else 0, dtype=np.float64)
+    remaining = np.ones(m, dtype=np.bool_)
+    L = np.zeros((m, k), dtype=np.float64)
+    Ly = np.zeros(k, dtype=np.float64)
+    d = np.ones(m, dtype=np.float64)
+    c = scale * np.asarray(r, dtype=np.float64)
+    score = np.empty(m, dtype=np.float64)
+    s1 = np.empty(m, dtype=np.float64)
+    s2 = np.empty(m, dtype=np.float64)
+    dy = 1.0
+    logdet_S = 0.0
+    logdet_yS = 0.0
+    count = 0
+
+    while count < k:
+        j, dy, log_s1, log_s2 = _cefsplus_callback_step(
+            R,
+            tie_break_rel,
+            scale,
+            eps,
+            count,
+            L,
+            Ly,
+            d,
+            c,
+            remaining,
+            score,
+            s1,
+            s2,
+            dy,
+        )
+        if j < 0:
+            break
+        selected[count] = j
+        logdet_S += log_s1
+        logdet_yS += log_s2
+        if want_objective:
+            objective[count] = logdet_S - logdet_yS
+        count += 1
+        report_progress(
+            callback,
+            count,
+            k,
+            stage="path",
+            selector="cefsplus",
+        )
+
+    return selected[:count], objective[:count]
+
+
+@njit_optional_cache(cache=True)
 def cefsplus_loop(
     R: np.ndarray,
     r: np.ndarray,
@@ -342,9 +526,12 @@ def select_cached(
     return_objective: bool = False,
     return_indices: bool = False,
     warn_noise_floor: bool = True,
+    callback: ProgressCallback | None = None,
+    return_result: bool = False,
+    store_proxies: bool = False,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
-]:
+] | "SelectionView":
     """Select features using pre-built cache.
 
     corr_prune="auto" resolves to no pruning for every method. Pass a float to
@@ -355,6 +542,17 @@ def select_cached(
     """
     from sift._preprocess import to_numpy, validate_k
 
+    if not isinstance(return_result, (bool, np.bool_)):
+        raise ValueError("return_result must be a boolean")
+    if not isinstance(store_proxies, (bool, np.bool_)):
+        raise ValueError("store_proxies must be a boolean")
+    if store_proxies and not return_result:
+        raise ValueError("store_proxies=True requires return_result=True")
+    if return_result and (return_objective or return_indices):
+        raise ValueError(
+            "return_result=True cannot be combined with return_objective or "
+            "return_indices; the normalized result already carries both"
+        )
     k = validate_k(k, allow_auto=False)
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
@@ -377,7 +575,18 @@ def select_cached(
 
     objective = None
     if method == "cefsplus":
-        if return_objective:
+        if callback is not None:
+            sel_local, callback_objective = _cefsplus_loop_with_callback(
+                R_cand,
+                r_cand,
+                k_actual,
+                rel_cand,
+                callback,
+                want_objective=return_objective or return_result,
+            )
+            if return_objective or return_result:
+                objective = callback_objective
+        elif return_objective or return_result:
             sel_local, objective = cefsplus_loop_with_objective(R_cand, r_cand, k_actual, rel_cand)
         else:
             sel_local = cefsplus_loop(R_cand, r_cand, k_actual, rel_cand)
@@ -387,6 +596,7 @@ def select_cached(
             rel_cand,
             k_actual,
             use_quotient=method == "mrmr_quot",
+            callback=callback,
         )
         if warn_noise_floor:
             _warn_gaussian_mrmr_noise_floor(panel, sel_local, method)
@@ -397,6 +607,7 @@ def select_cached(
             rel_cand,
             k_actual,
             use_min=method == "jmim",
+            callback=callback,
         )
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -407,6 +618,87 @@ def select_cached(
         out = [cache.feature_names[i] for i in selected_original]
     else:
         out = selected_original.tolist()
+
+    if return_result:
+        if objective is None:
+            R_path = R_cand[np.ix_(sel_local, sel_local)]
+            r_path = r_cand[sel_local]
+            objective = objective_from_corr_path(R_path, r_path)
+        if cache.feature_names is None:
+            raise ValueError(
+                "return_result=True requires cache.feature_names so the normalized "
+                "view can prove the complete input feature identity"
+            )
+        feature_names = list(cache.feature_names)
+        selected_indices = selected_original.astype(np.int64).tolist()
+        selected_rank = {
+            position: rank
+            for rank, position in enumerate(selected_indices, start=1)
+        }
+        rank = pd.array(
+            [selected_rank.get(position, pd.NA) for position in range(len(feature_names))],
+            dtype="Int64",
+        )
+        relevance = np.full(len(feature_names), np.nan, dtype=np.float64)
+        relevance[np.asarray(panel.original, dtype=np.int64)] = np.asarray(
+            panel.rel,
+            dtype=np.float64,
+        )
+        ranking = pd.DataFrame(
+            {
+                "feature": feature_names,
+                "rank": rank,
+                "selected": [position in selected_rank for position in range(len(feature_names))],
+                "selected_index": pd.array(
+                    range(len(feature_names)),
+                    dtype="Int64",
+                ),
+                "relevance": relevance,
+                "selector": f"cached_{method}",
+            }
+        )
+        from sift.selection.result import FilterSelectionResult, build_selector_metadata
+        from sift.selection.view import as_result
+
+        result = FilterSelectionResult(
+            selected_features=list(out),
+            selected_indices=selected_indices,
+            selector_metadata=build_selector_metadata(
+                f"cached_{method}",
+                k=len(out),
+                k_requested=k,
+                top_m=top_m,
+                n_features=len(feature_names),
+                auto_k=False,
+                extra={
+                    "cache_backed": True,
+                    "method": method,
+                    "corr_prune": corr_prune,
+                    "n_rows_original": int(cache.n_rows_original),
+                    "n_rows_cached": int(len(cache.row_idx)),
+                },
+            ),
+            ranking_=ranking,
+            diagnostics_={
+                "objective": np.asarray(objective, dtype=np.float64).copy(),
+                "candidate_indices": np.asarray(
+                    panel.original,
+                    dtype=np.int64,
+                ).copy(),
+            },
+        )
+        if store_proxies:
+            proxy_correlations = proxy_frame_from_panel(
+                panel.R,
+                candidate_indices=panel.original,
+                selected_indices=selected_indices,
+            )
+            object.__setattr__(
+                result,
+                _PROXY_CORRELATIONS_ATTR,
+                proxy_correlations,
+            )
+        return as_result(result, input_features=feature_names)
 
     if return_objective:
         if objective is None:

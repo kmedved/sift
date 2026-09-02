@@ -10,6 +10,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from sift._logging import logger
 from sift._preprocess import ensure_weights
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
@@ -43,6 +44,150 @@ from sift.selection.panel import build_candidate_panel
 
 EvalData = tuple[pd.DataFrame, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]
 GaussianAutoKResult = tuple[list[str], list[int], pd.DataFrame, dict]
+
+#: ``diagnostics_`` key holding the normalized auto-k curve payload.  The
+#: payload is producer-side data with a fixed shape so that result adapters
+#: never have to guess which route-specific diagnostic column is the criterion.
+AUTO_K_CURVE_KEY = "auto_k_curve"
+
+#: Columns of the normalized curve frame, in order.
+AUTO_K_CURVE_COLUMNS = ("k", "criterion", "criterion_se", "selected")
+
+# Route -> (criterion column, standard-error column or None, direction).
+# The criterion is the quantity whose value across ``k`` drives that route's
+# stopping/selection decision, so plotting it always explains the chosen k.
+_AUTO_K_CURVE_CRITERIA: dict[str, tuple[str, Optional[str], str]] = {
+    "evaluate": ("score", "score_se", "higher_is_better"),
+    "gaussian_cv": ("score", "score_se", "higher_is_better"),
+    "xfit_objective": ("score", "score_se", "higher_is_better"),
+    "penalized_objective": ("penalized_score", None, "higher_is_better"),
+    "elbow": ("objective", None, "higher_is_better"),
+    "k_posterior": ("post", None, "higher_is_better"),
+    "perm_gap": ("gap", "gap_se", "higher_is_better"),
+    "stability": ("phi", "phi_se", "higher_is_better"),
+    "changepoint": ("log_scaled_gain", None, "higher_is_better"),
+    "chi2_stop": ("p_max", None, "lower_is_better"),
+    "forward_stop": ("Y_running_mean", None, "lower_is_better"),
+}
+
+# Routes whose diagnostics are deliberately not a k-indexed criterion path.
+# They report an explicit reason rather than a fabricated curve.
+_AUTO_K_CURVE_UNAVAILABLE: dict[str, str] = {
+    "knockoff_path": (
+        "knockoff_path diagnostics carry one row per candidate feature and knockoff "
+        "draw rather than one row per k, so the route has no k-indexed criterion curve"
+    ),
+    "consensus": (
+        "consensus diagnostics carry one row per member method's k vote rather than "
+        "one row per k, so the route has no k-indexed criterion curve"
+    ),
+}
+
+
+def _auto_k_curve_unavailable(route: str, reason: str) -> dict:
+    return {
+        "available": False,
+        "route": route,
+        "criterion": None,
+        "criterion_direction": None,
+        "unavailable_reason": reason,
+        "curve": None,
+    }
+
+
+def build_auto_k_curve_payload(
+    *,
+    k_method: str,
+    diagnostics: Optional[pd.DataFrame],
+    summary: Optional[dict],
+) -> dict:
+    """Normalize one auto-k route's diagnostics into the standard curve payload.
+
+    Every auto-k route reports its search under a different column name
+    (``score``, ``penalized_score``, ``objective``, ``phi``, ``p_max``, ...).
+    This function resolves the route actually run — following the ``auto``
+    router's ``routed_method`` when present — and returns a fixed-shape payload
+    so result adapters never inspect route-specific diagnostics themselves.
+
+    Returns
+    -------
+    dict
+        ``{"available", "route", "criterion", "criterion_direction",
+        "unavailable_reason", "curve"}``.  When ``available`` is true, ``curve``
+        is a DataFrame with exactly the columns ``k``, ``criterion``,
+        ``criterion_se``, and ``selected``; ``criterion`` names the source
+        diagnostic column and ``criterion_direction`` is ``"higher_is_better"``
+        or ``"lower_is_better"``.  When it is false, ``curve`` is ``None`` and
+        ``unavailable_reason`` says why the route has no k-indexed curve.
+    """
+    summary = summary or {}
+    route = str(summary.get("routed_method") or summary.get("method") or k_method)
+
+    if route in _AUTO_K_CURVE_UNAVAILABLE:
+        return _auto_k_curve_unavailable(route, _AUTO_K_CURVE_UNAVAILABLE[route])
+    spec = _AUTO_K_CURVE_CRITERIA.get(route)
+    if spec is None:
+        return _auto_k_curve_unavailable(
+            route,
+            f"no normalized criterion is defined for auto-k route {route!r}",
+        )
+    if not isinstance(diagnostics, pd.DataFrame) or diagnostics.empty:
+        return _auto_k_curve_unavailable(
+            route,
+            f"auto-k route {route!r} produced no diagnostics rows",
+        )
+
+    column, se_column, direction = spec
+    missing = [name for name in ("k", column) if name not in diagnostics.columns]
+    if missing:
+        return _auto_k_curve_unavailable(
+            route,
+            f"auto-k route {route!r} diagnostics are missing the {missing} "
+            "column(s) required for a normalized curve",
+        )
+
+    k_values = pd.to_numeric(diagnostics["k"], errors="coerce")
+    if k_values.isna().any():
+        return _auto_k_curve_unavailable(
+            route,
+            f"auto-k route {route!r} diagnostics contain a non-numeric k",
+        )
+    k_int = k_values.to_numpy(dtype=np.int64)
+    criterion = pd.to_numeric(diagnostics[column], errors="coerce").to_numpy(
+        dtype=np.float64
+    )
+    if se_column is not None and se_column in diagnostics.columns:
+        criterion_se = pd.to_numeric(diagnostics[se_column], errors="coerce").to_numpy(
+            dtype=np.float64
+        )
+    else:
+        criterion_se = np.full(k_int.shape[0], np.nan, dtype=np.float64)
+
+    # ``selected`` marks the k the route actually returned.  Deriving it from the
+    # summary rather than a per-route ``selected`` column keeps stop rules that
+    # were floored by ``min_k`` (and routes with no such column) truthful.
+    selected_k = summary.get("selected_k")
+    if selected_k is None:
+        selected = np.zeros(k_int.shape[0], dtype=bool)
+    else:
+        selected = k_int == int(selected_k)
+
+    curve = pd.DataFrame(
+        {
+            "k": k_int,
+            "criterion": criterion,
+            "criterion_se": criterion_se,
+            "selected": selected,
+        }
+    ).sort_values("k", kind="mergesort").reset_index(drop=True)
+    return {
+        "available": True,
+        "route": route,
+        "criterion": column,
+        "criterion_direction": direction,
+        "unavailable_reason": None,
+        "curve": curve,
+    }
 
 
 def auto_k_summary(
@@ -397,7 +542,7 @@ def _require_eval_split_context(
 
 def _print_selected_k(label: str, selected_count: int, verbose: bool) -> None:
     if verbose:
-        print(f"  {label} selected k={selected_count}")
+        logger.info(f"  {label} selected k={selected_count}")
 
 
 def _select_elbow_count(
@@ -504,6 +649,10 @@ def select_gaussian_evaluate_path(
     corr_prune: float | None | Literal["auto"] = "auto",
     feature_names: Optional[list[str]] = None,
     verbose: bool = True,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     **_unused,
 ) -> GaussianAutoKResult:
     _require_eval_split_context(auto_k_config, groups, time)
@@ -517,6 +666,7 @@ def select_gaussian_evaluate_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
@@ -529,6 +679,10 @@ def select_gaussian_evaluate_path(
         cat_features=cat_features,
         cat_encoding=cat_encoding,
         sample_weight=sample_weight,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     summary = auto_k_summary(
@@ -559,6 +713,7 @@ def select_gaussian_elbow_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_elbow_count(objective, auto_k_config, len(path))
     _print_selected_k("Elbow", selected_count, verbose)
@@ -588,6 +743,7 @@ def select_gaussian_penalized_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_penalized_count(
         objective,
@@ -635,6 +791,7 @@ def select_gaussian_posterior_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     selected_count, auto_diag = _select_posterior_count(
         objective,
@@ -685,6 +842,7 @@ def select_gaussian_chi2_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -738,6 +896,7 @@ def select_gaussian_forward_stop_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -791,6 +950,7 @@ def select_gaussian_changepoint_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     selected_count, auto_diag = select_k_changepoint(
@@ -847,6 +1007,7 @@ def select_gaussian_perm_gap_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     nulls = null_objective_paths(
         cache,
@@ -901,6 +1062,7 @@ def select_gaussian_xfit_objective_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     curves = xfit_objective_curves(
         cache,
@@ -961,6 +1123,7 @@ def select_gaussian_cv_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     curves = gaussian_cv_curves(
         cache,
@@ -1030,6 +1193,7 @@ def select_gaussian_knockoff_path(
             corr_prune=corr_prune,
             want_indices=True,
             return_objective=False,
+            callback=_unused.get("callback"),
         )
         selected_count = min(selected_count, len(path))
         selected = path[:selected_count]
@@ -1102,6 +1266,7 @@ def select_gaussian_stability_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=False,
+        callback=_unused.get("callback"),
     )
     boot = bootstrap_paths(
         cache,
@@ -1196,10 +1361,11 @@ def select_gaussian_auto_path(
         "verbose": verbose,
         **kwargs,
     }
-    selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
-        routed_config,
-        **runner_kwargs,
-    )
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+            routed_config,
+            **runner_kwargs,
+        )
     stopped_by = summary.get("stopped_by")
     degenerate_stop = stopped_by in {"degenerate_folds", "degenerate"}
     empty_terminal_stop = not selected and stopped_by == "max_k"
@@ -1207,11 +1373,13 @@ def select_gaussian_auto_path(
         (degenerate_stop or empty_terminal_stop)
         and routed_config.k_method != "penalized_objective"
     ):
-        fallback_config = replace(
-            auto_k_config,
-            k_method="penalized_objective",
-            objective_penalty="ebic",
-            min_k=0,
+        fallback_config = _strip_router_only_fields(
+            replace(
+                auto_k_config,
+                k_method="penalized_objective",
+                objective_penalty="ebic",
+                min_k=0,
+            )
         )
         route["primary"] = route["chosen"]
         route["chosen"] = "penalized_objective"
@@ -1221,10 +1389,17 @@ def select_gaussian_auto_path(
             "objective_penalty": "ebic",
             "reason": f"primary stopped_by={stopped_by}",
         }
-        selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
-            fallback_config,
-            **{**runner_kwargs, "auto_k_config": fallback_config},
-        )
+        with auto_k_module._suppress_auto_k_unused_field_warnings():
+            selected, selected_indices, auto_diag, summary = _run_gaussian_routed_path(
+                fallback_config,
+                **{
+                    **runner_kwargs,
+                    "auto_k_config": fallback_config,
+                    # The fallback rebuilds the same greedy path under a different
+                    # stopping rule. Do not duplicate/reset path progress events.
+                    "callback": None,
+                },
+            )
 
     summary = dict(summary)
     summary["method"] = "auto"
@@ -1271,18 +1446,19 @@ def select_gaussian_auto_path(
                 "automatic-k optimum."
             )
         warnings.warn(message, UserWarning, stacklevel=2)
-    _run_auto_dense_check(
-        config=auto_k_config,
-        summary=summary,
-        route=route,
-        cache=cache,
-        y=y,
-        method=method,
-        groups=groups,
-        time=time,
-        top_m=top_m,
-        corr_prune=corr_prune,
-    )
+    with auto_k_module._suppress_auto_k_unused_field_warnings():
+        _run_auto_dense_check(
+            config=auto_k_config,
+            summary=summary,
+            route=route,
+            cache=cache,
+            y=y,
+            method=method,
+            groups=groups,
+            time=time,
+            top_m=top_m,
+            corr_prune=corr_prune,
+        )
     summary["auto_routing"] = route
     return selected, selected_indices, auto_diag, summary
 
@@ -1492,17 +1668,13 @@ def select_gaussian_consensus_path(
         corr_prune=corr_prune,
         want_indices=True,
         return_objective=True,
+        callback=_unused.get("callback"),
     )
     rows = []
     for name in auto_k_config.consensus_methods:
         start = time_module.perf_counter()
         note = ""
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"AutoKConfig\..*does not use it\.",
-                category=UserWarning,
-            )
+        with auto_k_module._suppress_auto_k_unused_field_warnings():
             try:
                 k_hat, note = _consensus_method_k(
                     name,
@@ -1579,7 +1751,7 @@ def select_gaussian_consensus_path(
 
 def _cached_filter_path(
     cache, y, k: int, *, method: str, top_m: int, corr_prune,
-    want_indices: bool, return_objective: bool,
+    want_indices: bool, return_objective: bool, callback=None,
 ) -> tuple[list[str], list[int], np.ndarray | None]:
     from sift.selection.cefsplus import select_cached
 
@@ -1593,6 +1765,7 @@ def _cached_filter_path(
         return_indices=want_indices,
         return_objective=return_objective,
         warn_noise_floor=False,
+        callback=callback,
     )
     if return_objective and want_indices:
         path, indices, objective = result
@@ -1628,12 +1801,17 @@ def select_filter_classic_auto_k(
     sample_weight: Optional[np.ndarray],
     task: Literal["regression", "classification"],
     cat_features: Optional[list[str]], cat_encoding: str,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     verbose: bool = True,
     return_indices: bool = False,
-) -> list[str] | tuple[list[str], list[int]]:
+    return_diagnostics: bool = False,
+) -> list[str] | tuple:
     path = [feature_names[i] for i in path_idx]
     _require_eval_split_context(auto_k_config, eval_groups, eval_time)
-    best_k, selected, _ = auto_k_module.select_k_auto(
+    best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
         y_arr,
         path,
@@ -1644,11 +1822,27 @@ def select_filter_classic_auto_k(
         cat_features=cat_features,
         cat_encoding=cat_encoding,
         sample_weight=sample_weight,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
+    result: tuple = (selected,)
     if return_indices:
-        return selected, [int(i) for i in path_idx[: len(selected)]]
-    return selected
+        result += ([int(i) for i in path_idx[: len(selected)]],)
+    if return_diagnostics:
+        summary = auto_k_summary(
+            auto_k_config,
+            selected_k=len(selected),
+            path_length=len(path),
+            effective_max_k=_effective_max_k(auto_k_config, len(path)),
+            diagnostics=auto_diag,
+        )
+        result += (auto_diag, summary)
+    if len(result) == 1:
+        return selected
+    return result
 
 
 def select_binary_elbow(
@@ -1885,6 +2079,10 @@ def select_binary_changepoint(
 def select_binary_evaluate(
     X, problem: BinaryProblem, run: BinaryPathRun, options: BinaryOptions, *,
     auto_k_config: AutoKConfig, cat_encoding: str, verbose: bool,
+    target_cv_n_splits: int = 5,
+    target_cv_smoothing: Literal["auto"] | float = "auto",
+    target_prior: float | None = None,
+    warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ) -> BinarySelection:
     eval_X = X if isinstance(X, pd.DataFrame) else pd.DataFrame(np.asarray(X), columns=run.feature_names)
     eval_X = eval_X.iloc[run.row_idx]
@@ -1903,10 +2101,23 @@ def select_binary_evaluate(
         task="classification",
         cat_features=run.cat_features,
         cat_encoding=cat_encoding,
-        sample_weight=run.w_sub,
+        sample_weight=(
+            run.w_sub
+            if problem.weighted
+            or (
+                cat_encoding == "target_cv"
+                and problem.time is not None
+                and target_prior is None
+            )
+            else None
+        ),
         loo_smoothing=options.loo_smoothing,
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,
+        target_cv_n_splits=target_cv_n_splits,
+        target_cv_smoothing=target_cv_smoothing,
+        target_prior=target_prior,
+        warmup_policy=warmup_policy,
     )
     selected_count = len(selected_features)
     _print_selected_k("CV/holdout", best_k, verbose)

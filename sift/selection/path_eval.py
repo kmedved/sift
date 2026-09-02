@@ -16,7 +16,14 @@ from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from sift._metadata import resolve_row_metadata
 from sift._preprocess import best_score_from_dict, ensure_weights
+from sift.scoring import (
+    UnsupportedScorerSampleWeightError,
+    is_sklearn_scorer,
+    score_with_sklearn_scorer,
+    sklearn_scorer_label,
+)
 
 
 EstimatorFactory = Callable[[], Any]
@@ -33,6 +40,12 @@ class FeaturePathEvaluationResult:
     scores: Mapping[int, float]
     best_k: int
     diagnostics: pd.DataFrame
+
+    def result_view(self, input_features=None):
+        """Return an additive normalized view without changing this result."""
+        from sift.selection.view import as_result
+
+        return as_result(self, input_features=input_features)
 
 
 def _split_weights(weights: np.ndarray, idx: np.ndarray, *, label: str) -> np.ndarray:
@@ -315,9 +328,20 @@ def _fit_predict_score(
     y_va: np.ndarray,
     w_va: np.ndarray,
     scoring: Scoring,
+    sample_weight_supplied: bool,
 ) -> float:
     try:
         _fit_estimator(estimator, X_tr, y_tr, w_tr)
+        if is_sklearn_scorer(scoring):
+            signed_score = score_with_sklearn_scorer(
+                scoring,
+                estimator,
+                X_va,
+                y_va,
+                sample_weight=w_va if sample_weight_supplied else None,
+            )
+            score = -signed_score
+            return float(score) if np.isfinite(score) else float("inf")
         y_pred = np.asarray(estimator.predict(X_va), dtype=np.float64).ravel()
         if y_pred.shape[0] != y_va.shape[0]:
             raise ValueError("estimator.predict returned wrong number of predictions")
@@ -330,12 +354,14 @@ def _fit_predict_score(
         if not np.isfinite(score):
             return float("inf")
         return float(score)
+    except UnsupportedScorerSampleWeightError:
+        raise
     except Exception as exc:
         warnings.warn(
             "Feature-path evaluation failed for one estimator fit/score and "
             f"recorded an infinite score: {type(exc).__name__}: {exc}",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         return float("inf")
 
@@ -372,9 +398,11 @@ def evaluate_feature_path(
     estimator_factory : callable, optional
         Factory called to create one estimator per (split, k). If provided,
         ``estimator`` is not used.
-    scoring : {'rmse', 'mae'} or callable
+    scoring : {'rmse', 'mae'}, sklearn scorer object, or callable
         Lower-is-better scoring. Callable signature is
         ``scoring(y_true, y_pred, sample_weight)``.
+        Estimator-style sklearn scorers are negated into this result's
+        historical lower-is-better score curve.
     splitter : optional
         If None, a simple random holdout split is used. Otherwise a splitter
         object with ``split(...)`` or ``(train_idx, val_idx)`` tuple.
@@ -392,10 +420,21 @@ def evaluate_feature_path(
     FeaturePathEvaluationResult
         Includes tested ks, evaluated scores, best-k, and diagnostics dataframe.
     """
+    metadata = resolve_row_metadata(
+        X,
+        groups=groups,
+        sample_weight=sample_weight,
+    )
+    X = metadata.X
+    groups = metadata.groups
+    sample_weight = metadata.sample_weight
     if estimator is not None and estimator_factory is not None:
         raise ValueError("Pass either estimator or estimator_factory, not both")
     if not callable(scoring) and scoring not in {"rmse", "mae"}:
-        raise ValueError("scoring must be 'rmse', 'mae', or a callable(y_true, y_pred, sample_weight)")
+        raise ValueError(
+            "scoring must be 'rmse', 'mae', an sklearn scorer object, or a "
+            "callable(y_true, y_pred, sample_weight)"
+        )
 
     if isinstance(X, pd.DataFrame):
         X_df = X
@@ -415,6 +454,7 @@ def evaluate_feature_path(
     if not np.isfinite(y_arr).all():
         raise ValueError("y contains non-finite values")
 
+    sample_weight_supplied = sample_weight is not None
     w_arr = ensure_weights(sample_weight, X_path.shape[0], normalize=True)
 
     k_values = _resolve_k_grid(k_grid, max_k=X_path.shape[1])
@@ -451,6 +491,7 @@ def evaluate_feature_path(
                 y_val,
                 w_val,
                 scoring=scoring,
+                sample_weight_supplied=sample_weight_supplied,
             )
             raw_scores[k].append(score)
 
@@ -478,6 +519,15 @@ def evaluate_feature_path(
     else:
         best_features = path_names[:best_k]
 
+    if is_sklearn_scorer(scoring):
+        scoring_label = sklearn_scorer_label(scoring)
+    elif isinstance(scoring, str):
+        scoring_label = scoring
+    else:
+        module = getattr(scoring, "__module__", type(scoring).__module__)
+        name = getattr(scoring, "__qualname__", type(scoring).__qualname__)
+        scoring_label = f"legacy:{module}.{name}"
+
     diagnostics = pd.DataFrame(
         {
             "k": k_values,
@@ -486,6 +536,7 @@ def evaluate_feature_path(
             "n_finite": [finite_counts[k] for k in k_values],
             "n_splits": [n_splits] * len(k_values),
             "best_score": [best_score] * len(k_values),
+            "scoring": [scoring_label] * len(k_values),
         }
     )
 

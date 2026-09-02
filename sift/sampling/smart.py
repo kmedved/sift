@@ -8,6 +8,8 @@ import warnings
 from sklearn.utils.extmath import randomized_svd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
+from sift._logging import logger
+
 
 def leverage_scores_multi_alpha(
     Xs: np.ndarray,
@@ -290,7 +292,7 @@ def _compute_svd_factors(
             svd_rows = min(n, int(config.svd_sample_size))
             if svd_rows < n:
                 if config.verbose:
-                    print(
+                    logger.info(
                         f"SVD computed on {svd_rows:,}/{n:,} rows; leverage scores are approximate."
                     )
                 svd_idx = rng.choice(n, size=svd_rows, replace=False)
@@ -307,7 +309,11 @@ def _compute_svd_factors(
         S = S.astype(np.float32)
         return V, S, S * S
     except Exception as e:
-        warnings.warn(f"SVD failed ({e}); using uniform geometry scores.", RuntimeWarning)
+        warnings.warn(
+            f"SVD failed ({e}); using uniform geometry scores.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
         return None, None, None
 
 
@@ -403,11 +409,19 @@ def _compute_residual_scores(
 
             beta = min(config.residual_weight_cap, r2)
             if config.verbose:
-                print(f"Pilot R² = {r2:.3f} → residual weight β = {beta:.3f}")
+                logger.info(f"Pilot R² = {r2:.3f} → residual weight β = {beta:.3f}")
         except Exception as e:
-            warnings.warn(f"Pilot model failed ({e}); using geometry only.", RuntimeWarning)
+            warnings.warn(
+                f"Pilot model failed ({e}); using geometry only.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
     elif config.verbose:
-        warnings.warn(f"Dataset too small for pilot model (n={n}); using geometry only.", RuntimeWarning)
+        warnings.warn(
+            f"Dataset too small for pilot model (n={n}); using geometry only.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
     return res_scores, beta
 
 
@@ -445,7 +459,7 @@ def _build_anchor_mask(df: pd.DataFrame, config: SmartSamplerConfig) -> np.ndarr
             f"anchor_fn returned {len(anchor_mask)} rows but df has {len(df)} rows"
         )
     if config.verbose and anchor_mask.any():
-        print(f"Anchors: {anchor_mask.sum():,} rows")
+        logger.info(f"Anchors: {anchor_mask.sum():,} rows")
     return anchor_mask
 
 
@@ -605,7 +619,7 @@ def _assemble_sample(
     if config.verbose:
         n_groups = out[config.group_col].nunique() if config.group_col else 1
         total_groups = len(arrays.group_indices)
-        print(
+        logger.info(
             f"Sampled {len(out):,} rows ({len(out)/len(arrays.df):.1%}), "
             f"{n_groups:,}/{total_groups:,} groups"
         )
@@ -655,7 +669,7 @@ def smart_sample(
     if config.verbose:
         n, d = arrays.Xs.shape
         target_total = int(np.floor(config.sample_frac * n))
-        print(
+        logger.info(
             f"Smart sampler: {n:,} rows × {d} features → target "
             f"{target_total:,} ({config.sample_frac:.1%})"
         )

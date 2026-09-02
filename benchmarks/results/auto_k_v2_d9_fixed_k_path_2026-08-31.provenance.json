@@ -1,0 +1,228 @@
+{
+  "artifact": {
+    "columns": [
+      "design",
+      "seed",
+      "benchmark",
+      "runtime_s"
+    ],
+    "path": "benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv",
+    "row_count": 2,
+    "sha256": "b38d81da98c66bb6c10cfca75d8f226c7276a1b4a8b8c20b229d51ea1629a947"
+  },
+  "command": {
+    "argv": [
+      "/opt/anaconda3/bin/python",
+      "benchmarks/bench_auto_k_path_timing.py",
+      "--full",
+      "--seeds",
+      "2",
+      "--seed-start",
+      "0",
+      "--timing-repeats",
+      "5",
+      "--warmup-runs",
+      "1",
+      "--thread-limit",
+      "1",
+      "--output",
+      "benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv"
+    ],
+    "cwd": "/Users/konstantinmedvedovsky/code/sift",
+    "shell": "/opt/anaconda3/bin/python benchmarks/bench_auto_k_path_timing.py --full --seeds 2 --seed-start 0 --timing-repeats 5 --warmup-runs 1 --thread-limit 1 --output benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv"
+  },
+  "configuration": {
+    "benchmark": "fixed_k_select_cached",
+    "cache": {
+      "compute_Rxx_rule": "n_features <= 4000",
+      "random_state": "seed",
+      "subsample_rule": "None when n_rows <= 50000 else 50000"
+    },
+    "denominator_scope": "complete select_cached call on a pre-built FeatureCache; cache construction is excluded",
+    "design": "D9",
+    "full": true,
+    "runtime_aggregation": "median_per_seed",
+    "seeds": [
+      0,
+      1
+    ],
+    "selector": {
+      "corr_prune": "auto",
+      "k_rule": "bench_auto_k._design_max_k",
+      "method": "cefsplus",
+      "return_indices": true,
+      "return_objective": true,
+      "top_m_rule": "max(5 * k, 250)"
+    },
+    "timer": "time.perf_counter",
+    "timing_repeats": 5,
+    "timing_thread_limit": 1,
+    "warmup_runs": 1
+  },
+  "environment": {
+    "cpu_count": 14,
+    "machine": "arm64",
+    "package_versions": {
+      "numba": "0.60.0",
+      "numpy": "1.26.4",
+      "pandas": "2.2.2",
+      "scikit-learn": "1.5.1",
+      "scipy": "1.13.1",
+      "sift": "0.9.0a1",
+      "threadpoolctl": "3.5.0"
+    },
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python_executable": "/opt/anaconda3/bin/python",
+    "python_implementation": "CPython",
+    "python_version": "3.12.7",
+    "thread_environment": {},
+    "threadpools_ambient": [
+      {
+        "architecture": "armv8",
+        "filepath": "/opt/anaconda3/lib/python3.12/site-packages/numpy/.dylibs/libopenblas64_.0.dylib",
+        "internal_api": "openblas",
+        "num_threads": 14,
+        "prefix": "libopenblas",
+        "threading_layer": "pthreads",
+        "user_api": "blas",
+        "version": "0.3.23.dev"
+      },
+      {
+        "architecture": "armv8",
+        "filepath": "/opt/anaconda3/lib/libopenblasp-r0.3.21.dylib",
+        "internal_api": "openblas",
+        "num_threads": 14,
+        "prefix": "libopenblas",
+        "threading_layer": "pthreads",
+        "user_api": "blas",
+        "version": "0.3.21"
+      },
+      {
+        "filepath": "/opt/anaconda3/lib/libomp.dylib",
+        "internal_api": "openmp",
+        "num_threads": 14,
+        "prefix": "libomp",
+        "user_api": "openmp",
+        "version": null
+      }
+    ]
+  },
+  "generated_at_utc": "2026-08-31T16:25:20.286463+00:00",
+  "git": {
+    "capture_scope": "before measurement and artifact creation",
+    "captured_at_utc": "2026-08-31T16:25:01.599007+00:00",
+    "commit": "88a870584dffddc043508578493e8e8421f50cd4",
+    "dirty": false,
+    "status_porcelain": []
+  },
+  "measurements": [
+    {
+      "cache_preparation_s": 8.277201250195503,
+      "design": "D9",
+      "resolved_k": 100,
+      "runtime_median_s": 0.13732037506997585,
+      "runtime_samples_s": [
+        0.1419972910080105,
+        0.15026891604065895,
+        0.13732037506997585,
+        0.13554687495343387,
+        0.1345343750435859
+      ],
+      "seed": 0,
+      "selected_path_length": 100,
+      "shape": [
+        50000,
+        2000
+      ],
+      "threadpools_during_timing": [
+        {
+          "architecture": "armv8",
+          "filepath": "/opt/anaconda3/lib/python3.12/site-packages/numpy/.dylibs/libopenblas64_.0.dylib",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libopenblas",
+          "threading_layer": "pthreads",
+          "user_api": "blas",
+          "version": "0.3.23.dev"
+        },
+        {
+          "architecture": "armv8",
+          "filepath": "/opt/anaconda3/lib/libopenblasp-r0.3.21.dylib",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libopenblas",
+          "threading_layer": "pthreads",
+          "user_api": "blas",
+          "version": "0.3.21"
+        },
+        {
+          "filepath": "/opt/anaconda3/lib/libomp.dylib",
+          "internal_api": "openmp",
+          "num_threads": 1,
+          "prefix": "libomp",
+          "user_api": "openmp",
+          "version": null
+        }
+      ],
+      "top_m": 500
+    },
+    {
+      "cache_preparation_s": 7.503942667040974,
+      "design": "D9",
+      "resolved_k": 100,
+      "runtime_median_s": 0.13535208394750953,
+      "runtime_samples_s": [
+        0.1429804579820484,
+        0.13532866700552404,
+        0.13277208292856812,
+        0.13535208394750953,
+        0.13537783292122185
+      ],
+      "seed": 1,
+      "selected_path_length": 100,
+      "shape": [
+        50000,
+        2000
+      ],
+      "threadpools_during_timing": [
+        {
+          "architecture": "armv8",
+          "filepath": "/opt/anaconda3/lib/python3.12/site-packages/numpy/.dylibs/libopenblas64_.0.dylib",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libopenblas",
+          "threading_layer": "pthreads",
+          "user_api": "blas",
+          "version": "0.3.23.dev"
+        },
+        {
+          "architecture": "armv8",
+          "filepath": "/opt/anaconda3/lib/libopenblasp-r0.3.21.dylib",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libopenblas",
+          "threading_layer": "pthreads",
+          "user_api": "blas",
+          "version": "0.3.21"
+        },
+        {
+          "filepath": "/opt/anaconda3/lib/libomp.dylib",
+          "internal_api": "openmp",
+          "num_threads": 1,
+          "prefix": "libomp",
+          "user_api": "openmp",
+          "version": null
+        }
+      ],
+      "top_m": 500
+    }
+  ],
+  "schema": "sift-auto-k-path-timing-provenance-v1",
+  "source_sha256": {
+    "benchmarks/auto_k_designs.py": "094241f2bc6b383f3753dee7998e5154bab8de17c7c76248c97416b720bdc9e5",
+    "benchmarks/bench_auto_k.py": "39f688d73c5f0c5d65b9350c1091795fd1d6462b0dbf5e822b6904164b0e2fcb",
+    "benchmarks/bench_auto_k_path_timing.py": "1565cf4c967e26129364bab1bd95df5aff3b43590ca451c79f79fcfb0ec2fef9",
+    "sift/estimators/copula.py": "b8f41399c1f543b7564f6affa779fd05dc08ecb4ac266fa191ed723d8cc37328",
+    "sift/selection/cefsplus.py": "b42594765f798d7e124fa9cec919f84ff9d213ca62943e76c783a18624e9a4d0"
+  }
+}

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Sift feature selection toolbox for mRMR, JMI/JMIM, CEFS+, stability selection, and CatBoost selectors"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "kmedved", email = "bibigon@gmail.com" },
 ]
@@ -22,9 +23,14 @@ dependencies = [
   "threadpoolctl>=3.1,<4",
 ]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +54,28 @@ version = { attr = "sift.__version__" }
 [tool.setuptools.packages.find]
 include = ["sift*"]
 exclude = ["tests*", "benchmarks*", "docs*", "examples*"]
+
+[tool.setuptools.package-data]
+sift = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "slow: Monte-Carlo or large-fixture tests; deselect with -m 'not slow'",
+  "catboost: requires the optional catboost dependency",
+  "categorical: requires the optional category_encoders dependency",
+]
+# Warnings are errors. Every exemption below is audited: it names an exact
+# message prefix and category, never a bare category. Warnings that a test
+# intends to trigger are asserted with `pytest.warns`; warnings that a single
+# test incidentally triggers carry a local `@pytest.mark.filterwarnings`.
+filterwarnings = [
+  "error",
+  # joblib/loky forks worker processes from an already-threaded parent. The
+  # notice is emitted by loky itself (`loky/backend/fork_exec.py`) on every
+  # process-backend run and cannot be addressed from this project.
+  "ignore:This process .* is multi-threaded, use of fork:DeprecationWarning",
+]
 
 [tool.ruff.lint]
 select = ["E9", "F63", "F7", "F82"]
