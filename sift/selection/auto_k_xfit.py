@@ -12,7 +12,6 @@ from scipy.special import digamma
 from sklearn.model_selection import GroupKFold, KFold
 
 from sift.estimators.copula import (
-    gaussian_mi_from_corr,
     weighted_corr_with_vector,
     weighted_correlation_matrix,
     weighted_rank_gauss_1d,
