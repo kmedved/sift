@@ -125,7 +125,79 @@ python -m pytest tests/test_docs_smoke.py -q
 
 When adding or renaming public exports, update both `sift/__init__.py` and
 `DOCS.MD`. If the export is a first-screen workflow such as `select_fdr`, also
-update `README.md`, [docs/user-guide.md](user-guide.md), and the release notes.
+update `README.md`, [docs/user-guide.md](user-guide.md),
+[docs/results.md](results.md), and the release notes.
+
+### Docstring standard
+
+Every name in `sift.__all__` carries a substantive
+[numpydoc](https://numpydoc.readthedocs.io/en/latest/format.html) docstring.
+This is a 0.9.0 release gate, not a style preference: the docstrings are the
+source the generated API reference will be built from in 0.9.1, so an export
+without one silently removes a page from that reference.
+
+The docstring coverage test enforces two mechanical floors:
+
+| requirement | applies to |
+| --- | --- |
+| a `Parameters` section | every callable export (functions and classes) |
+| at least 8 non-empty lines | every export, callables and data alike |
+
+Those are floors, not targets. A good docstring also has a one-line summary, a
+`Returns` section naming the concrete type, `Raises` for the validation errors
+the entry point owns, and an `Examples` section for anything a caller reaches
+first. A class documents its constructor parameters and its fitted attributes
+(the trailing-underscore ones) rather than repeating the function docstring it
+wraps. Keep parameter descriptions honest about defaults that are scheduled to
+change in 1.0 — the deprecation ledger in
+[docs/release-notes.md](release-notes.md) is the list.
+
+`__version__` is the one data export in `sift.__all__`; it is not a callable, so
+the `Parameters` requirement does not reach it.
+
+### Executable documentation blocks
+
+Every fenced `python` block in the manual set executes in CI. The covered files
+are:
+
+- `README.md`
+- `DOCS.MD`
+- `docs/API.md`
+- `docs/user-guide.md`
+- `docs/ADVANCED.md`
+- `docs/troubleshooting.md`
+- `docs/results.md`
+
+**Blocks are standalone by default.** Each block runs in a fresh namespace, so
+it must build its own `X`, `y`, and imports. Prefer tiny synthetic data
+(a few hundred rows and a handful of columns) over `make_regression` at scale:
+the runner allows roughly 20 s per block, and the suite runs under
+warnings-as-errors, so a block that emits an unasserted `UserWarning` or
+`FutureWarning` fails the run exactly as a test would.
+
+Three HTML comments change how a block is handled. Put the marker immediately
+before the fence; one blank line between marker and fence is allowed.
+
+| marker | effect |
+| --- | --- |
+| `<!-- sift-doc: skip reason="..." -->` | do not execute; the reason is required |
+| `<!-- sift-doc: requires=catboost -->` | execute only when the optional dependency is importable |
+| `<!-- sift-doc: continues -->` | execute in the *previous* block's namespace |
+
+Use `continues` only where the narrative genuinely builds across two blocks —
+fitting in one and inspecting the fitted object in the next, for example. A
+chain of `continues` blocks fails as a unit and is much harder to debug than
+one self-contained block, and a reader who lands on the page from a search
+result cannot copy it.
+
+`bash` blocks are not executed; neither are blocks in the specs, the release
+notes, `docs/architecture.md`, `docs/ALGORITHMS.md`, or `CONTRIBUTING.md`.
+
+Both gates — docstring coverage and block execution — run as part of the ordinary
+`python -m pytest -q`, so a docs-only change still needs a suite run before it
+ships.
+
+### Stale references
 
 When moving private selector internals, also check docs and tests for stale
 module names:
@@ -206,16 +278,22 @@ rather than assuming it is green.
 ### Verified dependency band
 
 **The whole declared band is supported — there is no ceiling below what
-`pyproject.toml` allows.** Measured on this tree, each row a full-suite run
-under the warnings-as-errors policy:
+`pyproject.toml` allows.** Each row is a full-suite run under the
+warnings-as-errors policy:
 
 | dependency set | result |
 | --- | --- |
 | floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
-| base (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,685 passed / 25 skipped |
+| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,713 passed / 25 skipped |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+
+Only the base row is re-measured every time this page is touched; it is the
+current count on this tree. The other rows were measured at earlier commits in
+the 0.9 campaign and are not re-run per commit, so their absolute counts trail
+the suite. Read them as green/not-green, and re-measure a row before quoting its
+number.
 
 The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
 13 failures are closed and described in `docs/release-notes.md` under
@@ -319,11 +397,14 @@ python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Release tags must match `v` plus `sift.__version__`. The release workflow verifies
-the exact wheel it attaches to the existing GitHub Release; adding an external
-package index is a future owner decision rather than an implicit release step.
+Release tags must match `v` plus `sift.__version__` — `v0.9.0` for the next
+release, once the release PR bumps `__version__` from its current `0.9.0a1`. The
+release workflow verifies the exact wheel it attaches to the existing GitHub
+Release. There is no publication step and no package index: releasing SIFT means
+creating a GitHub Release with the checked source and wheel distributions
+attached, and nothing else.
 
-For the 0.8.0 release bundle, the focused smoke is:
+For the 0.9.0 release bundle, the focused smoke is:
 
 ```bash
 python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q
