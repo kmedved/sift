@@ -1380,6 +1380,11 @@ def test_auto_k_routes_publish_their_criterion_curve(
 
 
 @pytest.mark.parametrize("k_method", ["knockoff_path", "consensus"])
+# The consensus route legitimately warns when its sub-methods disagree by more
+# than 2x on this small fixture; that advisory is not what this test pins.
+@pytest.mark.filterwarnings(
+    "ignore:consensus auto-k methods disagree by more than 2x:UserWarning"
+)
 def test_routes_without_a_k_curve_say_why(auto_k_frame, k_method):
     X, y = auto_k_frame
     config = sift.AutoKConfig(k_method=k_method, max_k=8)
