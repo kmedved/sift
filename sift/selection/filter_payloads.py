@@ -47,7 +47,9 @@ from sift.selection.cefsplus_binary_common import (
 from sift.selection.filter_auto_k import (
     _AUTOK_FIELD_DEFAULTS,
     _strip_router_only_fields,
+    AUTO_K_CURVE_KEY,
     auto_k_mode_label,
+    build_auto_k_curve_payload,
     prepare_filter_eval_data,
     select_binary_changepoint,
     select_binary_elbow,
@@ -171,7 +173,8 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             else pd.DataFrame(ctx.request.X, columns=prep.feature_names)
         )
         X_eval = X_eval.iloc[prep.row_idx]
-        selected, selected_indices = select_filter_classic_auto_k(
+        want_result = bool(ctx.request.return_result)
+        outcome = select_filter_classic_auto_k(
             y_arr=prep.y_arr,
             eval_X=X_eval,
             feature_names=prep.feature_names,
@@ -189,12 +192,46 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
             verbose=_kw(ctx, "verbose"),
             return_indices=True,
+            return_diagnostics=want_result,
         )
+        ranking = None
+        diagnostics = None
+        if not want_result:
+            selected, selected_indices = outcome
+        else:
+            selected, selected_indices, auto_diag, auto_summary = outcome
+            relevance = _compute_relevance(
+                prep.X_arr,
+                prep.y_arr,
+                prep.w,
+                ctx.request.task,
+                _kw(ctx, "relevance"),
+            )
+            ranking = _path_ranking(
+                prep.feature_names,
+                np.asarray(selected_indices, dtype=np.int64),
+                relevance,
+                ctx.spec.selector,
+            )
+            diagnostics = {
+                "path_relevance": relevance[
+                    np.asarray(selected_indices, dtype=np.int64)
+                ].astype(float).tolist(),
+                "auto_k": auto_summary,
+                "auto_k_diagnostics": auto_diag,
+                AUTO_K_CURVE_KEY: build_auto_k_curve_payload(
+                    k_method=ctx.auto_k_config.k_method,
+                    diagnostics=auto_diag,
+                    summary=auto_summary,
+                ),
+            }
         return SelectionPayload(
             selected_features=selected,
             selected_indices=selected_indices,
             top_m=top_m,
             n_features=len(prep.feature_names),
+            ranking=ranking,
+            diagnostics=diagnostics,
             metadata_extra=prep.target_cv_metadata,
         )
 
@@ -344,9 +381,27 @@ def make_auto_gaussian(
             top_m=top_m,
             selected_indices=selected_indices,
         )
+        ranking = None
         diagnostics = None
-        if include_diagnostics and ctx.request.return_result:
-            diagnostics = {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
+        if ctx.request.return_result:
+            diagnostics = {}
+            if include_diagnostics:
+                diagnostics.update(
+                    {"auto_k": auto_summary, "auto_k_diagnostics": auto_diag}
+                )
+            diagnostics[AUTO_K_CURVE_KEY] = build_auto_k_curve_payload(
+                k_method=ctx.auto_k_config.k_method,
+                diagnostics=auto_diag,
+                summary=auto_summary,
+            )
+            if selected_indices is not None:
+                relevance = _gaussian_relevance_for_input(ctx, cache)
+                ranking = _path_ranking(
+                    ctx.feature_names,
+                    selected_indices,
+                    relevance,
+                    ctx.spec.selector,
+                )
         metadata_extra = {}
         if target_cv_metadata:
             metadata_extra.update(target_cv_metadata)
@@ -358,6 +413,7 @@ def make_auto_gaussian(
             top_m=top_m,
             n_features=n_features,
             metadata_extra=metadata_extra,
+            ranking=ranking,
             diagnostics=diagnostics,
             proxy_correlations=proxy_correlations,
         )
@@ -777,8 +833,14 @@ def _binary_payload_from_selection(
         }
     )
     if options.k_value == "auto":
+        assert ctx.auto_k_config is not None
         diagnostics["auto_k"] = selection.auto_summary
         diagnostics["auto_k_diagnostics"] = selection.auto_diag
+        diagnostics[AUTO_K_CURVE_KEY] = build_auto_k_curve_payload(
+            k_method=ctx.auto_k_config.k_method,
+            diagnostics=selection.auto_diag,
+            summary=selection.auto_summary,
+        )
         if selection.auto_objective is not None:
             diagnostics["auto_k_objective"] = selection.auto_objective.tolist()
 

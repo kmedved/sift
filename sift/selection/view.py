@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
+import datetime
 import hashlib
 import json
 import math
@@ -14,12 +16,19 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from sift._selector_compat import ordered_indices, validate_output_order
 from sift.selection.proxies import normalize_proxy_frame
 
 
 SCHEMA_VERSION = "1"
 CURVE_COLUMNS = ("k", "criterion", "criterion_se", "selected")
 _INPUT_KINDS = {"dataframe", "positional", "unknown"}
+
+# Tag marking a serialized mapping that could not be represented as a plain
+# JSON object because at least one of its keys is not a string.  See
+# ``_json_safe`` for the envelope format.
+_MAPPING_ENVELOPE_TAG = "__sift_mapping__"
+_MAPPING_ENVELOPE_KIND = "typed_key_entries"
 
 
 def _label_token(value: Any) -> Any:
@@ -259,16 +268,77 @@ def _validate_selected_identity(
     return indices
 
 
+def _json_key_token(key: Any) -> dict[str, Any]:
+    """Return a collision-free, JSON-safe token for a mapping key.
+
+    The token records the key's concrete type alongside its JSON-safe value so
+    that ``1`` and ``"1"`` remain distinguishable.  Unsupported key objects
+    raise the same ``TypeError`` as unsupported values.
+    """
+    return {
+        "type": f"{type(key).__module__}.{type(key).__qualname__}",
+        "value": _json_safe(key),
+    }
+
+
 def _json_safe(value: Any) -> Any:
-    if isinstance(value, np.generic):
-        return _json_safe(value.item())
+    """Convert ``value`` into a JSON-serializable structure (schema version 1).
+
+    Conversions
+    -----------
+    - ``None``/``bool``/``int``/``str`` pass through unchanged; non-finite
+      floats, ``pd.NA``, and ``pd.NaT`` become ``None``.
+    - Dates, times, datetimes, and timedeltas become ISO 8601 strings.
+    - ``pathlib.Path`` becomes its string form.
+    - NumPy scalars/arrays, pandas ``Series``/``DataFrame``, and dataclasses
+      become their plain Python equivalents (``DataFrame`` uses
+      ``orient="split"``; dataclasses use :func:`dataclasses.asdict`).
+    - Sequences and sets become lists.
+
+    Mapping envelope
+    ----------------
+    A mapping whose keys are **all** strings serializes as an ordinary JSON
+    object, so the payload root and normal metadata keep their familiar shape.
+    A mapping containing any non-string key would silently merge entries such
+    as ``1`` and ``"1"`` under that representation, so it instead serializes as
+    a tagged, order-preserving envelope::
+
+        {
+            "__sift_mapping__": "typed_key_entries",
+            "entries": [
+                {"key": {"type": "builtins.int", "value": 1}, "value": "int"},
+                {"key": {"type": "builtins.str", "value": "1"}, "value": "str"},
+            ],
+        }
+
+    Each ``key`` token carries the key's concrete type and its JSON-safe value,
+    which keeps distinct keys distinct through ``json.dumps``/``json.loads``.
+    Both forms belong to schema version ``"1"``; consumers that meet a mapping
+    holding the ``"__sift_mapping__"`` tag must read ``entries`` instead of the
+    object's own keys.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` (or a mapping key) has no defined JSON representation.
+        Emitting ``repr()`` would leak memory addresses and produce payloads
+        that cannot be read back, so unsupported objects fail loudly.
+    """
     if value is None or isinstance(value, (bool, int, str)):
         return value
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, (pd.Timestamp, pd.Timedelta)):
+        return value.isoformat()
+    if isinstance(value, datetime.timedelta):
+        return pd.Timedelta(value).isoformat()
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, pd.DataFrame):
         return _json_safe(value.to_dict(orient="split"))
@@ -280,11 +350,26 @@ def _json_safe(value: Any) -> Any:
         }
     if isinstance(value, np.ndarray):
         return _json_safe(value.tolist())
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(dataclasses.asdict(value))
     if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        if all(isinstance(key, str) for key in value):
+            return {key: _json_safe(item) for key, item in value.items()}
+        return {
+            _MAPPING_ENVELOPE_TAG: _MAPPING_ENVELOPE_KIND,
+            "entries": [
+                {"key": _json_key_token(key), "value": _json_safe(item)}
+                for key, item in value.items()
+            ],
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_safe(item) for item in value]
-    return repr(value)
+    raise TypeError(
+        f"{type(value).__module__}.{type(value).__qualname__} has no JSON-safe "
+        "representation in SelectionView schema version "
+        f"{SCHEMA_VERSION!r}; convert it to a primitive, list, mapping, "
+        "dataclass, NumPy/pandas container, or datetime before serializing."
+    )
 
 
 def _validate_table_selection(
@@ -851,7 +936,73 @@ def _normalize_filter_table(
     return table, raw_features, complete
 
 
+_CRITERION_DIRECTIONS = {"higher_is_better", "lower_is_better"}
+
+
+def _normalize_auto_k_curve(payload: Any) -> tuple[pd.DataFrame | None, dict[str, Any]]:
+    """Read a producer-side auto-k curve payload into curve plus metadata.
+
+    Auto-k producers normalize their own route diagnostics (see
+    ``sift.selection.filter_auto_k.build_auto_k_curve_payload``), so adapters
+    never inspect route-specific diagnostic columns themselves.  A route with no
+    k-indexed criterion reports an explicit reason instead of a fabricated curve.
+    """
+    if payload is None:
+        return None, {"curve_available": False}
+    if not isinstance(payload, Mapping):
+        raise ValueError("auto-k curve payload must be a mapping")
+    if not payload.get("available", False):
+        reason = payload.get("unavailable_reason")
+        return None, {
+            "curve_available": False,
+            "curve_unavailable_reason": None if reason is None else str(reason),
+        }
+    criterion = payload.get("criterion")
+    direction = payload.get("criterion_direction")
+    if not isinstance(criterion, str) or not criterion:
+        raise ValueError("auto-k curve payload must name its criterion column")
+    if direction not in _CRITERION_DIRECTIONS:
+        raise ValueError(
+            "auto-k curve payload criterion_direction must be 'higher_is_better' "
+            "or 'lower_is_better'"
+        )
+    curve = payload.get("curve")
+    if not isinstance(curve, pd.DataFrame):
+        raise ValueError("an available auto-k curve payload must carry a DataFrame curve")
+    missing = [column for column in CURVE_COLUMNS if column not in curve.columns]
+    if missing:
+        raise ValueError(f"auto-k curve payload is missing required columns: {missing}")
+    normalized = pd.DataFrame(
+        {
+            "k": _coerce_position_series(
+                curve["k"],
+                label="auto-k curve k",
+                allow_missing=False,
+            ),
+            "criterion": pd.to_numeric(curve["criterion"], errors="coerce").to_numpy(
+                dtype=float
+            ),
+            "criterion_se": pd.to_numeric(
+                curve["criterion_se"], errors="coerce"
+            ).to_numpy(dtype=float),
+            "selected": _coerce_boolean_series(
+                curve["selected"],
+                label="auto-k curve selected",
+            ).to_numpy(),
+        }
+    ).reset_index(drop=True)
+    if normalized["k"].duplicated().any():
+        raise ValueError("auto-k curve payload k values must be unique")
+    return normalized, {
+        "curve_available": True,
+        "criterion": criterion,
+        "criterion_direction": direction,
+        "curve_route": payload.get("route"),
+    }
+
+
 def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
+    from sift.selection.filter_auto_k import AUTO_K_CURVE_KEY
     from sift.selection.result import _PROXY_CORRELATIONS_ATTR
 
     selected = list(result.selected_features)
@@ -892,24 +1043,58 @@ def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
         n_raw_features=raw_width,
         indices=selected_indices,
     )
+    diagnostics = result.diagnostics_
+    curve, curve_metadata = _normalize_auto_k_curve(
+        diagnostics.get(AUTO_K_CURVE_KEY) if isinstance(diagnostics, Mapping) else None
+    )
     metadata.update(
         {
             "adapter": "FilterSelectionResult",
-            "curve_available": False,
             "table_complete": complete,
             "input_kind": "unknown",
         }
     )
+    metadata.update(curve_metadata)
     return SelectionView(
         features=selected,
         indices=selected_indices,
         raw_features=raw_features,
         n_raw_features=raw_width,
         raw_table=table,
+        curve=curve,
         metadata=metadata,
-        diagnostics=result.diagnostics_,
+        diagnostics=diagnostics,
         proxy_correlations=getattr(result, _PROXY_CORRELATIONS_ATTR, None),
     )
+
+
+def _knockoff_dropped_inputs(metadata: Mapping[str, Any]) -> dict[int, str]:
+    """Return ``{raw position: reason}`` for columns knockoffs could not use."""
+    positions = metadata.get("dropped_feature_positions")
+    reasons = metadata.get("dropped_feature_reasons")
+    if positions is None and reasons is None:
+        return {}
+    if positions is None or reasons is None:
+        raise ValueError(
+            "knockoff metadata must carry both 'dropped_feature_positions' and "
+            "'dropped_feature_reasons'"
+        )
+    dropped_positions = _coerce_indices(
+        positions,
+        label="selector_metadata['dropped_feature_positions']",
+    )
+    reason_list = list(reasons)
+    if dropped_positions is None or len(dropped_positions) != len(reason_list):
+        raise ValueError(
+            "knockoff metadata 'dropped_feature_positions' and "
+            "'dropped_feature_reasons' must have the same length"
+        )
+    dropped = dict(zip(dropped_positions, (str(reason) for reason in reason_list)))
+    if len(dropped) != len(dropped_positions):
+        raise ValueError(
+            "knockoff metadata 'dropped_feature_positions' must be unique"
+        )
+    return dropped
 
 
 def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
@@ -928,6 +1113,32 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
     if missing:
         raise ValueError(f"knockoff result W is missing required columns: {missing}")
 
+    source_metadata = copy.deepcopy(dict(result.selector_metadata))
+    # ``n_features`` is the post-screening count the filter ran on; only the
+    # additive ``n_features_input`` establishes the caller's raw matrix width.
+    raw_width = None
+    if source_metadata.get("n_features_input") is not None:
+        raw_width = _strict_integer(
+            source_metadata["n_features_input"],
+            label="selector_metadata['n_features_input']",
+            minimum=0,
+        )
+        if raw_features is not None and len(raw_features) != raw_width:
+            raise ValueError(
+                "input_features length does not match "
+                "selector_metadata['n_features_input']"
+            )
+    elif raw_features is not None:
+        raw_width = len(raw_features)
+    dropped_inputs = _knockoff_dropped_inputs(source_metadata)
+    if raw_width is not None and any(
+        position >= raw_width for position in dropped_inputs
+    ):
+        raise ValueError(
+            "knockoff metadata 'dropped_feature_positions' contains a position "
+            "outside the raw input width"
+        )
+
     positions = _coerce_position_series(
         result.W["selected_index"],
         label="knockoff W selected_index",
@@ -935,9 +1146,11 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
     ).astype(int)
     if positions.duplicated().any():
         raise ValueError("knockoff W selected_index values must be unique and non-negative")
+    if raw_features is not None and (positions >= len(raw_features)).any():
+        raise ValueError("knockoff W contains positions outside input_features")
+    if raw_width is not None and (positions >= raw_width).any():
+        raise ValueError("knockoff W contains positions outside the raw input width")
     if raw_features is not None:
-        if (positions >= len(raw_features)).any():
-            raise ValueError("knockoff W contains positions outside input_features")
         for feature, position in zip(result.W["feature"], positions):
             if not _labels_equal(feature, raw_features[int(position)]):
                 raise ValueError("knockoff W feature identities do not match input_features")
@@ -966,13 +1179,31 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
             values = result.W[column]
             if values.notna().any():
                 table[column] = values.to_numpy(copy=True)
+    if dropped_inputs:
+        present = {int(value) for value in table["selected_index"]}
+        # Columns dropped before knockoff construction have no W row at all;
+        # give them an explicit positional row instead of leaving a silent gap.
+        missing_rows = [
+            {
+                "feature": raw_features[position] if raw_features is not None else None,
+                "selected_index": position,
+                "path_rank": pd.NA,
+                "selected": False,
+            }
+            for position in sorted(set(dropped_inputs).difference(present))
+        ]
+        if missing_rows:
+            table = pd.concat(
+                [table, pd.DataFrame(missing_rows).astype({"selected_index": "Int64"})],
+                ignore_index=True,
+            )
+        table["reason_dropped"] = [
+            dropped_inputs.get(int(position)) for position in table["selected_index"]
+        ]
     table = table.sort_values("selected_index", kind="mergesort").reset_index(drop=True)
 
-    complete = bool(
-        raw_features is not None
-        and len(table) == len(raw_features)
-        and set(int(value) for value in table["selected_index"]) == set(range(len(raw_features)))
-    )
+    covered = {int(value) for value in table["selected_index"]}
+    complete = bool(raw_width is not None and covered == set(range(raw_width)))
     metadata = copy.deepcopy(dict(result.selector_metadata))
     metadata.update(
         {
@@ -987,7 +1218,7 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
         features=selected,
         indices=selected_indices,
         raw_features=raw_features,
-        n_raw_features=len(raw_features) if raw_features is not None else None,
+        n_raw_features=raw_width,
         raw_table=table,
         metadata=metadata,
         diagnostics=result.diagnostics_,
@@ -2021,10 +2252,18 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         )
     selected_mask = np.zeros(n_features, dtype=bool)
     selected_mask[selected_indices] = True
+
+    # The fitted selector's ``output_order`` drives transform, get_support,
+    # and get_feature_names_out.  The view must not silently disagree with it,
+    # so features, indices, and path_rank all follow the same order.
+    output_order = validate_output_order(selector.output_order)
+    view_indices = [int(index) for index in ordered_indices(selected_indices, output_order)]
+    view_selected = [raw_features[index] for index in view_indices]
+
     path_rank = pd.Series(
         pd.array([pd.NA] * n_features, dtype="Int64"),
     )
-    for rank, index in enumerate(selected_indices, start=1):
+    for rank, index in enumerate(view_indices, start=1):
         path_rank.iloc[index] = rank
     table = pd.DataFrame(
         {
@@ -2068,6 +2307,7 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         selected_indices, dtype=np.int64
     )
     transform_selector.selected_feature_names_ = list(selected)
+    transform_selector.output_order = output_order
     transform_selector._fit_feature_names_generated_ = generated_names
     if hasattr(selector, "_sklearn_output_config"):
         transform_selector._sklearn_output_config = copy.deepcopy(
@@ -2100,6 +2340,7 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         "table_complete": True,
         "input_kind": input_kind,
         "raw_namespace": "fitted_candidate_features",
+        "output_order": output_order,
         "task": selector.task,
         "threshold": threshold,
         "max_features": max_features,
@@ -2127,8 +2368,8 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         "completed_bootstraps": completed_bootstraps,
     }
     return SelectionView(
-        features=selected,
-        indices=selected_indices,
+        features=view_selected,
+        indices=view_indices,
         raw_features=raw_features,
         n_raw_features=n_features,
         raw_table=table,

@@ -261,6 +261,49 @@ def _feature_names_for_valid_cols(cache: FeatureCache) -> list[Any]:
     return [cache.feature_names[int(i)] for i in cache.valid_cols]
 
 
+def _input_width_provenance(
+    cache: FeatureCache,
+    *,
+    inactive_valid_positions: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Describe the raw input width and the columns knockoffs could not use.
+
+    ``n_features`` counts the post-screening columns the knockoff filter
+    actually ran on, so it cannot establish the caller's raw matrix width once
+    constant columns are dropped.  ``n_features_input`` is that raw width, and
+    the dropped-position lists say which raw columns are missing and why:
+
+    ``"constant"``
+        Removed while building the copula cache (zero standard deviation), so
+        the column has no row in ``W`` at all.
+    ``"zero_weight_variance"``
+        Kept in the cache but carrying no weighted variance, so it takes no
+        part in knockoff construction.  These columns still have a ``W`` row.
+
+    The keys are omitted when the cache cannot prove the raw width, which
+    happens only for a prebuilt cache that carries no ``feature_names``.
+    """
+    if cache.feature_names is None:
+        return {}
+    n_input = len(cache.feature_names)
+    valid = np.asarray(cache.valid_cols, dtype=np.int64)
+    dropped: list[tuple[int, str]] = [
+        (int(position), "constant")
+        for position in set(range(n_input)).difference(valid.tolist())
+    ]
+    if inactive_valid_positions is not None:
+        dropped.extend(
+            (int(valid[int(position)]), "zero_weight_variance")
+            for position in np.asarray(inactive_valid_positions, dtype=np.int64)
+        )
+    dropped.sort(key=lambda item: item[0])
+    return {
+        "n_features_input": int(n_input),
+        "dropped_feature_positions": [position for position, _ in dropped],
+        "dropped_feature_reasons": [reason for _, reason in dropped],
+    }
+
+
 def _stable_group_codes(groups: Sequence[Any]) -> tuple[list[Any], np.ndarray]:
     labels: list[Any] = []
     mapping: dict[Any, int] = {}
@@ -1385,6 +1428,13 @@ def _select_fdr_cluster_representatives(
             "n_representatives": int(reps_sorted.shape[0]),
         }
     )
+    # The representative run only saw one column per cluster, so its dropped
+    # positions describe the reduced cache.  This result expands back to every
+    # valid column, so recompute the provenance against the full cache.
+    metadata.pop("n_features_input", None)
+    metadata.pop("dropped_feature_positions", None)
+    metadata.pop("dropped_feature_reasons", None)
+    metadata.update(_input_width_provenance(cache))
     diagnostics = dict(rep_result.diagnostics_ or {})
     diagnostics.update(
         {
@@ -1622,6 +1672,12 @@ def select_fdr(
         "group_mode": None if group_labels is None else "signed_max_heuristic",
         "group_fdr_control": None if group_labels is None else "none",
     }
+    metadata.update(
+        _input_width_provenance(
+            resolved_cache,
+            inactive_valid_positions=np.flatnonzero(~active),
+        )
+    )
 
     if zy_var <= 1e-12:
         return _all_zero_result(
