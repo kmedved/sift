@@ -334,7 +334,119 @@ def select_k_knockoff_path(
     *,
     top_m: int,
 ) -> tuple[np.ndarray, int, pd.DataFrame]:
-    """Select originals from a pair-aware knockoff-interleaved CEFS+ path."""
+    """Select originals from a pair-aware knockoff-interleaved CEFS+ path.
+
+    This is the rule behind ``AutoKConfig(k_method="knockoff_path")``. It
+    augments the screened candidate panel with Gaussian-copula knockoffs, runs
+    one pair-aware CEFS+ greedy over originals and knockoffs together, and
+    stops by counting knockoff entries: a knockoff winning a race is direct
+    evidence that entries this deep in the path are noise. Unlike every other
+    auto-k rule it returns a *set* with an approximate FDR reading rather than
+    a path prefix, which makes it a discovery tool; the ``knockoff_return``
+    handling that turns the count back into a prefix lives in the
+    orchestrator, and such a prefix does not inherit the q guarantee. It is
+    experimental: it did not clear the Auto-K v2 accuracy or null-calibration
+    gates, and it loses power at small ``n`` where signals lose races to their
+    own knockoffs.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Its ``Rxx`` is
+        not required to be valid for inactive columns; the active submatrix is
+        rebuilt and validated. Weights must be finite, non-negative, and sum
+        to more than zero, and duplicate non-synthetic feature names are
+        rejected.
+    y : array-like of shape (n_rows_original,)
+        Target aligned to the original rows, not to the cached subsample.
+    config : AutoKConfig
+        Must have ``k_method='knockoff_path'``. Reads ``knockoff_q``,
+        ``knockoff_draws``, ``knockoff_s_method``, ``random_state``, and
+        ``max_k`` (which caps both the joint path depth and the returned set
+        size). ``knockoff_return`` is honored one level up, by the
+        orchestrator. ``min_k`` is not applied: an empty set is a valid answer.
+    top_m : int
+        Number of original/knockoff *pairs* kept by the pair-symmetric screen,
+        clamped to the cache width. The screen ranks pairs by
+        ``max(|corr(original, y)|, |corr(knockoff, y)|)`` so it cannot favor
+        either member.
+
+    Returns
+    -------
+    selected : ndarray of int64
+        Selected original features in cache-valid coordinates (columns of
+        ``cache.Z``, so indices into ``cache.valid_cols``). Empty when the
+        running FDP estimate never reaches ``knockoff_q``.
+    selected_count : int
+        ``len(selected)``; the k this rule reports.
+    diagnostics : DataFrame
+        One row per first-entering pair per draw, with ``draw``, ``rank``,
+        ``pair_position``, ``feature_index_valid``, ``selected_index`` (the
+        original column index), ``label`` (+1 original first, -1 knockoff
+        first), ``entry_step``, ``entry_gain``, ``fdp_hat``, ``selected``,
+        ``q``, ``s_method``, ``screen_pairs``, and ``corr_prune_disabled``.
+        With ``knockoff_draws > 1`` it also carries ``selection_frequency``
+        and ``selected_final``. ``diagnostics.attrs`` records ``q_scope``,
+        ``per_draw_fdr_control``, ``aggregation``, ``aggregation_threshold``,
+        ``aggregation_fdr_control``, and
+        ``aggregation_preserves_per_draw_fdr``.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'knockoff_path'``; if ``y`` does not
+        have ``cache.n_rows_original`` rows; if the cache weights are not
+        finite, non-negative, and positive in sum; if no non-constant feature
+        remains for the knockoff construction; or if the cache fails its
+        structural contract or carries duplicate feature names.
+
+    See Also
+    --------
+    select_fdr : Knockoff W-statistic thresholding with the same q semantics.
+    select_k_perm_gap : Permutation-calibrated path stop.
+    select_k_chi2_stop : Analytic sequential test on the path.
+    AutoKConfig : ``knockoff_q``, ``knockoff_draws``, ``knockoff_s_method``,
+        ``knockoff_return``.
+
+    Notes
+    -----
+    For each screened pair, ``e_j`` is the step where its first member enters
+    the joint path and ``L_j`` is +1 when that member was the original.
+    Ordering pairs by ``e_j`` and applying Selective SeqStep+ to
+    ``FDP_hat(i) = (1 + #{L = -1, rank <= i}) / max(1, #{L = +1, rank <= i})``
+    gives the largest ``i`` with ``FDP_hat(i) <= knockoff_q``; the selected
+    originals are the ``L = +1`` pairs at or before it. FDR control applies to
+    that set, up to the second-order copula approximation of the knockoff
+    construction, and note that reaching a small q needs enough positives
+    before the first negative -- at ``q=0.2`` at least five. Correlation
+    pruning is hard-disabled for the joint run because dropping one member of
+    a pair would destroy exchangeability, and exact ties between an original
+    and its knockoff neutralize the whole pair instead of resolving
+    positionally. With ``knockoff_draws > 1`` the draws are aggregated by
+    selection frequency at 0.5, which is a stability heuristic and is *not*
+    FDR-controlled. Cost is one knockoff sample, one ``2m``-wide correlation,
+    and one ``2m``-wide greedy per draw.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import AutoKConfig, build_cache, select_k_knockoff_path
+    >>> rng = np.random.default_rng(0)
+    >>> columns = [f"f{i}" for i in range(10)]
+    >>> X = pd.DataFrame(rng.normal(size=(400, 10)), columns=columns)
+    >>> y = X.iloc[:, :6].sum(axis=1) + 0.5 * rng.normal(size=400)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> config = AutoKConfig(
+    ...     k_method="knockoff_path", min_k=0, max_k=8, knockoff_q=0.2
+    ... )
+    >>> selected, selected_count, diag = select_k_knockoff_path(
+    ...     cache, y.to_numpy(), config, top_m=10
+    ... )
+    >>> selected_count, sorted(selected.tolist())
+    (6, [0, 1, 2, 3, 4, 5])
+    >>> diag.attrs["q_scope"], diag.attrs["aggregation"]
+    ('per_draw', 'single_draw')
+    """
     validate_auto_k_config(config)
     if config.k_method != "knockoff_path":
         raise ValueError("select_k_knockoff_path requires AutoKConfig(k_method='knockoff_path')")
