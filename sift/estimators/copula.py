@@ -16,7 +16,95 @@ RankBackend = Literal["serial", "threads", "processes"]
 
 @dataclass
 class FeatureCache:
-    """Cached feature data for multi-target selection."""
+    """Cached feature data for multi-target selection.
+
+    Holds the weighted rank-Gaussian (copula) transform of a feature matrix
+    together with the row/column bookkeeping needed to map results back to the
+    caller's original matrix.  Build one with :func:`build_cache` and reuse it
+    across many targets: the expensive per-column rank transform (and, when
+    requested, the ``p x p`` correlation matrix) is paid once, after which
+    :func:`sift.select_cached`, :func:`sift.select_fdr` and the Gaussian filter
+    routes only need a fresh ``y``.  Instances are plain mutable dataclasses
+    and are safe to pickle, but the consumers validate their structural
+    contract on every call, so do not hand-edit the fields.
+
+    Parameters
+    ----------
+    Z : ndarray of shape (n_cached_rows, n_valid_features), float32
+        Weighted rank-Gaussian scores.  Each column is mapped through weighted
+        mid-ranks and the normal quantile function, then weighted-standardized
+        to mean 0 and variance 1.  Non-finite input entries are replaced by
+        their column mean before the transform, so a column that ends up
+        constant is dropped rather than stored.
+    Rxx : ndarray of shape (n_valid_features, n_valid_features), float32 or None
+        Weighted correlation matrix of ``Z``, or ``None`` when the cache was
+        built with ``compute_Rxx=False``.  Consumers that need it recompute a
+        local copy and, with ``verbose=True``, say so.
+    valid_cols : ndarray of shape (n_valid_features,), int
+        Column positions in the *original* matrix that survived the constant
+        column filter, in increasing order.  ``Z[:, j]`` is original column
+        ``valid_cols[j]``.
+    row_idx : ndarray of shape (n_cached_rows,), int
+        Row positions in the original matrix that the cache retained: the
+        positive-weight rows, subsampled without replacement when ``subsample``
+        applied.  Consumers index a full-length ``y`` with this array.
+    sample_weight : ndarray of shape (n_cached_rows,), float32
+        Weights of the retained rows, rescaled so their mean is exactly 1.
+    n_rows_original : int
+        Row count of the matrix the cache was built from.  Consumers require a
+        target of exactly this length.
+    feature_names : list of str or None, default None
+        Labels of *every* original column (length ``n_features``, not
+        ``n_valid_features``).  :func:`build_cache` always fills this in;
+        ``None`` only appears on hand-constructed caches and disables the
+        name-based result paths.
+    feature_names_are_synthetic : bool, default False
+        ``True`` when ``feature_names`` holds the generated positional labels
+        ``"x0", "x1", ...`` because the source matrix was an unlabelled array.
+        This provenance flag is what lets consumers refuse to treat a
+        positional cache as if it carried real DataFrame labels, so a cache
+        without it is rejected as too old.
+
+    Attributes
+    ----------
+    Z, Rxx, valid_cols, row_idx, sample_weight, n_rows_original, feature_names,
+    feature_names_are_synthetic
+        The constructor parameters above, stored as-is.
+
+    See Also
+    --------
+    build_cache : Build a cache from a feature matrix.
+    sift.select_cached : Select features from a cache for one target.
+    sift.select_fdr : Knockoff selection that accepts a prebuilt cache.
+    sift.sample_knockoffs : Draw one Gaussian knockoff copy of a cache.
+
+    Notes
+    -----
+    The cache is a *positional* object: ``valid_cols`` and ``row_idx`` are the
+    only bridge back to the caller's matrix, so a cache must only ever be used
+    with the same columns, in the same order, that built it.  Named caches
+    (``feature_names_are_synthetic=False``) additionally require a DataFrame
+    whose labels match exactly; positional caches require the compatible
+    ndarray.  Weights and the subsample are frozen into the cache, which is why
+    ``sample_weight``, ``subsample`` and ``random_state`` cannot be passed
+    again alongside a prebuilt cache.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import build_cache
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 4)), columns=list("abcd"))
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> cache.Z.shape, cache.Rxx.shape
+    ((200, 4), (4, 4))
+    >>> cache.feature_names, cache.feature_names_are_synthetic
+    (['a', 'b', 'c', 'd'], False)
+    >>> cache.valid_cols.tolist(), int(cache.n_rows_original)
+    ([0, 1, 2, 3], 200)
+    >>> float(np.round(cache.sample_weight.mean(), 6))
+    1.0
+    """
 
     Z: np.ndarray
     Rxx: np.ndarray | None
@@ -38,7 +126,111 @@ def build_cache(
     n_jobs: int = 1,
     rank_backend: RankBackend = "serial",
 ) -> FeatureCache:
-    """Build feature cache for multi-target selection."""
+    """Build feature cache for multi-target selection.
+
+    Applies the weighted rank-Gaussian (copula) transform column by column and
+    packages the result, together with the retained row and column positions,
+    as a :class:`FeatureCache`.  Reach for this when several targets share one
+    feature matrix: the transform (and optionally the ``p x p`` correlation
+    matrix) is computed once here, and :func:`sift.select_cached`,
+    :func:`sift.select_fdr` and the Gaussian filter routes then reuse it for
+    each ``y``.  By default it subsamples to 50,000 positive-weight rows with
+    seed 0, skips the correlation matrix, drops only exactly-constant columns,
+    and returns the cache; nothing about the target is involved, so one cache
+    is valid for every target measured on the same rows.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Numeric feature matrix.  DataFrame column labels are recorded in
+        ``FeatureCache.feature_names``; an unlabelled array gets the generated
+        labels ``"x0", "x1", ...`` and ``feature_names_are_synthetic=True``.
+        Object, category, and string columns are rejected rather than encoded,
+        as are datetime-like columns; non-finite entries are mean-imputed over
+        the retained rows.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Non-negative, finite row weights, ``None`` meaning uniform.  Weights
+        are normalized to mean 1 before use.  Zero-weight rows are excluded
+        from the cache entirely, so they can never be drawn by the subsample.
+    subsample : int or None, default 50000
+        Maximum number of positive-weight rows to retain.  When more rows
+        qualify, exactly ``subsample`` of them are drawn without replacement
+        using ``random_state``.  ``None`` keeps every positive-weight row.
+    random_state : int, default 0
+        Seed for the subsampling draw only; the transform itself is
+        deterministic.  Reuse the same seed to rebuild an identical cache.
+    compute_Rxx : bool, default False
+        When ``True``, also compute the weighted correlation matrix of ``Z``
+        and store it as ``FeatureCache.Rxx``.  Costs ``O(n * p^2)`` time and
+        ``p^2`` float32 entries of memory, but lets every later selection skip
+        that work.  Pass ``True`` when the cache will be reused, particularly
+        for :func:`sift.select_fdr`, which needs the matrix for knockoffs.
+    min_std : float, default 0.0
+        Columns whose standard deviation over the retained, mean-imputed rows
+        is not greater than this are dropped from the cache and omitted from
+        ``valid_cols``.  Must be finite and non-negative; the default drops
+        only exactly-constant columns.
+    n_jobs : int, default 1
+        Worker count for the column-wise transform, passed to joblib.  Ignored
+        when ``rank_backend="serial"``.  Must not be 0.
+    rank_backend : {"serial", "threads", "processes"}, default "serial"
+        How to parallelize the per-column transform.  ``"threads"`` is usually
+        the right choice for wide matrices because the sort and the normal
+        quantile release the GIL; ``"processes"`` isolates workers but copies
+        ``X`` into each one.
+
+    Returns
+    -------
+    FeatureCache
+        Cache holding ``Z`` (float32, shape ``(n_cached_rows, n_valid)``),
+        ``Rxx`` (float32 ``(n_valid, n_valid)`` or ``None``), the retained
+        ``valid_cols`` and ``row_idx`` position arrays, the rescaled
+        ``sample_weight``, ``n_rows_original``, and the feature-name
+        provenance.
+
+    Raises
+    ------
+    ValueError
+        If ``X`` holds object/category/string or datetime-like columns; if
+        ``min_std`` is negative or non-finite; if ``sample_weight`` has the
+        wrong length or contains negative or non-finite values; if the
+        retained rows carry zero total weight; or if every column is dropped
+        as constant.
+
+    See Also
+    --------
+    FeatureCache : The returned container and its field contract.
+    sift.select_cached : Run one cache-backed selection per target.
+    sift.select_fdr : Knockoff selection from a prebuilt cache.
+    sift.select_cefsplus : Filter selector that accepts ``cache=``.
+
+    Notes
+    -----
+    The transform maps each column to weighted mid-ranks, pushes them through
+    the normal quantile function, and weighted-standardizes the result, so
+    Gaussian correlations of ``Z`` are rank (copula) correlations of ``X`` and
+    are invariant to any monotone rescaling of a feature.  Ties share a
+    mid-rank, so the output does not depend on tie order.  Cost is
+    ``O(n log n)`` per column for the sort, plus ``O(n p^2)`` if
+    ``compute_Rxx=True``.  Because the cache freezes the rows and weights it
+    was built from, consumers reject ``sample_weight``, ``subsample`` and
+    ``random_state`` passed alongside a prebuilt cache rather than silently
+    ignoring them.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import build_cache, select_cached
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(300, 6))
+    >>> y1 = X[:, 0] + 0.1 * rng.normal(size=300)
+    >>> y2 = X[:, 3] + 0.1 * rng.normal(size=300)
+    >>> cache = build_cache(X, compute_Rxx=True, subsample=None)
+    >>> cache.Z.shape
+    (300, 6)
+    >>> select_cached(cache, y1, k=1), select_cached(cache, y2, k=1)
+    (['x0'], ['x3'])
+    """
     from sift._impute import mean_impute
     from sift._preprocess import (
         ensure_weights,

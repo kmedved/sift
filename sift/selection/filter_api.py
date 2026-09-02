@@ -312,7 +312,234 @@ def select_mrmr(
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
-    """Minimum Redundancy Maximum Relevance feature selection."""
+    """Minimum Redundancy Maximum Relevance feature selection.
+
+    Greedily grows a feature set that trades relevance to the target against
+    redundancy with the features already chosen, and returns the selected
+    names in selection order.  Reach for it as the fast relevance/redundancy
+    baseline on a wide matrix.  Prefer :func:`sift.select_jmi`,
+    :func:`sift.select_jmim`, or :func:`sift.select_cefsplus` when the
+    informative features are mutually redundant: those condition on the whole
+    selected set rather than penalizing pairwise redundancy, which is the
+    regime in which mRMR can promote a low-relevance, low-redundancy noise
+    column.  With defaults it runs the classic estimator with F-test
+    relevance, screens to ``max(5 * k, 250)`` candidates, subsamples 50,000
+    rows with seed 0, logs progress, and returns a plain ``list[str]``.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Feature matrix.  DataFrame labels are preserved in the output; an
+        unlabelled array yields the positional names ``"x0", "x1", ...``.
+        Object, category, and string columns must either be listed in
+        ``cat_features`` with a ``cat_encoding``, or encoded beforehand.
+    y : Series or ndarray of shape (n_samples,)
+        Target.  Interpreted according to ``task``: numeric for
+        ``"regression"``, class labels for ``"classification"``.
+    k : int or "auto"
+        Number of features to select, treated as an *upper bound*: fewer can
+        come back after constant-column filtering, relevance screening, or an
+        exhausted candidate path.  ``"auto"`` hands the count to the auto-k
+        machinery -- see ``auto_k_config``.
+    task : {"regression", "classification"}
+        Required keyword.  Chooses the relevance estimators and the target
+        validation applied to ``y``.
+    cache : FeatureCache or None, default None
+        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        with ``estimator="gaussian"``.  A named cache requires ``X`` to be the
+        DataFrame whose column labels and order built it; a positional cache
+        requires the matching ndarray.  Because a cache freezes its rows and
+        weights, ``sample_weight``, ``subsample``, and ``random_state`` cannot
+        be passed alongside it.
+    groups : ndarray of shape (n_samples,), str, or None, default None
+        Group labels defining auto-k validation splits, or the name of a
+        DataFrame column to use as such (the column is then removed from the
+        features).  Only meaningful with ``k="auto"``; a fixed-``k`` call that
+        supplies it is rejected rather than silently ignoring it.
+    time : ndarray of shape (n_samples,), str, or None, default None
+        Time values ordering auto-k holdout splits, or the name of a DataFrame
+        column, under the same rules as ``groups``.
+    auto_k_config : AutoKConfig or None, default None
+        Auto-k policy used when ``k="auto"``.  ``None`` infers
+        ``strategy="time_holdout"`` from ``time`` or ``strategy="group_cv"``
+        from ``groups`` and raises if neither is present.  mRMR supports
+        ``k_method="evaluate"`` with ``estimator="classic"``, and additionally
+        ``"auto"``, ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
+        ``"stability"`` with ``estimator="gaussian"``; any other method is
+        rejected by name.  Function-style calls stay on
+        ``auto_k_mode="prefix_only"``: one path is built and its prefixes are
+        scored.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights with at least one positive entry.
+        Used for relevance, redundancy, and auto-k validation scoring.  Not
+        supported by ``estimator="ksg"``, and rejected together with ``cache``.
+    relevance : {"f", "ks", "rf"}, default "f"
+        Marginal relevance score for ``estimator="classic"``.  ``"f"`` is the
+        F-test and works for both tasks; ``"rf"`` is a random-forest score;
+        ``"ks"`` is classification-only.  Ignored by
+        ``estimator="gaussian"``, which always uses copula Gaussian MI.
+    estimator : {"classic", "gaussian"}, default "classic"
+        ``"classic"`` scores relevance with ``relevance`` and redundancy with
+        Pearson-style correlation.  ``"gaussian"`` is the regression-only
+        rank-Gaussian copula path; it is much faster, accepts ``cache``, and
+        is the only route that supports ``store_proxies`` or non-``evaluate``
+        auto-k methods.
+    formula : {"quotient", "difference"}, default "quotient"
+        How relevance and mean redundancy are combined: ``"quotient"`` scores
+        ``relevance / mean_redundancy``, ``"difference"`` scores
+        ``relevance - mean_redundancy``.
+    top_m : int or None, default None
+        Candidate screen applied before the greedy loop.  ``None`` means
+        ``max(5 * k, 250)``; the effective value is never below ``k``.
+    cat_features : list of str or None, default None
+        Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
+        every object, category, and string column.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+"loo_logit"}, default "none"
+        Categorical encoding.  ``"none"`` leaves columns untouched, so
+        non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
+        cross-fitted encoder and needs no optional dependency: every emitted
+        value is a *centered category effect* -- out-of-fold training rows get
+        ``fold_encoding - fold_training_prior`` and inference rows get
+        ``full_fit_encoding - full_training_prior`` -- so a level a fold never
+        saw emits exactly zero rather than a fold-identifying prior, and an
+        ID-like column cannot mark its own fold.  That centering neutralizes
+        only unseen-in-fold emissions; a level appearing twice in a fold's
+        training rows still transmits its siblings' targets, so drop ID-like
+        columns or pass ``groups`` if that must not reach selection.  The
+        remaining values are the legacy full-data supervised encoders and
+        require ``allow_full_data_target_encoding=True``.
+    target_cv_n_splits : int, default 5
+        Requested fold count for ``cat_encoding="target_cv"``.  Must be at
+        least 2; the encoder reports the count it could actually use in
+        result metadata.
+    target_cv_smoothing : {"auto"} or float, default "auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``.  ``"auto"`` is defined
+        by weighted row mass and is therefore available on every fold kind,
+        weighted or not; an explicit value must be finite and non-negative.
+    target_prior : float or None, default None
+        Target-independent prior used to encode the earliest time-fold rows,
+        which have no history.  Only meaningful for time-aware ``"target_cv"``
+        and mutually exclusive with ``warmup_policy="exclude"``.
+    warmup_policy : {"exclude", "zero_weight"}, default "zero_weight"
+        Disposition of those warmup rows when no ``target_prior`` is given.
+        Both settings remove them from the selection fit through zero
+        effective weight.  Only meaningful for time-aware ``"target_cv"``.
+    allow_full_data_target_encoding : bool, default False
+        Opt in to fitting a legacy supervised encoder on every row, which
+        leaks the target into the features.  Required by ``cat_encoding`` in
+        ``{"target", "loo", "james_stein", "loo_logit"}`` and rejected
+        together with ``"target_cv"``, whose cross-fitted contract it
+        contradicts.
+    subsample : int or None, default 50000
+        Row cap for the selection path, sampled with ``random_state``.
+        ``None`` uses every row.  Cannot be passed with ``cache``.
+    random_state : int, default 0
+        Seed for subsampling and for the ``relevance="rf"`` forest.  Cannot be
+        passed with ``cache``; rebuild the cache with the seed you want.
+    n_jobs : int, default 1
+        Worker count for the redundancy loop and, for ``estimator="gaussian"``
+        without a cache, for building the rank-Gaussian transform.  Must not
+        be 0.
+    mrmr_backend : {"auto", "serial", "blas", "processes"}, default "auto"
+        Redundancy-update backend.  ``"auto"`` resolves to ``"blas"``
+        regardless of ``n_jobs``, because the BLAS matvec update avoids
+        process start-up and pickling costs; pass ``"processes"`` explicitly
+        to opt into joblib workers.
+    verbose : bool, default True
+        Log progress at INFO on the ``"sift"`` logger.  Use
+        :func:`sift.set_verbosity` for a process-wide default.
+    return_result : bool, default False
+        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        of the bare list.
+    store_proxies : bool, default False
+        Retain the selection-time copula correlation block so
+        ``result_view().proxies()`` can report near-duplicate stand-ins.
+        Requires ``return_result=True`` and ``estimator="gaussian"``.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` fired after each
+        completed path step with a one-based ``step``.  Exceptions raised
+        inside it propagate.
+
+    Returns
+    -------
+    list of str or FilterSelectionResult
+        By default the selected feature names in selection order.  With
+        ``return_result=True``, a
+        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``selected_features``, ``selected_indices`` (positions in ``X``),
+        ``selector_metadata``, a ``ranking_`` table, and ``diagnostics_``;
+        pass it to :func:`sift.as_result` for a normalized view.
+
+    Raises
+    ------
+    ValueError
+        If ``task`` is not one of the two allowed values; if ``k`` is not a
+        positive integer or ``"auto"``; if ``X`` is not 2-D or its row count
+        differs from ``y``, ``groups``, ``time``, or ``sample_weight``; if
+        ``estimator`` is not ``"classic"`` or ``"gaussian"``; if ``relevance``
+        is invalid for ``task``; if ``groups`` or ``time`` is supplied for a
+        fixed-``k`` call; if ``k="auto"`` has neither split context nor an
+        ``auto_k_config``, or names a ``k_method`` this route does not
+        support; if ``cache`` is combined with a non-Gaussian estimator,
+        ``sample_weight``, ``subsample``, or ``random_state``, or does not
+        match ``X``; if ``store_proxies`` is used without ``return_result`` or
+        outside the Gaussian route; or if the categorical-encoding flags
+        conflict as described above.
+    TypeError
+        If ``cat_features``/``cat_encoding`` are used with an ndarray ``X``.
+
+    Warns
+    -----
+    UserWarning
+        When ``k="auto"`` with ``k_method="auto"`` selects zero features: the
+        routed criterion supported no feature, which is a real answer on
+        noise-like data.  Inspect ``diagnostics_["auto_k"]`` with
+        ``return_result=True``, or pass an explicit
+        ``AutoKConfig(k_method=..., min_k=1)`` for a hard non-empty floor.
+        A fixed-``k`` ``estimator="gaussian"`` run additionally warns when
+        selected features have marginal Gaussian-MI relevance below the noise
+        floor expected from the strongest of the valid columns under
+        independence; the auto-k path builders suppress that check because
+        they truncate the path afterwards.
+
+    See Also
+    --------
+    sift.select_jmi : Joint-information selection that avoids mRMR's failure mode.
+    sift.select_jmim : Conservative minimum-pair variant of JMI.
+    sift.select_cefsplus : Log-determinant conditional-information selection.
+    sift.build_cache : Build the cache the Gaussian route can reuse.
+
+    Notes
+    -----
+    At each step mRMR scores every remaining candidate by its relevance to
+    ``y`` against its mean redundancy with the already-selected set, combining
+    the two by ``formula``.  Both terms are on one scale, which is the source
+    of its known failure mode: once informative features are mutually
+    redundant, a pure-noise column with tiny relevance and tiny redundancy can
+    win.  The classic route measures redundancy with correlations of the raw
+    columns; the Gaussian route measures it as ``-0.5 * log(1 - r**2)`` on
+    rank-Gaussian correlations, which makes it monotone-invariant and lets a
+    :class:`~sift.FeatureCache` be reused across targets.  ``k`` is an upper
+    bound throughout, and every screening or pruning step can only lower the
+    count actually returned.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_mrmr
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> X["dup"] = X["f0"]  # an exact duplicate of a strong feature
+    >>> y = X["f0"] + 0.5 * X["f3"] + 0.1 * rng.normal(size=200)
+    >>> select_mrmr(X, y, k=2, task="regression", verbose=False)
+    ['f0', 'f3']
+    >>> result = select_mrmr(X, y, k=2, task="regression", verbose=False,
+    ...                      return_result=True)
+    >>> result.selected_features, result.selected_indices
+    (['f0', 'f3'], [0, 3])
+    """
     request = _request_from_public_locals(
         locals(),
         task=task,
@@ -338,7 +565,199 @@ def select_jmi(
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
-    """Joint Mutual Information feature selection."""
+    """Joint Mutual Information feature selection.
+
+    Greedily grows a feature set by scoring each candidate on the joint
+    information it carries about the target *together with* each
+    already-selected feature, summed over the selected set.  Because the score
+    conditions on what is already chosen instead of penalizing pairwise
+    redundancy, JMI prefers complementary features and does not share mRMR's
+    tendency to promote low-relevance noise columns.  Use it as the default
+    filter when features overlap; use :func:`sift.select_jmim` for the
+    conservative minimum-pair variant.  With defaults it resolves the
+    estimator from ``task``, screens to ``max(5 * k, 250)`` candidates,
+    subsamples 50,000 rows with seed 0, logs progress, and returns a plain
+    ``list[str]``.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Feature matrix.  DataFrame labels are preserved in the output; an
+        unlabelled array yields the positional names ``"x0", "x1", ...``.
+        Non-numeric columns need ``cat_features``/``cat_encoding`` or
+        pre-encoding.
+    y : Series or ndarray of shape (n_samples,)
+        Target, interpreted according to ``task``.
+    k : int or "auto"
+        Number of features to select, treated as an *upper bound*.  ``"auto"``
+        hands the count to the auto-k machinery -- see ``auto_k_config``.
+    task : {"regression", "classification"}
+        Required keyword.  Chooses the estimator resolution and the target
+        validation applied to ``y``.
+    cache : FeatureCache or None, default None
+        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        with ``estimator="gaussian"``.  A named cache requires the DataFrame
+        whose labels and order built it; a positional cache requires the
+        matching ndarray.  ``sample_weight``, ``subsample``, and
+        ``random_state`` cannot accompany it.
+    groups : ndarray of shape (n_samples,), str, or None, default None
+        Group labels defining auto-k validation splits, or the name of a
+        DataFrame column to use as such (the column is then removed from the
+        features).  Rejected for fixed-``k`` calls.
+    time : ndarray of shape (n_samples,), str, or None, default None
+        Time values ordering auto-k holdout splits, or a DataFrame column
+        name, under the same rules as ``groups``.
+    auto_k_config : AutoKConfig or None, default None
+        Auto-k policy used when ``k="auto"``.  ``None`` infers the strategy
+        from ``time`` or ``groups`` and raises if neither is present.  The
+        classic estimators support ``k_method="evaluate"`` only;
+        ``estimator="gaussian"`` additionally supports ``"auto"``,
+        ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
+        ``"stability"``.  Function-style calls stay on
+        ``auto_k_mode="prefix_only"``.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights with at least one positive entry.
+        With ``estimator="binned"`` they weight both the bin edges and the
+        entropy counts.  Rejected by ``estimator="ksg"`` and by ``cache``.
+    estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
+        Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
+        classification and ``"r2"`` for regression.  ``"binned"`` uses
+        quantile bins and is the only classification-capable choice;
+        ``"r2"``, ``"ksg"``, and ``"gaussian"`` are regression-only.
+        ``"gaussian"`` is the cache-compatible rank-Gaussian path and the only
+        one that accepts ``cache`` or ``store_proxies``.
+    relevance : {"f", "ks", "rf"}, default "f"
+        Marginal relevance used to seed the path and break ties for the
+        classic estimators.  ``"f"`` and ``"rf"`` serve both tasks; ``"ks"``
+        is classification-only.  Ignored by ``estimator="gaussian"``, which
+        uses copula Gaussian MI.
+    top_m : int or None, default None
+        Candidate screen applied before the greedy loop.  ``None`` means
+        ``max(5 * k, 250)``; the effective value is never below ``k``.
+    cat_features : list of str or None, default None
+        Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
+        every object, category, and string column.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+"loo_logit"}, default "none"
+        Categorical encoding.  ``"none"`` leaves columns untouched, so
+        non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
+        cross-fitted encoder: every emitted value is a *centered category
+        effect* -- out-of-fold training rows get
+        ``fold_encoding - fold_training_prior`` and inference rows get
+        ``full_fit_encoding - full_training_prior`` -- so a level a fold never
+        saw emits exactly zero instead of a fold-identifying prior.  That
+        centering neutralizes only unseen-in-fold emissions; a level seen
+        twice in a fold's training rows still transmits its siblings' targets,
+        so drop ID-like columns or pass ``groups`` if that must not reach
+        selection.  The remaining values are legacy full-data supervised
+        encoders and require ``allow_full_data_target_encoding=True``.
+    target_cv_n_splits : int, default 5
+        Requested fold count for ``cat_encoding="target_cv"``; at least 2.
+    target_cv_smoothing : {"auto"} or float, default "auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``.  ``"auto"`` is defined
+        by weighted row mass and works on every fold kind; an explicit value
+        must be finite and non-negative.
+    target_prior : float or None, default None
+        Target-independent prior for the earliest time-fold rows.  Only
+        meaningful for time-aware ``"target_cv"``, and mutually exclusive with
+        ``warmup_policy="exclude"``.
+    warmup_policy : {"exclude", "zero_weight"}, default "zero_weight"
+        Disposition of those warmup rows when no ``target_prior`` is given;
+        both remove them from the selection fit through zero effective weight.
+        Only meaningful for time-aware ``"target_cv"``.
+    allow_full_data_target_encoding : bool, default False
+        Opt in to fitting a legacy supervised encoder on every row.  Required
+        by ``cat_encoding`` in ``{"target", "loo", "james_stein",
+        "loo_logit"}`` and rejected together with ``"target_cv"``.
+    subsample : int or None, default 50000
+        Row cap for the selection path, sampled with ``random_state``.
+        ``None`` uses every row.  Cannot be passed with ``cache``.
+    random_state : int, default 0
+        Seed for subsampling and for the ``relevance="rf"`` forest.  Cannot be
+        passed with ``cache``.
+    verbose : bool, default True
+        Log progress at INFO on the ``"sift"`` logger.
+    return_result : bool, default False
+        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        of the bare list.
+    store_proxies : bool, default False
+        Retain the selection-time copula correlation block for
+        ``result_view().proxies()``.  Requires ``return_result=True`` and
+        ``estimator="gaussian"``.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` fired after each
+        completed path step with a one-based ``step``; exceptions propagate.
+
+    Returns
+    -------
+    list of str or FilterSelectionResult
+        By default the selected feature names in selection order.  With
+        ``return_result=True``, a
+        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``selected_features``, ``selected_indices``, ``selector_metadata``, a
+        ``ranking_`` table, and ``diagnostics_``.
+
+    Raises
+    ------
+    ValueError
+        If ``task`` is invalid; if ``k`` is not a positive integer or
+        ``"auto"``; if ``X`` is not 2-D or row counts disagree; if
+        ``estimator`` is not one of the five allowed values, or is a
+        regression-only estimator used with ``task="classification"``; if
+        ``relevance`` is invalid for ``task``; if ``estimator="ksg"`` is
+        combined with ``sample_weight``; if ``groups`` or ``time`` is supplied
+        for a fixed-``k`` call; if ``k="auto"`` lacks split context and an
+        ``auto_k_config``, or names an unsupported ``k_method``; if ``cache``
+        is combined with a non-Gaussian estimator, ``sample_weight``,
+        ``subsample``, or ``random_state``, or does not match ``X``; if
+        ``store_proxies`` is used without ``return_result`` or outside the
+        Gaussian route; or if the categorical-encoding flags conflict.
+    TypeError
+        If ``cat_features``/``cat_encoding`` are used with an ndarray ``X``.
+
+    Warns
+    -----
+    UserWarning
+        When ``k="auto"`` with ``k_method="auto"`` selects zero features: the
+        routed criterion supported no feature.  Inspect
+        ``diagnostics_["auto_k"]`` with ``return_result=True``, or pass an
+        explicit ``AutoKConfig(k_method=..., min_k=1)`` for a hard non-empty
+        floor.
+
+    See Also
+    --------
+    sift.select_jmim : The conservative minimum-pair aggregation of this score.
+    sift.select_mrmr : Faster relevance/redundancy baseline.
+    sift.select_cefsplus : Log-determinant conditional-information selection.
+    sift.build_cache : Build the cache the Gaussian route can reuse.
+
+    Notes
+    -----
+    The JMI score of a candidate ``f`` given the selected set ``S`` is
+    ``sum over s in S of I(f, s; y)``, so a feature is rewarded for
+    information it adds *jointly* with each incumbent rather than penalized
+    for correlating with it.  Summing keeps the score growing with ``|S|`` and
+    makes it comparatively tolerant of one redundant pair;
+    :func:`sift.select_jmim` takes the minimum instead and is stricter.  The
+    Gaussian route evaluates the pair term in closed form from rank-Gaussian
+    correlations, costing one correlation-row update per step, and can reuse a
+    :class:`~sift.FeatureCache` across targets.  ``k`` is an upper bound.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_jmi
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> X["dup"] = X["f0"]
+    >>> y = X["f0"] + 0.5 * X["f3"] + 0.1 * rng.normal(size=200)
+    >>> select_jmi(X, y, k=2, task="regression", verbose=False)
+    ['f0', 'f3']
+    >>> select_jmi(X, y, k=2, task="regression", estimator="gaussian",
+    ...            verbose=False)
+    ['f0', 'f3']
+    """
     request = _request_from_public_locals(
         locals(),
         task=task,
@@ -364,7 +783,195 @@ def select_jmim(
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
-    """JMI Maximization, using the conservative minimum-pair aggregation."""
+    """JMI Maximization, using the conservative minimum-pair aggregation.
+
+    Identical to :func:`sift.select_jmi` except that a candidate is scored by
+    its *worst* pairing with the already-selected set rather than the sum over
+    all of them.  A feature therefore has to add joint information alongside
+    every incumbent, not merely on average, which makes JMIM the conservative
+    choice when one redundant pair must not carry a candidate through.  It
+    typically returns a smaller, less overlapping set than JMI at the same
+    ``k``.  With defaults it resolves the estimator from ``task``, screens to
+    ``max(5 * k, 250)`` candidates, subsamples 50,000 rows with seed 0, logs
+    progress, and returns a plain ``list[str]``.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Feature matrix.  DataFrame labels are preserved in the output; an
+        unlabelled array yields the positional names ``"x0", "x1", ...``.
+        Non-numeric columns need ``cat_features``/``cat_encoding`` or
+        pre-encoding.
+    y : Series or ndarray of shape (n_samples,)
+        Target, interpreted according to ``task``.
+    k : int or "auto"
+        Number of features to select, treated as an *upper bound*.  ``"auto"``
+        hands the count to the auto-k machinery -- see ``auto_k_config``.
+    task : {"regression", "classification"}
+        Required keyword.  Chooses the estimator resolution and the target
+        validation applied to ``y``.
+    cache : FeatureCache or None, default None
+        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        with ``estimator="gaussian"``.  A named cache requires the DataFrame
+        whose labels and order built it; a positional cache requires the
+        matching ndarray.  ``sample_weight``, ``subsample``, and
+        ``random_state`` cannot accompany it.
+    groups : ndarray of shape (n_samples,), str, or None, default None
+        Group labels defining auto-k validation splits, or the name of a
+        DataFrame column to use as such (the column is then removed from the
+        features).  Rejected for fixed-``k`` calls.
+    time : ndarray of shape (n_samples,), str, or None, default None
+        Time values ordering auto-k holdout splits, or a DataFrame column
+        name, under the same rules as ``groups``.
+    auto_k_config : AutoKConfig or None, default None
+        Auto-k policy used when ``k="auto"``.  ``None`` infers the strategy
+        from ``time`` or ``groups`` and raises if neither is present.  The
+        classic estimators support ``k_method="evaluate"`` only;
+        ``estimator="gaussian"`` additionally supports ``"auto"``,
+        ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
+        ``"stability"``.  Function-style calls stay on
+        ``auto_k_mode="prefix_only"``.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights with at least one positive entry.
+        With ``estimator="binned"`` they weight both the bin edges and the
+        entropy counts.  Rejected by ``estimator="ksg"`` and by ``cache``.
+    estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
+        Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
+        classification and ``"r2"`` for regression.  ``"binned"`` uses
+        quantile bins and is the only classification-capable choice;
+        ``"r2"``, ``"ksg"``, and ``"gaussian"`` are regression-only.
+        ``"gaussian"`` is the cache-compatible rank-Gaussian path and the only
+        one that accepts ``cache`` or ``store_proxies``.
+    relevance : {"f", "ks", "rf"}, default "f"
+        Marginal relevance used to seed the path and break ties for the
+        classic estimators.  ``"f"`` and ``"rf"`` serve both tasks; ``"ks"``
+        is classification-only.  Ignored by ``estimator="gaussian"``.
+    top_m : int or None, default None
+        Candidate screen applied before the greedy loop.  ``None`` means
+        ``max(5 * k, 250)``; the effective value is never below ``k``.
+    cat_features : list of str or None, default None
+        Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
+        every object, category, and string column.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+"loo_logit"}, default "none"
+        Categorical encoding.  ``"none"`` leaves columns untouched, so
+        non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
+        cross-fitted encoder: every emitted value is a *centered category
+        effect* -- out-of-fold training rows get
+        ``fold_encoding - fold_training_prior`` and inference rows get
+        ``full_fit_encoding - full_training_prior`` -- so a level a fold never
+        saw emits exactly zero instead of a fold-identifying prior.  That
+        centering neutralizes only unseen-in-fold emissions; a level seen
+        twice in a fold's training rows still transmits its siblings' targets,
+        so drop ID-like columns or pass ``groups`` if that must not reach
+        selection.  The remaining values are legacy full-data supervised
+        encoders and require ``allow_full_data_target_encoding=True``.
+    target_cv_n_splits : int, default 5
+        Requested fold count for ``cat_encoding="target_cv"``; at least 2.
+    target_cv_smoothing : {"auto"} or float, default "auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``.  ``"auto"`` is defined
+        by weighted row mass and works on every fold kind; an explicit value
+        must be finite and non-negative.
+    target_prior : float or None, default None
+        Target-independent prior for the earliest time-fold rows.  Only
+        meaningful for time-aware ``"target_cv"``, and mutually exclusive with
+        ``warmup_policy="exclude"``.
+    warmup_policy : {"exclude", "zero_weight"}, default "zero_weight"
+        Disposition of those warmup rows when no ``target_prior`` is given;
+        both remove them from the selection fit through zero effective weight.
+        Only meaningful for time-aware ``"target_cv"``.
+    allow_full_data_target_encoding : bool, default False
+        Opt in to fitting a legacy supervised encoder on every row.  Required
+        by ``cat_encoding`` in ``{"target", "loo", "james_stein",
+        "loo_logit"}`` and rejected together with ``"target_cv"``.
+    subsample : int or None, default 50000
+        Row cap for the selection path, sampled with ``random_state``.
+        ``None`` uses every row.  Cannot be passed with ``cache``.
+    random_state : int, default 0
+        Seed for subsampling and for the ``relevance="rf"`` forest.  Cannot be
+        passed with ``cache``.
+    verbose : bool, default True
+        Log progress at INFO on the ``"sift"`` logger.
+    return_result : bool, default False
+        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        of the bare list.
+    store_proxies : bool, default False
+        Retain the selection-time copula correlation block for
+        ``result_view().proxies()``.  Requires ``return_result=True`` and
+        ``estimator="gaussian"``.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` fired after each
+        completed path step with a one-based ``step``; exceptions propagate.
+
+    Returns
+    -------
+    list of str or FilterSelectionResult
+        By default the selected feature names in selection order.  With
+        ``return_result=True``, a
+        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``selected_features``, ``selected_indices``, ``selector_metadata``, a
+        ``ranking_`` table, and ``diagnostics_``.
+
+    Raises
+    ------
+    ValueError
+        If ``task`` is invalid; if ``k`` is not a positive integer or
+        ``"auto"``; if ``X`` is not 2-D or row counts disagree; if
+        ``estimator`` is not one of the five allowed values, or is a
+        regression-only estimator used with ``task="classification"``; if
+        ``relevance`` is invalid for ``task``; if ``estimator="ksg"`` is
+        combined with ``sample_weight``; if ``groups`` or ``time`` is supplied
+        for a fixed-``k`` call; if ``k="auto"`` lacks split context and an
+        ``auto_k_config``, or names an unsupported ``k_method``; if ``cache``
+        is combined with a non-Gaussian estimator, ``sample_weight``,
+        ``subsample``, or ``random_state``, or does not match ``X``; if
+        ``store_proxies`` is used without ``return_result`` or outside the
+        Gaussian route; or if the categorical-encoding flags conflict.
+    TypeError
+        If ``cat_features``/``cat_encoding`` are used with an ndarray ``X``.
+
+    Warns
+    -----
+    UserWarning
+        When ``k="auto"`` with ``k_method="auto"`` selects zero features: the
+        routed criterion supported no feature.  Inspect
+        ``diagnostics_["auto_k"]`` with ``return_result=True``, or pass an
+        explicit ``AutoKConfig(k_method=..., min_k=1)`` for a hard non-empty
+        floor.
+
+    See Also
+    --------
+    sift.select_jmi : The sum aggregation of the same joint-information score.
+    sift.select_mrmr : Faster relevance/redundancy baseline.
+    sift.select_cefsplus : Log-determinant conditional-information selection.
+    sift.build_cache : Build the cache the Gaussian route can reuse.
+
+    Notes
+    -----
+    The JMIM score of a candidate ``f`` given the selected set ``S`` is
+    ``min over s in S of I(f, s; y)``.  The minimum is a hard constraint: one
+    incumbent with which the candidate is uninformative caps its score,
+    whatever the other pairings contribute.  That is exactly why it is more
+    conservative than JMI's sum, and why it is the safer default when a single
+    strong feature would otherwise pull near-duplicates in behind it.  Both
+    aggregations share one path builder, so estimator behavior, screening,
+    weighting, and cache reuse are identical; only the aggregation differs.
+    ``k`` is an upper bound.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_jmim
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> X["dup"] = X["f0"]
+    >>> y = X["f0"] + 0.5 * X["f3"] + 0.1 * rng.normal(size=200)
+    >>> select_jmim(X, y, k=2, task="regression", verbose=False)
+    ['f0', 'f3']
+    >>> select_jmim(X, y, k=3, task="regression", verbose=False)[0]
+    'f0'
+    """
     request = _request_from_public_locals(
         locals(),
         task=task,
@@ -392,7 +999,221 @@ def select_cefsplus(
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
-    """CEFS+ feature selection using log-det Gaussian MI proxy."""
+    """CEFS+ feature selection using log-det Gaussian MI proxy.
+
+    Greedily grows a feature set that maximizes a log-determinant conditional
+    information objective on the rank-Gaussian (copula) transform of ``X``, so
+    each step adds the feature that explains the most target variance *given*
+    everything already selected.  This is SIFT's strongest regression filter
+    and the recommended default: unlike mRMR it conditions on the full
+    selected set rather than penalizing pairwise redundancy, and unlike JMI it
+    accounts for the joint covariance rather than pairs.  It is regression-only
+    -- ``y`` is always read as numeric.  With defaults it selects up to 75
+    features, screens to ``max(5 * k, 250)`` candidates, applies no
+    correlation pruning, subsamples 50,000 rows with seed 0, logs progress,
+    and returns a plain ``list[str]``.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Feature matrix.  DataFrame labels are preserved in the output; an
+        unlabelled array yields the positional names ``"x0", "x1", ...``.
+        Non-numeric columns need ``cat_features``/``cat_encoding`` or
+        pre-encoding.
+    y : Series or ndarray of shape (n_samples,)
+        Numeric regression target.  Must be finite; there is no ``task``
+        argument, so labels-shaped targets are only warned about, not encoded.
+    k : int or "auto", default 75
+        Number of features to select, treated as an *upper bound*.  ``"auto"``
+        hands the count to the auto-k machinery -- see ``auto_k_config``.
+    cache : FeatureCache or None, default None
+        Prebuilt copula cache from :func:`sift.build_cache`, reused instead of
+        transforming ``X`` again.  A named cache requires the DataFrame whose
+        labels and order built it; a positional cache requires the matching
+        ndarray.  Because a cache freezes its rows and weights,
+        ``sample_weight``, ``subsample``, and ``random_state`` cannot be
+        passed alongside it.
+    groups : ndarray of shape (n_samples,), str, or None, default None
+        Group labels defining auto-k validation splits, or the name of a
+        DataFrame column to use as such (the column is then removed from the
+        features).  Rejected for fixed-``k`` calls.
+    time : ndarray of shape (n_samples,), str, or None, default None
+        Time values ordering auto-k holdout splits, or a DataFrame column
+        name, under the same rules as ``groups``.
+    auto_k_config : AutoKConfig or None, default None
+        Auto-k policy used when ``k="auto"``.  Leaving it ``None`` selects the
+        zero-config router, ``AutoKConfig(k_method="auto")``, which needs no
+        ``groups`` or ``time`` and records its branch in
+        ``diagnostics_["auto_k"]``.  CEFS+ supports the widest set of methods:
+        ``"auto"``, ``"evaluate"``, ``"elbow"``, ``"xfit_objective"``,
+        ``"gaussian_cv"``, ``"stability"``, ``"penalized_objective"``,
+        ``"k_posterior"``, ``"chi2_stop"``, ``"forward_stop"``,
+        ``"changepoint"``, ``"perm_gap"``, ``"knockoff_path"``, and
+        ``"consensus"``.  Function-style calls stay on
+        ``auto_k_mode="prefix_only"``: one path is built and its prefixes are
+        scored.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights with at least one positive entry,
+        used for the copula transform, the correlations, and auto-k scoring.
+        Rejected together with ``cache``, whose weights are already fixed.
+    top_m : int or None, default None
+        Candidate screen applied before the greedy loop: only the features
+        with the largest absolute copula correlation with ``y`` compete.
+        ``None`` means ``max(5 * k, 250)`` (``max_k`` in place of ``k`` for
+        auto-k); the effective value is never below ``k``.
+    corr_prune : float or None, default None
+        Redundancy prefilter on the screened panel.  ``None`` means no
+        pruning, which keeps suppressor pairs eligible.  A float in
+        ``(0, 1]`` such as ``0.95`` greedily drops any candidate whose
+        absolute correlation with a better-scoring survivor reaches the
+        threshold -- useful when duplicate suppression matters more than
+        recovering suppressors.
+    cat_features : list of str or None, default None
+        Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
+        every object, category, and string column.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+"loo_logit"}, default "none"
+        Categorical encoding.  ``"none"`` leaves columns untouched, so
+        non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
+        cross-fitted encoder: every emitted value is a *centered category
+        effect* -- out-of-fold training rows get
+        ``fold_encoding - fold_training_prior`` and inference rows get
+        ``full_fit_encoding - full_training_prior`` -- so a level a fold never
+        saw emits exactly zero instead of a fold-identifying prior, and an
+        ID-like column cannot mark its own fold.  That centering neutralizes
+        only unseen-in-fold emissions; a level seen twice in a fold's training
+        rows still transmits its siblings' targets, so drop ID-like columns or
+        pass ``groups`` if that must not reach selection.  The remaining
+        values are legacy full-data supervised encoders and require
+        ``allow_full_data_target_encoding=True``.  Contextual ``"target_cv"``
+        with ``groups`` or ``time`` is accepted only under ``k="auto"`` with
+        ``AutoKConfig(k_method="evaluate")``.
+    target_cv_n_splits : int, default 5
+        Requested fold count for ``cat_encoding="target_cv"``; at least 2.
+        The fitted encoder reports the count it could actually use.
+    target_cv_smoothing : {"auto"} or float, default "auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``.  ``"auto"`` is defined
+        by weighted row mass and is therefore available on every fold kind,
+        weighted or not; an explicit value must be finite and non-negative.
+    target_prior : float or None, default None
+        Target-independent prior used to encode the earliest time-fold rows,
+        which have no history.  Only meaningful for time-aware ``"target_cv"``
+        and mutually exclusive with ``warmup_policy="exclude"``.
+    warmup_policy : {"exclude", "zero_weight"}, default "zero_weight"
+        Disposition of those warmup rows when no ``target_prior`` is given;
+        both remove them from the selection fit through zero effective weight.
+        Only meaningful for time-aware ``"target_cv"``.
+    allow_full_data_target_encoding : bool, default False
+        Opt in to fitting a legacy supervised encoder on every row, which
+        leaks the target into the features.  Required by ``cat_encoding`` in
+        ``{"target", "loo", "james_stein", "loo_logit"}`` and rejected
+        together with ``"target_cv"``.
+    subsample : int or None, default 50000
+        Row cap for the copula cache built from ``X``, sampled with
+        ``random_state``.  ``None`` uses every positive-weight row.  Cannot be
+        passed with ``cache``.
+    random_state : int, default 0
+        Seed for that subsampling draw and for stochastic auto-k methods.
+        Cannot be passed with ``cache``; rebuild the cache with the seed you
+        want.
+    verbose : bool, default True
+        Log progress at INFO on the ``"sift"`` logger.  Use
+        :func:`sift.set_verbosity` for a process-wide default.
+    return_result : bool, default False
+        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        of the bare list.  Required to inspect the objective path and the
+        auto-k diagnostics.
+    store_proxies : bool, default False
+        Retain the selection-time candidate-by-selected copula correlation
+        block so ``result_view().proxies()`` can report near-duplicate
+        stand-ins for a selected feature.  Requires ``return_result=True``;
+        the block never contains ``X`` or a cache.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` fired after each
+        completed greedy step with a one-based ``step``.  Exceptions raised
+        inside it propagate.
+
+    Returns
+    -------
+    list of str or FilterSelectionResult
+        By default the selected feature names in selection order.  With
+        ``return_result=True``, a
+        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``selected_features``, ``selected_indices`` (positions in ``X``),
+        ``selector_metadata``, a ``ranking_`` table, and ``diagnostics_``
+        holding the cumulative ``"objective_path"`` and its per-step
+        ``"objective_gain"`` for a fixed ``k``, or the ``"auto_k"`` summary,
+        diagnostics, and curve when ``k="auto"``.
+
+    Raises
+    ------
+    ValueError
+        If ``k`` is not a positive integer or ``"auto"``; if ``X`` is not 2-D
+        or its row count differs from ``y``, ``groups``, ``time``, or
+        ``sample_weight``; if ``y`` is non-finite; if ``corr_prune`` is
+        outside ``(0, 1]``; if ``groups`` or ``time`` is supplied for a
+        fixed-``k`` call; if ``k="auto"`` names a ``k_method`` this route does
+        not support; if contextual ``cat_encoding="target_cv"`` is combined
+        with ``groups``/``time`` outside ``k_method="evaluate"``; if ``cache``
+        is combined with ``sample_weight``, ``subsample``, or
+        ``random_state``, or does not match ``X``; if ``store_proxies`` is
+        used without ``return_result``; or if the categorical-encoding flags
+        conflict as described above.
+    TypeError
+        If ``cat_features``/``cat_encoding`` are used with an ndarray ``X``.
+
+    Warns
+    -----
+    UserWarning
+        When ``y`` holds only 3-20 distinct integer-valued levels and so looks
+        like multiclass labels rather than a numeric target -- use a
+        ``task="classification"`` selector or
+        :func:`sift.select_cefsplus_binary` instead.  Also when ``k="auto"``
+        with ``k_method="auto"`` selects zero features: the routed criterion
+        supported no feature, which is a real answer on noise-like data.
+        Inspect ``diagnostics_["auto_k"]`` with ``return_result=True``, or
+        pass an explicit ``AutoKConfig(k_method=..., min_k=1)`` for a hard
+        non-empty floor.
+
+    See Also
+    --------
+    sift.select_cefsplus_binary : Binary-target counterpart with a logistic path.
+    sift.select_cached : Same objective, run repeatedly against one cache.
+    sift.build_cache : Build the cache this selector can reuse.
+    sift.select_fdr : Error-controlled discovery instead of a fixed count.
+
+    Notes
+    -----
+    Selecting ``j`` given the current set ``S`` maximizes
+    ``log|Sigma_{S+j}| - log|Sigma_{y,S+j}|``, whose cumulative value equals
+    ``2 * I(y; S)`` under the fitted Gaussian copula and is what
+    ``diagnostics_["objective_path"]`` reports; it is non-decreasing by
+    construction.  The step is evaluated by a partial Cholesky (residual)
+    recursion costing ``O(m * t)`` at step ``t`` for ``m`` screened
+    candidates, so ``O(m * k**2)`` overall, and it issues no BLAS calls, so it
+    cannot thrash the caller's thread pool.  Because everything before the
+    greedy loop is target-independent, passing a prebuilt
+    :class:`~sift.FeatureCache` makes repeated selection across targets cheap;
+    :func:`sift.select_cached` is the direct form of that loop.  ``k`` is an
+    upper bound throughout.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_cefsplus
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(300, 8)),
+    ...                  columns=[f"f{i}" for i in range(8)])
+    >>> y = X["f1"] + 0.8 * X["f4"] + 0.1 * rng.normal(size=300)
+    >>> select_cefsplus(X, y, k=2, verbose=False)
+    ['f1', 'f4']
+    >>> select_cefsplus(X, y, k="auto", verbose=False)  # zero-config router
+    ['f1', 'f4']
+    >>> result = select_cefsplus(X, y, k=2, verbose=False, return_result=True)
+    >>> path = result.diagnostics_["objective_path"]
+    >>> len(path), path[1] >= path[0]
+    (2, True)
+    """
     request = _request_from_public_locals(
         locals(),
         task="regression",
@@ -421,7 +1242,224 @@ def select_cefsplus_binary(
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
-    """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy."""
+    """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy.
+
+    Greedily grows a feature set for a two-class target by ranking each
+    candidate on the conditional Bernoulli deviance it would remove from a
+    weighted logistic fit on the features already selected, scored with a
+    Rao/Fisher score-test update.  Use it as the binary counterpart of
+    :func:`sift.select_cefsplus` when the target really is a label and a
+    logistic path is the right proxy; it is a different estimator, not the
+    Gaussian log-determinant objective under another name.  With defaults it
+    runs the log-loss path over all finite candidates and all rows, refits the
+    selected-feature logistic every step, applies no correlation pruning, logs
+    progress, and returns a plain ``list[str]``.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Feature matrix.  DataFrame labels are preserved in the output; an
+        unlabelled array yields the positional names ``"x0", "x1", ...``.
+        Non-numeric columns need ``cat_features``/``cat_encoding`` or
+        pre-encoding.
+    y : Series or ndarray of shape (n_samples,)
+        Binary target with exactly two distinct non-missing values.  Labels of
+        any hashable type are accepted and mapped to ``0``/``1``; the mapping
+        is reported in the result metadata.
+    k : int or "auto"
+        Number of features to select, treated as an *upper bound*.  ``"auto"``
+        hands the count to the auto-k machinery -- see ``auto_k_config``.
+    loss : {"logloss", "brier"}, default "logloss"
+        Selection proxy.  ``"logloss"`` runs the greedy logistic score-test
+        path described above.  ``"brier"`` instead delegates to
+        :func:`sift.select_cefsplus` with the 0/1 target cast to float, which
+        makes the Gaussian-only options (notably ``store_proxies``) available
+        and reports ``delegate_selector="cefsplus"`` in metadata.
+    top_m : int or None, default None
+        Candidate screen applied before the greedy loop.  Unlike the other
+        filters, ``None`` here means *every* finite candidate, so set it
+        explicitly for wide binary screens.
+    corr_prune : float or None, default None
+        Absolute weighted feature-correlation pruning threshold in ``(0, 1]``.
+        ``None`` means no pruning, which keeps possible suppressor pairs.
+    groups : ndarray of shape (n_samples,), str, or None, default None
+        Group labels defining auto-k validation splits, or the name of a
+        DataFrame column to use as such (the column is then removed from the
+        features).  Rejected for fixed-``k`` calls.
+    time : ndarray of shape (n_samples,), str, or None, default None
+        Time values ordering auto-k holdout splits, or a DataFrame column
+        name, under the same rules as ``groups``.
+    auto_k_config : AutoKConfig or None, default None
+        Auto-k policy used when ``k="auto"``.  Leaving it ``None`` selects the
+        zero-config router, ``AutoKConfig(k_method="auto")``, which needs no
+        ``groups`` or ``time``.  Binary CEFS+ supports ``"auto"``,
+        ``"evaluate"``, ``"elbow"``, ``"penalized_objective"``,
+        ``"k_posterior"``, and ``"changepoint"``; the log-loss path also
+        rejects non-default ``auto_dense_*`` fields rather than ignoring them,
+        while ``loss="brier"`` inherits the Gaussian CEFS+ contract.  For
+        ``k="auto"`` the path is built out to ``AutoKConfig.max_k``.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights with at least one positive entry.
+        Combined multiplicatively with ``class_weight`` and normalized to mean
+        1; each class must retain positive total weight.
+    class_weight : None, "balanced", or dict, default None
+        Per-class multiplier.  ``"balanced"`` equalizes the two classes' total
+        weight; a dict must supply a finite, non-negative value for both *raw*
+        class labels.  Weights are resolved on the input rows *before* any
+        ``subsample`` draw, which the metadata records as
+        ``class_weight_scope="pre_subsample"``.
+    ridge : float, default 0.0001
+        Positive, finite L2 penalty stabilizing both the selected-feature
+        logistic fit and the candidate score-test information; the same term
+        enters every candidate denominator.
+    refit_every : int, default 1
+        Positive step interval at which the selected-feature logistic null is
+        refit.  The default refits every step.  Larger values switch to a
+        block-Gram accelerator between refits and should be treated as an
+        approximate speed mode, not an equivalent computation.
+    cat_features : list of str or None, default None
+        Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
+        every object, category, and string column.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+"loo_logit"}, default "none"
+        Categorical encoding.  ``"none"`` leaves columns untouched, so
+        non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
+        cross-fitted encoder: every emitted value is a *centered category
+        effect* -- out-of-fold training rows get
+        ``fold_encoding - fold_training_prior`` and inference rows get
+        ``full_fit_encoding - full_training_prior`` -- so a level a fold never
+        saw emits exactly zero instead of a fold-identifying prior.  That
+        centering neutralizes only unseen-in-fold emissions; a level seen
+        twice in a fold's training rows still transmits its siblings' targets,
+        so drop ID-like columns or pass ``groups`` if that must not reach
+        selection.  ``"loo_logit"`` is the binary-specific leave-one-out logit
+        encoder tuned by ``loo_smoothing`` and the clip bounds; under
+        ``loss="brier"`` it is delegated as plain ``"loo"``.  Every value but
+        ``"none"`` and ``"target_cv"`` requires
+        ``allow_full_data_target_encoding=True``.
+    target_cv_n_splits : int, default 5
+        Requested fold count for ``cat_encoding="target_cv"``; at least 2.
+    target_cv_smoothing : {"auto"} or float, default "auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``.  ``"auto"`` is defined
+        by weighted row mass and works on every fold kind; an explicit value
+        must be finite and non-negative.
+    target_prior : float or None, default None
+        Target-independent prior for the earliest time-fold rows; for a binary
+        target it must lie in ``[0, 1]``.  Only meaningful for time-aware
+        ``"target_cv"``, and mutually exclusive with
+        ``warmup_policy="exclude"``.
+    warmup_policy : {"exclude", "zero_weight"}, default "zero_weight"
+        Disposition of those warmup rows when no ``target_prior`` is given;
+        both remove them from the selection fit through zero effective weight.
+        Only meaningful for time-aware ``"target_cv"``.
+    loo_smoothing : float, default 20.0
+        Positive, finite smoothing constant pulling each category's
+        leave-one-out rate toward the global prior, for
+        ``cat_encoding="loo_logit"``.
+    loo_clip_min : float, default 0.0001
+        Lower probability clip applied before the logit, for
+        ``cat_encoding="loo_logit"``.
+    loo_clip_max : float, default 0.9999
+        Upper probability clip, which must satisfy
+        ``0 < loo_clip_min < loo_clip_max < 1``.
+    allow_full_data_target_encoding : bool, default False
+        Opt in to fitting a legacy supervised encoder on every row.  Required
+        by ``cat_encoding`` in ``{"target", "loo", "james_stein",
+        "loo_logit"}`` and rejected together with ``"target_cv"``.
+    subsample : int or None, default None
+        Row cap for the selection path, sampled with ``random_state``.  Unlike
+        the other filters this defaults to ``None``, meaning every row.
+    random_state : int, default 0
+        Seed for the subsampling draw and for stochastic auto-k methods.
+    verbose : bool, default True
+        Log progress at INFO on the ``"sift"`` logger.
+    return_result : bool, default False
+        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        of the bare list.
+    store_proxies : bool, default False
+        Retain the selection-time copula correlation block for
+        ``result_view().proxies()``.  Requires ``return_result=True`` and
+        ``loss="brier"``; the log-loss path rejects it rather than ignoring it.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` fired after each
+        completed path step with a one-based ``step``; exceptions propagate.
+
+    Returns
+    -------
+    list of str or FilterSelectionResult
+        By default the selected feature names in selection order.  With
+        ``return_result=True``, a
+        :class:`~sift.selection.result.FilterSelectionResult` whose
+        ``selector_metadata`` records ``selector="cefsplus_binary"``, the
+        ``loss``, the ``target_mapping`` from raw labels to ``0``/``1``,
+        whether the run was ``weighted``, and the ``class_weight`` scope.
+
+    Raises
+    ------
+    ValueError
+        If ``y`` does not have exactly two distinct non-missing classes, or
+        holds missing or non-finite values; if either class ends up with
+        non-positive effective weight; if ``k`` is not a positive integer or
+        ``"auto"``; if ``X`` is not 2-D or row counts disagree; if ``loss`` is
+        not ``"logloss"`` or ``"brier"``; if ``ridge`` is not positive and
+        finite; if ``refit_every`` is not a positive integer; if ``top_m`` or
+        ``subsample`` is not a positive integer or ``None``; if ``corr_prune``
+        is outside ``(0, 1]``; if the ``loo_*`` bounds violate
+        ``0 < min < max < 1`` or ``loo_smoothing`` is not positive; if
+        ``class_weight`` is neither ``None``, ``"balanced"``, nor a dict
+        covering both raw labels; if ``groups`` or ``time`` is supplied for a
+        fixed-``k`` call; if ``k="auto"`` names an unsupported ``k_method`` or
+        sets ``auto_dense_*`` on the log-loss path; if ``store_proxies`` is
+        used without ``return_result`` or on the log-loss path; or if the
+        categorical-encoding flags conflict.
+    TypeError
+        If ``cat_features``/``cat_encoding`` are used with an ndarray ``X``.
+
+    Warns
+    -----
+    UserWarning
+        When ``k="auto"`` with ``k_method="auto"`` selects zero features: the
+        routed criterion supported no feature, which is a real answer on
+        noise-like data.  Inspect ``diagnostics_["auto_k"]`` with
+        ``return_result=True``, or pass an explicit
+        ``AutoKConfig(k_method=..., min_k=1)`` for a hard non-empty floor.
+
+    See Also
+    --------
+    sift.select_cefsplus : Regression counterpart, and the ``"brier"`` delegate.
+    sift.select_mrmr : Task-aware relevance/redundancy filter.
+    sift.select_jmim : Conservative joint-information filter.
+
+    Notes
+    -----
+    The log-loss path standardizes the weighted columns, fits an
+    intercept-only Bernoulli model, and then repeatedly admits the candidate
+    with the largest ridge-regularized score-test statistic against the
+    current selected-feature fit, refitting that fit every ``refit_every``
+    steps.  Scoring candidates by a score test rather than by ``k`` separate
+    logistic refits is what keeps the path affordable; the price is that the
+    ranking is a local quadratic approximation around the current fit, not an
+    exact deviance comparison.  ``loss="brier"`` sidesteps the logistic path
+    entirely by handing the 0/1 target to the Gaussian log-determinant
+    objective.  Constant or non-finite columns are dropped before selection
+    and reported in the diagnostics, and ``k`` is an upper bound throughout.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_cefsplus_binary
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(300, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> logit = 1.5 * X["f2"] - 1.5 * X["f5"]
+    >>> y = (rng.uniform(size=300) < 1.0 / (1.0 + np.exp(-logit))).astype(int)
+    >>> select_cefsplus_binary(X, y, k=2, verbose=False)
+    ['f5', 'f2']
+    >>> result = select_cefsplus_binary(X, y, k=2, verbose=False,
+    ...                                 return_result=True)
+    >>> result.selector_metadata["selector"], result.selector_metadata["loss"]
+    ('cefsplus_binary', 'logloss')
+    """
     request = _request_from_public_locals(
         locals(),
         task="classification",

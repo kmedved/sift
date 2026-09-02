@@ -79,7 +79,96 @@ _SUBSAMPLE_DEFAULT = _SubsampleDefaultType()
 
 @dataclass(frozen=True)
 class KnockoffSelectionResult:
-    """Result object for q-calibrated knockoff selection."""
+    """Result object for q-calibrated knockoff selection.
+
+    Returned by :func:`select_fdr`.  Alongside the selected set it carries the
+    full per-feature ``W`` table, the threshold that produced the selection,
+    and the validity metadata that says how strong the FDR claim actually is
+    -- read ``selector_metadata["fdr_control"]`` before quoting one.  The
+    object is a frozen dataclass, so it is safe to keep and pass around; call
+    :meth:`result_view` for the normalized :class:`~sift.SelectionView`.
+
+    Parameters
+    ----------
+    selected_features : list
+        Selected feature labels, ordered by descending mean ``W`` with ties
+        broken by cache column order.  Empty when nothing cleared the
+        threshold, which is a valid answer.
+    selected_indices : list of int or None
+        Positions of those features in the original feature matrix, in the
+        same order.
+    selector_metadata : dict
+        Run configuration and validity provenance: ``q``, ``offset``,
+        ``statistic``, ``s_method``, ``n_draws``, ``eta``, the shrinkage
+        diagnostics ``gamma`` and ``lambda_min``, the power diagnostics
+        ``s_mean``, ``s_median`` and ``n_low_power_features``, the raw input
+        width ``n_features_input`` with ``dropped_feature_positions`` and
+        ``dropped_feature_reasons``, and the claim fields ``fdr_control``,
+        ``per_draw_fdr_control``, ``q_scope``, ``aggregation``,
+        ``aggregation_fdr_control`` and ``validity_model``.
+    W : DataFrame
+        One row per valid cache feature with columns ``feature``,
+        ``selected_index``, ``W`` (the mean statistic over draws),
+        ``selected``, ``selection_frequency``, ``relevance``, ``selector``,
+        and one ``W_draw_<i>`` column per draw.  Grouped runs add
+        ``feature_group``, and ``feature_groups="auto"`` adds
+        ``is_representative``.
+    threshold : float or None
+        The knockoff threshold for a single draw -- ``inf`` when no data-driven
+        threshold exists -- and ``None`` for a derandomized ``n_draws > 1``
+        run, where selection is by frequency instead.
+    selection_frequency : Series or None
+        Fraction of draws that selected each feature, indexed by feature
+        label, when ``n_draws > 1``; ``None`` for a single draw.
+    diagnostics_ : dict or None, default None
+        Per-draw detail: ``thresholds``, ``selection_sets`` (original column
+        positions), and ``active_valid_positions``.  Grouped runs add
+        ``feature_groups``, ``group_W_draws`` and ``group_thresholds``;
+        ``feature_groups="auto"`` also adds ``cluster_labels``,
+        ``cluster_representatives_valid_positions``, and the nested
+        ``representative_result``.
+
+    Attributes
+    ----------
+    selected_features, selected_indices, selector_metadata, W, threshold,
+    selection_frequency, diagnostics_
+        The constructor fields above, stored as-is.
+
+    See Also
+    --------
+    select_fdr : The selector that produces this result.
+    sift.as_result : Convert it to a normalized view.
+    sift.SelectionView : The normalized view type.
+
+    Notes
+    -----
+    ``W`` covers only the features the filter actually ran on: constant
+    columns never reach the cache, and columns with no weighted variance take
+    no part in knockoff construction.  ``selector_metadata`` reconciles that
+    against the caller's matrix through ``n_features_input`` and the
+    dropped-position lists, so ``len(W)`` is not the raw feature count.  The
+    ``W`` statistic is antisymmetric under swapping a feature with its
+    knockoff: positive values are evidence for the original, and the threshold
+    calibrates how many negatives the selected set is allowed to imply.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_fdr
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(300, 8)),
+    ...                  columns=[f"f{i}" for i in range(8)])
+    >>> beta = np.zeros(8)
+    >>> beta[:5] = 2.5
+    >>> y = X.to_numpy() @ beta + 0.5 * rng.normal(size=300)
+    >>> result = select_fdr(X, y, q=0.2, random_state=0, verbose=False)
+    >>> sorted(result.selected_features), result.selection_frequency is None
+    (['f0', 'f1', 'f2', 'f3', 'f4'], True)
+    >>> len(result.W), sorted(result.diagnostics_)
+    (8, ['active_valid_positions', 'selection_sets', 'thresholds'])
+    >>> result.get_feature_ranking().loc[0, ["feature", "rank", "selected"]].tolist()
+    ['f4', 1, True]
+    """
 
     selected_features: list[Any]
     selected_indices: Optional[list[int]]
@@ -90,6 +179,44 @@ class KnockoffSelectionResult:
     diagnostics_: Optional[dict[str, Any]] = None
 
     def get_feature_ranking(self) -> pd.DataFrame:
+        """Return the ``W`` table sorted into a stable feature ranking.
+
+        Reorders a copy of :attr:`W` by descending ``W``, breaking ties by the
+        original row order so the result is deterministic, and inserts a
+        one-based ``rank`` column.  Unselected features are ranked too, which
+        makes this the table to read when you want to see how close the
+        near-misses came to the threshold.
+
+        Returns
+        -------
+        DataFrame
+            Columns ``feature``, optionally ``feature_group``, then ``W``,
+            ``rank``, ``selected``, ``selection_frequency``,
+            ``selected_index``, ``relevance``, and ``selector``, with a fresh
+            zero-based index.  The per-draw ``W_draw_<i>`` columns of
+            :attr:`W` are not carried over.
+
+        See Also
+        --------
+        KnockoffSelectionResult.result_view : Normalized view of the same data.
+
+        Examples
+        --------
+        >>> import numpy as np, pandas as pd
+        >>> from sift import select_fdr
+        >>> rng = np.random.default_rng(0)
+        >>> X = pd.DataFrame(rng.normal(size=(300, 8)),
+        ...                  columns=[f"f{i}" for i in range(8)])
+        >>> beta = np.zeros(8)
+        >>> beta[:5] = 2.5
+        >>> y = X.to_numpy() @ beta + 0.5 * rng.normal(size=300)
+        >>> ranking = select_fdr(X, y, q=0.2, random_state=0,
+        ...                      verbose=False).get_feature_ranking()
+        >>> ranking["rank"].tolist()
+        [1, 2, 3, 4, 5, 6, 7, 8]
+        >>> bool(ranking["W"].is_monotonic_decreasing)
+        True
+        """
         ranking = self.W.copy()
         ranking["_feature_order"] = np.arange(len(ranking), dtype=np.int64)
         ranking = ranking.sort_values(
@@ -116,7 +243,45 @@ class KnockoffSelectionResult:
         return ranking[columns]
 
     def result_view(self, input_features=None):
-        """Return an additive normalized view without changing this result."""
+        """Return an additive normalized view without changing this result.
+
+        Convenience wrapper around :func:`sift.as_result`.  This result object
+        is left exactly as it is; the view is a separate, normalized copy.
+
+        Parameters
+        ----------
+        input_features : sequence or None, default None
+            Ordered labels of every raw input column, used to establish the
+            view's raw feature identity and column hash when the result alone
+            cannot prove it.  ``None`` leaves the view with whatever identity
+            the result carries.
+
+        Returns
+        -------
+        SelectionView
+            Normalized view exposing ``features``, ``indices``, ``k``,
+            ``table``, and ``metadata``.
+
+        See Also
+        --------
+        sift.as_result : The generic converter this delegates to.
+        sift.SelectionView : The returned view type.
+
+        Examples
+        --------
+        >>> import numpy as np, pandas as pd
+        >>> from sift import select_fdr
+        >>> rng = np.random.default_rng(0)
+        >>> X = pd.DataFrame(rng.normal(size=(300, 8)),
+        ...                  columns=[f"f{i}" for i in range(8)])
+        >>> beta = np.zeros(8)
+        >>> beta[:5] = 2.5
+        >>> y = X.to_numpy() @ beta + 0.5 * rng.normal(size=300)
+        >>> view = select_fdr(X, y, q=0.2, random_state=0,
+        ...                   verbose=False).result_view()
+        >>> view.k, sorted(view.features)
+        (5, ['f0', 'f1', 'f2', 'f3', 'f4'])
+        """
         from sift.selection.view import as_result
 
         return as_result(self, input_features=input_features)
@@ -1171,7 +1336,88 @@ def sample_knockoffs(
     min_eig: float = 1e-3,
     random_state: int = 0,
 ) -> np.ndarray:
-    """Fit and sample one Gaussian-copula knockoff draw for a cache."""
+    """Fit and sample one Gaussian-copula knockoff draw for a cache.
+
+    Fits the second-order Gaussian knockoff operators from the cache's own
+    copula correlation matrix and returns one sampled knockoff copy of
+    ``cache.Z``, laid out on exactly the same columns.  This is an advanced
+    helper for diagnostics and for building custom feature statistics -- for
+    ordinary discovery use :func:`select_fdr`, which does the fitting,
+    sampling, statistic, and thresholding in one call.  With defaults it uses
+    equicorrelated decorrelation and seed 0, and returns a fresh float32
+    array; nothing is cached or mutated on ``cache``.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Cache from :func:`sift.build_cache`.  Its structural contract is
+        revalidated here, duplicate non-synthetic feature names are rejected,
+        and its weights must be finite, non-negative, and sum above zero.
+        ``Rxx`` is used when present and recomputed locally otherwise.
+    s_method : {"equi", "mvr", "me"}, default "equi"
+        How the knockoff decorrelation vector ``s`` is solved.  ``"equi"`` is
+        the cheapest; ``"mvr"`` and ``"me"`` run diagonal coordinate descent
+        and can raise power on correlated designs.
+    min_eig : float, default 0.001
+        Minimum eigenvalue required of the correlation matrix.  A matrix that
+        falls short is mixed with the identity and a :class:`UserWarning` is
+        emitted.
+    random_state : int, default 0
+        Seed for the knockoff noise draw.  The same seed and cache reproduce
+        the same matrix exactly.
+
+    Returns
+    -------
+    ndarray of shape (n_cached_rows, n_valid_features), float32
+        One knockoff copy aligned column-for-column with ``cache.Z``.  Columns
+        with no weighted variance take no part in the construction and come
+        back as exact zeros.
+
+    Raises
+    ------
+    ValueError
+        If the cache fails its structural or provenance checks, carries
+        duplicate feature names, has weights that are non-finite, negative, or
+        sum to zero, or retains no non-constant feature.
+
+    Warns
+    -----
+    UserWarning
+        When the copula correlation matrix had to be shrunk toward the
+        identity to reach ``min_eig``; the knockoffs are then an approximate
+        plug-in model and exact Model-X FDR is not claimed.
+
+    See Also
+    --------
+    select_fdr : The full q-calibrated knockoff filter.
+    sift.build_cache : Build the cache this helper consumes.
+    KnockoffSelectionResult : The result object ``select_fdr`` returns.
+
+    Notes
+    -----
+    The knockoffs are second-order: they match the copula correlation matrix
+    ``Sigma`` in the sense that the joint covariance of ``(Z, Z_tilde)`` has
+    ``Sigma`` on both diagonal blocks and ``Sigma - diag(s)`` off-diagonal, so
+    each column is decorrelated from its own knockoff by ``s_j`` while every
+    cross-correlation is preserved.  Larger ``s`` means more power and,
+    because ``s`` is bounded by the smallest eigenvalue, near-collinear
+    columns drive it toward zero.  Only one draw is returned; independent
+    draws come from different ``random_state`` values, and combining them is
+    derandomization, which does not preserve a per-draw FDR claim.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import build_cache, sample_knockoffs
+    >>> rng = np.random.default_rng(0)
+    >>> cache = build_cache(rng.normal(size=(200, 5)), compute_Rxx=True)
+    >>> Z_tilde = sample_knockoffs(cache, random_state=123)
+    >>> Z_tilde.shape == cache.Z.shape, Z_tilde.dtype
+    (True, dtype('float32'))
+    >>> repeat = sample_knockoffs(cache, random_state=123)
+    >>> bool(np.array_equal(Z_tilde, repeat))  # same seed, same draw
+    True
+    """
 
     _validate_prebuilt_cache_structure(cache, validate_rxx=False)
     _reject_duplicate_feature_names(cache)
@@ -1486,12 +1732,200 @@ def select_fdr(
 ) -> KnockoffSelectionResult:
     """Select features by a q-calibrated Gaussian-copula knockoff filter.
 
+    Answers "which features survive a target false-discovery level?" rather
+    than "which ``k`` features are best": it builds or reuses a copula
+    :class:`~sift.FeatureCache`, fits and samples second-order Gaussian
+    knockoffs, computes a swap-antisymmetric statistic ``W`` per feature, and
+    keeps everything at or above the knockoff+ threshold for ``q``.  Use it
+    when you want error control instead of a fixed count; use the filter
+    selectors when you want a ranking of fixed size.  With defaults it targets
+    ``q=0.1`` with the fast marginal ``"relevance"`` statistic, one knockoff
+    draw, the knockoff+ offset, equicorrelated decorrelation, a 50,000-row
+    subsample seeded at 0, and returns a
+    :class:`KnockoffSelectionResult`.  An empty selection is a valid answer:
+    it means nothing survived the threshold.
+
     ``feature_groups="auto"`` clusters near-collinear features (average-linkage
     on ``1 - |corr|`` cut at ``1 - group_corr_threshold``), runs the knockoff
     filter on one representative (medoid) per cluster, and reports selected
     clusters. This restores power when tightly correlated blocks would
     otherwise force the knockoff decorrelation ``s`` towards zero; the
     discovery unit becomes the cluster, not the individual feature.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features), default None
+        Feature matrix from which to build the copula cache.  Exactly one of
+        ``X`` and ``cache`` must be given.  Numeric only; encode categoricals
+        beforehand -- this selector has no ``cat_encoding`` argument, because
+        target-derived preprocessing would invalidate the Model-X claim.
+    y : Series or ndarray of shape (n_samples,), default None
+        Continuous numeric target, required despite the ``None`` default.  It
+        must be finite and have exactly as many rows as the matrix the cache
+        was built from, before any subsampling.
+    q : float, default 0.1
+        Target false-discovery rate, validated in ``(0, 1)``.
+    statistic : {"relevance", "cefsplus", "lsm", "ridge"}, default "relevance"
+        Feature statistic.  ``"relevance"`` is the fast marginal Gaussian-MI
+        difference between each feature and its knockoff.  ``"ridge"`` is the
+        analytic coefficient difference ``|beta_j| - |beta_j_tilde|`` from
+        ``(G + lambda I)^-1 [r; r_tilde]``, deterministic and antisymmetric by
+        construction.  ``"lsm"`` is the lasso signed-max from a Gram-form LARS
+        path.  ``"cefsplus"`` is a redundancy-aware greedy entry-order
+        statistic and is markedly slower -- treat it as a second opinion, not
+        a better default.  The names ``"lcd"``, ``"mrmr_diff"``,
+        ``"mrmr_quot"``, ``"jmi"``, and ``"jmim"`` are reserved and raise.
+    n_draws : int, default 1
+        Number of independent knockoff draws.  Values above 1 derandomize by
+        selecting features chosen in at least a fraction ``eta`` of draws --
+        which drops the FDR claim; see Notes.
+    eta : float, default 0.5
+        Selection-frequency threshold in ``(0, 1]`` applied when
+        ``n_draws > 1``.  Ignored for a single draw.
+    offset : {0, 1}, default 1
+        ``1`` is the knockoff+ threshold, which adds one to the negative count
+        in the estimated FDP.  ``0`` is the less conservative plain knockoff
+        threshold, best read as modified-FDR control.
+    s_method : {"equi", "mvr", "me"}, default "equi"
+        How the knockoff decorrelation vector ``s`` is solved.  ``"equi"`` is
+        the cheapest; ``"mvr"`` and ``"me"`` run diagonal coordinate descent
+        and can raise power on correlated designs.  A lower reported
+        ``s_mean`` does not by itself mean a worse solution -- it is a
+        diagnostic, not the objective.
+    min_eig : float, default 0.001
+        Minimum eigenvalue required of the copula correlation matrix.  When
+        the empirical matrix falls short it is mixed with the identity by a
+        factor ``gamma`` and a :class:`UserWarning` is emitted; ``gamma`` and
+        ``lambda_min`` are reported in metadata.
+    screen_pairs : int or None, default 2000
+        Cap on the number of original/knockoff pairs handed to statistics that
+        need screening (``"cefsplus"``, ``"lsm"``, ``"ridge"``).  ``None``
+        disables the cap.  The default ``"relevance"`` statistic needs no
+        screening and ignores this.
+    statistic_options : dict or None, default None
+        Extra options for the chosen statistic; unknown keys are rejected by
+        name.  ``"cefsplus"`` accepts ``path_depth`` (an explicit hard cap on
+        the greedy path) and ``min_gain_ratio`` (early stop once the best gain
+        is small relative to the first; disabled by default).  ``"lsm"``
+        accepts ``max_steps``.  ``"ridge"`` accepts ``ridge_lambda``
+        (default ``0.5``).  ``"relevance"`` accepts none.
+    feature_groups : sequence, "auto", or None, default None
+        Group the discovery unit.  A sequence of labels, of length equal to
+        either the valid cache columns or the original columns, thresholds a
+        heuristic signed-maximum group statistic and expands selected groups
+        back to their members.  ``"auto"`` instead clusters near-collinear
+        features and runs the filter on one medoid per cluster.  Both modes
+        report ``fdr_control="none"``; see Notes.
+    group_corr_threshold : float, default 0.7
+        Absolute-correlation cut for ``feature_groups="auto"``, in ``(0, 1)``.
+        Clustering is average linkage on ``1 - |corr|`` cut at
+        ``1 - group_corr_threshold`` and costs ``O(p**2)`` time and memory, so
+        pre-screen very wide matrices.
+    sample_weight : ndarray of shape (n_samples,) or None, default None
+        Finite, non-negative row weights used when building the cache from
+        ``X``.  Rejected with a prebuilt ``cache``, whose weights are already
+        fixed.  Weighting yields an importance-weighted approximation, not an
+        exact weighted Model-X guarantee.
+    subsample : int or None, default 50000
+        Row cap for cache construction from ``X``.  ``None`` uses every
+        positive-weight row.  Rejected with a prebuilt ``cache``.
+    cache : FeatureCache or None, default None
+        Prebuilt copula cache from :func:`sift.build_cache`, used instead of
+        ``X``.  Build it with ``compute_Rxx=True`` so the correlation matrix
+        the knockoff model needs is already there.
+    random_state : int, default 0
+        Seed for cache subsampling when building from ``X``, and for the
+        knockoff draws.  Unlike ``sample_weight`` and ``subsample``, this
+        stays meaningful with a prebuilt cache because it seeds a fresh draw.
+    n_jobs : int, default 1
+        Worker count for cache construction and for statistics that fit
+        sklearn models.  Building a cache from ``X`` rejects ``0``; the
+        analytic statistics never spawn workers, so it does not reach them.
+    verbose : bool, default True
+        Log the threshold, selected count, and ``s_mean`` at INFO on the
+        ``"sift"`` logger.
+
+    Returns
+    -------
+    KnockoffSelectionResult
+        Result carrying ``selected_features`` ordered by descending ``W``,
+        their ``selected_indices`` in ``X``, the ``W`` table with one row per
+        valid cache feature, the ``threshold`` (``None`` when derandomized),
+        ``selection_frequency`` (``None`` for a single draw), the validity
+        ``selector_metadata``, and per-draw ``diagnostics_``.
+
+    Raises
+    ------
+    ValueError
+        If neither or both of ``X`` and ``cache`` are given; if ``y`` is
+        ``None``, non-finite, or has the wrong row count; if ``q`` or ``eta``
+        is outside its interval, ``n_draws`` is not a positive integer,
+        ``offset`` is not 0 or 1, or ``screen_pairs`` is not a positive
+        integer or ``None``; if ``statistic`` is unknown or reserved; if
+        ``statistic_options`` carries keys the statistic does not accept; if
+        ``feature_groups`` is a string other than ``"auto"``, has the wrong
+        length, or contains missing or unhashable labels; if
+        ``group_corr_threshold`` is outside ``(0, 1)``; if ``sample_weight``
+        or ``subsample`` accompanies a prebuilt ``cache``; if the cache fails
+        its structural or provenance checks or carries duplicate feature
+        names; or if no feature retains positive weighted variance.
+
+    Warns
+    -----
+    UserWarning
+        When the median knockoff decorrelation ``s`` falls below ``0.05``:
+        most knockoffs are then nearly identical to their originals and ``W``
+        is near zero, which usually means near-collinear columns.  Consider
+        ``s_method="mvr"`` or ``"me"``, ``feature_groups``, or pruning
+        duplicates.  Also when the copula correlation matrix had to be shrunk
+        toward the identity to reach ``min_eig``; when a ``"cefsplus"`` run
+        with an explicit ``path_depth`` saturates that cap; and, once per
+        process, when ``y`` holds integer labels with 3-20 distinct values,
+        which look multiclass -- run one-vs-rest targets instead.
+
+    See Also
+    --------
+    sample_knockoffs : Draw one knockoff copy for custom statistics.
+    KnockoffSelectionResult : The returned container.
+    sift.build_cache : Build the cache this selector can reuse.
+    sift.select_cefsplus : Fixed-size selection instead of error control.
+
+    Notes
+    -----
+    Validity is *plug-in*: metadata reports
+    ``validity_model="gaussian_copula_plugin"`` and, for a single ungrouped
+    draw, ``fdr_control="approximate_plugin"``.  Exact finite-sample Model-X
+    FDR would require the sampled Gaussian-copula model to be the true feature
+    distribution and the statistic to be valid under swaps; with estimated
+    correlations, shrinkage, or weights, read the output as an approximate
+    practical knockoff filter.  The claim is dropped outright -- metadata
+    reports ``fdr_control="none"``, ``q_scope="per_draw"``, and
+    ``aggregation_fdr_control="none"`` -- whenever ``n_draws > 1`` or any
+    ``feature_groups`` mode is used, because ``q`` then calibrates each draw
+    or each representative rather than the reported set.  Note also that
+    knockoff+ is discrete: at level ``q`` with ``offset=1`` at least
+    ``ceil(1 / q)`` features must clear the threshold before the estimated FDP
+    can reach ``q``, so a problem with few true signals can legitimately
+    return nothing at a small ``q``.  Rerunning with new seeds until something
+    is selected destroys the guarantee.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import select_fdr
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(400, 12)),
+    ...                  columns=[f"f{i}" for i in range(12)])
+    >>> beta = np.zeros(12)
+    >>> beta[:6] = 2.0
+    >>> y = X.to_numpy() @ beta + 0.5 * rng.normal(size=400)
+    >>> result = select_fdr(X, y, q=0.2, random_state=0, verbose=False)
+    >>> sorted(result.selected_features)
+    ['f0', 'f1', 'f2', 'f3', 'f4', 'f5']
+    >>> result.selector_metadata["fdr_control"]
+    'approximate_plugin'
+    >>> bool(np.isfinite(result.threshold)), result.selection_frequency is None
+    (True, True)
     """
 
     q_float = _validate_probability(q, "q")
