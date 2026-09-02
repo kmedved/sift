@@ -699,6 +699,33 @@ def summarize_gate_rows(
     return output
 
 
+GATE_FLOAT_DIGITS = 12
+GATE_FLOAT_RTOL = 1e-9
+
+
+def _render_gate_scalar(value: object) -> str:
+    """Spell one gate cell platform-stably.
+
+    Floats are written with ``GATE_FLOAT_DIGITS`` significant digits so that
+    last-ulp summation differences between BLAS builds, Python versions, and
+    operating systems do not change the committed artifact (a raw ``repr``
+    differed in the 17th digit between macOS/arm64 and Linux CI).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return str(value)
+        return format(value, f".{GATE_FLOAT_DIGITS}g")
+    if hasattr(value, "item") and not isinstance(value, str):  # numpy scalars
+        return _render_gate_scalar(value.item())
+    return str(value)
+
+
 def render_gate_csv(rows: Sequence[dict[str, object]]) -> bytes:
     """Render rows with a fixed header, ordering, newline, and scalar spelling."""
     buffer = io.StringIO(newline="")
@@ -707,8 +734,62 @@ def render_gate_csv(rows: Sequence[dict[str, object]]) -> bytes:
     for row in rows:
         if set(row) != set(GATE_COLUMNS):
             raise GateSummaryError("gate row keys do not match the output schema")
-        writer.writerow({key: "" if row[key] is None else str(row[key]) for key in GATE_COLUMNS})
+        writer.writerow({key: _render_gate_scalar(row[key]) for key in GATE_COLUMNS})
     return buffer.getvalue().encode("utf-8")
+
+
+def _parse_gate_cell(text: str) -> object:
+    if text == "":
+        return None
+    if text in ("True", "False"):
+        return text == "True"
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def compare_gate_csv_files(
+    actual_path: Path,
+    expected_path: Path,
+    *,
+    rtol: float = GATE_FLOAT_RTOL,
+) -> list[str]:
+    """Return human-readable mismatches between two rendered gate tables.
+
+    Non-float cells must match exactly; float cells match within ``rtol``.
+    An empty list means the tables agree.
+    """
+
+    def _load(path: Path) -> list[dict[str, str]]:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames != list(GATE_COLUMNS):
+                raise GateSummaryError(f"{path}: unexpected gate columns {reader.fieldnames}")
+            return list(reader)
+
+    actual_rows, expected_rows = _load(actual_path), _load(expected_path)
+    mismatches: list[str] = []
+    if len(actual_rows) != len(expected_rows):
+        mismatches.append(f"row count {len(actual_rows)} != {len(expected_rows)}")
+    for index, (actual, expected) in enumerate(zip(actual_rows, expected_rows)):
+        for column in GATE_COLUMNS:
+            left = _parse_gate_cell(actual[column])
+            right = _parse_gate_cell(expected[column])
+            if isinstance(left, float) and isinstance(right, float):
+                if not math.isclose(left, right, rel_tol=rtol, abs_tol=0.0):
+                    mismatches.append(
+                        f"row {index} ({actual.get('method')}) {column}: {left!r} != {right!r}"
+                    )
+            elif left != right:
+                mismatches.append(
+                    f"row {index} ({actual.get('method')}) {column}: {left!r} != {right!r}"
+                )
+    return mismatches
 
 
 def regenerate_gate_csv(
@@ -749,6 +830,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="denominator convention for program std(k_hat)/k_oracle",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--verify-against",
+        type=Path,
+        default=None,
+        help=(
+            "after writing --output, compare it to this committed gate table: exact "
+            f"match for non-float cells, rtol={GATE_FLOAT_RTOL:g} for floats; exit 1 on mismatch"
+        ),
+    )
     return parser
 
 
@@ -766,6 +856,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except GateSummaryError as exc:
         parser.error(str(exc))
+    if args.verify_against is not None:
+        mismatches = compare_gate_csv_files(args.output, args.verify_against)
+        if mismatches:
+            for line in mismatches:
+                print(f"gate table mismatch: {line}")
+            return 1
+        print(
+            f"gate table matches {args.verify_against} "
+            f"(floats within rtol={GATE_FLOAT_RTOL:g})"
+        )
     return 0
 
 

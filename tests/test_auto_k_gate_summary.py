@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.summarize_auto_k_gates import (
+    compare_gate_csv_files,
     PATH_TIMING_COLUMNS,
     PATH_TIMING_PROVENANCE_SCHEMA,
     RAW_COLUMNS,
@@ -227,7 +228,7 @@ def test_gate_summary_is_byte_identical(gate_campaign, tmp_path):
         b"method,G1_accuracy,G2_or_D5_null,G3_dense_weak,G4_structure,G5_runtime,"
         b"G5_runtime_ratio,G6_stability,program_mean_regret_D1_D3_D7,"
         b"program_std_k_over_oracle,D5_main_p_gt3,D5_main_max_k,program_success\n"
-        b"penalized/ebic,True,True,True,True,True,0.5,True,0.0,0.0,0.0,1,True\n"
+        b"penalized/ebic,True,True,True,True,True,0.5,True,0,0,0,1,True\n"
     )
     assert first.read_bytes() == expected
     assert second.read_bytes() == expected
@@ -366,7 +367,9 @@ def test_committed_dated_gate_is_bound_to_its_full_clean_provenance(tmp_path):
         oracle_aggregation="mean",
     )
     expected = results / "auto_k_v2_gates_mean_oracle_2026-08-31.csv"
-    assert output_path.read_bytes() == expected.read_bytes()
+    # Floats are rendered with 12 significant digits, which absorbs last-ulp
+    # platform differences; compare numerically (exact for non-float cells).
+    assert compare_gate_csv_files(output_path, expected) == []
 
 
 def test_gate_summary_rejects_unavailable_provenance_commit(

@@ -192,9 +192,10 @@ jobs:
           name: sift-quick-benchmark-results
           path: benchmark-results.json
       # Regenerates the Auto-K G1-G6 gate table from the committed raw campaign
-      # CSVs. The summarizer is deterministic (tests/test_auto_k_gate_summary.py
-      # pins the exact bytes), so a drifting table means the inputs or the
-      # aggregation changed, not that the benchmark host was noisy.
+      # CSVs. The summarizer renders floats with 12 significant digits and
+      # tests/test_auto_k_gate_summary.py pins the table numerically, so a
+      # drifting table means the inputs or the aggregation changed, not that the
+      # benchmark host was noisy.
       - name: Regenerate the Auto-K gate table from committed raw CSVs
         run: |
           python benchmarks/summarize_auto_k_gates.py \
@@ -203,11 +204,8 @@ jobs:
             --timing benchmarks/results/auto_k_v2_d9.csv \
             --fixed-k-path-timing benchmarks/results/auto_k_v2_d9_fixed_k_path_2026-08-31.csv \
             --oracle-aggregation mean \
-            --output auto_k_v2_gates_mean_oracle.csv
-      - name: Verify the regenerated table matches the committed artifact
-        run: |
-          cmp auto_k_v2_gates_mean_oracle.csv \
-            benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
+            --output auto_k_v2_gates_mean_oracle.csv \
+            --verify-against benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
       - name: Upload Auto-K gate table
         uses: actions/upload-artifact@v4
         with:
