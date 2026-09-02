@@ -181,7 +181,7 @@ before the fence; one blank line between marker and fence is allowed.
 | marker | effect |
 | --- | --- |
 | `<!-- sift-doc: skip reason="..." -->` | do not execute; the reason is required |
-| `<!-- sift-doc: requires=catboost -->` | execute only when the optional dependency is importable |
+| `<!-- sift-doc: requires=catboost -->` | execute only when the named module imports; any module name works (`matplotlib`, `category_encoders`), and several `requires=` tokens may be combined in one marker |
 | `<!-- sift-doc: continues -->` | execute in the *previous* block's namespace |
 
 Use `continues` only where the narrative genuinely builds across two blocks —

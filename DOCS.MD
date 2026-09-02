@@ -1055,6 +1055,11 @@ repeat or invent those warnings.
   `forward_stop` are the calibrated no-signal stops; `changepoint` is currently
   an experimental diagnostic and should not be used as a default. These methods
   may legitimately return `k=0` when no discovery is supported.
+  With the default router (`k_method="auto"`, which is what a bare
+  `k="auto"` uses), an empty selection additionally emits a `UserWarning`
+  naming the routed criterion; explicit criteria return `[]` silently. For a
+  hard non-empty floor pass an explicit criterion together with `min_k`, for
+  example `AutoKConfig(k_method="chi2_stop", min_k=1)`.
 - `k_method="perm_gap"` reruns CEFS+ on structure-aware permuted targets and
   compares the real objective curve to the null envelope. Use `perm_null="auto"`
   by default, or set `"within_group"` / `"circular_shift"` when the null must
