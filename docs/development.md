@@ -147,7 +147,7 @@ name in `sift.__all__` is in scope.
 | at least 8 non-empty docstring lines | every export |
 | every signature parameter named as a `name : type` entry | functions, under `Parameters`; classes, under `Parameters` or `Attributes`, read off `__init__` |
 | a `Returns` or `Yields` section | functions |
-| an `Examples` section | every export |
+| an `Examples` section with at least one runnable `>>>` statement | every export, except the four optional-dependency exports pinned by name in `LITERAL_EXAMPLE_EXPORTS` (`select_boruta_shap`, `catboost_select`, `catboost_regression`, `catboost_classif`), whose examples are literal blocks that must name the dependency; the set is asserted exactly, so it cannot grow silently |
 
 The parameter check includes `*args` and `**kwargs`: a variadic in the signature
 has to appear as its own entry, spelled with the stars. For a class the two
@@ -159,9 +159,14 @@ docstring with `doctest` and executes the `>>>` statements under
 warnings-as-errors, so an example that emits an unasserted `UserWarning` or
 `FutureWarning` fails the suite. It deliberately does **not** compare printed
 output: NumPy 2 scalar reprs differ across the CI matrix, so an expected-output
-line would pin the docstring to one interpreter. Only two kinds of example are
-left unrun — one carrying an explicit `# doctest: +SKIP`, and one that depends
-on CatBoost.
+line would pin the docstring to one interpreter. It also runs the `Examples`
+sections of the public methods and properties that exported classes define
+inside `sift` (ids like `SelectionView.proxies`), executes a statement whose
+documented output is a traceback inside `pytest.raises` with the exception
+type checked, and runs each case in a fresh namespace with a temporary
+working directory. Only three things leave an example unrun — a leading
+`# doctest: +SKIP` (a later one skips just that statement), a missing
+CatBoost extra when the section uses it, and the pinned literal blocks above.
 
 **What neither test checks: defaults and accepted values.** Nothing compares the
 `default=...` text or the listed choices in a description against the actual
@@ -305,7 +310,7 @@ warnings-as-errors policy:
 | dependency set | result |
 | --- | --- |
 | floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
-| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,895 passed / 35 skipped (10 skips are doc-block dependency gates) |
+| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,965 passed / 39 skipped (10 doc-block and 4 docstring-example skips are optional-dependency gates) |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |

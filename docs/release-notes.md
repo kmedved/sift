@@ -641,11 +641,17 @@ was added to `pyproject.toml`.
   parameter — `*args` and `**kwargs` included — named as a `name : type` entry
   under `Parameters` for functions or under `Parameters`/`Attributes` for classes
   (read off `__init__`), a `Returns` or `Yields` section for functions, and an
-  `Examples` section for every export. `tests/test_docstring_examples.py` parses
-  each docstring with `doctest` and executes the `>>>` statements under
-  warnings-as-errors; it does not compare printed output, because NumPy 2 scalar
-  reprs differ across the CI matrix, and it leaves unrun only examples marked
-  `# doctest: +SKIP` and those that need CatBoost. Neither test compares
+  `Examples` section with at least one runnable `>>>` statement for every
+  export — except the four optional-dependency exports pinned by name
+  (`select_boruta_shap`, `catboost_select`, `catboost_regression`,
+  `catboost_classif`), whose examples are literal blocks that must name the
+  dependency. `tests/test_docstring_examples.py` parses each docstring (and the
+  `Examples` sections of exported classes' public methods) with `doctest` and
+  executes the `>>>` statements under warnings-as-errors, running documented
+  tracebacks inside `pytest.raises`; it does not compare printed output,
+  because NumPy 2 scalar reprs differ across the CI matrix, and it leaves unrun
+  only examples marked `# doctest: +SKIP`, those that need CatBoost, and the
+  pinned literal blocks. Neither test compares
   documented defaults or accepted values against the signature — that stays a
   review responsibility.
 - Every fenced `python` code block in the manual now executes in CI. The README
