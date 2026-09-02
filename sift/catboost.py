@@ -751,7 +751,234 @@ def catboost_select(
 ) -> CatBoostSelectionResult:
     """Run CatBoost feature selection and return scores, paths, and final importances.
 
+    Gradient-boosted wrapper selection: for every candidate feature count the
+    function runs CatBoost's own recursive elimination (or a forward search) on
+    each train/validation split, averages the validation metric per count, then
+    refits one final model on the retained features to report importances. Use
+    it when the downstream model is CatBoost and a wrapper score is worth its
+    cost; prefer the filter selectors when speed or a model-free ranking
+    matters more. Pre-filtering, encoders and importance are computed inside
+    each split, so validation rows never inform the candidate set.
+
     ``callback(step, total, info)`` is called after each completed split.
+
+    Parameters
+    ----------
+    X : DataFrame of shape (n_samples, n_features)
+        Candidate features. Categorical, text and numeric columns are allowed.
+    y : Series of shape (n_samples,)
+        Target. A DataFrame is narrowed to its first column, and array-likes
+        are wrapped on ``X.index``.
+    k : int or None, default=None
+        Requested feature count. When given, only that count is evaluated and
+        the largest evaluated count at or below it is returned. ``None``
+        searches the whole ``feature_counts`` curve and applies the parsimony
+        rule: starting from the global arg-best count (exact ties prefer the
+        smaller one), walk towards smaller counts and keep the smallest whose
+        mean score stays within ``tolerance`` of ``|best_score|``, giving up
+        after ``selection_patience`` consecutive counts outside that band.
+        ``tolerance=0`` therefore returns the arg-best unless a smaller count
+        ties it exactly.
+    task : {"regression", "classification"}, default="regression"
+        Problem type; it selects ``CatBoostRegressor`` or
+        ``CatBoostClassifier`` and the default metric and loss.
+    min_features : int, default=5
+        Smallest count in the generated search grid. Ignored when ``k`` or
+        ``feature_counts`` is given.
+    step_function : float, default=0.67
+        Geometric ratio between successive generated counts, a float in
+        ``(0, 1)``. Ignored when ``k`` or ``feature_counts`` is given.
+    feature_counts : list of int or None, default=None
+        Explicit search grid, deduplicated and evaluated largest first.
+    selection_patience : int, default=3
+        Positive number of consecutive out-of-band counts the parsimony walk
+        tolerates before it stops.
+    tolerance : float, default=0.01
+        Non-negative relative score band for that walk.
+    cv : splitter or None, default=None
+        Any sklearn-compatible splitter (``TimeSeriesSplit``, ``GroupKFold``,
+        ...). Its ``split`` must accept ``groups`` when ``groups`` is supplied.
+        Mutually exclusive with ``use_stability=True``.
+    n_splits : int, default=3
+        Split count for the built-in shuffle splitters used when ``cv`` is
+        ``None``.
+    test_size : float, default=0.25
+        Validation fraction for those built-in splitters.
+    group_col : str or None, default=None
+        Permanent alias for ``groups`` naming a column of ``X``; the column is
+        copied out as row metadata and dropped from the candidate features.
+        Passing both ``groups`` and ``group_col`` raises.
+    sample_weight_col : str or None, default=None
+        Permanent alias for ``sample_weight`` naming a column of ``X``, with
+        the same extraction and the same conflict rule.
+    prefilter_k : int or None, default=200
+        Cap on candidates entering the CatBoost search, applied per split on
+        training rows only. ``None`` disables pre-filtering, as does a value at
+        or above the feature count.
+    prefilter_method : str, default="catboost"
+        Ranking used for that pre-filter: ``"catboost"``, ``"cefsplus"``,
+        ``"mrmr"`` or ``"none"``.
+    use_stability : bool, default=False
+        Replace the CV splits with group-aware bootstrap resamples and keep
+        features by selection frequency.
+    n_bootstrap : int, default=20
+        Positive number of resamples for ``use_stability=True``.
+    stability_threshold : float, default=0.6
+        Selection frequency in ``[0, 1]`` a feature must reach in that mode.
+    n_estimators : int, default=500
+        CatBoost ``iterations`` for every fitted model.
+    learning_rate : float or None, default=None
+        CatBoost ``learning_rate``; ``None`` leaves CatBoost's own default.
+    max_depth : int or None, default=6
+        CatBoost ``depth``; ``None`` leaves CatBoost's own default.
+    eval_metric : str or None, default=None
+        Validation metric. ``None`` resolves to ``"RMSE"`` for regression,
+        ``"Logloss"`` for two-class and ``"MultiClass"`` for multiclass
+        targets.
+    loss_function : str or None, default=None
+        Training loss, resolved from ``task`` and the class count the same way.
+    catboost_params : dict or None, default=None
+        Raw CatBoost parameters merged last. Keys that collide with the
+        translated SIFT arguments emit one ``UserWarning`` and keep the
+        historical ``catboost_params``-wins precedence; SIFT 1.0 will reject
+        conflicting values instead. An ``eval_metric`` supplied here also
+        redefines the reported metric and, unless ``higher_is_better`` is
+        explicit, its direction.
+    algorithm : str, default="shap"
+        Search strategy: ``"shap"``, ``"permutation"``, ``"prediction"``,
+        ``"forward"`` or ``"forward_greedy"``. The first three drive
+        CatBoost's recursive ``select_features`` by SHAP values, loss-function
+        change or prediction-values change; ``"forward"`` is an
+        importance-ordered
+        forward sweep and ``"forward_greedy"`` an exhaustive forward search
+        capped at ``k <= 30`` and ``n_features <= 200``.
+    steps : int, default=6
+        Elimination steps handed to CatBoost's ``select_features`` for the
+        three recursive algorithms.
+    cat_features : list of str or None, default=None
+        Extra categorical columns, merged with the detected ones. Names absent
+        from ``X`` are ignored with a ``UserWarning``.
+    text_features : list of str or None, default=None
+        Columns to pass to CatBoost as text features.
+    treat_object_as_categorical : bool, default=True
+        Treat ``object``/``string`` columns as categorical. With ``False``, any
+        orphan object column is still auto-treated as categorical with a
+        ``UserWarning``, because CatBoost would otherwise fail.
+    train_early_stopping_rounds : int, default=20
+        Overfitting-detector patience for the per-split fits. It is skipped
+        when ``catboost_params`` already sets ``od_type``, ``od_wait`` or
+        ``od_pval``, and it is never applied to the final full-data refit.
+    gpu : bool, default=False
+        Run CatBoost with ``task_type="GPU"`` on device 0. GPU execution
+        ignores ``n_jobs``.
+    n_jobs : int, default=-1
+        Thread count for CPU CatBoost fits and for the pre-filter. Positive
+        values become CatBoost's ``thread_count``.
+    higher_is_better : bool or None, default=None
+        Metric direction. ``None`` infers it from the resolved metric name.
+    random_state : int or None, default=None
+        Seed for splits, bootstraps, pre-filtering and CatBoost's
+        ``random_seed``. Leaving it ``None`` emits a ``FutureWarning``: 0.9
+        stays nondeterministic while SIFT 1.0 will default to seed 0.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed split.
+    groups : array-like, str or None, default=None
+        Row group labels, or the name of an ``X`` column to extract and drop.
+        Groups switch the default splitter to ``GroupShuffleSplit`` and make
+        ``use_stability`` resampling group-aware.
+    time : array-like, str or None, default=None
+        Row time values, or the name of an ``X`` column to extract and drop.
+        SIFT stably orders every aligned row by ``time`` before splitting.
+        Missing or mutually unorderable values raise. Ordering alone does not
+        make the default random splitter chronological; pass a time-aware
+        ``cv`` when that is required.
+    sample_weight : array-like or None, default=None
+        Non-negative row weights forwarded to the CatBoost pools.
+
+    Returns
+    -------
+    CatBoostSelectionResult
+        Dataclass carrying ``selected_features``, the chosen ``best_k``,
+        ``scores_by_k``/``scores_std_by_k``/``all_scores``, ``features_by_k``,
+        the final-model ``feature_importances``, ``prefilter_features``,
+        ``stability_scores``, ``metric``, ``higher_is_better`` and
+        ``selection_patience``. Call ``result.result_view()`` for the
+        normalized ``SelectionView``.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``catboost`` package is not installed.
+    ValueError
+        For an invalid ``task``, ``algorithm``, ``prefilter_method``,
+        ``step_function``, stability or parsimony option; when a direct
+        argument and its ``*_col`` alias are both given; when a ``*_col`` name
+        is missing, ambiguous or used with a non-DataFrame ``X``; when ``cv``
+        is combined with ``use_stability=True``; when ``time`` holds missing or
+        unorderable values; or when ``algorithm="forward_greedy"`` exceeds its
+        size limits.
+    TypeError
+        If a custom ``cv.split`` cannot be inspected, or does not accept
+        ``groups`` while ``groups`` is supplied.
+    RuntimeError
+        If no split produced a finite score, or no feature list was recorded
+        for the selected count.
+
+    Warns
+    -----
+    UserWarning
+        For ``catboost_params`` collisions, unknown ``cat_features`` names,
+        auto-treated orphan object columns, a requested ``k`` above the largest
+        evaluated count, a failed ``select_features`` call that falls back to
+        importance ranking, and a failed final importance computation.
+    FutureWarning
+        When ``random_state`` is left at ``None``.
+
+    See Also
+    --------
+    catboost_regression : Regression wrapper returning only the feature names.
+    catboost_classif : Classification wrapper returning only the names.
+    sift.select_boruta : All-relevant tree-based alternative.
+
+    Notes
+    -----
+    CatBoost is an optional dependency; install it with
+    ``python -m pip install -e ".[catboost]"``. ``sift.catboost_select`` is a
+    lazy export, so importing ``sift`` never requires the extra, and this
+    function raises ``ImportError`` only when actually called without it.
+    ``best_k`` on the returned result is the count that was selected, which for
+    ``k=None`` is the parsimonious pick and can differ from the raw
+    best-scoring count; read ``scores_by_k`` for the full curve.
+
+    Examples
+    --------
+    These examples require the optional ``catboost`` extra. They are shown as
+    code rather than executed doctests because SIFT's own test environment
+    does not install CatBoost::
+
+        import numpy as np
+        import pandas as pd
+        import sift
+
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(400, 8)),
+                         columns=[f"f{i}" for i in range(8)])
+        y = pd.Series(2.0 * X["f0"] + X["f1"] + 0.1 * rng.normal(size=400))
+
+        result = sift.catboost_select(
+            X, y, k=3, task="regression", algorithm="forward",
+            random_state=0, verbose=False,
+        )
+        result.selected_features        # three retained column names
+        result.scores_by_k              # {k: mean validation score}
+
+        # Panel data: name the metadata columns instead of passing arrays.
+        panel_result = sift.catboost_select(
+            panel_df, panel_df["target"], groups="entity_id", time="date",
+            random_state=0,
+        )
     """
     k_req = k
     if CatBoostRegressor is None:
@@ -958,7 +1185,76 @@ def catboost_regression(
     callback: ProgressCallback | None = None,
     **kwargs,
 ) -> List[str]:
-    """CatBoost feature selection for regression."""
+    """CatBoost feature selection for regression.
+
+    One-call wrapper that runs :func:`catboost_select` with
+    ``task="regression"`` and returns only the retained column names. Use it
+    when the score curve, importances and diagnostics are not needed; call
+    :func:`catboost_select` directly for the full
+    :class:`~sift.catboost_common.CatBoostSelectionResult`.
+
+    Parameters
+    ----------
+    X : DataFrame of shape (n_samples, n_features)
+        Candidate features.
+    y : Series of shape (n_samples,)
+        Continuous target.
+    k : int
+        Requested feature count, forwarded as ``catboost_select(k=...)``. Pass
+        ``k=None`` to search the whole curve and let the parsimony rule choose.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed split.
+    **kwargs
+        Every other :func:`catboost_select` keyword, including ``algorithm``,
+        ``cv``, ``prefilter_k``, ``catboost_params``, ``random_state``, the
+        ``groups``/``time``/``sample_weight`` row arrays and their permanent
+        ``group_col``/``sample_weight_col`` aliases (a direct value and its
+        alias together raise).
+
+    Returns
+    -------
+    list of str
+        The selected feature names.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``catboost`` package is not installed.
+    ValueError
+        Propagated from :func:`catboost_select` for invalid options, alias
+        conflicts or unorderable ``time`` values.
+
+    Warns
+    -----
+    UserWarning
+        Propagated from :func:`catboost_select`, notably the
+        ``catboost_params``-wins collision notice.
+    FutureWarning
+        When ``random_state`` is left at ``None``.
+
+    See Also
+    --------
+    catboost_select : The full-result entry point and option reference.
+    catboost_classif : The classification counterpart.
+
+    Notes
+    -----
+    CatBoost is an optional dependency; install it with
+    ``python -m pip install -e ".[catboost]"``. The name is a lazy export from
+    ``sift``, so importing the package never requires the extra.
+
+    Examples
+    --------
+    This example requires the optional ``catboost`` extra and is shown as code
+    rather than an executed doctest, because SIFT's own test environment does
+    not install CatBoost::
+
+        import sift
+
+        features = sift.catboost_regression(
+            X, y, k=20, algorithm="forward", random_state=0, verbose=False,
+        )
+    """
     return _catboost_task_features(
         X, y, k, task='regression', callback=callback, **kwargs
     )
@@ -972,7 +1268,80 @@ def catboost_classif(
     callback: ProgressCallback | None = None,
     **kwargs,
 ) -> List[str]:
-    """CatBoost feature selection for classification."""
+    """CatBoost feature selection for classification.
+
+    One-call wrapper that runs :func:`catboost_select` with
+    ``task="classification"`` and returns only the retained column names. Use
+    it when the score curve, importances and diagnostics are not needed; call
+    :func:`catboost_select` directly for the full
+    :class:`~sift.catboost_common.CatBoostSelectionResult`.
+
+    Parameters
+    ----------
+    X : DataFrame of shape (n_samples, n_features)
+        Candidate features.
+    y : Series of shape (n_samples,)
+        Class labels. Two-class targets default to the ``Logloss`` metric and
+        loss; three or more classes default to ``MultiClass``.
+    k : int
+        Requested feature count, forwarded as ``catboost_select(k=...)``. Pass
+        ``k=None`` to search the whole curve and let the parsimony rule choose.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed split.
+    **kwargs
+        Every other :func:`catboost_select` keyword, including ``algorithm``,
+        ``cv``, ``prefilter_k``, ``catboost_params``, ``random_state``, the
+        ``groups``/``time``/``sample_weight`` row arrays and their permanent
+        ``group_col``/``sample_weight_col`` aliases (a direct value and its
+        alias together raise).
+
+    Returns
+    -------
+    list of str
+        The selected feature names.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``catboost`` package is not installed.
+    ValueError
+        Propagated from :func:`catboost_select` for invalid options, alias
+        conflicts or unorderable ``time`` values.
+
+    Warns
+    -----
+    UserWarning
+        Propagated from :func:`catboost_select`, notably the
+        ``catboost_params``-wins collision notice.
+    FutureWarning
+        When ``random_state`` is left at ``None``.
+
+    See Also
+    --------
+    catboost_select : The full-result entry point and option reference.
+    catboost_regression : The regression counterpart.
+
+    Notes
+    -----
+    CatBoost is an optional dependency; install it with
+    ``python -m pip install -e ".[catboost]"``. The name is a lazy export from
+    ``sift``, so importing the package never requires the extra. Without an
+    explicitly time-aware ``cv``, splits stay stratified-random even when
+    ``time`` is supplied; ``time`` only fixes the row order.
+
+    Examples
+    --------
+    This example requires the optional ``catboost`` extra and is shown as code
+    rather than an executed doctest, because SIFT's own test environment does
+    not install CatBoost::
+
+        import sift
+
+        features = sift.catboost_classif(
+            X, y_binary, k=20, algorithm="forward", random_state=0,
+            verbose=False,
+        )
+    """
     return _catboost_task_features(
         X, y, k, task='classification', callback=callback, **kwargs
     )
