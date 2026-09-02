@@ -840,9 +840,14 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         coef_mean = self.coef_bootstrap_.mean(axis=0)
         coef_std = self.coef_bootstrap_.std(axis=0)
+        # ``np.where`` evaluates both branches, so guard the ratio: a feature
+        # that no bootstrap ever selected has a zero mean and a zero std, and
+        # 0/0 would otherwise raise numpy's invalid-value RuntimeWarning.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            coef_ratio = coef_std / np.abs(coef_mean)
         coef_cv = np.where(
             np.abs(coef_mean) > 1e-10,
-            coef_std / np.abs(coef_mean),
+            coef_ratio,
             np.inf
         )
 
