@@ -534,11 +534,153 @@ def select_cached(
 ] | "SelectionView":
     """Select features using pre-built cache.
 
-    corr_prune="auto" resolves to no pruning for every method. Pass a float to
+    Runs one greedy Gaussian-copula selection against a target using a
+    :class:`~sift.estimators.copula.FeatureCache` that already holds the
+    rank-Gaussian transform.  This is the entry point for multi-target work:
+    build the cache once with :func:`sift.build_cache`, then call this per
+    ``y``.  Only the target-dependent work -- the marginal correlations, the
+    candidate panel, and the greedy path -- is repeated.  By default it runs
+    CEFS+, screens to ``max(5 * k, 250)`` candidates, applies no correlation
+    pruning, and returns a plain ``list`` of selected feature names.
+
+    ``corr_prune="auto"`` resolves to no pruning for every method. Pass a float to
     opt into marginal-correlation pruning when duplicate suppression is more
     important than retaining possible suppressor pairs. ``warn_noise_floor`` controls
     the Gaussian-mRMR warning about noise-level picks; auto-k path builders
     disable it because they cut the path afterwards.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Cache built by :func:`sift.build_cache` from the feature matrix.  Its
+        structural contract is revalidated on every call, and duplicate
+        non-synthetic ``feature_names`` are rejected.
+    y : array-like of shape (n_rows_original,)
+        Numeric target aligned to the matrix the cache was built from, before
+        any subsampling: the cache indexes it with ``cache.row_idx``.  Must be
+        finite; classification labels have to be encoded numerically first.
+    k : int
+        Upper bound on the number of features to select.  Must be a positive
+        integer -- ``k="auto"`` is not supported here.  Fewer than ``k``
+        features come back when the candidate panel is smaller or the greedy
+        score stops being finite.
+    method : {"cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"}, default "cefsplus"
+        Greedy criterion.  ``"cefsplus"`` maximizes the log-determinant
+        conditional-information gain; ``"jmi"``/``"jmim"`` aggregate pairwise
+        joint information by sum and by minimum; ``"mrmr_quot"``/
+        ``"mrmr_diff"`` divide and subtract mean redundancy from relevance.
+    top_m : int or None, default None
+        Candidate screen: only the ``top_m`` features with the largest absolute
+        copula correlation with ``y`` enter the greedy loop.  ``None`` means
+        ``max(5 * k, 250)``.  The effective value is raised to at least ``k``
+        and clipped to the number of valid cache columns.
+    corr_prune : {"auto"}, float or None, default "auto"
+        Redundancy prefilter applied to the screened panel.  ``"auto"`` and
+        ``None`` both mean no pruning, which keeps suppressor pairs eligible.
+        A float in ``(0, 1]`` greedily drops any candidate whose absolute
+        correlation with a better-scoring survivor reaches the threshold.
+    return_objective : bool, default False
+        Also return the cumulative Gaussian-MI objective along the selected
+        path.  Cannot be combined with ``return_result=True``.
+    return_indices : bool, default False
+        Also return the selected positions in the original feature matrix.
+        Cannot be combined with ``return_result=True``.
+    warn_noise_floor : bool, default True
+        Emit the Gaussian-mRMR noise-floor :class:`UserWarning` when
+        ``method`` is ``"mrmr_quot"`` or ``"mrmr_diff"``.  Auto-k path builders
+        pass ``False`` because they truncate the path afterwards and the check
+        would fire on features they are about to drop.
+    callback : callable or None, default None
+        Progress hook ``callback(step, total, info)`` invoked once per
+        completed greedy step, with a one-based ``step``.  Exceptions raised
+        inside it propagate.  Supplements, never replaces, ``verbose`` logging.
+    return_result : bool, default False
+        Return a normalized :class:`~sift.SelectionView` instead of the legacy
+        list/tuple forms.  Requires ``cache.feature_names``; rejects
+        ``return_objective`` and ``return_indices``, whose information the view
+        already carries.
+    store_proxies : bool, default False
+        Retain the selection-time candidate-by-selected copula correlation
+        block on the view so ``view.proxies()`` and ``view.proxies_at()`` can
+        report near-duplicate stand-ins for a selected feature.  Requires
+        ``return_result=True``.  The block never contains ``X`` or the cache.
+
+    Returns
+    -------
+    list or tuple or SelectionView
+        With every flag at its default, a ``list`` of selected feature names
+        in selection order (a ``list`` of original integer positions when
+        ``cache.feature_names`` is ``None``).  The legacy tuple forms are
+        ``(features, objective)`` for ``return_objective=True``,
+        ``(features, indices)`` for ``return_indices=True``, and
+        ``(features, indices, objective)`` for both, where ``indices`` is a
+        ``list[int]`` of original column positions and ``objective`` is a
+        float64 array of shape ``(n_selected,)``.  With ``return_result=True``
+        a :class:`~sift.SelectionView` whose ``raw_table`` covers every cached
+        input feature and whose ``diagnostics`` carry ``objective`` and
+        ``candidate_indices``.
+
+    Raises
+    ------
+    ValueError
+        If ``return_result`` or ``store_proxies`` is not a boolean; if
+        ``store_proxies=True`` without ``return_result=True``; if
+        ``return_result=True`` is combined with ``return_objective`` or
+        ``return_indices``; if ``k`` is not a positive integer or is
+        ``"auto"``; if the cache fails its structural or provenance checks or
+        carries duplicate feature names; if ``y`` is non-finite or its length
+        differs from ``cache.n_rows_original``; if ``corr_prune`` is outside
+        ``(0, 1]``; if ``method`` is unknown; or if ``return_result=True`` is
+        requested for a cache without ``feature_names``.
+
+    Warns
+    -----
+    UserWarning
+        For ``method="mrmr_quot"`` or ``"mrmr_diff"`` with
+        ``warn_noise_floor=True``, when selected features have marginal
+        Gaussian-MI relevance below the noise floor expected from the
+        strongest of ``p_valid`` null columns.  Both mRMR formulas compare
+        relevance against redundancy on one scale, so a low-relevance,
+        low-redundancy noise column can outscore mutually redundant
+        informative ones; JMI, JMIM and CEFS+ do not share that failure mode.
+
+    See Also
+    --------
+    sift.build_cache : Build the cache this function consumes.
+    sift.FeatureCache : The cache contract and field meanings.
+    sift.select_cefsplus : Same objective, starting from ``X`` and ``y``.
+    sift.select_fdr : Error-controlled discovery from the same cache.
+
+    Notes
+    -----
+    CEFS+ maximizes ``log|Sigma_S| - log|Sigma_{y,S}|``, which equals
+    ``2 * I(y; S)`` under the fitted Gaussian copula, and is what the returned
+    ``objective`` path reports at each step; it is non-decreasing by
+    construction.  The greedy step uses a partial Cholesky (residual)
+    recursion costing ``O(m * t)`` at step ``t``, so ``O(m * k**2)`` overall
+    for ``m`` screened candidates, and calls no BLAS, so it cannot thrash a
+    caller's thread pool.  The JMI/JMIM and mRMR paths update one row of the
+    candidate correlation matrix per step and cost ``O(m * k)``.  Everything
+    downstream of the cache is target-dependent only, which is what makes
+    cache reuse across targets cheap; the cached rows, weights and copula
+    transform are fixed and this function never re-derives them.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import build_cache, select_cached
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(300, 8))
+    >>> y = X[:, 2] - 2.0 * X[:, 5] + 0.1 * rng.normal(size=300)
+    >>> cache = build_cache(X, compute_Rxx=True, subsample=None)
+    >>> select_cached(cache, y, k=2)
+    ['x5', 'x2']
+    >>> names, objective = select_cached(cache, y, k=2, return_objective=True)
+    >>> names, bool(objective[1] >= objective[0])
+    (['x5', 'x2'], True)
+    >>> view = select_cached(cache, y, k=2, return_result=True)
+    >>> view.k, view.indices
+    (2, [5, 2])
     """
     from sift._preprocess import to_numpy, validate_k
 

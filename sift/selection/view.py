@@ -418,6 +418,140 @@ class SelectionView:
     Legacy result objects remain the public return values.  This class copies
     their available metadata and diagnostics, never the caller's feature
     matrix.
+
+    One shape for every selector: whichever of SIFT's result families produced
+    a selection, the view exposes the same five accessors -- :attr:`features`,
+    :attr:`indices`, :attr:`k`, :attr:`table`, and :attr:`metadata` -- so
+    downstream code does not branch on the selector.  Build one with
+    :func:`as_result` or a result object's ``result_view()`` rather than
+    calling this constructor, which exists for the adapters.  Every accessor
+    returns a defensive copy, so a view is safe to hand around and cannot be
+    mutated through what it hands back.
+
+    Parameters
+    ----------
+    features : iterable
+        Selected feature labels in the selector's own order.
+    indices : iterable of int or None
+        Their positions in the raw feature matrix, aligned to ``features``.
+        ``None`` when the source result cannot prove positions.
+    raw_features : iterable or None
+        Ordered labels of every raw input column, or ``None`` when unknown.
+    n_raw_features : int or None
+        Raw input width.  Inferred from ``raw_features`` when that is given;
+        required whenever ``metadata["table_complete"]`` is true.
+    raw_table : DataFrame
+        Per-feature table.  Must carry ``feature``, ``selected_index``,
+        ``path_rank`` and ``selected``; ``path_rank`` must be unique,
+        one-based, and present on exactly the selected rows.
+    curve : DataFrame or None, default None
+        Selection curve with columns ``k``, ``criterion``, ``criterion_se``
+        and ``selected``.  ``None`` stores an empty frame with those columns.
+    metadata : mapping or None, default None
+        Selector metadata to copy.  ``schema_version``, ``transform_available``,
+        ``inverse_transform_available``, the column hashes, and the proxy
+        counters are always (re)written by the constructor; ``input_kind``
+        must be ``"dataframe"``, ``"positional"`` or ``"unknown"``, and
+        ``table_complete`` must be boolean.
+    diagnostics : any, default None
+        Selector diagnostics, deep-copied as given.
+    encoded_features : iterable or None, default None
+        Labels of the post-encoding feature space, when the selector had one.
+    encoded_indices : iterable of int or None, default None
+        Selected positions in that encoded space, aligned to ``features``.
+    encoded_table : DataFrame or None, default None
+        Per-feature table in the encoded space.
+    transformer : callable or None, default None
+        ``X -> X_selected`` callable backing :meth:`transform`.  ``None``
+        leaves the method raising :class:`NotImplementedError`.
+    inverse_transformer : callable or None, default None
+        Callable backing :meth:`inverse_transform`, under the same rule.
+    proxy_correlations : DataFrame or None, default None
+        Candidate-by-selected correlation block backing :meth:`proxies` and
+        :meth:`proxies_at`.  Normalized and size-checked on construction.
+
+    Attributes
+    ----------
+    features : list
+        Selected feature labels, in selection order.
+    indices : list of int or None
+        Their raw-matrix positions, or ``None`` when unknown.
+    support_ : ndarray of shape (n_raw_features,), bool, or None
+        Boolean mask over the raw columns, or ``None`` when either the raw
+        width or the indices are unknown.
+    k : int
+        Number of selected features.
+    raw_features : list or None
+        Ordered labels of every raw input column, or ``None``.
+    raw_input : dict
+        ``{"n_features", "features", "columns_hash"}`` describing the raw
+        input identity.
+    encoded_features : list or None
+        Labels of the encoded feature space, or ``None``.
+    encoded_indices : list of int or None
+        Selected positions in the encoded space, or ``None``.
+    encoded_support_ : ndarray of bool or None
+        Boolean mask over the encoded columns, or ``None``.
+    encoded_output : dict or None
+        ``{"n_features", "features", "columns_hash"}`` for the encoded space,
+        or ``None`` when there is none.
+    raw_table : DataFrame
+        The normalized per-feature table.
+    table : DataFrame
+        Alias of :attr:`raw_table`.
+    encoded_table : DataFrame or None
+        Per-feature table in the encoded space, or ``None``.
+    curve : DataFrame
+        Selection curve with columns ``k``, ``criterion``, ``criterion_se``
+        and ``selected``; empty when the route reported none.
+    metadata : dict
+        Copied selector metadata plus ``schema_version``, ``input_kind``,
+        ``table_complete``, ``transform_available``,
+        ``inverse_transform_available``, ``raw_columns_hash``,
+        ``encoded_columns_hash``, and the ``proxy_*`` counters.
+    diagnostics : any
+        Copied selector diagnostics.
+
+    See Also
+    --------
+    as_result : Build a view from a supported result object.
+    sift.select_cached : Returns a view directly with ``return_result=True``.
+    sift.KnockoffSelectionResult : One of the result families adapted here.
+
+    Notes
+    -----
+    The view is *additive*: it never replaces or mutates the result it was
+    built from, and it never retains the caller's feature matrix -- only
+    labels, positions, tables, metadata and diagnostics.  Result-only sources
+    cannot prove whether their input was named or positional, so those views
+    report ``metadata["input_kind"] == "unknown"``; passing ``input_features``
+    to :func:`as_result` establishes an ordered raw identity and a
+    ``raw_columns_hash`` without rewriting that provenance.  Likewise, only a
+    view built from a fitted selector can transform data: result-only views
+    raise :class:`NotImplementedError` from :meth:`transform` and report
+    ``metadata["transform_available"] is False``.  A partial table -- one that
+    does not cover every raw position -- is marked by
+    ``metadata["table_complete"] is False`` and limits :meth:`plot`.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import as_result, select_cefsplus
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 5)), columns=list("abcde"))
+    >>> y = X["a"] + 0.7 * X["d"] + 0.1 * rng.normal(size=200)
+    >>> result = select_cefsplus(X, y, k=2, verbose=False, return_result=True)
+    >>> view = as_result(result, input_features=list(X.columns))
+    >>> view.k, view.features, view.indices
+    (2, ['a', 'd'], [0, 3])
+    >>> view.support_.tolist()
+    [True, False, False, True, False]
+    >>> list(view.table.columns)
+    ['feature', 'selected_index', 'path_rank', 'selected', 'relevance']
+    >>> view.metadata["table_complete"], view.metadata["transform_available"]
+    (True, False)
+    >>> view
+    SelectionView(k=2, adapter='FilterSelectionResult')
     """
 
     __slots__ = (
@@ -692,6 +826,33 @@ class SelectionView:
         return copy.deepcopy(self._diagnostics)
 
     def transform(self, X: Any) -> Any:
+        """Reduce a feature matrix to the selected columns.
+
+        Available only on views built from a fitted selector that retained its
+        preprocessing state; result-only views have nothing to apply.  Check
+        ``metadata["transform_available"]`` before calling.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray
+            Matrix in the same feature space the selector was fitted on.
+
+        Returns
+        -------
+        DataFrame or ndarray
+            ``X`` restricted to the selected columns, in the fitted
+            selector's own output order.
+
+        Raises
+        ------
+        NotImplementedError
+            If this view carries no fitted transformer.
+
+        See Also
+        --------
+        SelectionView.inverse_transform : The reverse mapping, when retained.
+        SelectionView.features : The selected labels, always available.
+        """
         if self._transformer is None:
             raise NotImplementedError(
                 "transform is unavailable for this result-only view; adapt a fitted selector "
@@ -700,6 +861,32 @@ class SelectionView:
         return self._transformer(X)
 
     def inverse_transform(self, X_selected: Any) -> Any:
+        """Map selected columns back to the original feature space.
+
+        Available only on views that retained a fitted inverse encoder, which
+        no current SIFT adapter provides; check
+        ``metadata["inverse_transform_available"]`` first.
+
+        Parameters
+        ----------
+        X_selected : DataFrame or ndarray
+            Matrix over the selected columns, as returned by
+            :meth:`transform`.
+
+        Returns
+        -------
+        DataFrame or ndarray
+            The same rows expressed in the original feature space.
+
+        Raises
+        ------
+        NotImplementedError
+            If this view carries no fitted inverse transformer.
+
+        See Also
+        --------
+        SelectionView.transform : The forward mapping.
+        """
         if self._inverse_transformer is None:
             raise NotImplementedError(
                 "inverse_transform is unavailable because this view does not retain a fitted "
@@ -708,6 +895,53 @@ class SelectionView:
         return self._inverse_transformer(X_selected)
 
     def proxies(self, feature: Any, r_min: float = 0.8) -> pd.DataFrame:
+        """Return unselected stand-ins for one selected feature, by label.
+
+        Answers "what else could have been picked instead?" -- the unselected
+        candidates whose copula correlation with ``feature`` is large enough
+        that they carry much the same signal.  Requires the selection to have
+        run with ``store_proxies=True``.
+
+        Parameters
+        ----------
+        feature : hashable
+            Label of the selected feature.  Resolved against
+            :attr:`raw_features` when known, otherwise against
+            :attr:`features`; an ambiguous or missing label is an error.
+        r_min : float, default 0.8
+            Minimum absolute correlation to report, in ``[0, 1]``.
+
+        Returns
+        -------
+        DataFrame
+            Columns ``feature``, ``selected_index``, and ``correlation``,
+            sorted by descending absolute correlation then raw position.
+            Empty when nothing clears ``r_min``.
+
+        Raises
+        ------
+        NotImplementedError
+            If proxy correlations were not stored.
+        ValueError
+            If ``feature`` is missing or ambiguous -- use :meth:`proxies_at`
+            for positional access -- or if ``r_min`` is outside ``[0, 1]``.
+
+        See Also
+        --------
+        SelectionView.proxies_at : The positional form of this lookup.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from sift import build_cache, select_cached
+        >>> rng = np.random.default_rng(0)
+        >>> X = rng.normal(size=(200, 5))
+        >>> y = X[:, 0] + 0.1 * rng.normal(size=200)
+        >>> view = select_cached(build_cache(X, compute_Rxx=True), y, k=1,
+        ...                      return_result=True, store_proxies=True)
+        >>> list(view.proxies("x0", r_min=0.9).columns)
+        ['feature', 'selected_index', 'correlation']
+        """
         if self._proxy_correlations is None:
             raise NotImplementedError(
                 "proxy correlations were not stored; rerun selection with store_proxies=True"
@@ -733,7 +967,39 @@ class SelectionView:
         return self.proxies_at(matches[0], r_min=r_min)
 
     def proxies_at(self, selected_index: int, r_min: float = 0.8) -> pd.DataFrame:
-        """Return unselected proxy candidates for one selected raw position."""
+        """Return unselected proxy candidates for one selected raw position.
+
+        Positional form of :meth:`proxies`, and the one to use when labels are
+        duplicated or absent.  Requires the selection to have run with
+        ``store_proxies=True``.
+
+        Parameters
+        ----------
+        selected_index : int
+            Raw-matrix position of a *selected* feature; a position that was
+            not selected has no stored proxy column.
+        r_min : float, default 0.8
+            Minimum absolute correlation to report, in ``[0, 1]``.
+
+        Returns
+        -------
+        DataFrame
+            Columns ``feature``, ``selected_index``, and ``correlation``,
+            sorted by descending absolute correlation then raw position.
+            Selected features are excluded, so only genuine stand-ins appear.
+
+        Raises
+        ------
+        NotImplementedError
+            If proxy correlations were not stored.
+        ValueError
+            If ``selected_index`` is not an integer or is not a selected proxy
+            position, or if ``r_min`` is not a finite number in ``[0, 1]``.
+
+        See Also
+        --------
+        SelectionView.proxies : The label-based form of this lookup.
+        """
         if self._proxy_correlations is None:
             raise NotImplementedError(
                 "proxy correlations were not stored; rerun selection with store_proxies=True"
@@ -784,6 +1050,37 @@ class SelectionView:
         )
 
     def plot(self, ax=None):
+        """Plot the selection curve, or the per-feature metric as a fallback.
+
+        Draws :attr:`curve` (``criterion`` against ``k``, with the chosen
+        points marked) when the route reported one.  Otherwise it falls back
+        to a bar chart of ``gain`` or ``relevance`` from the table, which
+        requires that table to cover every raw position.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, default None
+            Axes to draw on.  ``None`` creates a new figure and axes, which is
+            the only path that imports matplotlib.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes that were drawn on.
+
+        Raises
+        ------
+        NotImplementedError
+            If there is no curve and the table is partial, or has no ``gain``
+            or ``relevance`` column to plot.
+        ImportError
+            If ``ax`` is ``None`` and matplotlib is not installed.
+
+        See Also
+        --------
+        SelectionView.curve : The underlying curve data.
+        SelectionView.table : The per-feature table used as a fallback.
+        """
         curve_available = not self._curve.empty
         if not curve_available and not self._metadata["table_complete"]:
             raise NotImplementedError(
@@ -820,6 +1117,46 @@ class SelectionView:
         return ax
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the view to a versioned, JSON-safe payload.
+
+        Everything the view holds except the proxy-correlation block, which is
+        deliberately omitted because it is bounded working data rather than
+        part of the result.
+
+        Returns
+        -------
+        dict
+            Keys ``schema_version``, ``features``, ``indices``, ``support``,
+            ``raw_input``, ``raw_table``, ``encoded_features``,
+            ``encoded_indices``, ``encoded_support``, ``encoded_output``,
+            ``encoded_table``, ``curve``, ``metadata``, and ``diagnostics``.
+            Tables are emitted in pandas ``orient="split"`` form, and mappings
+            with non-string keys use a tagged envelope rather than losing
+            their key types.
+
+        Raises
+        ------
+        TypeError
+            If a diagnostics or metadata value has no defined JSON
+            representation.  Nothing is coerced to its ``repr`` silently.
+
+        See Also
+        --------
+        SelectionView.metadata : The metadata copied into the payload.
+
+        Examples
+        --------
+        >>> import numpy as np, pandas as pd
+        >>> from sift import as_result, select_cefsplus
+        >>> rng = np.random.default_rng(0)
+        >>> X = pd.DataFrame(rng.normal(size=(200, 5)), columns=list("abcde"))
+        >>> y = X["a"] + 0.7 * X["d"] + 0.1 * rng.normal(size=200)
+        >>> view = as_result(select_cefsplus(X, y, k=2, verbose=False,
+        ...                                  return_result=True))
+        >>> payload = view.to_dict()
+        >>> payload["schema_version"], payload["features"]
+        ('1', ['a', 'd'])
+        """
         payload = {
             "schema_version": SCHEMA_VERSION,
             "features": self.features,
@@ -2627,6 +2964,84 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
     Passing an existing view is an identity operation.  Legacy list and tuple
     returns are intentionally not guessed; request the corresponding result
     object with ``return_result=True`` first.
+
+    This is the single entry point that turns any of SIFT's result families
+    into one normalized shape, so downstream code can read ``features``,
+    ``indices``, ``k``, ``table`` and ``metadata`` without knowing which
+    selector ran.  The original object is neither modified nor replaced; the
+    view is a separate copy that never retains the caller's feature matrix.
+
+    Parameters
+    ----------
+    obj : result object or SelectionView
+        A :class:`~sift.selection.result.FilterSelectionResult`,
+        :class:`~sift.KnockoffSelectionResult`, ``BorutaResult``,
+        ``FeaturePathEvaluationResult``, ``ImportanceResult``,
+        ``CatBoostSelectionResult``, or a fitted ``StabilitySelector``.  An
+        existing :class:`SelectionView` is returned unchanged.  Subclasses of
+        the result types are not accepted: dispatch is by exact type so an
+        adapter cannot silently mis-read an extended object.
+    input_features : sequence or None, default None
+        Ordered labels of every raw input column.  Supplying them establishes
+        the view's raw feature identity and ``raw_columns_hash`` for a result
+        that cannot prove its own, which is what lets ``support_`` and a
+        complete table exist.  Must not be given when ``obj`` is already a
+        :class:`SelectionView`.
+
+    Returns
+    -------
+    SelectionView
+        Normalized view over ``obj``.  For an existing view, ``obj`` itself.
+
+    Raises
+    ------
+    TypeError
+        If ``obj`` is a bare list or tuple (rerun the selector with
+        ``return_result=True``), a permutation-importance DataFrame (rerun
+        :func:`sift.permutation_importance` with ``return_result=True``), or
+        any other unsupported type.
+    ValueError
+        If ``input_features`` is supplied together with an existing
+        :class:`SelectionView`, or if it contradicts the identity, width, or
+        positions the result already carries.
+
+    See Also
+    --------
+    SelectionView : The returned view type and its accessors.
+    sift.KnockoffSelectionResult.result_view : Method form for that result.
+    sift.select_cached : Returns a view directly with ``return_result=True``.
+
+    Notes
+    -----
+    Adaptation is additive and lossless in one direction only: the view reads
+    what the result already proved and refuses to invent the rest.  A legacy
+    result cannot say whether its input was named or positional, so those
+    views report ``metadata["input_kind"] == "unknown"`` even when
+    ``input_features`` is supplied.  Result-only sources also carry no fitted
+    preprocessing state, so :meth:`SelectionView.transform` raises and
+    ``metadata["transform_available"]`` is ``False``; only a fitted selector
+    yields a transforming view.  Metrics a selector never reported stay
+    ``NaN`` rather than being guessed, and a table that cannot cover every raw
+    position is marked ``table_complete=False``.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import as_result, select_cefsplus
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 5)), columns=list("abcde"))
+    >>> y = X["a"] + 0.7 * X["d"] + 0.1 * rng.normal(size=200)
+    >>> result = select_cefsplus(X, y, k=2, verbose=False, return_result=True)
+    >>> view = as_result(result, input_features=list(X.columns))
+    >>> view.k, view.features, view.metadata["input_kind"]
+    (2, ['a', 'd'], 'unknown')
+    >>> as_result(view) is view  # identity for an existing view
+    True
+    >>> try:  # a legacy list is never guessed at
+    ...     as_result(["a", "d"])
+    ... except TypeError as exc:
+    ...     print(type(exc).__name__)
+    TypeError
     """
 
     if isinstance(obj, SelectionView):

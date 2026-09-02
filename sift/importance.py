@@ -324,6 +324,17 @@ def permutation_importance(
     """
     Permutation importance with optional time-series-aware strategies.
 
+    Scores each feature by how much the model's performance drops when that
+    column is shuffled, averaged over ``n_repeats`` permutations of a fitted
+    model's predictions.  Unlike SIFT's selectors this ranks rather than
+    selects: it never chooses a cut-off, and its semantics are recorded as
+    ``"ranking_only"``.  The permutation strategy is what makes it usable on
+    dependent data -- supply ``groups`` or ``time`` and the shuffle is
+    restricted so it cannot destroy the dependence structure it should
+    preserve.  By default it uses negative MSE, 10 repeats, all cores, thread
+    parallelism, a nondeterministic seed, and returns the historical
+    four-column DataFrame sorted by descending mean importance.
+
     Parameters
     ----------
     model : fitted estimator
@@ -360,13 +371,22 @@ def permutation_importance(
         - "block": shuffle time-ordered blocks (requires time)
         - "circular_shift": rotate within time order (requires time)
     block_size : int or "auto"
-        For block method.
+        For block method. ``"auto"`` uses ``int(sqrt(n_samples))``. Ignored by
+        every other ``permute_method``.
     n_jobs : int
-        Number of parallel jobs.
+        Number of parallel jobs. The default ``-1`` uses all cores; features
+        are split into contiguous chunks, one per worker.
     parallel_backend : {"threads", "processes"}
         Joblib backend preference. "threads" avoids inter-process copies for
         many estimators; "processes" isolates workers when process parallelism
         is preferred.
+    random_state : int or None, default None
+        Seed for the permutation draws. One seed per (feature, repeat) is
+        derived from it, so a given seed reproduces the run exactly, including
+        under parallelism. The ``None`` default draws nondeterministic entropy
+        and emits a :class:`FutureWarning`: SIFT 1.0 will resolve it to
+        ``random_state=0``. Pass an integer to make the call reproducible and
+        silence that warning.
     return_result : bool
         If ``False`` (default), return the historical four-column DataFrame.
         If ``True``, return :class:`ImportanceResult`, including the
@@ -376,7 +396,71 @@ def permutation_importance(
     -------
     DataFrame or ImportanceResult
         The default DataFrame has columns ``feature``, ``importance_mean``,
-        ``importance_std``, and ``baseline_score``.
+        ``importance_std``, and ``baseline_score``, one row per feature,
+        sorted by descending ``importance_mean``. With ``return_result=True``,
+        an :class:`ImportanceResult` exposing that table as ``ranking_``, the
+        ``(n_features, n_repeats)`` matrix of raw score drops as
+        ``importances_`` in *raw feature order*, ``feature_names``,
+        ``ranking_indices`` mapping ranking rows back to those positions,
+        ``baseline_score``, ``selector_metadata`` (including
+        ``selection_semantics="ranking_only"``), and ``diagnostics_``.
+
+    Raises
+    ------
+    ValueError
+        If ``n_repeats`` is not a positive integer; if ``return_result`` is
+        not a boolean; if ``parallel_backend`` is not ``"threads"`` or
+        ``"processes"``; if ``X`` is not 2-D or its row count differs from
+        ``y``; if ``permute_method`` is ``"block"`` or ``"circular_shift"``
+        without ``time``, or ``"within_group"`` without ``groups``; or if
+        ``higher_is_better`` is passed with a named, ``ScoringSpec``, or
+        sklearn scorer, all of which already carry a direction.
+    TypeError
+        If ``scoring`` is neither a scorer name, a ``ScoringSpec``, nor a
+        callable.
+
+    Warns
+    -----
+    FutureWarning
+        When ``random_state`` is left at ``None``, because the run is then
+        nondeterministic and the default will change in SIFT 1.0.
+
+    See Also
+    --------
+    ImportanceResult : The richer return type, and its accessors.
+    sift.as_result : Normalize an ``ImportanceResult`` into a SelectionView.
+    sift.select_fdr : Error-controlled selection rather than a ranking.
+
+    Notes
+    -----
+    Importance is the *score drop*: the baseline score of the unpermuted data
+    minus the score after shuffling one column, oriented so larger always
+    means more important whatever the metric's own direction. It is measured
+    on the model as given, so it reflects what that fitted model relies on,
+    not what an independent model would learn -- correlated features can share
+    credit and each look unimportant alone. ``importance_std`` is the
+    population standard deviation over repeats (``ddof=0``), so it describes
+    permutation noise, not sampling uncertainty. Cost is one model prediction
+    per feature and repeat, ``n_features * n_repeats`` in total, plus one
+    baseline.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sklearn.linear_model import LinearRegression
+    >>> from sift import permutation_importance
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 4)), columns=list("abcd"))
+    >>> y = 3.0 * X["a"] - 2.0 * X["b"] + 0.1 * rng.normal(size=200)
+    >>> model = LinearRegression().fit(X, y)
+    >>> ranking = permutation_importance(model, X, y, n_repeats=5,
+    ...                                  random_state=0)
+    >>> ranking["feature"].tolist()
+    ['a', 'b', 'c', 'd']
+    >>> result = permutation_importance(model, X, y, n_repeats=5,
+    ...                                 random_state=0, return_result=True)
+    >>> result.importances_.shape, result.ranking_indices
+    ((4, 5), [0, 1, 2, 3])
     """
     metadata = resolve_row_metadata(
         X,
