@@ -123,8 +123,9 @@ cannot identify its own fold. The unweighted fixed-k folds reproduce sklearn's
 `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
 shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
 m-estimates. No path needs optional dependencies. Configure them with
-`target_cv_n_splits=5` and `target_cv_smoothing="auto"`; weighted, grouped, and
-time-aware modes require an explicit non-negative smoothing float. Time-aware
+`target_cv_n_splits=5` and `target_cv_smoothing="auto"`; `"auto"` is accepted on
+every fold kind (weighted rows use weighted row mass in the empirical-Bayes
+prior), and an explicit non-negative float is always accepted. Time-aware
 calls accept a target-independent `target_prior` (the earliest block then emits
 a centered neutral zero and stays in the fit), or use
 `warmup_policy="zero_weight"` (default) / `"exclude"` to remove the earliest

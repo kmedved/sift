@@ -848,10 +848,12 @@ def test_near_unique_ids_with_a_shared_target_stay_selectable_by_design():
     assert float(np.var(encoded)) > 0.0
     assert abs(float(np.corrcoef(encoded, y)[0, 1])) > 0.5
 
+    # k=1 makes the assertion falsifiable: the encoded near-unique ID must beat
+    # the numeric feature outright, not merely appear in a two-of-two selection.
     selected = sift.select_mrmr(
         X,
         y,
-        2,
+        1,
         task="regression",
         estimator="classic",
         mrmr_backend="serial",
@@ -859,7 +861,7 @@ def test_near_unique_ids_with_a_shared_target_stay_selectable_by_design():
         subsample=None,
         verbose=False,
     )
-    assert "id" in selected
+    assert selected == ["id"]
 
 
 def test_near_unique_ids_without_a_shared_target_are_not_selected():

@@ -75,9 +75,11 @@ jobs:
   #
   # The dependency blockers are gone. The newest resolution `pyproject.toml`
   # allows -- numpy 2.5.2 / pandas 3.0.5 / scikit-learn 1.9.0 / scipy 1.18.1 /
-  # numba 0.67.0 -- is green at 1,680 passed / 30 skipped, and the `test` matrix
-  # above installs exactly that band, so the whole declared range is exercised
-  # on every run. See docs/development.md ("Verified dependency band").
+  # numba 0.67.0 -- is green at 1,680 passed / 30 skipped. The `test (3.12)` job
+  # above resolves to that band on every run (numpy 2.5 ships no cp310/cp311
+  # wheels, so 3.10/3.11 resolve slightly older versions), and `min-pins` covers
+  # the floors, so the declared range is exercised end to end. See
+  # docs/development.md ("Verified dependency band").
   #
   # The interpreter is not a blocker either: numba ships cp313 wheels from
   # 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local 3.13.15 run with
