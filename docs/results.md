@@ -21,12 +21,19 @@ Request the existing rich result first, then adapt it. Supplying
 the legacy result cannot reconstruct it completely.
 
 ```python
+import numpy as np
+import pandas as pd
+
 import sift
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
 
 result = sift.select_mrmr(
     X,
     y,
-    k=20,
+    k=6,
     task="regression",
     return_result=True,
     verbose=False,
@@ -35,6 +42,8 @@ view = sift.as_result(result, input_features=X.columns)
 ```
 
 The same five accessor lines work for all seven entry-point families:
+
+<!-- sift-doc: continues -->
 
 ```python
 view.features
@@ -134,10 +143,13 @@ fall back to `"unknown"` because names such as `x0` cannot distinguish a real
 DataFrame label from an older generated positional label.
 
 `selected_index` is the positional authority when labels repeat. The raw table
-retains positions instead of collapsing duplicate labels. The five result-only
-selection adapters and the importance result do not enable name-based
-transforms or proxy lookup, so callers should
-use `indices` and `support_` for positional work.
+retains positions instead of collapsing duplicate labels. None of the six
+result-only adapters enable a name-based `transform`, so callers should use
+`indices` and `support_` for positional work. Proxy lookup is the one
+selection-time capability that does survive adaptation: a Gaussian filter
+result selected with `store_proxies=True` carries its correlation block through
+`sift.as_result`, and `proxies_at` is the unambiguous accessor there when raw
+labels repeat.
 
 ## Curves, serialization, and plotting
 
