@@ -11,6 +11,7 @@ import pickle
 
 import numpy as np
 import pandas as pd
+import warnings
 import pytest
 
 import sift
@@ -1714,3 +1715,45 @@ def test_unsupported_objects_raise_instead_of_leaking_repr(value):
 def test_unsupported_mapping_keys_raise_too():
     with pytest.raises(TypeError, match="no JSON-safe representation"):
         _json_safe({object(): 1, "ok": 2})
+
+
+def test_knockoff_view_with_dropped_inputs_appends_rows_without_pandas_warnings():
+    W = pd.DataFrame(
+        {
+            "feature": ["a", "b", "c"],
+            "selected_index": [0, 1, 3],
+            "W": [1.5, -0.2, 0.9],
+            "selected": [True, False, True],
+            "relevance": [0.8, 0.1, 0.6],
+            "feature_group": [0, 0, 1],
+        }
+    )
+    result = sift.KnockoffSelectionResult(
+        selected_features=["a", "c"],
+        selected_indices=[0, 3],
+        selector_metadata={
+            "selector": "knockoff_fdr",
+            "n_features": 3,
+            "n_features_input": 4,
+            "dropped_feature_positions": [2],
+            "dropped_feature_reasons": ["constant"],
+        },
+        W=W,
+        threshold=0.5,
+        selection_frequency=None,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        view = sift.as_result(result, input_features=["a", "b", "const", "c"])
+    table = view.table
+    assert table["selected_index"].tolist() == [0, 1, 2, 3]
+    dropped = table.loc[table["selected_index"] == 2].iloc[0]
+    assert dropped["feature"] == "const"
+    assert dropped["reason_dropped"] == "constant"
+    assert not dropped["selected"]
+    assert pd.isna(dropped["path_rank"]) and pd.isna(dropped["gain"])
+    assert pd.isna(dropped["relevance"]) and pd.isna(dropped["feature_group"])
+    assert str(table["path_rank"].dtype) == "Int64"
+    assert table["selected"].dtype == bool
+    assert table.loc[table["selected_index"] != 2, "feature_group"].tolist() == [0, 0, 1]
+    assert view.metadata["table_complete"] is True

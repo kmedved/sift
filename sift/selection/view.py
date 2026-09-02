@@ -1068,6 +1068,44 @@ def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
     )
 
 
+
+def _append_rows_like(table: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
+    """Append ``rows`` to ``table`` with every column cast to the table's dtype.
+
+    Columns the rows do not mention become missing values of the matching
+    dtype.  Aligning dtypes first keeps the concatenation free of pandas'
+    all-NA-entry deprecation, which fires whenever an all-missing column would
+    otherwise be ignored while inferring the result dtype.
+    """
+    missing = pd.DataFrame(rows)
+    count = len(missing)
+    aligned: dict[str, object] = {}
+    for column in table.columns:
+        dtype = table[column].dtype
+        if column in missing.columns:
+            values = missing[column]
+            if pd.api.types.is_extension_array_dtype(dtype):
+                aligned[column] = pd.array(values.tolist(), dtype=dtype)
+            elif pd.api.types.is_object_dtype(dtype):
+                aligned[column] = pd.Series(values.tolist(), dtype=object)
+            elif values.isna().any():
+                nullable = table[column].convert_dtypes().dtype
+                table = table.astype({column: nullable})
+                aligned[column] = pd.array(values.tolist(), dtype=nullable)
+            else:
+                aligned[column] = values.to_numpy().astype(dtype, copy=False)
+        elif pd.api.types.is_extension_array_dtype(dtype):
+            aligned[column] = pd.array([pd.NA] * count, dtype=dtype)
+        elif pd.api.types.is_object_dtype(dtype):
+            aligned[column] = pd.Series([None] * count, dtype=object)
+        elif pd.api.types.is_float_dtype(dtype):
+            aligned[column] = np.full(count, np.nan, dtype=dtype)
+        else:
+            nullable = table[column].convert_dtypes().dtype
+            table = table.astype({column: nullable})
+            aligned[column] = pd.array([pd.NA] * count, dtype=nullable)
+    return pd.concat([table, pd.DataFrame(aligned)], ignore_index=True)
+
 def _knockoff_dropped_inputs(metadata: Mapping[str, Any]) -> dict[int, str]:
     """Return ``{raw position: reason}`` for columns knockoffs could not use."""
     positions = metadata.get("dropped_feature_positions")
@@ -1193,10 +1231,7 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
             for position in sorted(set(dropped_inputs).difference(present))
         ]
         if missing_rows:
-            table = pd.concat(
-                [table, pd.DataFrame(missing_rows).astype({"selected_index": "Int64"})],
-                ignore_index=True,
-            )
+            table = _append_rows_like(table, missing_rows)
         table["reason_dropped"] = [
             dropped_inputs.get(int(position)) for position in table["selected_index"]
         ]
