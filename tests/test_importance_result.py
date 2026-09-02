@@ -178,11 +178,22 @@ def test_importance_result_view_is_complete_ranking_not_subset_selection():
 
 
 def test_duplicate_dataframe_labels_remain_distinct_by_position():
+    # A duplicate-labelled frame cannot be handed to an sklearn estimator at
+    # all: from scikit-learn 1.9 its dataframe validation goes through narwhals,
+    # which rejects repeated column names in ``fit`` and ``predict`` alike. SIFT
+    # passes X through to ``model.predict`` untouched, so the estimator here is
+    # a positional stub -- addressing columns by position is precisely the
+    # contract under test, since ``X["dup"]`` is ambiguous by construction.
+    class _PositionalPredictor:
+        def predict(self, X):
+            assert isinstance(X, pd.DataFrame)
+            return 3.0 * X.iloc[:, 1].to_numpy()
+
     rng = np.random.default_rng(91)
     values = rng.normal(size=(70, 3))
     X = pd.DataFrame(values, columns=["dup", "dup", "noise"])
     y = 3.0 * values[:, 1]
-    model = LinearRegression().fit(X, y)
+    model = _PositionalPredictor()
 
     result = permutation_importance(
         model,

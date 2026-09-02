@@ -758,8 +758,17 @@ def test_sample_knockoffs_convenience_shape_and_determinism():
 
     assert Zt1.shape == cache.Z.shape
     assert Zt1.dtype == np.float32
+    # Same seed, same interpreter: bit-identical. This is the determinism the
+    # library actually promises, so it stays an exact comparison.
     np.testing.assert_array_equal(Zt1, Zt2)
-    np.testing.assert_array_equal(
+    # The pinned draw is only reproducible to float32 precision across builds.
+    # ``mean_op``/``noise_chol`` come out of LAPACK (``eigh``/``cho_factor``)
+    # and are then applied as float32 BLAS GEMMs, neither of which is bit-stable
+    # across NumPy/SciPy versions: numpy 2.5.2 + scipy 1.18.1 reproduces this
+    # block to a max relative deviation of 6.4e-8, under one float32 ulp
+    # (eps = 1.19e-7). rtol=1e-6 is ~8 ulp -- loose enough for that rounding,
+    # far tighter than any real change to the sampler or its RNG stream.
+    np.testing.assert_allclose(
         Zt1[:2, :4],
         np.array(
             [
@@ -768,6 +777,8 @@ def test_sample_knockoffs_convenience_shape_and_determinism():
             ],
             dtype=np.float32,
         ),
+        rtol=1e-6,
+        atol=0.0,
     )
 
 
