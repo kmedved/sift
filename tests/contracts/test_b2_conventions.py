@@ -118,7 +118,7 @@ def test_selector_auto_k_sugar_excludes_metadata_and_transform_accepts_original(
         verbose=False,
     ).fit(X, y, groups="group")
 
-    assert selector.feature_names_in_ == ["signal", "weak", "noise", "time"]
+    assert list(selector.feature_names_in_) == ["signal", "weak", "noise", "time"]
     assert "group" not in selector.selected_features_
     transformed = selector.transform(X)
     assert transformed.shape == (len(X), len(selector.selected_features_))
@@ -141,7 +141,7 @@ def test_stability_fit_and_threshold_tuning_accept_column_sugar_and_scorer(b2_da
         from_column.selection_frequencies_,
         from_array.selection_frequencies_,
     )
-    assert from_column.feature_names_in_ == list(features.columns)
+    assert list(from_column.feature_names_in_) == list(features.columns)
 
     threshold, diagnostics = from_column.tune_threshold(
         X,
@@ -165,7 +165,7 @@ def test_boruta_selector_accepts_group_and_time_column_sugar(b2_data):
         verbose=False,
     ).fit(X, y, groups="group", time="time")
 
-    assert selector.feature_names_in_ == ["signal", "weak", "noise"]
+    assert list(selector.feature_names_in_) == ["signal", "weak", "noise"]
     assert selector.transform(X).shape[0] == len(X)
 
 

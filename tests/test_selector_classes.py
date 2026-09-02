@@ -222,8 +222,23 @@ def test_selector_dataframe_transform_rejects_reordered_columns():
 
     selector = MRMRSelector(k=2, task="regression", verbose=False).fit(X, y)
 
-    with pytest.raises(ValueError, match="columns"):
+    # String columns use sklearn's standard feature-name mismatch wording so
+    # check_dataframe_column_names_consistency passes.
+    with pytest.raises(
+        ValueError,
+        match="Feature names must be in the same order as they were in fit",
+    ):
         selector.transform(X[list(reversed(X.columns))])
+
+    # Non-string labels fall back to SIFT's own strict order/identity message.
+    numeric = pd.DataFrame(X.to_numpy(), columns=range(5))
+    numeric_selector = MRMRSelector(k=2, task="regression", verbose=False).fit(
+        numeric, y
+    )
+    with pytest.raises(
+        ValueError, match="DataFrame columns must match fitted columns and order"
+    ):
+        numeric_selector.transform(numeric[list(reversed(numeric.columns))])
 
 
 def test_gaussian_selector_requires_positional_x_for_unnamed_cache():

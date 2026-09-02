@@ -764,7 +764,7 @@ def test_stability_smart_sampler_honors_explicit_feature_subset():
         verbose=False,
     ).fit(X, y, feature_names=["a"])
 
-    assert selector.feature_names_in_ == ["a"]
+    assert list(selector.feature_names_in_) == ["a"]
     assert set(selector.selected_feature_names_) <= {"a"}
     transformed = selector.transform(X)
     assert transformed.shape == (len(X), len(selector.selected_feature_names_))
@@ -785,7 +785,7 @@ def test_stability_smart_sampler_honors_explicit_feature_subset():
         random_state=0,
         verbose=False,
     ).fit(X, y, feature_names=("c", "a"))
-    assert ordered.feature_names_in_ == ["c", "a"]
+    assert list(ordered.feature_names_in_) == ["c", "a"]
     assert set(ordered.selected_feature_names_) <= {"c", "a"}
 
 
@@ -843,7 +843,7 @@ def test_stability_smart_sampler_excludes_explicit_metadata_names():
         verbose=False,
     ).fit(X, y, feature_names=["a", "group", "time", "c"])
 
-    assert selector.feature_names_in_ == ["a", "c"]
+    assert list(selector.feature_names_in_) == ["a", "c"]
     assert set(selector.selected_feature_names_) <= {"a", "c"}
 
 
@@ -884,7 +884,7 @@ def test_stability_smart_sampler_tune_threshold_retains_metadata_columns():
     best, results = selector.tune_threshold(X, y, thresholds=[0.0], cv=2)
 
     assert best == 0.0
-    assert selector.feature_names_in_ == ["a"]
+    assert list(selector.feature_names_in_) == ["a"]
     assert results.loc[0, "n_features"] == 1.0
     assert results.loc[0, "n_finite"] == 2
 
@@ -987,7 +987,7 @@ def test_stability_accepts_ordered_one_dimensional_feature_name_containers(
         verbose=False,
     ).fit(X, y, feature_names=feature_names)
 
-    assert selector.feature_names_in_ == expected
+    assert list(selector.feature_names_in_) == expected
     assert selector.get_feature_names_out(feature_names).shape == (2,)
 
 

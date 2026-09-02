@@ -585,7 +585,8 @@ After fitting, selector classes expose:
 
 - `selected_features_`
 - `selected_indices_`
-- `feature_names_in_`
+- `feature_names_in_` — sklearn's one-dimensional NumPy object array of fitted
+  feature names. Positional (ndarray) fits store the generated `x0...` names.
 - `n_features_in_`
 - `k_` when automatic k resolved a value
 - `get_feature_names_out()`

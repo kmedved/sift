@@ -2062,7 +2062,9 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
     # set_output wrapping without retaining X, coefficient matrices, callbacks,
     # or a live reference whose behavior could change after refit.
     transform_selector = type(selector)()
-    transform_selector.feature_names_in_ = list(raw_features)
+    # Match the fitted selector's public dtype contract: sklearn requires
+    # ``feature_names_in_`` to be a one-dimensional object ndarray.
+    transform_selector.feature_names_in_ = raw_values.copy()
     transform_selector.n_features_in_ = n_features
     transform_selector.selected_features_ = np.asarray(
         selected_indices, dtype=np.int64

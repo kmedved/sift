@@ -37,6 +37,7 @@ from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, reject_datetime_like_features
 from sift._selector_compat import (
+    feature_names_array,
     inverse_selected_matrix,
     ordered_indices,
     reject_sparse,
@@ -84,10 +85,7 @@ def _coerce_feature_names(feature_names, *, argument: str = "feature_names") -> 
 
 def _feature_names_object_array(feature_names) -> np.ndarray:
     """Build a one-dimensional object array without expanding tuple labels."""
-    names = list(feature_names)
-    result = np.empty(len(names), dtype=object)
-    result[:] = names
-    return result
+    return feature_names_array(feature_names)
 
 
 def _feature_names_index(feature_names) -> pd.Index:
@@ -422,7 +420,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             y = np.asarray(y, dtype=np.float64) - self._target_center_
 
         n, p = X.shape
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
         self.n_features_in_ = p
 
         if groups is not None:

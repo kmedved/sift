@@ -169,7 +169,9 @@ def test_boruta_default_explicit_result_method_and_transform_contract(
     )
 
     for fitted in (implicit, explicit):
-        assert fitted.feature_names_in_ == all_names
+        assert isinstance(fitted.feature_names_in_, np.ndarray)
+        assert fitted.feature_names_in_.dtype == object
+        assert list(fitted.feature_names_in_) == all_names
         assert fitted.n_features_in_ == 4
         assert fitted.selected_features_ == expected_names
         assert fitted.n_iter_ == 4
@@ -321,7 +323,9 @@ def test_knockoff_default_explicit_result_metadata_and_transform_contract(
     expected_ranking = [all_names[index] for index in [0, 2, 1, 3, 5, 4]]
 
     for fitted in (implicit, explicit):
-        assert fitted.feature_names_in_ == all_names
+        assert isinstance(fitted.feature_names_in_, np.ndarray)
+        assert fitted.feature_names_in_.dtype == object
+        assert list(fitted.feature_names_in_) == all_names
         assert fitted.n_features_in_ == 6
         assert fitted.selected_features_ == expected_names
         np.testing.assert_array_equal(

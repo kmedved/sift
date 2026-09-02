@@ -25,6 +25,7 @@ from sift._logging import logger
 from sift._metadata import drop_fitted_metadata_columns, resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
 from sift._selector_compat import (
+    feature_names_array,
     inverse_selected_matrix,
     ordered_indices,
     reject_sparse,
@@ -207,8 +208,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
 
     Attributes
     ----------
-    feature_names_in_ : list[str]
-        Feature names from fit.
+    feature_names_in_ : ndarray of shape (n_features,)
+        One-dimensional object array of fitted feature names. Positional fits
+        keep the generated ``x0...`` names in this attribute.
     status_ : ndarray
         Feature status: -1=rejected, 0=tentative, 1=accepted.
     selected_features_ : list[str]
@@ -495,7 +497,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         """Return accepted feature names following sklearn's transformer API."""
         check_is_fitted(self, ["status_", "feature_names_in_", "n_features_in_"])
-        fitted_names = np.asarray(self.feature_names_in_, dtype=object)
+        fitted_names = feature_names_array(self.feature_names_in_)
         if input_features is not None:
             input_names = np.asarray(input_features, dtype=object)
             if input_names.ndim != 1 or input_names.shape[0] != self.n_features_in_:
@@ -631,6 +633,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
             "_target_cv_training_output_",
             "categorical_features_",
             "_categorical_encoding_applied_",
+            "_fit_feature_names_generated_",
             "feature_names_in_",
             "n_features_in_",
             "status_",
@@ -785,6 +788,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         X_arr = to_numpy(X, dtype=np.float64)
 
         n, p = X_arr.shape
+        # Generated names stay in the public ``feature_names_in_`` attribute;
+        # the private marker records that the fit was positional.
+        self._fit_feature_names_generated_ = feature_names is None
         if feature_names is None:
             feature_names = [f"x{i}" for i in range(p)]
 
@@ -1067,7 +1073,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         shadow_thresholds_arr,
         mean_importance,
     ) -> None:
-        self.feature_names_in_ = feature_names
+        self.feature_names_in_ = feature_names_array(feature_names)
         self.n_features_in_ = len(feature_names)
         self.status_ = status
         self.hits_ = hits
