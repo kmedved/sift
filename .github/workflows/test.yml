@@ -21,6 +21,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -46,6 +50,10 @@ jobs:
         python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -81,6 +89,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -110,6 +122,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -130,6 +146,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # full history: tests/test_auto_k_gate_summary.py verifies the committed
+          # gate table against source hashes at its provenance commit
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:

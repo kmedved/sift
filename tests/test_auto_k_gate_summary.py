@@ -335,6 +335,25 @@ def test_gate_summary_rejects_missing_or_untrusted_path_timing_sidecar(
 
 def test_committed_dated_gate_is_bound_to_its_full_clean_provenance(tmp_path):
     results = REPO_ROOT / "benchmarks/results"
+    sidecar = json.loads(
+        (results / "auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    provenance_commit = str(sidecar["git"]["commit"])
+    have_commit = subprocess.run(
+        ["git", "cat-file", "-e", f"{provenance_commit}^{{commit}}"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    if not have_commit:
+        pytest.skip(
+            "provenance commit "
+            f"{provenance_commit[:12]} is not available in this checkout (shallow "
+            "clone or archive); CI runs this verification on a full-history checkout"
+        )
     output_path = tmp_path / "gates.csv"
     regenerate_gate_csv(
         results / "auto_k_v2_main.csv",
