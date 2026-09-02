@@ -78,7 +78,80 @@ from sift.boruta_helpers import (
 
 @dataclass
 class BorutaResult:
-    """Results from Boruta feature selection."""
+    """Results from Boruta feature selection.
+
+    A plain snapshot of one finished Boruta run: the accept/reject/tentative
+    verdict for every candidate feature, the hit counts and shadow thresholds
+    the verdicts came from, and the mean importance used to rank them. It is
+    returned by :func:`select_boruta` and :func:`select_boruta_shap` under
+    ``return_result=True``, and by ``BorutaSelector.result_()`` after ``fit``,
+    which copies its arrays so later refits cannot mutate an earlier result.
+    Every array is positional and aligned with ``feature_names``, so ordinary
+    NumPy masking works directly; the convenience masks and
+    :meth:`get_feature_ranking` are built on exactly that alignment.
+
+    Unlike the fixed-``k`` filters, Boruta is an all-relevant selector: it
+    keeps every feature that beats its shadow, so the accepted count is a
+    property of the data rather than a request.
+
+    Attributes
+    ----------
+    feature_names : list of str
+        Candidate feature labels in fitted column order. A positional ndarray
+        fit stores the generated ``x0...`` names here.
+    status : ndarray of shape (n_features,)
+        Per-feature verdict: ``1`` accepted, ``0`` tentative, ``-1`` rejected.
+        With ``resolve_tentative=True`` the surviving tentatives are forced to
+        ``1`` or ``-1`` against the median shadow threshold, and any
+        ``max_features`` cap demotes the weakest accepted features to ``-1``.
+    hits : ndarray of shape (n_features,)
+        Number of iterations in which a feature beat that iteration's shadow
+        threshold while it was still undecided. Counting stops once a feature
+        leaves tentative status, so ``hits`` is not comparable across features
+        decided in different rounds.
+    n_iter : int
+        Number of Boruta iterations actually run, which may be below
+        ``max_iter`` after an early stop.
+    shadow_thresholds : ndarray of shape (n_iter,)
+        The ``perc``-percentile shadow importance recorded once per iteration.
+    mean_importance : ndarray of shape (n_features,)
+        Mean observed importance per feature over the iterations in which it
+        was still active; ``NaN`` for a feature that never received one.
+
+    See Also
+    --------
+    select_boruta : Function-style Boruta returning this result on request.
+    BorutaSelector : The estimator whose ``result_()`` builds it.
+    sift.as_result : Normalize this result into a ``SelectionView``; also
+        reachable as ``result.result_view()``.
+
+    Notes
+    -----
+    ``accepted_mask``, ``rejected_mask`` and ``tentative_mask`` are boolean
+    views of ``status``; ``selected_features()`` returns the accepted labels in
+    input-column order, while ``get_feature_ranking()`` returns a DataFrame of
+    ``feature``, ``mean_importance``, ``hits`` and a textual ``status``, sorted
+    by descending mean importance with ``NaN`` last and stable ties. The
+    dataclass is mutable and holds the arrays it was given, so treat a result
+    obtained from ``BorutaSelector.result_()`` as the owner of its copies.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import select_boruta
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(120, 5))
+    >>> y = 3.0 * X[:, 0] + 2.0 * X[:, 1] + 0.1 * rng.normal(size=120)
+    >>> result = select_boruta(X, y, max_iter=10, n_estimators=50,
+    ...                        random_state=0, verbose=False,
+    ...                        return_result=True)
+    >>> result.selected_features()
+    ['x0', 'x1']
+    >>> sorted(set(result.status.tolist()))
+    [-1, 1]
+    >>> list(result.get_feature_ranking().columns)
+    ['feature', 'mean_importance', 'hits', 'status']
+    """
 
     feature_names: list[str]
     status: np.ndarray
@@ -186,8 +259,40 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
     shadow_method : {"auto", "global", "within_group", "block", "circular_shift"}
         Shadow feature permutation method. "auto" selects based on
         groups/time availability.
+    shadow_mode : {"columns", "rows"}, default="columns"
+        Permutation axis for the shadows. "columns" permutes each column
+        independently (classic Boruta); "rows" applies one row permutation to
+        every column, preserving cross-feature covariance in the null.
     block_size : int or "auto"
         Block size for block permutation.
+    cat_features : list of str, optional
+        Categorical column names to encode. None auto-detects object,
+        category and string DataFrame columns; names absent from X are
+        dropped. Only used when cat_encoding is not "none".
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+        Categorical encoding fitted before the Boruta loop. "target_cv" is the
+        leakage-safe cross-fitted encoder and is the only supervised value
+        accepted without an explicit opt-in; the four legacy encodings fit on
+        the full dataset and therefore require
+        allow_full_data_target_encoding=True, because tree learners can read a
+        row's own target back out of them. Any supervised value is rejected
+        with importance_data="test". sample_weight is consumed only by
+        "target_cv" and "loo_logit".
+    target_cv_n_splits : int, default=5
+        Fold count for cat_encoding="target_cv".
+    target_cv_smoothing : "auto" or float, default="auto"
+        Empirical-Bayes shrinkage for "target_cv"; an explicit non-negative
+        float is always accepted.
+    target_prior : float, optional
+        Target-independent prior for time-aware "target_cv" fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        "target_cv" fit when no target_prior is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to the leakage-prone full-dataset supervised encodings. It is
+        rejected together with cat_encoding="target_cv", whose cross-fitted
+        contract it contradicts.
     importance_data : {"train", "test"}
         Compute importance on training data or held-out test split.
     test_size : float
@@ -199,13 +304,13 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
     random_state : int
         Random seed.
     verbose : bool
-        Print progress.
-    output_order : {'legacy', 'original'}, default='legacy'
-        Order used by transform, selected support indices, feature names, and
-        inverse transform. Boruta's legacy order is already input order.
+        Emit per-iteration progress at INFO on the ``sift`` logger.
     callback : callable, optional
         Called after each completed Boruta iteration as
         ``callback(step, total, info)``.
+    output_order : {'legacy', 'original'}, default='legacy'
+        Order used by transform, selected support indices, feature names, and
+        inverse transform. Boruta's legacy order is already input order.
 
     Attributes
     ----------
@@ -218,6 +323,31 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         Names of accepted features.
     n_iter_ : int
         Number of iterations run.
+
+    See Also
+    --------
+    select_boruta : One-call wrapper around this estimator.
+    select_boruta_shap : The same search with the SHAP importance backend.
+    BorutaResult : Result object returned by ``select_boruta(return_result=True)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sklearn.ensemble import RandomForestRegressor
+    >>> from sift import BorutaSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(120, 5)),
+    ...                  columns=[f"f{i}" for i in range(5)])
+    >>> y = 3.0 * X["f0"] + 2.0 * X["f1"] + 0.1 * rng.normal(size=120)
+    >>> selector = BorutaSelector(
+    ...     estimator=RandomForestRegressor(n_estimators=20, random_state=0),
+    ...     max_iter=10, random_state=0, verbose=False,
+    ... )
+    >>> selector.fit(X, y).selected_features_
+    ['f0', 'f1']
+    >>> selector.transform(X).shape
+    (120, 2)
     """
 
     def __init__(
@@ -1144,48 +1274,151 @@ def select_boruta(
     """
     Boruta feature selection.
 
+    Function-style entry point that builds a :class:`BorutaSelector`, fits it,
+    and returns the accepted features. Boruta is an all-relevant selector: at
+    each iteration it compares every still-undecided feature against a
+    permuted "shadow" copy of the matrix and accepts or rejects it by a
+    Bonferroni-adjusted binomial tail test on the hit counts, so the answer is
+    "everything that carries signal", not a minimal subset of size ``k``. Use
+    it for understanding and for all-relevant screening; use the fixed-``k``
+    filters when a budgeted, low-redundancy block is what a downstream model
+    needs.
+
     Parameters
     ----------
-    X : DataFrame or ndarray
-    y : array-like
-    task : {"regression", "classification"}
-    n_estimators : int or "auto"
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Candidate features. ``cat_features`` requires a DataFrame.
+    y : array-like of shape (n_samples,)
+        Target values.
+    task : {"regression", "classification"}, default="regression"
+        Problem type; it also picks the default estimator.
+    n_estimators : int or "auto", default="auto"
         Number of trees/iterations for the estimator. When "auto", use a fast
         bounded heuristic based on active features and depth. Auto only applies
         when estimator is None.
     sample_weight : array-like, optional
+        Non-negative row weights used for importance scoring, and for fitting
+        where the estimator supports it.
     groups : array-like, optional
         Group labels for shadow permutation.
     time : array-like, optional
         Time values for ordering.
     group_col : str, optional
         Column name in X to use as groups (extracted and dropped from X).
+        Passing both ``groups`` and ``group_col`` raises.
     time_col : str, optional
         Column name in X to use as time (extracted and dropped from X).
+        Passing both ``time`` and ``time_col`` raises.
     estimator : estimator object, optional
-    importance : {"native", "shap"}
-    max_iter : int
-    alpha : float
-    perc : int
-    resolve_tentative : bool
+        Base learner. None uses a RandomForest for native importance or
+        CatBoost for SHAP importance.
+    importance : {"native", "shap"}, default="native"
+        Importance backend: ``feature_importances_`` or SHAP values.
+    max_iter : int, default=50
+        Maximum Boruta iterations.
+    alpha : float, default=0.05
+        Significance level for the accept/reject tail tests, Bonferroni
+        adjusted by the number of still-tentative features.
+    perc : int, default=100
+        Percentile of the shadow importances used as the per-iteration
+        threshold; 100 is the classic maximum-shadow rule.
+    resolve_tentative : bool, default=True
+        Force any feature still tentative at the end to accepted or rejected
+        against the median shadow threshold.
     max_features : int, optional
-    shadow_method : str
-    block_size : int or "auto"
-    importance_data : {"train", "test"}
-    test_size : float
+        Cap on accepted features; the weakest accepted ones are demoted.
+    shadow_method : str, default="auto"
+        Shadow permutation method: ``"auto"``, ``"global"``,
+        ``"within_group"``, ``"block"`` or ``"circular_shift"``. ``"auto"``
+        chooses from the supplied groups/time.
+    shadow_mode : {"columns", "rows"}, default="columns"
+        Permutation axis. ``"columns"`` permutes each column independently
+        (classic Boruta); ``"rows"`` applies one row permutation to every
+        column, preserving cross-feature covariance in the null.
+    block_size : int or "auto", default="auto"
+        Block size for the block permutation methods.
+    cat_features : list of str, optional
+        Categorical column names to encode; requires a DataFrame ``X``. None
+        auto-detects object, category and string columns, and names absent
+        from ``X`` are dropped.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+        Categorical encoding fitted before the Boruta loop, default "none".
+        "target_cv" is the leakage-safe cross-fitted encoder and is the only
+        supervised value accepted without an explicit opt-in; the four legacy
+        encodings fit on the full dataset and therefore require
+        ``allow_full_data_target_encoding=True``, because tree learners can
+        read a row's own target back out of them. Any supervised value is
+        rejected with ``importance_data="test"``, and ``sample_weight`` is
+        consumed only by "target_cv" and "loo_logit".
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : "auto" or float, default="auto"
+        Empirical-Bayes shrinkage for "target_cv"; an explicit non-negative
+        float is always accepted.
+    target_prior : float, optional
+        Target-independent prior for time-aware "target_cv" fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        "target_cv" fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to the leakage-prone full-dataset supervised encodings. It is
+        rejected together with ``cat_encoding="target_cv"``.
+    importance_data : {"train", "test"}, default="train"
+        Compute importance on the training rows or on a held-out split.
+    test_size : float, default=0.3
+        Held-out fraction when ``importance_data="test"``.
     shap_sample_size : int, optional
-    early_stop_rounds : int
-    random_state : int
-    verbose : bool
+        Row subsample for SHAP importance; None uses every row.
+    early_stop_rounds : int, default=5
+        Stop after this many consecutive iterations that decide nothing.
+    random_state : int, default=0
+        Seed for the estimator clones and the shadow permutations.
+    verbose : bool, default=True
+        Emit per-iteration progress at INFO on the ``sift`` logger.
+    return_result : bool, default=False
+        If True, return BorutaResult instead of feature list.
     callback : callable, optional
         Called after each completed iteration as
         ``callback(step, total, info)``.
-    return_result : bool
-        If True, return BorutaResult instead of feature list.
 
     Returns
     -------
     list[str] or BorutaResult
+        Accepted feature labels in input-column order, or the full
+        :class:`BorutaResult` when ``return_result=True``.
+
+    Raises
+    ------
+    ValueError
+        If ``cat_features`` is given for a non-DataFrame ``X``, if a direct
+        row argument and its ``*_col`` alias are both supplied, if a
+        supervised ``cat_encoding`` is used without its opt-in or together
+        with ``importance_data="test"``, or if an option is out of range.
+
+    See Also
+    --------
+    select_boruta_shap : The same search with SHAP importance.
+    BorutaSelector : The estimator behind this function.
+    BorutaResult : The result object returned by ``return_result=True``.
+
+    Notes
+    -----
+    Because every feature that beats its shadow is kept, the accepted set can
+    be far larger than a filter's ``k`` and can include correlated duplicates.
+    ``importance="shap"`` needs the optional ``catboost`` extra unless an
+    explicit ``estimator`` is supplied.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import select_boruta
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(120, 5))
+    >>> y = 3.0 * X[:, 0] + 2.0 * X[:, 1] + 0.1 * rng.normal(size=120)
+    >>> select_boruta(X, y, max_iter=10, n_estimators=50, random_state=0,
+    ...               verbose=False)
+    ['x0', 'x1']
     """
     metadata = resolve_row_metadata(
         X,
@@ -1279,12 +1512,157 @@ def select_boruta_shap(
     """
     Boruta-Shap feature selection (convenience wrapper for importance='shap').
 
+    Identical to :func:`select_boruta` except that the importance backend is
+    fixed to SHAP values, which score a feature by its attributed contribution
+    to individual predictions rather than by the impurity or split statistics a
+    tree ensemble happens to expose. Prefer it when native importances are
+    known to be biased (high-cardinality or highly correlated features);
+    prefer :func:`select_boruta` when runtime matters, because SHAP is
+    markedly more expensive per iteration.
+
     Parameters
     ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Candidate features. ``cat_features`` requires a DataFrame.
+    y : array-like of shape (n_samples,)
+        Target values.
+    task : {"regression", "classification"}, default="regression"
+        Problem type; it also picks the default estimator.
     n_estimators : int or "auto"
         Number of trees/iterations for the estimator. When "auto", use a fast
         bounded heuristic based on active features and depth. Auto only applies
         when estimator is None.
+    sample_weight : array-like, optional
+        Non-negative row weights used for importance scoring, and for fitting
+        where the estimator supports it.
+    groups : array-like, optional
+        Group labels for shadow permutation.
+    time : array-like, optional
+        Time values for ordering.
+    group_col : str, optional
+        Column name in X to use as groups (extracted and dropped from X).
+        Passing both ``groups`` and ``group_col`` raises.
+    time_col : str, optional
+        Column name in X to use as time (extracted and dropped from X).
+        Passing both ``time`` and ``time_col`` raises.
+    estimator : estimator object, optional
+        Base learner. None uses CatBoost, which supplies native SHAP values.
+    max_iter : int, default=50
+        Maximum Boruta iterations.
+    alpha : float, default=0.05
+        Significance level for the accept/reject tail tests, Bonferroni
+        adjusted by the number of still-tentative features.
+    perc : int, default=100
+        Percentile of the shadow importances used as the per-iteration
+        threshold; 100 is the classic maximum-shadow rule.
+    resolve_tentative : bool, default=True
+        Force any feature still tentative at the end to accepted or rejected
+        against the median shadow threshold.
+    max_features : int, optional
+        Cap on accepted features; the weakest accepted ones are demoted.
+    shadow_method : str, default="auto"
+        Shadow permutation method: ``"auto"``, ``"global"``,
+        ``"within_group"``, ``"block"`` or ``"circular_shift"``. ``"auto"``
+        chooses from the supplied groups/time.
+    shadow_mode : {"columns", "rows"}, default="columns"
+        Permutation axis. ``"columns"`` permutes each column independently
+        (classic Boruta); ``"rows"`` applies one row permutation to every
+        column, preserving cross-feature covariance in the null.
+    block_size : int or "auto", default="auto"
+        Block size for the block permutation methods.
+    cat_features : list of str, optional
+        Categorical column names to encode; requires a DataFrame ``X``. None
+        auto-detects object, category and string columns, and names absent
+        from ``X`` are dropped.
+    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+        Categorical encoding fitted before the Boruta loop, default "none".
+        "target_cv" is the leakage-safe cross-fitted encoder and is the only
+        supervised value accepted without an explicit opt-in; the four legacy
+        encodings fit on the full dataset and therefore require
+        ``allow_full_data_target_encoding=True``. Any supervised value is
+        rejected with ``importance_data="test"``, and ``sample_weight`` is
+        consumed only by "target_cv" and "loo_logit".
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : "auto" or float, default="auto"
+        Empirical-Bayes shrinkage for "target_cv"; an explicit non-negative
+        float is always accepted.
+    target_prior : float, optional
+        Target-independent prior for time-aware "target_cv" fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        "target_cv" fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to the leakage-prone full-dataset supervised encodings. It is
+        rejected together with ``cat_encoding="target_cv"``.
+    importance_data : {"train", "test"}, default="train"
+        Compute importance on the training rows or on a held-out split.
+    test_size : float, default=0.3
+        Held-out fraction when ``importance_data="test"``.
+    shap_sample_size : int, optional
+        Row subsample for the SHAP computation, default 2000. None uses every
+        row and is markedly slower on large matrices.
+    early_stop_rounds : int, default=5
+        Stop after this many consecutive iterations that decide nothing.
+    random_state : int, default=0
+        Seed for the estimator clones, the shadow permutations and the SHAP
+        row subsample.
+    verbose : bool, default=True
+        Emit per-iteration progress at INFO on the ``sift`` logger.
+    return_result : bool, default=False
+        If True, return BorutaResult instead of feature list.
+    callback : callable, optional
+        Called after each completed iteration as
+        ``callback(step, total, info)``.
+
+    Returns
+    -------
+    list[str] or BorutaResult
+        Accepted feature labels in input-column order, or the full
+        :class:`BorutaResult` when ``return_result=True``.
+
+    Raises
+    ------
+    ImportError
+        If neither ``catboost`` (native SHAP) nor the ``shap`` package is
+        installed for the estimator in use.
+    ValueError
+        If ``cat_features`` is given for a non-DataFrame ``X``, if a direct
+        row argument and its ``*_col`` alias are both supplied, if a
+        supervised ``cat_encoding`` is used without its opt-in or together
+        with ``importance_data="test"``, or if an option is out of range.
+
+    See Also
+    --------
+    select_boruta : The same search with a selectable importance backend.
+    BorutaSelector : The estimator behind both functions.
+    BorutaResult : The result object returned by ``return_result=True``.
+
+    Notes
+    -----
+    SHAP values come from CatBoost natively when the estimator is a CatBoost
+    model, and from the optional ``shap`` package otherwise, so one of the two
+    must be installed. Everything else, including the all-relevant accept
+    semantics, matches :func:`select_boruta`.
+
+    Examples
+    --------
+    This example needs the optional ``catboost`` (or ``shap``) dependency. It
+    is shown as code rather than an executed doctest, because SIFT's own test
+    environment installs neither::
+
+        import numpy as np
+        import sift
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(200, 6))
+        y = 3.0 * X[:, 0] + 2.0 * X[:, 1] + 0.1 * rng.normal(size=200)
+
+        features = sift.select_boruta_shap(
+            X, y, task="regression", max_iter=10, random_state=0,
+            verbose=False,
+        )
     """
     return select_boruta(
         X,

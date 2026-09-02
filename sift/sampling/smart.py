@@ -141,7 +141,30 @@ class SmartSamplerConfig:
     random_state : int, optional
         Random seed.
     verbose : bool
-        Print progress.
+        Emit sampler progress at INFO on the ``sift`` logger.
+
+    See Also
+    --------
+    sift.smart_sample : Consumer of this configuration.
+    sift.panel_config : Preset for entity-over-time data.
+    sift.cross_section_config : Preset for independent rows.
+
+    Examples
+    --------
+    >>> import dataclasses
+    >>> from sift import SmartSamplerConfig
+    >>> config = SmartSamplerConfig(sample_frac=0.25, group_col="team",
+    ...                             random_state=0, verbose=False)
+    >>> config.sample_frac, config.group_col
+    (0.25, 'team')
+    >>> config.min_per_group, config.uniform_floor
+    (2, 0.05)
+
+    The dataclass is mutable, so a preset can be adjusted in place or copied
+    with :func:`dataclasses.replace`:
+
+    >>> dataclasses.replace(config, sample_frac=0.1).sample_frac
+    0.1
     """
     sample_frac: float = 0.10
     group_col: Optional[str] = None
@@ -654,13 +677,50 @@ def smart_sample(
     config : SmartSamplerConfig, optional
         Configuration object. If None, uses defaults with any kwargs overrides.
     **kwargs
-        Override any SmartSamplerConfig parameters.
+        Override individual :class:`SmartSamplerConfig` fields by name. They
+        win over the matching fields of ``config``; a keyword that is not a
+        config field raises ``TypeError``.
 
     Returns
     -------
     DataFrame
         Sampled data with 'sample_weight' column (approximate inverse
         inclusion probability, mean-normalized).
+
+    See Also
+    --------
+    SmartSamplerConfig : Every tunable field, with defaults.
+    sift.panel_config : Preset for entity-over-time data.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import SmartSamplerConfig, smart_sample
+    >>> rng = np.random.default_rng(0)
+    >>> df = pd.DataFrame({
+    ...     "x0": rng.normal(size=600),
+    ...     "x1": rng.normal(size=600),
+    ...     "team": np.repeat([f"t{i}" for i in range(6)], 100),
+    ... })
+    >>> df["y"] = 2.0 * df["x0"] - df["x1"] + 0.1 * rng.normal(size=600)
+    >>> config = SmartSamplerConfig(sample_frac=0.25, group_col="team",
+    ...                             random_state=0, verbose=False)
+    >>> sample = smart_sample(df, ["x0", "x1"], "y", config)
+    >>> list(sample.columns)
+    ['x0', 'x1', 'team', 'y', 'sample_weight']
+    >>> sorted(sample["team"].unique())
+    ['t0', 't1', 't2', 't3', 't4', 't5']
+    >>> round(float(sample["sample_weight"].mean()), 3)
+    1.0
+
+    Keyword overrides replace the matching config fields, so a one-off tweak
+    needs no config object:
+
+    >>> smaller = smart_sample(df, ["x0", "x1"], "y", sample_frac=0.1,
+    ...                        random_state=0, verbose=False)
+    >>> len(smaller) < len(sample)
+    True
     """
     config = _resolve_smart_config(config, kwargs)
     rng = np.random.default_rng(config.random_state)

@@ -12,7 +12,6 @@ from scipy.special import digamma
 from sklearn.model_selection import GroupKFold, KFold
 
 from sift.estimators.copula import (
-    gaussian_mi_from_corr,
     weighted_corr_with_vector,
     weighted_correlation_matrix,
     weighted_rank_gauss_1d,
@@ -405,7 +404,122 @@ def xfit_objective_curves(
     corr_prune,
     method: str,
 ) -> pd.DataFrame:
-    """Return a cross-fitted, drift-debiased objective score curve."""
+    """Return a cross-fitted, drift-debiased objective score curve.
+
+    This is the curve half of ``AutoKConfig(k_method="xfit_objective")``: the
+    honest version of the objective path, at correlation-math cost. Each fold
+    builds its own greedy path on fold-train rows, scores that path's
+    objective on fold-validation rows, and subtracts the exact Gaussian null
+    drift so that a null step contributes about zero instead of a positive
+    bias. It is a discovery-flavored curve -- it measures conditional
+    *information*, with no downstream model, metric, or hyperparameter -- and
+    it is dense in k, so every prefix length is scored. It is experimental:
+    the Auto-K v2 campaign failed it for automatic sizing.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Duplicate
+        non-synthetic feature names are rejected and the cache weights must
+        match the cache rows.
+    y : array-like of shape (n_rows_original,)
+        Target aligned to the original rows, not to the cached subsample.
+    config : AutoKConfig
+        Must have ``k_method='xfit_objective'`` and ``xfit_mode='shared_z'``.
+        Reads ``strategy``, ``xfit_folds``, ``val_frac`` (time holdout),
+        ``random_state`` (shuffled k-fold), ``min_k``, and ``max_k``.
+    groups : array-like, optional
+        Group labels, accepted either at cache-row length or at original-row
+        length. Required for ``strategy='group_cv'``.
+    time : array-like, optional
+        Row timestamps, accepted at either length. Required for
+        ``strategy='time_holdout'``.
+    top_m : int
+        Screening width for each fold-local candidate panel.
+    corr_prune : float, None, or {'auto'}
+        Correlation-pruning threshold forwarded to the fold panel builder.
+    method : {'cefsplus', 'mrmr_quot', 'mrmr_diff', 'jmi', 'jmim'}
+        Greedy selector used to build each fold-train path.
+
+    Returns
+    -------
+    curves : DataFrame
+        Higher-is-better score curve with one row per k from the effective
+        floor to the deepest depth common to all healthy folds:
+        ``k``, ``score``, ``score_mean``, ``score_std``, ``score_se``,
+        ``n_splits``, ``n_finite``, ``split_scores``, ``score_kind``
+        (``'xfit_objective'``), ``xfit_mode``, ``xfit_folds``,
+        ``fold_max_k``, ``fold_n_eff``, ``dropped_folds``, and ``debias``
+        (True). On a degenerate run the frame is empty and
+        ``curves.attrs`` carries ``stopped_by='degenerate_folds'``,
+        ``healthy_folds``, and ``dropped_folds``.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'xfit_objective'``; if
+        ``xfit_mode='exact'`` (fold-local cache rebuilding is not available
+        from cache-only orchestration); if the requested strategy lacks its
+        ``time`` or ``groups`` context, has fewer than two groups or rows, or
+        is unknown; if ``groups``/``time`` match neither row count; or if the
+        cache fails its structural contract.
+
+    Warns
+    -----
+    UserWarning
+        When folds with no finite score are dropped, and when fewer than two
+        healthy folds remain (an empty curve is returned so the caller falls
+        back to its method floor).
+
+    See Also
+    --------
+    select_k_xfit_objective : Turns this curve into a k.
+    gaussian_cv_curves : Same folds and paths, predictive risk instead.
+    compute_objective_for_path : In-sample objective on one full cache.
+
+    Notes
+    -----
+    For fold ``f`` and step ``t`` the debias term is
+    ``digamma((nu + 1)/2) - digamma(nu/2)`` with
+    ``nu = n_eff_val - t - 1``, the exact expectation of the null
+    log-gain (about ``1/nu`` for large ``nu``); the fold score is the
+    validation objective minus the cumulative drift. Each fold is capped at
+    ``floor(n_eff_val) - 2`` steps, where ``n_eff_val`` is the Kish size of
+    that fold's validation weights. ``xfit_mode='shared_z'`` keeps the
+    full-cache marginal ranks and re-standardizes them inside each fold, so
+    leakage is limited to the marginal transform having seen every row. Cost
+    is ``folds x (panel + greedy + O(K^2) objective)`` with no model fits.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import AutoKConfig, build_cache, xfit_objective_curves
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> config = AutoKConfig(
+    ...     k_method="xfit_objective",
+    ...     strategy="kfold",
+    ...     xfit_folds=3,
+    ...     min_k=1,
+    ...     max_k=4,
+    ... )
+    >>> curves = xfit_objective_curves(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     config=config,
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     method="cefsplus",
+    ... )
+    >>> curves["k"].tolist()
+    [1, 2, 3, 4]
+    >>> curves["score_kind"].iloc[0], bool(curves["debias"].iloc[0])
+    ('xfit_objective', True)
+    >>> bool(curves["score_mean"].iloc[1] > curves["score_mean"].iloc[0])
+    True
+    """
     if config.k_method != "xfit_objective":
         raise ValueError("xfit_objective_curves requires AutoKConfig(k_method='xfit_objective')")
     fold_scores, extra = _fold_score_arrays(
@@ -441,7 +555,124 @@ def gaussian_cv_curves(
     corr_prune,
     method: str,
 ) -> pd.DataFrame:
-    """Return a closed-form cross-validated Gaussian linear risk curve."""
+    """Return a closed-form cross-validated Gaussian linear risk curve.
+
+    This is the curve half of ``AutoKConfig(k_method="gaussian_cv")`` and of
+    the ``AutoKConfig.predictive(...)`` preset. It reproduces the ``evaluate``
+    semantics -- out-of-sample predictive risk against k -- without fitting a
+    single sklearn model: in copula space the prefix model is linear, its
+    coefficients come in closed form from the fold-train correlations, and its
+    validation risk is a quadratic form in the fold-validation correlations.
+    That makes it the predictive-sufficiency rule to reach for: honest
+    fold-train paths, dense in k, no alpha noise, and a standard error worth
+    trusting, which is why the parsimony rules (``one_se``, ``plateau``,
+    ``tolerance``) are usable here.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Duplicate
+        non-synthetic feature names are rejected and the cache weights must
+        match the cache rows.
+    y : array-like of shape (n_rows_original,)
+        Target aligned to the original rows, not to the cached subsample.
+    config : AutoKConfig
+        Must have ``k_method='gaussian_cv'`` and ``xfit_mode='shared_z'``.
+        Reads ``strategy``, ``xfit_folds``, ``xfit_ridge``, ``val_frac``
+        (time holdout), ``random_state`` (shuffled k-fold), ``min_k``, and
+        ``max_k``.
+    groups : array-like, optional
+        Group labels, accepted either at cache-row length or at original-row
+        length. Required for ``strategy='group_cv'``.
+    time : array-like, optional
+        Row timestamps, accepted at either length. Required for
+        ``strategy='time_holdout'``.
+    top_m : int
+        Screening width for each fold-local candidate panel.
+    corr_prune : float, None, or {'auto'}
+        Correlation-pruning threshold forwarded to the fold panel builder.
+    method : {'cefsplus', 'mrmr_quot', 'mrmr_diff', 'jmi', 'jmim'}
+        Greedy selector used to build each fold-train path.
+
+    Returns
+    -------
+    curves : DataFrame
+        Lower-is-better risk curve with one row per k from the effective floor
+        to the deepest depth common to all healthy folds: ``k``, ``score``,
+        ``score_mean``, ``score_std``, ``score_se``, ``n_splits``,
+        ``n_finite``, ``split_scores``, ``score_kind`` (``'gaussian_cv'``),
+        ``xfit_mode``, ``xfit_folds``, ``fold_max_k``, ``fold_n_eff``,
+        ``dropped_folds``, ``proxy`` (``'gaussian_linear_copula'``), and
+        ``xfit_ridge``. On a degenerate run the frame is empty and
+        ``curves.attrs`` carries ``stopped_by='degenerate_folds'``,
+        ``healthy_folds``, and ``dropped_folds``.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'gaussian_cv'``; if
+        ``xfit_mode='exact'``; if the requested strategy lacks its ``time`` or
+        ``groups`` context, has fewer than two groups or rows, or is unknown;
+        if ``groups``/``time`` match neither row count; or if the cache fails
+        its structural contract.
+
+    Warns
+    -----
+    UserWarning
+        When the fold-train correlation matrix is singular and the ridge is
+        increased (Cholesky first, then the per-k solve), when folds with no
+        finite score are dropped, and when fewer than two healthy folds remain
+        (an empty curve is returned).
+
+    See Also
+    --------
+    select_k_gaussian_cv : Turns this curve into a k.
+    xfit_objective_curves : Same folds and paths, information instead of risk.
+    select_k_auto : The model-fitting ``evaluate`` rule this replaces.
+
+    Notes
+    -----
+    Per fold, ``beta_k = (R_train[:k, :k] + lambda I)^-1 r_train[:k]`` and
+    ``risk(k) = 1 - 2 beta_k' r_val[:k] + beta_k' R_val[:k, :k] beta_k``, the
+    exact out-of-sample normalized MSE of the Gaussian-model predictor -- the
+    population quantity a RidgeCV/RMSE curve estimates noisily. All k are
+    obtained from one incremental Cholesky of the fold-train matrix, so the
+    whole curve costs ``O(K^3/3)`` flops per fold; a singular matrix falls
+    back to per-k solves with an inflated ridge. Each fold is capped at
+    ``floor(n_eff_val) - 2`` steps. The proxy is copula-linear, so treat the
+    curve as a well-behaved stand-in for, not a measurement of, a nonlinear
+    downstream model.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import AutoKConfig, build_cache, gaussian_cv_curves
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> config = AutoKConfig(
+    ...     k_method="gaussian_cv",
+    ...     strategy="kfold",
+    ...     xfit_folds=3,
+    ...     min_k=1,
+    ...     max_k=4,
+    ... )
+    >>> curves = gaussian_cv_curves(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     config=config,
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     method="cefsplus",
+    ... )
+    >>> curves["k"].tolist()
+    [1, 2, 3, 4]
+    >>> curves["proxy"].iloc[0]
+    'gaussian_linear_copula'
+    >>> bool(curves["score_mean"].iloc[1] < curves["score_mean"].iloc[0])
+    True
+    """
     if config.k_method != "gaussian_cv":
         raise ValueError("gaussian_cv_curves requires AutoKConfig(k_method='gaussian_cv')")
     fold_scores, extra = _fold_score_arrays(
@@ -471,7 +702,105 @@ def select_k_xfit_objective(
     curves: pd.DataFrame,
     config: AutoKConfig,
 ) -> tuple[int, pd.DataFrame]:
-    """Select k from a cross-fitted objective curve."""
+    """Select k from a cross-fitted objective curve.
+
+    This is the selection half of ``AutoKConfig(k_method="xfit_objective")``,
+    consuming the higher-is-better curve from ``xfit_objective_curves``.
+    Because the curve measures debiased conditional information rather than
+    predictive risk, this is a discovery-flavored sizing rule; a null-guard
+    check refuses to name a k at all when the best fold-mean score is not
+    distinguishable from zero. It is experimental for automatic sizing.
+
+    Parameters
+    ----------
+    curves : DataFrame
+        Score curve from ``xfit_objective_curves``, with at least ``k``,
+        ``score_mean``, and ``score_se``. Higher is better.
+    config : AutoKConfig
+        Must have ``k_method='xfit_objective'``. Reads ``selection_rule`` and
+        its tolerance fields, ``min_k``, and ``max_k``. ``selection_rule
+        ='best'`` is deliberately upgraded to ``'one_se'`` here, since
+        fold-level curves give a usable standard error and the raw argmax of a
+        flat curve is close to a coin flip; the request is preserved in
+        ``selection_rule_requested``.
+
+    Returns
+    -------
+    selected_k : int
+        Selected prefix length. ``max(0, min_k)`` when ``curves`` is empty;
+        ``0`` (or the floor when ``min_k > 0``) when the null guard fires.
+    diagnostics : DataFrame
+        A copy of ``curves`` plus ``best_k``, ``best_score``,
+        ``selection_rule``, ``selection_rule_effective``,
+        ``selection_rule_requested``, ``one_se_unavailable``,
+        ``within_tolerance``, ``in_selected_plateau``, and ``selected``. When
+        the null guard fires it also carries ``stopped_by='null_guard'``,
+        ``null_guard_z``, and ``null_guard_threshold``.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'xfit_objective'``, or if the curve
+        lacks a ``k`` column.
+
+    Warns
+    -----
+    UserWarning
+        When every candidate score is non-finite (the method floor is
+        returned), and when ``'one_se'`` has no usable standard error and
+        falls back to ``'best'``.
+
+    See Also
+    --------
+    xfit_objective_curves : Builds the ``curves`` argument.
+    select_k_gaussian_cv : Predictive-risk sibling on the same folds.
+    choose_k_from_score_curve : Shared rule engine.
+
+    Notes
+    -----
+    The null guard compares the best fold-mean score with
+    ``2.5 * score_se`` at that k: a debiased objective whose peak is inside
+    2.5 standard errors of zero is evidence that no prefix carries
+    information, so the rule returns the zero-capable floor rather than the
+    argmax of noise. Otherwise selection is delegated to
+    ``choose_k_from_score_curve`` with ``lower_is_better=False`` and the k
+    bounds clamped to ``[max(1, min(min_k, max evaluated k)), max evaluated
+    k]``. Cost is ``O(len(curves))``.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import (
+    ...     AutoKConfig,
+    ...     build_cache,
+    ...     select_k_xfit_objective,
+    ...     xfit_objective_curves,
+    ... )
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> config = AutoKConfig(
+    ...     k_method="xfit_objective",
+    ...     strategy="kfold",
+    ...     xfit_folds=3,
+    ...     min_k=1,
+    ...     max_k=4,
+    ... )
+    >>> curves = xfit_objective_curves(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     config=config,
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     method="cefsplus",
+    ... )
+    >>> selected_k, diag = select_k_xfit_objective(curves, config)
+    >>> selected_k
+    2
+    >>> diag["selection_rule_requested"].iloc[0], diag["selection_rule_effective"].iloc[0]
+    ('best', 'one_se')
+    """
     validate_auto_k_config(config)
     if config.k_method != "xfit_objective":
         raise ValueError("select_k_xfit_objective requires AutoKConfig(k_method='xfit_objective')")
@@ -515,7 +844,103 @@ def select_k_gaussian_cv(
     curves: pd.DataFrame,
     config: AutoKConfig,
 ) -> tuple[int, pd.DataFrame]:
-    """Select k from a closed-form Gaussian CV risk curve."""
+    """Select k from a closed-form Gaussian CV risk curve.
+
+    This is the selection half of ``AutoKConfig(k_method="gaussian_cv")`` and
+    of the ``AutoKConfig.predictive(...)`` preset, consuming the
+    lower-is-better risk curve from ``gaussian_cv_curves``. Because the curve
+    is out-of-sample predictive risk, this is the predictive-sufficiency rule:
+    ``selection_rule`` is honored exactly as requested, and the standard error
+    behind ``'one_se'`` is trustworthy here because it comes from fold curves
+    with no model-fitting noise inside them.
+
+    Parameters
+    ----------
+    curves : DataFrame
+        Risk curve from ``gaussian_cv_curves``, with at least ``k`` and
+        ``score_mean``. Lower is better.
+    config : AutoKConfig
+        Must have ``k_method='gaussian_cv'``. Reads ``selection_rule``,
+        ``one_se_multiplier``, ``score_abs_tol``, ``score_rel_tol``,
+        ``plateau_prefer``, ``plateau_min_points``, ``min_k``, and ``max_k``.
+
+    Returns
+    -------
+    selected_k : int
+        Selected prefix length, at least ``max(1, min(min_k, max evaluated
+        k))``. ``max(0, config.min_k)`` when ``curves`` is empty.
+    diagnostics : DataFrame
+        A copy of ``curves`` plus ``best_k``, ``best_score``,
+        ``selection_rule``, ``selection_rule_effective``,
+        ``one_se_unavailable``, ``within_tolerance``,
+        ``in_selected_plateau``, and ``selected``. Returned unchanged when
+        ``curves`` is empty.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'gaussian_cv'``, if the curve lacks a
+        ``k`` column, or if ``selection_rule`` is unknown.
+
+    Warns
+    -----
+    UserWarning
+        When every candidate score is non-finite (the method floor is
+        returned), and when ``'one_se'`` has no usable standard error and
+        falls back to ``'best'`` -- which is what a single time-holdout split
+        always does.
+
+    See Also
+    --------
+    gaussian_cv_curves : Builds the ``curves`` argument.
+    select_k_xfit_objective : Information-flavored sibling on the same folds.
+    choose_k_from_score_curve : Shared rule engine.
+    select_k_auto : The model-fitting ``evaluate`` rule this replaces.
+
+    Notes
+    -----
+    Selection is delegated to ``choose_k_from_score_curve`` with
+    ``lower_is_better=True`` and the k bounds clamped to the evaluated range,
+    so ``'best'``, ``'one_se'``, ``'plateau'``, and ``'tolerance'`` behave
+    exactly as they do for ``k_method='evaluate'``. Unlike
+    ``select_k_xfit_objective`` there is no null guard and no implicit rule
+    upgrade: a flat risk curve returns its argmin under ``'best'``, so choose
+    ``'one_se'`` when parsimony matters. Cost is ``O(len(curves))``.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import (
+    ...     AutoKConfig,
+    ...     build_cache,
+    ...     gaussian_cv_curves,
+    ...     select_k_gaussian_cv,
+    ... )
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> config = AutoKConfig(
+    ...     k_method="gaussian_cv",
+    ...     strategy="kfold",
+    ...     xfit_folds=3,
+    ...     min_k=1,
+    ...     max_k=4,
+    ... )
+    >>> curves = gaussian_cv_curves(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     config=config,
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     method="cefsplus",
+    ... )
+    >>> selected_k, diag = select_k_gaussian_cv(curves, config)
+    >>> selected_k
+    3
+    >>> diag["selection_rule_effective"].iloc[0]
+    'best'
+    """
     validate_auto_k_config(config)
     if config.k_method != "gaussian_cv":
         raise ValueError("select_k_gaussian_cv requires AutoKConfig(k_method='gaussian_cv')")

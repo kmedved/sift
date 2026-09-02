@@ -57,6 +57,220 @@ class AutoKConfig:
     where each validation split fits its own train-only selector path. The
     function-style selectors still reject nested mode and keep this helper on
     the prefix-only contract.
+
+    Every option is a flat dataclass field; ``k_method`` decides which of them
+    is actually read. Setting a field that the chosen ``k_method`` ignores
+    emits a ``UserWarning`` naming that field, so a config cannot quietly
+    pretend to control something. ``AutoKConfig.from_groups(...)`` accepts the
+    frozen option groups in :mod:`sift.selection.auto_k_options` and flattens
+    them into these same fields; the ``objective``, ``test``, ``perm``,
+    ``knockoff``, ``cv``, ``stability``, and ``experimental`` properties are
+    read-only snapshots of the corresponding subsets.
+
+    Attributes
+    ----------
+    k_method : str, default 'evaluate'
+        Rule that turns a feature path into a k. One of ``'evaluate'``,
+        ``'elbow'``, ``'penalized_objective'``, ``'chi2_stop'``,
+        ``'forward_stop'``, ``'perm_gap'``, ``'knockoff_path'``,
+        ``'xfit_objective'``, ``'gaussian_cv'``, ``'k_posterior'``,
+        ``'stability'``, ``'changepoint'``, ``'consensus'``, or ``'auto'``
+        (the measured router, which never warns about unused fields).
+    strategy : str, default 'time_holdout'
+        Split scheme: ``'time_holdout'``, ``'group_cv'``, or ``'kfold'``.
+        Read by ``'evaluate'``, ``'gaussian_cv'``, and ``'xfit_objective'``.
+        ``'kfold'`` is rejected for ``k_method='evaluate'``.
+    metric : str or sklearn scorer, default 'auto'
+        Prefix score for ``k_method='evaluate'``. ``'auto'`` resolves to
+        ``'rmse'`` (regression) or ``'logloss'`` (classification); the other
+        SIFT names are ``'mae'`` and ``'error'``. Estimator-style sklearn
+        scorer objects are negated into the lower-is-better curve.
+    max_k : int, default 100
+        Largest k any rule may return; positive integer. Every rule clamps it
+        to the realized path or curve length.
+    min_k : int, default 5
+        Smallest k any rule may return; non-negative integer and ``<= max_k``.
+        Discovery-flavored rules need ``min_k=0`` to be able to answer "no
+        features at all".
+    val_frac : float, default 0.2
+        Time-holdout validation fraction, in (0, 1). Read by ``'evaluate'``,
+        ``'gaussian_cv'``, and ``'xfit_objective'`` under
+        ``strategy='time_holdout'``.
+    n_splits : int, default 5
+        Fold count for ``k_method='evaluate'`` with ``strategy='group_cv'``.
+        Deliberately distinct from ``xfit_folds``.
+    random_state : int, default 42
+        Seed for the resampling rules (``'perm_gap'``, ``'knockoff_path'``,
+        ``'stability'``) and for the shuffled ``strategy='kfold'`` splits used
+        by the cross-fitted rules.
+    elbow_min_rel_gain : float, default 0.02
+        Relative-gain threshold for ``k_method='elbow'``; finite and >= 0.
+    elbow_patience : int, default 3
+        Consecutive small-gain steps ``k_method='elbow'`` requires before it
+        stops; positive integer.
+    auto_k_mode : str, default 'prefix_only'
+        ``'prefix_only'`` everywhere, or ``'nested'`` on selector classes with
+        ``k_method='evaluate'``. Function-style selectors raise
+        ``NotImplementedError`` for ``'nested'``.
+    selection_rule : str, default 'best'
+        Score-curve rule: ``'best'``, ``'one_se'``, ``'plateau'``, or
+        ``'tolerance'``. Read by ``'evaluate'``, ``'gaussian_cv'``, and
+        ``'xfit_objective'``.
+    one_se_multiplier : float, default 1.0
+        Standard-error multiple used by ``selection_rule='one_se'``; positive
+        and finite.
+    score_abs_tol : float or None, default None
+        Absolute score slack for ``selection_rule`` in
+        ``{'plateau', 'tolerance'}``; None, or finite and >= 0.
+    score_rel_tol : float or None, default None
+        Relative score slack for the same two rules. ``k_method='evaluate'``
+        requires at least one of the two tolerances for those rules.
+    plateau_prefer : str, default 'smallest'
+        Which plateau member ``selection_rule='plateau'`` returns:
+        ``'smallest'``, ``'center'``, ``'best'``, or ``'largest'``.
+    plateau_min_points : int, default 2
+        Minimum plateau width before ``selection_rule='plateau'`` prefers a
+        plateau member over the raw best k; positive integer.
+    objective_penalty : str, default 'bic'
+        Penalty family for ``k_method='penalized_objective'``: ``'bic'``,
+        ``'mdl'``, ``'aic'``, ``'hqc'``, ``'custom'``, ``'ebic'``, or
+        ``'ric'``. ``'ebic'`` and ``'ric'`` additionally require
+        ``n_candidates`` at call time.
+    objective_penalty_weight : float or None, default None
+        Per-degree-of-freedom penalty weight. Required by, and valid only
+        with, ``objective_penalty='custom'``; finite and >= 0.
+    objective_n_eff : float or None, default None
+        Explicit effective sample size that overrides ``n_eff_mode`` for the
+        objective, posterior, gain-test, and changepoint rules. None, or
+        finite and > 1 (> e for ``objective_penalty='hqc'``).
+    binary_objective_mode : str, default 'refit'
+        Binary CEFS+ objective source: ``'refit'`` log-likelihood gains or
+        ``'score_test'``. Read by direct ``'penalized_objective'`` and
+        ``'k_posterior'`` runs.
+    n_eff_mode : str or float, default 'auto'
+        Effective sample size rule: ``'auto'``, ``'kish'``, ``'weight_sum'``,
+        or a finite float > 1. ``'auto'`` means Kish ``(sum w)^2 / sum w^2``
+        for the Auto-K v2 rules and for EBIC/RIC, and the weight sum
+        otherwise.
+    alpha : float, default 0.05
+        Level in (0, 1) for ``'chi2_stop'``, for ``'forward_stop'`` (read as
+        a ForwardStop FDR level), and for ``'perm_gap'`` with
+        ``gap_rule='gain_envelope'``.
+    m_mode : str, default 'all'
+        Multiplicity count for the path gain tests: ``'all'`` (``p - t + 1``,
+        conservative), ``'panel'``, or ``'li_ji'``. Read by ``'chi2_stop'``
+        and ``'forward_stop'``.
+    stop_patience : int, default 2
+        Consecutive non-significant steps required before stopping in
+        ``'chi2_stop'`` and in ``'perm_gap'`` with
+        ``gap_rule='gain_envelope'``; reused by ``'changepoint'`` as the
+        median-smoothing width when > 2.
+    perm_B : int, default 20
+        Number of permutation null paths for ``k_method='perm_gap'``.
+    perm_null : str, default 'auto'
+        Permutation null: ``'auto'`` (time -> circular shift, else groups ->
+        within-group, else plain permutation), ``'permute'``,
+        ``'circular_shift'`` (requires ``time``), or ``'within_group'``
+        (requires ``groups``).
+    gap_rule : str, default 'tibshirani'
+        Gap-curve rule for ``'perm_gap'``: ``'tibshirani'``, ``'argmax'``, or
+        ``'gain_envelope'``.
+    knockoff_q : float, default 0.2
+        Target FDR in (0, 1) for ``k_method='knockoff_path'``.
+    knockoff_draws : int, default 1
+        Number of knockoff draws. Values > 1 aggregate draws by selection
+        frequency >= 0.5, which is not itself FDR-controlled.
+    knockoff_s_method : str, default 'equi'
+        Knockoff s-vector construction: ``'equi'``, ``'mvr'``, or ``'me'``.
+    knockoff_return : str, default 'set'
+        ``'set'`` keeps the selected originals; ``'prefix'`` asks the
+        orchestrator for a plain CEFS+ prefix of the same length, which does
+        not inherit the q guarantee.
+    xfit_folds : int, default 5
+        Fold count for ``'gaussian_cv'`` and ``'xfit_objective'``.
+    xfit_mode : str, default 'shared_z'
+        ``'shared_z'`` re-standardizes the shared marginal ranks inside each
+        fold; ``'exact'`` requires fold-local cache rebuilding and is
+        rejected by the function-style cache orchestration.
+    xfit_ridge : float, default 1e-3
+        Ridge added to the fold-train correlation matrix in
+        ``k_method='gaussian_cv'``; finite and >= 0.
+    ebic_gamma : str or float, default 'auto'
+        EBIC multiplicity weight, read by ``objective_penalty='ebic'`` and by
+        ``k_method='k_posterior'``. ``'auto'`` uses the Chen-Chen threshold
+        ``min(1, max(0, 1 - log(n_eff) / (2 log n_candidates)))``; otherwise a
+        float in [0, 1].
+    posterior_level : float, default 0.9
+        Highest-posterior-density mass in (0, 1) for ``'k_posterior'``.
+    posterior_pick : str, default 'map'
+        ``'map'`` for the posterior mode, or ``'smallest_in_hpd'`` for the
+        parsimonious end of the credible set.
+    boot_B : int, default 30
+        Bootstrap replicates for ``k_method='stability'``.
+    boot_mode : str, default 'bayes'
+        ``'bayes'`` (Exp(1) reweighting of every row) or ``'half'`` (uniform
+        half-sampling without replacement).
+    stability_rule : str, default 'max_one_se'
+        ``'max_one_se'`` (largest k within one jackknife SE of peak
+        stability) or ``'pi_threshold'`` (count features above
+        ``stability_pi``).
+    stability_pi : float, default 0.6
+        Selection-frequency threshold in (0.5, 1], read only by
+        ``stability_rule='pi_threshold'``.
+    floor_z : float, default 2.5
+        Noise-floor sigma multiple for ``k_method='changepoint'``; positive
+        and finite.
+    floor_window : float or int, default 0.2
+        Tail window used to estimate the changepoint noise floor: a fraction
+        in (0, 0.5] of the evaluated path, or an integer count >= 5.
+    consensus_methods : tuple of str, default four-rule tuple
+        Member rules for ``k_method='consensus'``; defaults to
+        ``('ebic', 'chi2_stop', 'perm_gap', 'gaussian_cv')``. Non-empty tuple
+        drawn from ``'ebic'``, ``'ric'``, ``'posterior'``, ``'k_posterior'``,
+        ``'chi2_stop'``, ``'forward_stop'``, ``'changepoint'``,
+        ``'perm_gap'``, ``'gaussian_cv'``, ``'xfit_objective'``, and
+        ``'stability'``.
+    auto_dense_check : bool, default False
+        Opt-in dense-regime cross-check for ``k_method='auto'`` on Gaussian
+        CEFS+. Non-default ``auto_dense_*`` values are rejected by binary
+        log-loss CEFS+.
+    auto_dense_min_k : int, default 100
+        Selected-k count above which the dense check runs; non-negative.
+    auto_dense_min_frac : float, default 0.25
+        Fraction of the effective max k above which the dense check runs; in
+        [0, 1].
+    auto_dense_disagreement_ratio : float, default 2.0
+        Ratio between the EBIC pick and the Gaussian-CV cross-check pick that
+        triggers the dense-regime warning; finite and > 1.
+
+    See Also
+    --------
+    validate_auto_k_config : Runtime validation applied by every rule.
+    select_k_auto : Prefix evaluation for ``k_method='evaluate'``.
+    select_k_penalized_objective : Penalized-objective rule.
+    select_k_gaussian_cv : Closed-form cross-validated risk rule.
+
+    Notes
+    -----
+    The intent presets construct validated configs directly:
+    ``AutoKConfig.default()`` (router), ``AutoKConfig.predictive(...)``
+    (``gaussian_cv``), ``AutoKConfig.discovery(alpha)`` (``chi2_stop`` with
+    ``min_k=0``), and ``AutoKConfig.downstream(strategy, metric, rule)``
+    (``evaluate``). ``predictive(n_folds=...)`` maps to ``xfit_folds`` only.
+    Router branches override method-specific floors (``min_k=0`` for EBIC and
+    permutation-gap stops, at least 1 for Gaussian CV curves), so pass an
+    explicit ``k_method`` when a hard ``min_k`` matters.
+
+    Examples
+    --------
+    >>> from sift import AutoKConfig
+    >>> config = AutoKConfig(k_method="chi2_stop", min_k=0, max_k=50)
+    >>> config.k_method, config.alpha, config.m_mode
+    ('chi2_stop', 0.05, 'all')
+    >>> AutoKConfig.discovery(alpha=0.01).min_k
+    0
+    >>> AutoKConfig.predictive(strategy="kfold", n_folds=3).xfit_folds
+    3
     """
 
     k_method: Literal[
@@ -1120,7 +1334,153 @@ def select_k_auto(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
 ) -> Tuple[int, List[str], pd.DataFrame]:
-    """Select optimal k by evaluating prefixes of feature_path."""
+    """Select optimal k by evaluating prefixes of feature_path.
+
+    This is the rule behind ``AutoKConfig(k_method="evaluate")``: build one
+    supervised feature path elsewhere, then score its prefixes with a cheap
+    proxy model (RidgeCV/Ridge for regression, logistic regression for
+    classification) on held-out rows and apply ``config.selection_rule`` to
+    the resulting curve. It targets *predictive sufficiency* against a
+    concrete downstream metric, so it is the right choice when the question is
+    "how many features does my model actually need"; it is the wrong choice
+    for discovery, where the curve is flat near the optimum and a support
+    recovery rule such as ``chi2_stop`` or a penalized objective is better
+    calibrated.
+
+    Parameters
+    ----------
+    X : DataFrame
+        Feature matrix. Must be a pandas DataFrame with unique column labels,
+        because ``feature_path`` entries are resolved by name.
+    y : ndarray of shape (n_samples,)
+        Target, raveled before use.
+    feature_path : list of str
+        Ordered feature names. Entries missing from ``X.columns`` are dropped;
+        the path is truncated to the effective ``max_k``.
+    config : AutoKConfig
+        Must have ``k_method='evaluate'``. Reads ``strategy``, ``metric``,
+        ``min_k``, ``max_k``, ``val_frac`` (time holdout), ``n_splits``
+        (group CV), ``selection_rule`` and its tolerance fields, and
+        ``auto_k_mode``.
+    groups : ndarray of shape (n_samples,) or str, optional
+        Group labels, or the name of an ``X`` column holding them (that
+        column is then removed from the feature matrix). Required for
+        ``strategy='group_cv'`` and forwarded to the
+        ``cat_encoding='target_cv'`` encoder when supplied.
+    time : ndarray of shape (n_samples,) or str, optional
+        Row timestamps, or the name of an ``X`` column holding them (removed
+        from the feature matrix as above). Required for
+        ``strategy='time_holdout'`` and forwarded to the ``'target_cv'``
+        encoder when supplied.
+    task : {'regression', 'classification'}, default 'regression'
+        Proxy-model family and default metric resolution.
+    cat_encoding : str, default 'none'
+        Fold-local categorical encoding: ``'none'``, ``'target_cv'``,
+        ``'target'``, ``'loo'``, ``'james_stein'``, or ``'loo_logit'``.
+        ``'target'``, ``'loo'``, and
+        ``'james_stein'`` require the optional ``category_encoders``
+        dependency; ``'loo_logit'`` requires ``task='classification'``.
+    cat_features : list of str, optional
+        Columns to treat as categorical. When None, object/category/string
+        columns of the fold-train frame are detected automatically.
+    sample_weight : ndarray of shape (n_samples,), optional
+        Row weights. Normalized to mean one per split for fitting and scoring;
+        the unnormalized copy is handed to the supervised encoders.
+    loo_smoothing : float, default 20.0
+        Smoothing for ``cat_encoding='loo_logit'``.
+    loo_clip_min : float, default 1e-4
+        Lower probability clip for ``cat_encoding='loo_logit'``.
+    loo_clip_max : float, default 1 - 1e-4
+        Upper probability clip for ``cat_encoding='loo_logit'``.
+    target_cv_n_splits : int, default 5
+        Inner CV folds for ``cat_encoding='target_cv'``.
+    target_cv_smoothing : {'auto'} or float, default 'auto'
+        Smoothing for ``cat_encoding='target_cv'``.
+    target_prior : float or None, default None
+        Explicit prior for ``cat_encoding='target_cv'``; None estimates it.
+    warmup_policy : {'exclude', 'zero_weight'}, default 'zero_weight'
+        How ``cat_encoding='target_cv'`` treats warm-up rows.
+
+    Returns
+    -------
+    best_k : int
+        Selected prefix length, ``0`` when the path resolves to no usable
+        feature.
+    features : list of str
+        The first ``best_k`` names of the resolved path.
+    diagnostics : DataFrame
+        One row per evaluated k with ``k``, ``score``, ``score_mean``,
+        ``score_std``, ``score_se``, ``n_splits``, ``n_finite``,
+        ``split_scores``, ``best_k``, ``best_score``, ``within_tolerance``,
+        ``in_selected_plateau``, ``selection_rule``,
+        ``selection_rule_effective``, ``one_se_unavailable``, and
+        ``selected``; plus ``metric`` when an sklearn scorer was used. Empty
+        when the path is empty.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'evaluate'``, if ``X`` has duplicate
+        column labels, if ``strategy='time_holdout'`` without ``time`` or
+        ``strategy='group_cv'`` without ``groups``, if fewer than two groups
+        are available, or if ``strategy`` is unknown.
+    NotImplementedError
+        If ``config.auto_k_mode='nested'``; function-style selectors are
+        prefix-only.
+    ImportError
+        If ``cat_encoding`` needs ``category_encoders`` and it is not
+        installed.
+
+    Warns
+    -----
+    UserWarning
+        When every candidate score is non-finite (the method floor is
+        returned), and when ``selection_rule='one_se'`` has no usable split
+        standard error and falls back to ``'best'``.
+
+    See Also
+    --------
+    AutoKConfig : Field-by-field description of the options read here.
+    choose_k_from_score_curve : Rule engine shared by every curve method.
+    select_k_gaussian_cv : Closed-form cross-validated risk, same intent.
+    evaluate_feature_path : Explicit k grid with a user-supplied estimator.
+
+    Notes
+    -----
+    Prefix scores are mildly optimistic: the path is built on all rows,
+    including the validation rows, so this is not an unbiased estimate of a
+    nested selector. The k grid is dense for small k and sparse afterwards
+    (see ``build_k_grid``), and a prefix that fails on some folds is recorded
+    with ``score=inf`` so it cannot win on partial coverage. Cost is one
+    proxy-model fit per (split, k) -- one split under ``'time_holdout'``, up
+    to ``n_splits`` under ``'group_cv'`` -- which makes this the most
+    expensive auto-k rule in the library. ``k_method='auto'`` is *not*
+    handled here: the router
+    lives in :mod:`sift.selection.filter_auto_k` and dispatches to a concrete
+    rule (EBIC by default for CEFS+), so this function rejects any
+    ``k_method`` other than ``'evaluate'``.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import AutoKConfig, select_k_auto
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(80, 5)), columns=list("abcde"))
+    >>> y = X["a"] + 0.6 * X["b"] + 0.5 * rng.normal(size=80)
+    >>> config = AutoKConfig(
+    ...     k_method="evaluate", strategy="time_holdout", min_k=1, max_k=5
+    ... )
+    >>> best_k, features, diag = select_k_auto(
+    ...     X, y.to_numpy(), list("abcde"), config, time=np.arange(80)
+    ... )
+    >>> best_k, features
+    (3, ['a', 'b', 'c'])
+    >>> print(diag[["k", "selected"]].to_string(index=False))
+     k  selected
+     1     False
+     3      True
+     5     False
+    """
     metadata = resolve_row_metadata(
         X,
         groups=groups,
@@ -1259,6 +1619,97 @@ def select_k_elbow(
     ``k`` is the number of retained features. Consequently, the first feature
     in a confirmed low-gain run is excluded from the selected prefix unless
     retaining it is required by the ``min_k`` floor.
+
+    This is the rule behind ``AutoKConfig(k_method="elbow")``, which forwards
+    ``elbow_min_rel_gain`` and ``elbow_patience`` here. It reads only the
+    in-sample objective curve, so it costs nothing beyond the path itself, but
+    its threshold is uncalibrated: gains shrink like ``1/n_eff`` under the
+    null while the denominator tracks accumulated signal, so a fixed
+    ``min_rel_gain`` means different things at different ``n`` and different
+    signal strengths. Treat it as a fast heuristic for a first look and prefer
+    a rule that cleared the Auto-K v2 campaign -- ``select_k_chi2_stop``, or
+    ``select_k_penalized_objective`` with ``objective_penalty="ebic"`` -- for
+    anything load-bearing.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative, non-decreasing objective after each path step, typically
+        the CEFS+ objective ``obj[t] = -log(1 - R^2_t) = 2 I(y; S_t)``. Must
+        be one-dimensional, numeric, and entirely finite.
+    min_k : int, default 5
+        Floor on the returned k; non-negative integer, clamped to the
+        effective ``max_k``.
+    max_k : int, default 100
+        Ceiling on the returned k; positive integer, clamped to
+        ``len(objective_path)``.
+    min_rel_gain : float, default 0.02
+        Relative-gain threshold. Step ``k`` counts as small when
+        ``(obj[k-1] - obj[k-2]) / max(|obj[k-2]|, 1) < min_rel_gain``. Finite
+        and non-negative.
+    patience : int, default 3
+        Consecutive small-gain steps required to stop; positive integer. On a
+        confirmed run starting at step ``k``, the selection is
+        ``max(min_k, k - patience)``.
+
+    Returns
+    -------
+    best_k : int
+        Selected prefix length, or ``0`` when the effective ``max_k`` is
+        non-positive. Falls back to the effective ``max_k`` when no run of
+        ``patience`` small gains is confirmed.
+    diagnostics : DataFrame
+        One row per evaluated k with ``k`` (1..effective max), ``objective``,
+        ``delta`` (step gain, with ``delta[0] = obj[0]``), and ``rel_gain``
+        (``inf`` at ``k=1``). Empty when the effective ``max_k`` is
+        non-positive.
+
+    Raises
+    ------
+    ValueError
+        If ``objective_path`` is not a one-dimensional numeric array or holds
+        a non-finite value; if ``min_k`` is not a non-negative integer, if
+        ``max_k`` or ``patience`` is not a positive integer, if
+        ``min_k > max_k``, or if ``min_rel_gain`` is not finite and
+        non-negative.
+
+    See Also
+    --------
+    select_k_changepoint : Same shape with an empirical noise floor
+        (experimental).
+    select_k_chi2_stop : Calibrated sequential test on the same gain path.
+    select_k_penalized_objective : Information-criterion stop on the same
+        objective path.
+    AutoKConfig : ``elbow_min_rel_gain`` and ``elbow_patience`` fields.
+
+    Notes
+    -----
+    Scanning is ``O(L)`` on top of the path, with no resampling and no model
+    fits. Because the scan starts at ``max(min_k, 2)`` and stops at the first
+    confirmed run, a single large interior gain resets the counter, which is
+    what keeps a masked-then-revealed signal from truncating the path early.
+    ``select_k_changepoint`` was written as the calibrated replacement for
+    this rule, but it did not clear the campaign's null-calibration gate
+    either; both stay available as diagnostics rather than as defaults.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import select_k_elbow
+    >>> objective = np.array([1.0, 1.8, 2.4, 2.42, 2.43, 2.44])
+    >>> best_k, diag = select_k_elbow(
+    ...     objective, min_k=1, max_k=6, min_rel_gain=0.05, patience=2
+    ... )
+    >>> best_k
+    3
+    >>> print(diag[["k", "delta", "rel_gain"]].round(3).to_string(index=False))
+     k  delta  rel_gain
+     1   1.00       inf
+     2   0.80     0.800
+     3   0.60     0.333
+     4   0.02     0.008
+     5   0.01     0.004
+     6   0.01     0.004
     """
     raw_obj = np.asarray(objective_path)
     if raw_obj.ndim != 1:
@@ -1461,7 +1912,142 @@ def select_k_penalized_objective(
     max_k: Optional[int] = None,
     df_path: Optional[np.ndarray] = None,
 ) -> Tuple[int, pd.DataFrame]:
-    """Select k by maximizing a penalized CEFS+ proxy objective path."""
+    """Select k by maximizing a penalized CEFS+ proxy objective path.
+
+    This is the rule behind ``AutoKConfig(k_method="penalized_objective")``
+    and the router's measured default for CEFS+ (with
+    ``objective_penalty="ebic"``). It maximizes
+    ``objective_scale * obj(k) - penalty(k)`` over the prefix grid, treating
+    the objective as a scaled log-likelihood gain and charging an information
+    criterion for model size. Its target is *support recovery*, so it suits
+    discovery work; for predictive sizing prefer a risk curve
+    (``select_k_gaussian_cv``). The classical BIC/AIC/HQC penalties are
+    structurally too weak here because the greedy step takes a maximum over
+    the remaining candidates: use ``'ebic'`` or ``'ric'``, which charge for
+    that multiplicity.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative objective after each path step, indexed from ``k=1``.
+        Reshaped to one dimension and cast to float.
+    config : AutoKConfig
+        Must have ``k_method='penalized_objective'``. Reads
+        ``objective_penalty``, ``objective_penalty_weight`` (custom only),
+        ``ebic_gamma`` (EBIC only), ``objective_n_eff``, ``n_eff_mode``,
+        ``min_k``, and ``max_k``.
+    objective_scale : float or {'n_eff'}
+        Multiplier turning the objective into a log-likelihood scale.
+        ``'n_eff'`` uses the resolved effective sample size (Gaussian CEFS+);
+        binary log-likelihood/score-test gains pass ``2.0`` by Wilks. Must be
+        finite.
+    n_samples : int
+        Row count used to normalize ``sample_weight`` and to derive the
+        effective sample size.
+    sample_weight : ndarray of shape (n_samples,), optional
+        Row weights, normalized to mean one before the Kish and weight-sum
+        effective sizes are computed. None means uniform weights.
+    n_candidates : int or None, default None
+        Number of candidate features *before* screening or pruning. Required
+        by ``objective_penalty`` in ``{'ebic', 'ric'}`` and must be at least
+        the largest evaluated k; ignored by the other penalties.
+    min_k : int or None, default None
+        Floor on the returned k; falls back to ``config.min_k``. Clamped into
+        ``[0, effective_max_k]``. A floor of 0 adds a ``k=0`` row with
+        objective 0, letting the rule answer "no features".
+    max_k : int or None, default None
+        Ceiling on the returned k; falls back to ``config.max_k``. Clamped to
+        ``len(objective_path)``.
+    df_path : ndarray, optional
+        Per-step degrees of freedom replacing the default ``df = k``. Must be
+        at least as long as the effective ``max_k``. Honored by the
+        ``k``-proportional penalties (BIC, MDL, AIC, HQC, custom); the EBIC
+        and RIC penalties are defined on k itself and ignore it.
+
+    Returns
+    -------
+    best_k : int
+        Argmax of the penalized score over ``k >= effective min_k``, ties
+        broken toward the smaller k. ``0`` when the effective ``max_k`` is
+        non-positive.
+    diagnostics : DataFrame
+        One row per evaluated k with ``k``, ``objective``,
+        ``delta_objective``, ``df``, ``penalty_weight``, ``penalty``,
+        ``penalty_kind``, ``ebic_gamma``, ``n_candidates``,
+        ``penalized_score``, ``selected``, ``n_eff``, ``n_eff_source``,
+        ``weight_sum``, ``kish_n_eff``, ``objective_scale``,
+        ``objective_scale_source``, ``objective_nonmonotone_steps``,
+        ``n_finite_objective``, ``n_finite_penalized_score``,
+        ``all_penalized_scores_invalid``, ``effective_min_k``,
+        ``effective_max_k``, ``path_length``, and the saturation flags
+        ``selected_at_effective_max_k``, ``selected_at_config_max_k``,
+        ``path_exhausted_before_max_k``,
+        ``evaluation_limited_before_path_end``, and ``selected_at_min_k``.
+        Empty when the effective ``max_k`` is non-positive.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'penalized_objective'``; if
+        ``objective_scale`` is not finite; if ``df_path`` is shorter than the
+        effective path; if ``n_candidates`` is missing, non-positive, or
+        smaller than the largest evaluated k under EBIC/RIC; if the resolved
+        effective sample size is not finite and > 1; or if it is not greater
+        than ``e`` under ``objective_penalty='hqc'``.
+
+    Warns
+    -----
+    UserWarning
+        When every candidate penalized score is non-finite; the effective
+        minimum k is returned and ``all_penalized_scores_invalid`` is True.
+
+    See Also
+    --------
+    select_k_posterior : Same criterion, exponentiated into a distribution.
+    select_k_chi2_stop : Sequential test on the same gain path.
+    select_k_gaussian_cv : Predictive-risk sizing instead of support
+        recovery.
+    AutoKConfig : ``objective_penalty``, ``ebic_gamma``, ``n_eff_mode``.
+
+    Notes
+    -----
+    With ``d`` the degrees of freedom at k, the penalties are ``log(n_eff)*d``
+    (BIC, MDL), ``2*d`` (AIC), ``2*log(log(n_eff))*d`` (HQC),
+    ``objective_penalty_weight*d`` (custom),
+    ``k*log(n_eff) + 2*gamma*log C(p, k)`` (EBIC), and ``2*k*log(p)`` (RIC),
+    where ``p`` is ``n_candidates`` and ``log C`` is the exact log binomial
+    coefficient. ``ebic_gamma='auto'`` resolves to the Chen-Chen threshold
+    ``min(1, max(0, 1 - log(n_eff)/(2 log p)))``, degrading to plain BIC when
+    ``n_eff >= p^2``. ``n_eff_mode='auto'`` selects the Kish size
+    ``(sum w)^2 / sum w^2`` for EBIC and RIC and the weight sum otherwise;
+    since weights are normalized to mean one, the weight sum equals
+    ``n_samples`` regardless of weight skew. Evaluation is ``O(L)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import AutoKConfig, select_k_penalized_objective
+    >>> objective = np.array([1.0, 1.8, 2.4, 2.42, 2.43, 2.44])
+    >>> config = AutoKConfig(
+    ...     k_method="penalized_objective",
+    ...     objective_penalty="ebic",
+    ...     min_k=0,
+    ...     max_k=6,
+    ... )
+    >>> best_k, diag = select_k_penalized_objective(
+    ...     objective,
+    ...     config,
+    ...     objective_scale="n_eff",
+    ...     n_samples=200,
+    ...     n_candidates=50,
+    ... )
+    >>> best_k
+    3
+    >>> diag["penalty_kind"].iloc[0], diag["n_eff_source"].iloc[0]
+    ('ebic', 'kish')
+    >>> bool(0.0 < diag["ebic_gamma"].iloc[0] <= 1.0)
+    True
+    """
     validate_auto_k_config(config)
     if config.k_method != "penalized_objective":
         raise ValueError(
@@ -1596,6 +2182,114 @@ def select_k_posterior(
     HPD intervals are computed over selectable k values. If ``min_k > 0``, the
     zero-feature posterior mass is still reported as ``p_zero`` but is excluded
     from MAP/HPD selection.
+
+    This is the rule behind ``AutoKConfig(k_method="k_posterior")``. It
+    exponentiates the EBIC criterion into a normalized distribution over
+    prefix lengths, so besides a point estimate it reports a credible set,
+    ``P(k = 0)``, and the entropy of the size distribution. Use it for
+    discovery work where the *sharpness* of k matters: a wide HPD is the
+    signal that the data do not pin k down and that parsimony rules (or the
+    consensus combiner) should decide. It is not a predictive-sizing rule.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative objective after each path step, indexed from ``k=1``.
+    config : AutoKConfig
+        Must have ``k_method='k_posterior'``. Reads ``ebic_gamma``,
+        ``posterior_level``, ``posterior_pick``, ``objective_n_eff``,
+        ``n_eff_mode``, ``min_k``, and ``max_k``.
+    objective_scale : float or {'n_eff'}
+        Multiplier turning the objective into a log-likelihood scale.
+        ``'n_eff'`` uses the resolved effective sample size; binary CEFS+
+        gains pass ``2.0``. Must be finite.
+    n_samples : int
+        Row count used to normalize ``sample_weight`` and derive the
+        effective sample size.
+    n_candidates : int
+        Number of candidate features before screening or pruning. Required:
+        it drives the binomial size prior. Must be a positive integer at
+        least as large as the largest evaluated k.
+    sample_weight : ndarray of shape (n_samples,), optional
+        Row weights, normalized to mean one. None means uniform weights.
+    min_k : int or None, default None
+        Floor on the selectable k; falls back to ``config.min_k`` and is
+        clamped into ``[0, effective_max_k]``. ``k=0`` always appears in the
+        grid so ``p_zero`` stays reportable, but is selectable only when the
+        effective floor is 0.
+    max_k : int or None, default None
+        Ceiling on the evaluated k; falls back to ``config.max_k`` and is
+        clamped to ``len(objective_path)``.
+
+    Returns
+    -------
+    best_k : int
+        The posterior mode when ``posterior_pick='map'``, or the smallest k
+        inside the HPD set when ``posterior_pick='smallest_in_hpd'``. ``0``
+        when the effective ``max_k`` is non-positive.
+    diagnostics : DataFrame
+        One row per grid k with ``k``, ``objective``, ``delta_objective``,
+        ``log_post``, ``post``, ``in_hpd``, ``selected``, ``n_eff``,
+        ``n_eff_source``, ``weight_sum``, ``kish_n_eff``, ``objective_scale``,
+        ``objective_scale_source``, ``ebic_gamma``, ``n_candidates``,
+        ``posterior_level``, ``hpd_lo``, ``hpd_hi``, ``p_zero``, ``entropy``,
+        ``effective_min_k``, ``effective_max_k``, and ``path_length``. Empty
+        when the effective ``max_k`` is non-positive.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'k_posterior'``; if
+        ``objective_scale`` is not finite; if ``n_candidates`` is not a
+        positive integer at least as large as the largest evaluated k; or if
+        the resolved effective sample size is not finite and > 1.
+
+    Warns
+    -----
+    UserWarning
+        When every posterior log-weight is non-finite, and when no
+        *selectable* log-weight is finite. Both fall back to the effective
+        minimum k with an all-zero posterior and an empty HPD set.
+
+    See Also
+    --------
+    select_k_penalized_objective : The EBIC point estimate this normalizes.
+    select_k_stability : Reliability-flavored alternative when k is fuzzy.
+    AutoKConfig : ``posterior_level``, ``posterior_pick``, ``ebic_gamma``.
+
+    Notes
+    -----
+    The grid weight is
+    ``log pi(k) = 0.5 * (objective_scale * obj(k) - k log n_eff)
+    - gamma * log C(n_candidates, k)``, normalized with ``logsumexp``: the
+    unit-information Gaussian prior gives the half-BIC Laplace core and the
+    gamma-weighted binomial term is the multiplicity correction, so the MAP is
+    the EBIC argmax by construction. The HPD set sorts k by descending mass
+    and accumulates to ``posterior_level``; ``hpd_lo``/``hpd_hi`` report its
+    envelope, not a contiguous interval. This is a *pseudo*-posterior computed
+    along one greedy path: it does not integrate over model space and it
+    inherits the greedy's path-dependence, so read it as calibrated relative
+    evidence rather than as a coverage guarantee. Evaluation is ``O(L)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import AutoKConfig, select_k_posterior
+    >>> objective = np.array([1.0, 1.8, 2.4, 2.42, 2.43, 2.44])
+    >>> config = AutoKConfig(k_method="k_posterior", min_k=0, max_k=6)
+    >>> best_k, diag = select_k_posterior(
+    ...     objective,
+    ...     config,
+    ...     objective_scale="n_eff",
+    ...     n_samples=200,
+    ...     n_candidates=50,
+    ... )
+    >>> best_k
+    3
+    >>> int(diag["hpd_lo"].iloc[0]), int(diag["hpd_hi"].iloc[0])
+    (3, 4)
+    >>> float(round(diag["post"].sum(), 6))
+    1.0
     """
     validate_auto_k_config(config)
     if config.k_method != "k_posterior":
@@ -1736,6 +2430,92 @@ def compute_objective_for_path(
     Objective at step t:
         obj[t] = log|Σ_S| - log|Σ_{y,S}|
                = 2 * I(y; S)   (Gaussian MI proxy)
+
+    This is the shared objective primitive, not a k rule: no
+    ``AutoKConfig.k_method`` routes to it. The path-only rules
+    (``elbow``, ``penalized_objective``, ``k_posterior``, ``chi2_stop``,
+    ``forward_stop``, ``changepoint``, ``perm_gap``) consume exactly this
+    curve as their ``objective_path`` argument, and the orchestrators build it
+    while running the greedy. Call it directly to re-score an ordering you
+    already have -- a hand-picked feature list, a path from another selector,
+    or a saved path checked against a new target -- against one full cache.
+    It is a discovery-flavored quantity (conditional information carried by
+    the prefix), not a predictive score, and it is computed in sample on every
+    cache row: it is not the cross-fitting primitive. Fold and bootstrap
+    methods must build fold-local correlations and call
+    ``objective_from_corr_path`` instead.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Supplies the
+        rank-Gauss matrix ``Z``, the row subsample, the sample weights, and
+        (when ``compute_Rxx=True``) the cached feature correlation matrix,
+        which is sliced instead of recomputed. Duplicate non-synthetic feature
+        names are rejected.
+    y : ndarray of shape (n_rows_original,)
+        Target aligned to the *original* rows the cache was built from, not to
+        the cached subsample. It is raveled, sliced by ``cache.row_idx``, and
+        rank-Gauss transformed under the cache weights.
+    feature_path : list of str or int
+        Ordered features. Strings resolve through ``cache.feature_names``,
+        integers are original column indices. Entries that are unknown or that
+        fell out of ``cache.valid_cols`` are skipped silently, so the result
+        can be shorter than the input.
+    shrink : float, default 1e-6
+        Shrinkage of the correlation matrix toward the identity for numerical
+        stability, forwarded to ``objective_from_corr_path``.
+    eps : float, default 1e-12
+        Floor on the Schur-complement determinants, forwarded to
+        ``objective_from_corr_path``.
+
+    Returns
+    -------
+    objective : ndarray of shape (n_resolved,)
+        Cumulative, monotonically non-decreasing objective after each resolved
+        step, indexed from ``k=1``. Empty when ``feature_path`` is empty or
+        nothing resolves to a valid cache column.
+
+    Raises
+    ------
+    ValueError
+        If ``y`` does not have ``cache.n_rows_original`` rows, if the cache
+        fails its structural contract (missing provenance marker, non-finite
+        ``Z``, inconsistent ``valid_cols``/``row_idx``/weights), or if the
+        cache carries duplicate feature names.
+
+    See Also
+    --------
+    select_k_elbow : Consumes this curve.
+    select_k_penalized_objective : Consumes this curve.
+    select_k_chi2_stop : Consumes this curve.
+    build_cache : Builds the ``FeatureCache`` this expects.
+
+    Notes
+    -----
+    ``obj[t] = -log(1 - R^2_t)`` where ``R^2_t = r_S' R_S^-1 r_S`` is the
+    squared multiple correlation of the copula-space target on the first ``t``
+    path features, so the per-step gain is ``-log(1 - rho^2_t)`` for the
+    sample partial correlation of the entering feature. Target correlations
+    are clipped to ``+/-0.999999`` before the Schur-complement recursion,
+    which costs ``O(k^2)`` in total; extracting ``R_path`` is an ``O(k^2)``
+    slice with a cached ``Rxx`` and one weighted correlation otherwise.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import build_cache, compute_objective_for_path
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 4)), columns=list("abcd"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> objective = compute_objective_for_path(cache, y.to_numpy(), ["a", "b", "c"])
+    >>> objective.shape
+    (3,)
+    >>> bool(np.all(np.diff(objective) >= 0.0))
+    True
+    >>> compute_objective_for_path(cache, y.to_numpy(), ["missing"]).size
+    0
     """
     from sift.estimators.copula import (
         weighted_corr_with_vector,

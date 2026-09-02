@@ -858,6 +858,33 @@ def test_target_cv_binary_encoding_is_unchanged_by_the_offset_fix():
     )
 
 
+def test_target_cv_rejects_sample_weights_with_overflowing_total_mass():
+    """Finite individual weights must not silently overflow their aggregate."""
+    X, y = _offset_probe_data(1720, n=120)
+    sample_weight = np.full(len(X), np.finfo(np.float64).max)
+    message = "finite total sample_weight"
+
+    encoder = TargetCVEncoder(
+        ["cat"], target_type="continuous", smooth="auto", cv=5
+    )
+    with pytest.raises(ValueError, match=message):
+        encoder.fit_transform(X.loc[:, ["cat"]], y, sample_weight=sample_weight)
+
+    with pytest.raises(ValueError, match=message):
+        sift.select_mrmr(
+            X,
+            y,
+            1,
+            task="regression",
+            estimator="classic",
+            mrmr_backend="serial",
+            cat_encoding="target_cv",
+            sample_weight=sample_weight,
+            subsample=None,
+            verbose=False,
+        )
+
+
 @pytest.mark.parametrize(("selector", "kwargs"), FUNCTION_ROUTES)
 def test_target_cv_weighted_function_routes_use_custom_cross_fitting(
     selector,

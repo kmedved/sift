@@ -23,12 +23,19 @@ error messages and common pitfalls see [troubleshooting](troubleshooting.md).
 ## Fixed-k Filters
 
 ```python
-from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus
+import numpy as np
+import pandas as pd
 
-mrmr = select_mrmr(X, y, k=25, task="regression", verbose=False)
-jmi = select_jmi(X, y, k=25, task="regression", verbose=False)
-jmim = select_jmim(X, y, k=25, task="regression", verbose=False)
-cefs = select_cefsplus(X, y, k=25, verbose=False)
+from sift import select_cefsplus, select_jmi, select_jmim, select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+
+mrmr = select_mrmr(X, y, k=6, task="regression", verbose=False)
+jmi = select_jmi(X, y, k=6, task="regression", verbose=False)
+jmim = select_jmim(X, y, k=6, task="regression", verbose=False)
+cefs = select_cefsplus(X, y, k=6, verbose=False)
 ```
 
 Fixed `k` is an upper bound. Selectors can return fewer features when constant
@@ -42,15 +49,25 @@ matrices are rejected during fit, transform, and inverse transform.
 ## Binary CEFS+
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import select_cefsplus_binary
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+X["position"] = rng.choice(["guard", "wing", "big"], size=len(X))
+score = 2.0 * X["x0"] - 1.5 * X["x1"] + rng.normal(scale=0.3, size=len(X))
+y_binary = (score > score.median()).astype(int)
 
 selected = select_cefsplus_binary(
     X,
     y_binary,
-    k=20,
+    k=6,
     loss="logloss",
     class_weight="balanced",
-    cat_encoding="loo_logit",
+    cat_features=["position"],
+    cat_encoding="target_cv",
     verbose=False,
 )
 ```
@@ -58,13 +75,24 @@ selected = select_cefsplus_binary(
 Use binary CEFS+ when the target is Bernoulli-like and logistic conditional
 information is a better fit than a Gaussian target approximation.
 `sample_weight` and `class_weight` are honored directly by `loss="logloss"`.
+`cat_encoding="target_cv"` is the leakage-safe default choice here; the
+binary-only `cat_encoding="loo_logit"` is a full-data supervised encoder and so
+needs `allow_full_data_target_encoding=True` before a function-style selector
+will run it.
 
 ## FDR-Controlled Knockoffs
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import select_fdr
 
-result = select_fdr(X, y, q=0.1, n_draws=1, verbose=False)
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
+
+result = select_fdr(X, y, q=0.1, n_draws=1, random_state=0, verbose=False)
 selected = result.selected_features
 ranking = result.get_feature_ranking()
 ```
@@ -129,8 +157,13 @@ q. It is often useful to compare both diagnostics.
 
 ```python
 import numpy as np
+import pandas as pd
 
 from sift import AutoKConfig, select_cefsplus
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
 
 # Zero-config CEFS+ auto-k uses the measured Auto-K v2 router.
 selected = select_cefsplus(X, y, k="auto", verbose=False)
@@ -138,8 +171,8 @@ selected = select_cefsplus(X, y, k="auto", verbose=False)
 config = AutoKConfig(
     k_method="evaluate",  # or "auto", "gaussian_cv", "chi2_stop", etc.
     strategy="time_holdout",
-    min_k=5,
-    max_k=80,
+    min_k=2,
+    max_k=10,
 )
 
 timestamps = np.arange(len(X))  # replace with the real chronological key
@@ -182,13 +215,21 @@ failed-gate for automatic sizing.
 ## Reuse a Gaussian Cache
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import build_cache, select_cached
 
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y1 = X.iloc[:, :6].sum(axis=1) + rng.normal(scale=0.3, size=len(X))
+y2 = X.iloc[:, 6:].sum(axis=1) + rng.normal(scale=0.3, size=len(X))
+
 cache = build_cache(X, subsample=None, compute_Rxx=True)
-mrmr = select_cached(cache, y1, k=30, method="mrmr_quot")
-cefs = select_cached(cache, y2, k=30, method="cefsplus")
+mrmr = select_cached(cache, y1, k=6, method="mrmr_quot")
+cefs = select_cached(cache, y2, k=6, method="cefsplus")
 cefs_view = select_cached(
-    cache, y2, k=30, method="cefsplus", return_result=True
+    cache, y2, k=6, method="cefsplus", return_result=True
 )
 ```
 
@@ -209,7 +250,14 @@ exclusive with the legacy `return_objective` and `return_indices` tuple flags.
 ## Stability Selection
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import StabilitySelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
 
 selector = StabilitySelector(
     task="regression",
@@ -228,7 +276,8 @@ X_restored = selector.inverse_transform(X_stable)
 Pass both `groups` and `time` to use block bootstrap for ordered panel data.
 With DataFrames, `groups="column"` and `time="column"` extract and exclude the
 metadata columns; direct arrays remain positional. `penalty` is an alias for
-`alpha`, and both may be supplied only when equal. Threshold tuning accepts
+`alpha`, and both may be supplied only when equal. Both spellings are permanent:
+neither is deprecated and neither warns. Threshold tuning accepts
 sklearn scorer objects as well as scorer names.
 `selector.get_feature_names_out()` is the sklearn-compatible equivalent for
 retrieving the selected names after fitting.
@@ -247,34 +296,63 @@ seed 0. Their existing `n_jobs=-1` defaults are also unchanged in 0.9.
 
 ## CatBoost Row Context
 
+<!-- sift-doc: requires=catboost -->
+
 ```python
-from sklearn.model_selection import TimeSeriesSplit
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import GroupKFold
+
 import sift
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + rng.normal(scale=0.3, size=len(X))
+group_ids = np.repeat(np.arange(20), 10)
+dates = np.tile(np.arange(10), 20)
+weights = np.ones(len(X))
 
 result = sift.catboost_select(
     X,
     y,
-    k=20,
+    k=5,
+    min_features=2,
+    n_estimators=50,
     groups=group_ids,
     time=dates,
     sample_weight=weights,
-    cv=TimeSeriesSplit(n_splits=5),
+    cv=GroupKFold(n_splits=3),
     random_state=0,
+    verbose=False,
 )
 ```
 
 CatBoost accepts direct positional `groups`, `time`, and `sample_weight`
 arrays. DataFrame callers may instead use `groups="group_column"` or
-`time="date_column"`; `group_col` and `sample_weight_col` remain compatibility
-aliases. A direct value and its alias cannot be combined. Supplied time values
+`time="date_column"`; `group_col` and `sample_weight_col` are permanent
+aliases, not deprecated spellings, and neither warns.
+A direct value and its alias cannot be combined. Supplied time values
 must be non-missing and mutually orderable and stably order aligned rows before
-the configured splitter. Use a time-aware splitter when chronological
-validation is required; the default splitter remains random.
+the configured splitter. The example pairs `groups` with `GroupKFold`; a
+time-only splitter such as `TimeSeriesSplit` ignores `groups` (scikit-learn
+warns), so pass `time=` alone when chronological validation is required. The
+default splitter remains random.
 
 ## Time-aware Permutation Importance
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+
 from sift import permutation_importance
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + rng.normal(scale=0.3, size=len(X))
+group_ids = np.repeat(np.arange(20), 10)
+dates = np.tile(np.arange(10), 20)
+fitted_model = Ridge().fit(X, y)
 
 importance = permutation_importance(
     fitted_model,
@@ -285,6 +363,7 @@ importance = permutation_importance(
     permute_method="auto",
     scoring="neg_rmse",
     n_repeats=10,
+    random_state=0,
 )
 
 rich_importance = permutation_importance(
@@ -295,6 +374,7 @@ rich_importance = permutation_importance(
     time=dates,
     n_repeats=10,
     return_result=True,
+    random_state=0,
 )
 repeat_drops = rich_importance.importances_
 view = rich_importance.result_view()
@@ -333,11 +413,23 @@ all of an identifier's rows land in the same fold — under `groups=` the same
 column encodes to exactly zero.
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 8)), columns=[f"x{i}" for i in range(8)])
+X["league"] = rng.choice(["nba", "wnba", "gleague"], size=len(X))
+league_effect = X["league"].map({"nba": 2.0, "wnba": 0.0, "gleague": -2.0})
+y = league_effect + 1.5 * X["x0"] + rng.normal(scale=0.3, size=len(X))
+
 selected = select_mrmr(
     X,
     y,
-    k=10,
+    k=4,
     task="regression",
+    cat_features=["league"],
     cat_encoding="target_cv",
     verbose=False,
 )
@@ -352,11 +444,25 @@ unweighted formula with every count replaced by weighted row mass, so weight
 available when you want to fix the shrinkage:
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 8)), columns=[f"x{i}" for i in range(8)])
+X["league"] = rng.choice(["nba", "wnba", "gleague"], size=len(X))
+league_effect = X["league"].map({"nba": 2.0, "wnba": 0.0, "gleague": -2.0})
+y = league_effect + 1.5 * X["x0"] + rng.normal(scale=0.3, size=len(X))
+weights = np.ones(len(X))
+weights[-50:] = 2.0  # emphasize the most recent rows
+
 selected = select_mrmr(
     X,
     y,
-    k=10,
+    k=4,
     task="regression",
+    cat_features=["league"],
     cat_encoding="target_cv",
     target_cv_smoothing=20.0,  # or leave it at the default "auto"
     sample_weight=weights,
@@ -389,7 +495,17 @@ plus fitted `StabilitySelector` and the opt-in `ImportanceResult` from
 `permutation_importance`. Legacy result types and default returns are unchanged.
 
 ```python
-from sift import select_cefsplus_binary
+import numpy as np
+import pandas as pd
+
+from sift import AutoKConfig, select_cefsplus_binary
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+score = 2.0 * X["x0"] - 1.5 * X["x1"] + rng.normal(scale=0.3, size=len(X))
+y_binary = (score > score.median()).astype(int)
+
+config = AutoKConfig(k_method="elbow", min_k=2, max_k=8)
 
 result = select_cefsplus_binary(
     X,
@@ -406,7 +522,11 @@ print(result.selector_metadata)
 
 The common A2d access pattern is:
 
+<!-- sift-doc: continues -->
+
 ```python
+import sift
+
 view = sift.as_result(result, input_features=X.columns)
 
 view.features
@@ -428,7 +548,14 @@ objects.
 A fitted stability selector supplies the same accessors and a frozen transform:
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import StabilitySelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
 
 selector = StabilitySelector(random_state=0, verbose=False).fit(X, y)
 view = selector.result_view_

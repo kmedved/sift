@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -930,3 +932,28 @@ def test_stability_failed_refit_clears_partial_and_old_state(monkeypatch):
         selector.get_feature_info()
     with pytest.raises(NotFittedError):
         selector.transform(X_new)
+
+
+def test_get_coef_stability_is_warning_free_for_never_selected_features():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(120, 6)), columns=[f"f{i}" for i in range(6)])
+    y = 2.0 * X["f0"].to_numpy() + rng.normal(scale=0.1, size=120)
+    selector = StabilitySelector(
+        task="regression",
+        n_bootstrap=8,
+        threshold=0.6,
+        store_coefs=True,
+        random_state=0,
+        verbose=False,
+    )
+    selector.fit(X, y)
+    # A feature that no bootstrap ever selected has zero mean and zero std,
+    # which used to reach numpy's 0/0 path inside ``np.where``.
+    selector.coef_bootstrap_[:, 5] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        table = selector.get_coef_stability()
+    row = table.set_index("feature").loc["f5"]
+    assert row["coef_mean"] == 0.0 and row["coef_std"] == 0.0
+    assert np.isinf(row["coef_cv"])
+    assert np.isfinite(table.set_index("feature").loc["f0", "coef_cv"])

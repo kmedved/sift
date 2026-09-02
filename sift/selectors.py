@@ -877,7 +877,193 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
 
 
 class MRMRSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_mrmr`."""
+    """Sklearn-style wrapper for :func:`sift.select_mrmr`.
+
+    Minimum-redundancy maximum-relevance grows a greedy path that trades target
+    relevance against redundancy with the features already chosen, and stops at
+    ``k``. Use it as a fast, model-free pre-filter inside an sklearn
+    ``Pipeline`` whenever a fixed-width, low-redundancy feature block is
+    wanted. ``fit`` learns the path and records the selection; ``transform``
+    returns the selected columns in the fitted container kind (DataFrame in,
+    DataFrame out; ndarray in, ndarray out), ``set_output(transform="pandas")``
+    is honored like any sklearn transformer, and ``inverse_transform`` restores
+    a dense full-width matrix with unselected columns zero-filled. Sparse input
+    is rejected in ``fit``, ``transform`` and ``inverse_transform``.
+
+    ``k`` is an upper bound rather than a promise: constant-column filtering,
+    relevance screening and non-positive objective checks can end the path with
+    fewer than ``k`` features.
+
+    Parameters
+    ----------
+    k : int or {"auto"}, default=10
+        Upper bound on the number of selected features. ``"auto"`` defers the
+        size to ``auto_k_config``; with no config, automatic sizing needs
+        ``groups`` or ``time`` at fit time (they select ``strategy="group_cv"``
+        or ``"time_holdout"``) and otherwise raises.
+    task : {"regression", "classification"}, default="regression"
+        Target kind. It picks the relevance scorer and the estimator variants.
+    relevance : {"f", "ks", "rf"}, default="f"
+        Relevance score. Regression accepts ``"f"`` and ``"rf"``;
+        classification also accepts ``"ks"``. Any other pairing raises.
+    estimator : {"classic", "gaussian"}, default="classic"
+        Redundancy estimator. ``"classic"`` scores redundancy on the raw rows;
+        ``"gaussian"`` is a regression-only fast path over the Gaussian-copula
+        :class:`~sift.FeatureCache` and the only route that accepts ``cache``.
+    formula : {"quotient", "difference"}, default="quotient"
+        Objective shape: relevance divided by mean redundancy, or relevance
+        minus mean redundancy.
+    top_m : int or None, default=None
+        Keep only the ``top_m`` most relevant valid candidates before the
+        greedy loop. ``None`` resolves to ``max(5 * k, 250)``, never below
+        ``k``.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns. Unused when
+        ``cat_encoding="none"`` or when ``X`` is an ndarray.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
+        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+        ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
+        training rows receive
+        ``fold_encoding - fold_training_prior`` while inference rows receive
+        ``full_fit_encoding - full_training_prior``, so an unseen category maps
+        to a centered zero and cannot identify its own fold. ``"target"``,
+        ``"loo"`` and ``"james_stein"`` require the optional
+        ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
+        leave-one-out logit encoder and the only one that accepts
+        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        makes ``fit_transform`` return the y-aware encoded training block and
+        makes ``inverse_transform`` unavailable.
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``. ``"auto"`` reproduces
+        sklearn's ``TargetEncoder`` rule on unweighted fixed-k folds and uses
+        weighted row mass elsewhere; an explicit non-negative float always
+        works.
+    target_prior : float or None, default=None
+        Target-independent prior for time-aware ``"target_cv"`` fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        ``"target_cv"`` fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
+        rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
+        contract it contradicts.
+    subsample : int, None or {"auto"}, default="auto"
+        Row cap for classic row sampling and for uncached Gaussian cache
+        construction. ``"auto"`` is the sklearn-clonable spelling of the
+        omitted default: 50,000 rows when fitting from ``X``, and "not
+        supplied" when ``cache`` is given. ``None`` keeps every positively
+        weighted row. An explicit value beside a ``cache`` raises.
+    random_state : int or {"auto"}, default="auto"
+        Seed for that row sampling and for uncached cache construction.
+        ``"auto"`` is the omitted default and resolves to seed 0 when fitting
+        from ``X``. An explicit value beside a ``cache`` raises.
+    n_jobs : int, default=1
+        Worker count for the redundancy loop.
+    mrmr_backend : {"auto", "serial", "blas", "processes"}, default="auto"
+        Redundancy-update backend. ``"auto"`` resolves to ``"blas"``
+        regardless of ``n_jobs``, because the BLAS matvec update avoids
+        process start-up and pickling costs; pass ``"processes"`` explicitly
+        to opt into joblib workers.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    cache : FeatureCache or None, default=None
+        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+        A named cache requires a DataFrame with identical columns in identical
+        order; a positional cache requires the matching ndarray. A cache cannot
+        be combined with a supervised ``cat_encoding``.
+    auto_k_config : AutoKConfig or None, default=None
+        Automatic-sizing configuration, read only when ``k="auto"``. Selector
+        classes additionally accept ``auto_k_mode="nested"`` together with
+        ``k_method="evaluate"``, which refits a train-only path per split.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed greedy
+        step. Nested auto-k folds stay silent; only the final refit reports.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        selection-path order; ``"original"`` emits ascending fitted column
+        position. The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    selected_features_ : list
+        Selected feature labels in selection-path order.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix, in path order.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    k_ : int
+        Feature count chosen by nested automatic k. Set only on the
+        ``auto_k_mode="nested"`` path, not by prefix-only auto-k.
+    nested_auto_k_diagnostics_ : dict
+        Fold scores, metric and selection rule behind ``k_``; same path only.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+    categorical_encoding_metadata_ : dict
+        The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
+        ``cat_encoding="target_cv"`` encoded at least one column.
+
+    Raises
+    ------
+    ValueError
+        If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
+        neither ``auto_k_config`` nor row context, if ``subsample`` or
+        ``random_state`` is explicit beside a ``cache``, if a supervised
+        ``cat_encoding`` is combined with a ``cache``, or if ``X`` is sparse or
+        not two-dimensional.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When an explicit ``AutoKConfig(k_method="auto")`` router supports zero
+        features, or saturates its effective ``max_k`` (a censored result).
+
+    See Also
+    --------
+    sift.select_mrmr : Function-style mRMR with the same options.
+    JMISelector : Complementarity-driven joint mutual information.
+    CEFSPlusSelector : Gaussian log-determinant conditional-information path.
+    KnockoffSelector : q-calibrated selection instead of a fixed ``k``.
+
+    Notes
+    -----
+    The shared selector-class fit contract is
+    ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
+    ``auto_k_config`` may also be passed per call and then win over the
+    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
+    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
+    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    that moves the column out of the candidate features. Under sklearn >= 1.4
+    metadata routing every datum must be requested explicitly with
+    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
+    ``groups``/``time`` request.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import MRMRSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(200, 6))
+    >>> y = X[:, 0] + 0.5 * X[:, 1] + 0.1 * rng.normal(size=200)
+    >>> selector = MRMRSelector(k=2, task="regression", verbose=False)
+    >>> selector.fit(X, y).selected_features_
+    ['x0', 'x1']
+    >>> selector.transform(X).shape
+    (200, 2)
+    """
 
     _subsample_auto_is_cache_default = True
     _random_state_auto_is_cache_default = True
@@ -912,7 +1098,184 @@ class MRMRSelector(_BaseSelector):
 
 
 class JMISelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_jmi`."""
+    """Sklearn-style wrapper for :func:`sift.select_jmi`.
+
+    Joint mutual information adds, at every step, the candidate whose *summed*
+    joint information with the target given each already-selected feature is
+    largest, so it prefers features that complement the current set rather than
+    merely scoring well alone. Reach for it over mRMR when interactions matter
+    more than raw marginal relevance. ``fit`` learns the path and records the
+    selection; ``transform`` returns the selected columns in the fitted
+    container kind, ``set_output(transform="pandas")`` is honored like any
+    sklearn transformer, and ``inverse_transform`` restores a dense full-width
+    matrix with unselected columns zero-filled. Sparse input is rejected in
+    ``fit``, ``transform`` and ``inverse_transform``.
+
+    ``k`` is an upper bound rather than a promise: constant-column filtering,
+    relevance screening and non-positive objective checks can end the path with
+    fewer than ``k`` features.
+
+    Parameters
+    ----------
+    k : int or {"auto"}, default=10
+        Upper bound on the number of selected features. ``"auto"`` defers the
+        size to ``auto_k_config``; with no config, automatic sizing needs
+        ``groups`` or ``time`` at fit time (they select ``strategy="group_cv"``
+        or ``"time_holdout"``) and otherwise raises.
+    task : {"regression", "classification"}, default="regression"
+        Target kind. It picks the relevance scorer and the estimator variants.
+    estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default="auto"
+        Mutual-information estimator for the joint terms. ``"auto"`` resolves
+        to ``"binned"`` for classification and ``"r2"`` for regression;
+        ``"gaussian"`` is the copula-cache fast path and the only route that
+        accepts ``cache``; ``"ksg"`` is the nearest-neighbour estimator and
+        rejects ``sample_weight``.
+    relevance : {"f", "ks", "rf"}, default="f"
+        Relevance score used for screening and the first step. Regression
+        accepts ``"f"`` and ``"rf"``; classification also accepts ``"ks"``.
+    top_m : int or None, default=None
+        Keep only the ``top_m`` most relevant valid candidates before the
+        greedy loop. ``None`` resolves to ``max(5 * k, 250)``, never below
+        ``k``.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns. Unused when
+        ``cat_encoding="none"`` or when ``X`` is an ndarray.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
+        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+        ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
+        training rows receive ``fold_encoding - fold_training_prior`` while
+        inference rows receive ``full_fit_encoding - full_training_prior``, so
+        an unseen category maps to a centered zero and cannot identify its own
+        fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
+        optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
+        leave-one-out logit encoder and the only one that accepts
+        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        makes ``fit_transform`` return the y-aware encoded training block and
+        makes ``inverse_transform`` unavailable.
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``. ``"auto"`` reproduces
+        sklearn's ``TargetEncoder`` rule on unweighted fixed-k folds and uses
+        weighted row mass elsewhere; an explicit non-negative float always
+        works.
+    target_prior : float or None, default=None
+        Target-independent prior for time-aware ``"target_cv"`` fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        ``"target_cv"`` fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
+        rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
+        contract it contradicts.
+    subsample : int, None or {"auto"}, default="auto"
+        Row cap for classic row sampling and for uncached Gaussian cache
+        construction. ``"auto"`` is the sklearn-clonable spelling of the
+        omitted default: 50,000 rows when fitting from ``X``, and "not
+        supplied" when ``cache`` is given. ``None`` keeps every positively
+        weighted row. An explicit value beside a ``cache`` raises.
+    random_state : int or {"auto"}, default="auto"
+        Seed for that row sampling and for uncached cache construction.
+        ``"auto"`` is the omitted default and resolves to seed 0 when fitting
+        from ``X``. An explicit value beside a ``cache`` raises.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    cache : FeatureCache or None, default=None
+        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+        A named cache requires a DataFrame with identical columns in identical
+        order; a positional cache requires the matching ndarray. A cache cannot
+        be combined with a supervised ``cat_encoding``.
+    auto_k_config : AutoKConfig or None, default=None
+        Automatic-sizing configuration, read only when ``k="auto"``. Selector
+        classes additionally accept ``auto_k_mode="nested"`` together with
+        ``k_method="evaluate"``, which refits a train-only path per split.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed greedy
+        step. Nested auto-k folds stay silent; only the final refit reports.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        selection-path order; ``"original"`` emits ascending fitted column
+        position. The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    selected_features_ : list
+        Selected feature labels in selection-path order.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix, in path order.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    k_ : int
+        Feature count chosen by nested automatic k. Set only on the
+        ``auto_k_mode="nested"`` path, not by prefix-only auto-k.
+    nested_auto_k_diagnostics_ : dict
+        Fold scores, metric and selection rule behind ``k_``; same path only.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+    categorical_encoding_metadata_ : dict
+        The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
+        ``cat_encoding="target_cv"`` encoded at least one column.
+
+    Raises
+    ------
+    ValueError
+        If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
+        neither ``auto_k_config`` nor row context, if ``subsample`` or
+        ``random_state`` is explicit beside a ``cache``, if a supervised
+        ``cat_encoding`` is combined with a ``cache``, if
+        ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
+        sparse or not two-dimensional.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When an explicit ``AutoKConfig(k_method="auto")`` router supports zero
+        features, or saturates its effective ``max_k`` (a censored result).
+
+    See Also
+    --------
+    sift.select_jmi : Function-style JMI with the same options.
+    JMIMSelector : Conservative minimum-pair variant of the same objective.
+    MRMRSelector : Relevance-versus-redundancy greedy path.
+
+    Notes
+    -----
+    The shared selector-class fit contract is
+    ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
+    ``auto_k_config`` may also be passed per call and then win over the
+    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
+    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
+    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    that moves the column out of the candidate features. Under sklearn >= 1.4
+    metadata routing every datum must be requested explicitly with
+    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
+    ``groups``/``time`` request.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import JMISelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(200, 6))
+    >>> y = X[:, 0] + 0.5 * X[:, 1] + 0.1 * rng.normal(size=200)
+    >>> selector = JMISelector(k=2, task="regression", verbose=False)
+    >>> selector.fit(X, y).selected_features_
+    ['x0', 'x1']
+    >>> selector.get_support(indices=True)
+    array([0, 1])
+    """
 
     _subsample_auto_is_cache_default = True
     _random_state_auto_is_cache_default = True
@@ -944,7 +1307,186 @@ class JMISelector(_BaseSelector):
 
 
 class JMIMSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_jmim`."""
+    """Sklearn-style wrapper for :func:`sift.select_jmim`.
+
+    JMI Maximization is the conservative sibling of :class:`JMISelector`: at
+    each step it scores a candidate by the *minimum* joint information taken
+    over the already-selected features instead of the sum, so one strongly
+    redundant pairing is enough to hold a candidate back. Prefer it when a
+    single redundant partner should veto a feature; prefer plain JMI when
+    average complementarity is the better summary. ``fit`` learns the path and
+    records the selection; ``transform`` returns the selected columns in the
+    fitted container kind, ``set_output(transform="pandas")`` is honored like
+    any sklearn transformer, and ``inverse_transform`` restores a dense
+    full-width matrix with unselected columns zero-filled. Sparse input is
+    rejected in ``fit``, ``transform`` and ``inverse_transform``.
+
+    ``k`` is an upper bound rather than a promise: constant-column filtering,
+    relevance screening and non-positive objective checks can end the path with
+    fewer than ``k`` features.
+
+    Parameters
+    ----------
+    k : int or {"auto"}, default=10
+        Upper bound on the number of selected features. ``"auto"`` defers the
+        size to ``auto_k_config``; with no config, automatic sizing needs
+        ``groups`` or ``time`` at fit time (they select ``strategy="group_cv"``
+        or ``"time_holdout"``) and otherwise raises.
+    task : {"regression", "classification"}, default="regression"
+        Target kind. It picks the relevance scorer and the estimator variants.
+    estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default="auto"
+        Mutual-information estimator for the joint terms. ``"auto"`` resolves
+        to ``"binned"`` for classification and ``"r2"`` for regression;
+        ``"gaussian"`` is the copula-cache fast path and the only route that
+        accepts ``cache``; ``"ksg"`` is the nearest-neighbour estimator and
+        rejects ``sample_weight``.
+    relevance : {"f", "ks", "rf"}, default="f"
+        Relevance score used for screening and the first step. Regression
+        accepts ``"f"`` and ``"rf"``; classification also accepts ``"ks"``.
+    top_m : int or None, default=None
+        Keep only the ``top_m`` most relevant valid candidates before the
+        greedy loop. ``None`` resolves to ``max(5 * k, 250)``, never below
+        ``k``.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns. Unused when
+        ``cat_encoding="none"`` or when ``X`` is an ndarray.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
+        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+        ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
+        training rows receive ``fold_encoding - fold_training_prior`` while
+        inference rows receive ``full_fit_encoding - full_training_prior``, so
+        an unseen category maps to a centered zero and cannot identify its own
+        fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
+        optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
+        leave-one-out logit encoder and the only one that accepts
+        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        makes ``fit_transform`` return the y-aware encoded training block and
+        makes ``inverse_transform`` unavailable.
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``. ``"auto"`` reproduces
+        sklearn's ``TargetEncoder`` rule on unweighted fixed-k folds and uses
+        weighted row mass elsewhere; an explicit non-negative float always
+        works.
+    target_prior : float or None, default=None
+        Target-independent prior for time-aware ``"target_cv"`` fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        ``"target_cv"`` fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
+        rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
+        contract it contradicts.
+    subsample : int, None or {"auto"}, default="auto"
+        Row cap for classic row sampling and for uncached Gaussian cache
+        construction. ``"auto"`` is the sklearn-clonable spelling of the
+        omitted default: 50,000 rows when fitting from ``X``, and "not
+        supplied" when ``cache`` is given. ``None`` keeps every positively
+        weighted row. An explicit value beside a ``cache`` raises.
+    random_state : int or {"auto"}, default="auto"
+        Seed for that row sampling and for uncached cache construction.
+        ``"auto"`` is the omitted default and resolves to seed 0 when fitting
+        from ``X``. An explicit value beside a ``cache`` raises.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    cache : FeatureCache or None, default=None
+        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+        A named cache requires a DataFrame with identical columns in identical
+        order; a positional cache requires the matching ndarray. A cache cannot
+        be combined with a supervised ``cat_encoding``.
+    auto_k_config : AutoKConfig or None, default=None
+        Automatic-sizing configuration, read only when ``k="auto"``. Selector
+        classes additionally accept ``auto_k_mode="nested"`` together with
+        ``k_method="evaluate"``, which refits a train-only path per split.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed greedy
+        step. Nested auto-k folds stay silent; only the final refit reports.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        selection-path order; ``"original"`` emits ascending fitted column
+        position. The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    selected_features_ : list
+        Selected feature labels in selection-path order.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix, in path order.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    k_ : int
+        Feature count chosen by nested automatic k. Set only on the
+        ``auto_k_mode="nested"`` path, not by prefix-only auto-k.
+    nested_auto_k_diagnostics_ : dict
+        Fold scores, metric and selection rule behind ``k_``; same path only.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+    categorical_encoding_metadata_ : dict
+        The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
+        ``cat_encoding="target_cv"`` encoded at least one column.
+
+    Raises
+    ------
+    ValueError
+        If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
+        neither ``auto_k_config`` nor row context, if ``subsample`` or
+        ``random_state`` is explicit beside a ``cache``, if a supervised
+        ``cat_encoding`` is combined with a ``cache``, if
+        ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
+        sparse or not two-dimensional.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When an explicit ``AutoKConfig(k_method="auto")`` router supports zero
+        features, or saturates its effective ``max_k`` (a censored result).
+
+    See Also
+    --------
+    sift.select_jmim : Function-style JMIM with the same options.
+    JMISelector : Summed-score variant of the same joint objective.
+    MRMRSelector : Relevance-versus-redundancy greedy path.
+
+    Notes
+    -----
+    The shared selector-class fit contract is
+    ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
+    ``auto_k_config`` may also be passed per call and then win over the
+    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
+    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
+    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    that moves the column out of the candidate features. Under sklearn >= 1.4
+    metadata routing every datum must be requested explicitly with
+    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
+    ``groups``/``time`` request.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import JMIMSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 4)), columns=list("abcd"))
+    >>> y = X["a"] + 0.5 * X["b"] + 0.1 * rng.normal(size=200)
+    >>> selector = JMIMSelector(k=2, task="regression", verbose=False)
+    >>> list(selector.fit(X, y).get_feature_names_out())
+    ['a', 'b']
+    >>> selector.transform(X).shape
+    (200, 2)
+    """
 
     _subsample_auto_is_cache_default = True
     _random_state_auto_is_cache_default = True
@@ -976,7 +1518,180 @@ class JMIMSelector(_BaseSelector):
 
 
 class CEFSPlusSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_cefsplus`."""
+    """Sklearn-style wrapper for :func:`sift.select_cefsplus`.
+
+    CEFS+ is a regression-only Gaussian-copula filter: it ranks a candidate by
+    the log-determinant conditional-information gain it adds to the features
+    already chosen, which makes it fast on wide numeric matrices and willing to
+    keep suppressor variables that a pairwise-redundancy filter would drop.
+    Use it as the default wide-data filter, and reach for ``k="auto"`` when the
+    feature count itself should be measured rather than guessed. ``fit`` learns
+    the path and records the selection; ``transform`` returns the selected
+    columns in the fitted container kind, ``set_output(transform="pandas")`` is
+    honored like any sklearn transformer, and ``inverse_transform`` restores a
+    dense full-width matrix with unselected columns zero-filled. Sparse input
+    is rejected in ``fit``, ``transform`` and ``inverse_transform``.
+
+    ``k`` is an upper bound rather than a promise: constant-column filtering,
+    relevance screening, correlation pruning and non-positive objective checks
+    can end the path with fewer than ``k`` features.
+
+    Parameters
+    ----------
+    k : int or {"auto"}, default=75
+        Upper bound on the number of selected features. Unlike the mutual
+        information selectors, ``k="auto"`` without an ``auto_k_config`` is
+        supported with no row context: it routes through the measured Auto-K
+        router, ``AutoKConfig(k_method="auto")``.
+    top_m : int or None, default=None
+        Keep only the ``top_m`` most relevant valid candidates before the
+        greedy loop. ``None`` resolves to ``max(5 * k, 250)``, never below
+        ``k``.
+    corr_prune : float or None, default=None
+        Absolute copula-correlation threshold for dropping duplicate-looking
+        candidates. ``None`` prunes nothing and therefore preserves possible
+        suppressor pairs; a float in ``(0, 1]`` such as ``0.95`` opts into
+        duplicate-oriented pruning.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns. Unused when
+        ``cat_encoding="none"`` or when ``X`` is an ndarray.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
+        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+        ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
+        training rows receive ``fold_encoding - fold_training_prior`` while
+        inference rows receive ``full_fit_encoding - full_training_prior``, so
+        an unseen category maps to a centered zero and cannot identify its own
+        fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
+        optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
+        leave-one-out logit encoder and the only one that accepts
+        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        makes ``fit_transform`` return the y-aware encoded training block and
+        makes ``inverse_transform`` unavailable.
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``. ``"auto"`` reproduces
+        sklearn's ``TargetEncoder`` rule on unweighted fixed-k folds and uses
+        weighted row mass elsewhere; an explicit non-negative float always
+        works.
+    target_prior : float or None, default=None
+        Target-independent prior for time-aware ``"target_cv"`` fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        ``"target_cv"`` fit when no ``target_prior`` is given.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
+        rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
+        contract it contradicts.
+    subsample : int, None or {"auto"}, default="auto"
+        Row cap for uncached Gaussian cache construction. ``"auto"`` is the
+        sklearn-clonable spelling of the omitted default: 50,000 rows when
+        fitting from ``X``, and "not supplied" when ``cache`` is given.
+        ``None`` keeps every positively weighted row. An explicit value beside
+        a ``cache`` raises.
+    random_state : int or {"auto"}, default="auto"
+        Seed for that row sampling and cache construction. ``"auto"`` is the
+        omitted default and resolves to seed 0 when fitting from ``X``. An
+        explicit value beside a ``cache`` raises.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    cache : FeatureCache or None, default=None
+        Prebuilt Gaussian-copula cache to reuse. A named cache requires a
+        DataFrame with identical columns in identical order; a positional cache
+        requires the matching ndarray. A cache carries its own row weights, so
+        it cannot be combined with ``sample_weight`` or with a supervised
+        ``cat_encoding``.
+    auto_k_config : AutoKConfig or None, default=None
+        Automatic-sizing configuration, read only when ``k="auto"``. Selector
+        classes additionally accept ``auto_k_mode="nested"`` together with
+        ``k_method="evaluate"``, which refits a train-only path per split.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed greedy
+        step. Nested auto-k folds stay silent; only the final refit reports.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        selection-path order; ``"original"`` emits ascending fitted column
+        position. The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    selected_features_ : list
+        Selected feature labels in selection-path order.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix, in path order.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    k_ : int
+        Feature count chosen by nested automatic k. Set only on the
+        ``auto_k_mode="nested"`` path, not by prefix-only or routed auto-k.
+    nested_auto_k_diagnostics_ : dict
+        Fold scores, metric and selection rule behind ``k_``; same path only.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+    categorical_encoding_metadata_ : dict
+        The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
+        ``cat_encoding="target_cv"`` encoded at least one column.
+
+    Raises
+    ------
+    ValueError
+        If ``groups``/``time`` reach a fixed-``k`` fit, if ``subsample`` or
+        ``random_state`` is explicit beside a ``cache``, if ``sample_weight``
+        is passed beside a ``cache``, if a supervised ``cat_encoding`` is
+        combined with a ``cache``, or if ``X`` is sparse or not
+        two-dimensional. Contextual ``cat_encoding="target_cv"`` with
+        ``groups``/``time`` additionally requires an explicit
+        ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When the routed ``k="auto"`` criterion supports zero features, or when
+        it saturates its effective ``max_k`` and the result is censored.
+
+    See Also
+    --------
+    sift.select_cefsplus : Function-style CEFS+ with the same options.
+    CEFSPlusBinarySelector : Bernoulli-deviance CEFS+ for binary targets.
+    MRMRSelector : Relevance-versus-redundancy greedy path.
+
+    Notes
+    -----
+    The shared selector-class fit contract is
+    ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
+    ``auto_k_config`` may also be passed per call and then win over the
+    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
+    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
+    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    that moves the column out of the candidate features. Under sklearn >= 1.4
+    metadata routing every datum must be requested explicitly with
+    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
+    ``groups``/``time`` request.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import CEFSPlusSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(200, 6))
+    >>> y = X[:, 0] + 0.5 * X[:, 1] + 0.1 * rng.normal(size=200)
+    >>> CEFSPlusSelector(k=2, verbose=False).fit(X, y).selected_features_
+    ['x0', 'x1']
+    >>> CEFSPlusSelector(k="auto", verbose=False).fit(X, y).selected_features_
+    ['x0', 'x1']
+    """
 
     _subsample_auto_is_cache_default = True
     _random_state_auto_is_cache_default = True
@@ -1009,7 +1724,197 @@ class CEFSPlusSelector(_BaseSelector):
 
 
 class CEFSPlusBinarySelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`."""
+    """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`.
+
+    The binary CEFS+ path scores candidates by the conditional Bernoulli
+    deviance they remove, refitting a ridge-penalized logistic model along a
+    greedy prefix, so it sizes features against the loss a downstream binary
+    classifier actually optimizes. Use it for two-class targets, especially
+    imbalanced ones, where ``class_weight`` should shape the objective. ``fit``
+    validates a two-class target and records the selection; ``transform``
+    returns the selected columns in the fitted container kind,
+    ``set_output(transform="pandas")`` is honored like any sklearn
+    transformer, and ``inverse_transform`` restores a dense full-width matrix
+    with unselected columns zero-filled. Sparse input is rejected in ``fit``,
+    ``transform`` and ``inverse_transform``. Unlike the other filter selector
+    classes this one has no ``cache`` option and rejects prebuilt caches.
+
+    ``k`` is an upper bound rather than a promise: constant-column filtering,
+    relevance screening, correlation pruning and non-positive gain checks can
+    end the path with fewer than ``k`` features.
+
+    Parameters
+    ----------
+    k : int or {"auto"}, default=75
+        Upper bound on the number of selected features. ``k="auto"`` without an
+        ``auto_k_config`` needs no row context: it routes through the measured
+        Auto-K router, ``AutoKConfig(k_method="auto")``.
+    loss : {"logloss", "brier"}, default="logloss"
+        Objective driving the greedy path. ``"logloss"`` walks the logistic
+        deviance path described above; ``"brier"`` delegates to the Gaussian
+        CEFS+ proxy and therefore follows that route's contracts.
+    top_m : int or None, default=None
+        Keep only the ``top_m`` most relevant valid candidates before the
+        greedy loop. ``None`` resolves to ``max(5 * k, 250)``, never below
+        ``k``.
+    corr_prune : float or None, default=None
+        Absolute copula-correlation threshold for dropping duplicate-looking
+        candidates. ``None`` prunes nothing and therefore preserves possible
+        suppressor pairs; a float in ``(0, 1]`` opts into duplicate-oriented
+        pruning.
+    class_weight : None, {"balanced"} or dict, default=None
+        Per-class multipliers applied on top of ``sample_weight``.
+        ``"balanced"`` equalizes the two classes' total weight; a dict must
+        provide a finite non-negative value for both raw class labels.
+    ridge : float, default=1e-4
+        Positive L2 penalty on the non-intercept coefficients of the logistic
+        prefix fits.
+    refit_every : int, default=1
+        Positive integer stride between full logistic refits along the greedy
+        path; larger values trade objective accuracy for speed.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns. Unused when
+        ``cat_encoding="none"`` or when ``X`` is an ndarray.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
+        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit`` against the
+        validated 0/1 target. ``"target_cv"`` is the built-in leakage-safe
+        contract: out-of-fold training rows receive
+        ``fold_encoding - fold_training_prior`` while inference rows receive
+        ``full_fit_encoding - full_training_prior``, so an unseen category maps
+        to a centered zero and cannot identify its own fold. ``"target"``,
+        ``"loo"`` and ``"james_stein"`` require the optional
+        ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
+        leave-one-out logit encoder and the only one that accepts
+        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        makes ``fit_transform`` return the y-aware encoded training block and
+        makes ``inverse_transform`` unavailable.
+    target_cv_n_splits : int, default=5
+        Fold count for ``cat_encoding="target_cv"``.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Empirical-Bayes shrinkage for ``"target_cv"``. ``"auto"`` reproduces
+        sklearn's ``TargetEncoder`` rule on unweighted fixed-k folds and uses
+        weighted row mass elsewhere; an explicit non-negative float always
+        works.
+    target_prior : float or None, default=None
+        Target-independent prior for time-aware ``"target_cv"`` fits, so the
+        earliest block emits a centered neutral zero and stays in the fit.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        How to treat the earliest no-history block of a time-aware
+        ``"target_cv"`` fit when no ``target_prior`` is given.
+    loo_smoothing : float, default=20.0
+        Positive smoothing constant of the ``cat_encoding="loo_logit"``
+        encoder.
+    loo_clip_min : float, default=1e-4
+        Lower probability clip of that encoder; ``0 < loo_clip_min <
+        loo_clip_max < 1`` is enforced.
+    loo_clip_max : float, default=1.0 - 1e-4
+        Upper probability clip of that encoder.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
+        rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
+        contract it contradicts.
+    subsample : int or None, default=None
+        Row cap applied before the path is built. ``None`` keeps every
+        positively weighted row. This selector takes no cache, so the numeric
+        default needs no ``"auto"`` sentinel.
+    random_state : int, default=0
+        Seed for that row sampling.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    auto_k_config : AutoKConfig or None, default=None
+        Automatic-sizing configuration, read only when ``k="auto"``. Selector
+        classes additionally accept ``auto_k_mode="nested"`` together with
+        ``k_method="evaluate"``, which refits a train-only path per split.
+    callback : ProgressCallback or None, default=None
+        ``callback(step, total, info)`` called after each completed greedy
+        step. Nested auto-k folds stay silent; only the final refit reports.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        selection-path order; ``"original"`` emits ascending fitted column
+        position. The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    selected_features_ : list
+        Selected feature labels in selection-path order.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix, in path order.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    k_ : int
+        Feature count chosen by nested automatic k. Set only on the
+        ``auto_k_mode="nested"`` path, not by prefix-only or routed auto-k.
+    nested_auto_k_diagnostics_ : dict
+        Fold scores, metric and selection rule behind ``k_``; same path only.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+    categorical_encoding_metadata_ : dict
+        The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
+        ``cat_encoding="target_cv"`` encoded at least one column.
+
+    Raises
+    ------
+    ValueError
+        If ``y`` is not two-class, if ``groups``/``time`` reach a fixed-``k``
+        fit, if a prebuilt cache is supplied, if ``loss="brier"`` is combined
+        with ``cat_encoding="loo_logit"`` on DataFrame categoricals (no
+        function-API parity), or if ``X`` is sparse or not two-dimensional.
+        Contextual ``cat_encoding="target_cv"`` with ``groups``/``time``
+        additionally requires an explicit
+        ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When the routed ``k="auto"`` criterion supports zero features, or when
+        it saturates its effective ``max_k`` and the result is censored.
+
+    See Also
+    --------
+    sift.select_cefsplus_binary : Function-style binary CEFS+.
+    CEFSPlusSelector : The regression Gaussian CEFS+ path this delegates to
+        under ``loss="brier"``.
+    MRMRSelector : Relevance-versus-redundancy greedy path.
+
+    Notes
+    -----
+    The shared selector-class fit contract is
+    ``fit(X, y, sample_weight=None, groups=None, time=None)``;
+    ``auto_k_config`` may also be passed per call and then wins over the
+    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
+    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
+    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    that moves the column out of the candidate features. Under sklearn >= 1.4
+    metadata routing every datum must be requested explicitly with
+    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
+    ``groups``/``time`` request. The estimator declares itself binary-only to
+    sklearn's tag APIs so the common estimator checks feed it two classes.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import CEFSPlusBinarySelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(200, 6))
+    >>> y = (X[:, 0] + 0.5 * X[:, 1] + 0.1 * rng.normal(size=200) > 0).astype(int)
+    >>> selector = CEFSPlusBinarySelector(k=2, verbose=False)
+    >>> selector.fit(X, y).selected_features_
+    ['x0', 'x1']
+    >>> selector.get_support()
+    array([ True,  True, False, False, False, False])
+
+    """
 
     def __init__(
         self,
@@ -1223,6 +2128,17 @@ _KNOCKOFF_SUPERVISED_ENCODING_NOTE = (
 class KnockoffSelector(_BaseSelector):
     """Sklearn-style wrapper for :func:`sift.select_fdr`.
 
+    This selector is sized by a target false-discovery rate ``q`` rather than
+    by a feature count: it builds or reuses a Gaussian-copula
+    :class:`~sift.FeatureCache`, samples second-order knockoffs, computes
+    antisymmetric ``W`` statistics and applies the knockoff+ threshold. Use it
+    when the question is "which features are trustworthy discoveries" rather
+    than "give me the best ``k``". It has no ``k`` and no ``auto_k_config``.
+    ``transform`` returns the selected columns in the fitted container kind,
+    ``set_output(transform="pandas")`` is honored like any sklearn
+    transformer, and ``inverse_transform`` restores a dense full-width matrix
+    with unselected columns zero-filled.
+
     ``subsample="auto"`` resolves to 50,000 rows when fitting from X and acts
     as an omitted construction option with a prebuilt cache. Explicit
     subsample values are not valid with a cache. The stochastic knockoff
@@ -1234,6 +2150,174 @@ class KnockoffSelector(_BaseSelector):
     Model-X claim. The 0.8 supervised encodings remain available for
     compatibility, but only with an explicit :class:`UserWarning` and result
     metadata that downgrades ``fdr_control`` to ``"none"``.
+
+    Parameters
+    ----------
+    q : float, default=0.1
+        Target FDR level, a finite float in ``(0, 1)``. With ``n_draws > 1``
+        it is a per-draw level, not a guarantee for the aggregated vote.
+    statistic : str, default="relevance"
+        Feature-importance statistic behind ``W``. Enabled values are
+        ``"relevance"`` (fast default), ``"lsm"`` (lasso signed max),
+        ``"ridge"`` (analytic ridge coefficient difference) and ``"cefsplus"``
+        (tie-safe greedy CEFS+). Other registry names are reserved and raise.
+    n_draws : int, default=1
+        Number of knockoff draws. Above one, features are kept when their
+        selection frequency reaches ``eta``, ``threshold`` becomes ``None``,
+        and the aggregated result reports ``fdr_control="none"``.
+    eta : float, default=0.5
+        Selection-frequency cut for derandomized runs, in ``(0, 1]``.
+    offset : {1, 0}, default=1
+        ``1`` is the knockoff+ threshold; ``0`` is the less conservative
+        modified-knockoff (mFDR-style) threshold.
+    s_method : {"equi", "mvr", "me"}, default="equi"
+        Diagonal decorrelation objective. ``"equi"`` is fastest; ``"mvr"`` and
+        ``"me"`` use coordinate descent and can add power on correlated
+        designs.
+    min_eig : float, default=1e-3
+        Minimum eigenvalue enforced on the estimated feature correlation.
+        Shrinking towards it emits a plug-in-validity ``UserWarning``.
+    screen_pairs : int or None, default=2000
+        Positive cap on the candidate pairs screened by statistics that need
+        screening; ``None`` screens every pair.
+    statistic_options : dict or None, default=None
+        Extra options for the chosen statistic: ``{"max_steps": int}`` for
+        ``"lsm"``, ``{"ridge_lambda": float}`` for ``"ridge"``, and
+        ``{"path_depth": int, "min_gain_ratio": float}`` for ``"cefsplus"``.
+        Unknown keys raise.
+    feature_groups : sequence, {"auto"} or None, default=None
+        Group labels for a heuristic signed-maximum group aggregation, or
+        ``"auto"`` to cluster near-collinear features and run the filter on one
+        representative per cluster. Either mode expands selected groups back to
+        their members and establishes no group- or feature-level FDR; the
+        metadata reports ``"none"``.
+    group_corr_threshold : float, default=0.7
+        Absolute-correlation cut used by ``feature_groups="auto"`` clustering.
+    cat_features : list of str or None, default=None
+        Categorical column names to encode. ``None`` auto-detects ``object``,
+        ``category`` and ``string`` DataFrame columns.
+    cat_encoding : str, default="none"
+        One of ``"none"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
+        ``"loo_logit"``. ``"target_cv"`` is rejected outright here.
+        ``"none"`` is the only value that preserves the Model-X FDR claim; the
+        four legacy supervised encodings warn and downgrade the claim as
+        described above. Note that :func:`sift.select_fdr` itself has no
+        ``cat_encoding`` parameter: the encoders live in this class.
+    target_cv_n_splits : int, default=5
+        Inherited constructor option of the shared preprocessing block. It has
+        no effect here, because ``cat_encoding="target_cv"`` is rejected.
+    target_cv_smoothing : {"auto"} or float, default="auto"
+        Inherited constructor option of the shared preprocessing block, unused
+        for the same reason.
+    target_prior : float or None, default=None
+        Inherited constructor option of the shared preprocessing block, unused
+        for the same reason.
+    warmup_policy : {"exclude", "zero_weight"}, default="zero_weight"
+        Inherited constructor option of the shared preprocessing block, unused
+        for the same reason.
+    allow_full_data_target_encoding : bool, default=False
+        Opt in to fitting the legacy supervised encoders on the full matrix.
+    loo_smoothing : float, default=20.0
+        Positive smoothing constant of the ``cat_encoding="loo_logit"``
+        encoder.
+    loo_clip_min : float, default=1e-4
+        Lower probability clip of that encoder; ``0 < loo_clip_min <
+        loo_clip_max < 1`` is enforced.
+    loo_clip_max : float, default=1.0 - 1e-4
+        Upper probability clip of that encoder.
+    subsample : int, None or {"auto"}, default="auto"
+        Row cap for uncached cache construction. ``"auto"`` means the omitted
+        default: 50,000 rows when fitting from ``X``, and "not supplied" with a
+        cache. An explicit value beside a ``cache`` raises.
+    random_state : int, default=0
+        Seed for the knockoff draw. Unlike the filter selectors this stays
+        numeric, because it seeds a fresh draw even when a cache is reused.
+    n_jobs : int, default=1
+        Worker count for cache construction and statistic evaluation.
+    verbose : bool, default=True
+        Emit progress at INFO on the ``sift`` logger.
+    cache : FeatureCache or None, default=None
+        Prebuilt Gaussian-copula cache to reuse. A named cache requires a
+        DataFrame with identical columns in identical order; a cache built from
+        positional features requires the matching ndarray. A cache already
+        stores row weights, so ``sample_weight`` is rejected beside it, and a
+        supervised ``cat_encoding`` is rejected too.
+    output_order : {"legacy", "original"}, default="legacy"
+        Order used by ``transform``, ``get_support(indices=True)``,
+        ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
+        discovery order; ``"original"`` emits ascending fitted column position.
+        The boolean support mask is always positional.
+
+    Attributes
+    ----------
+    result_ : KnockoffSelectionResult
+        The full result: ``selected_features``, ``selected_indices``, the ``W``
+        diagnostics table, ``threshold``, ``selection_frequency`` and
+        ``selector_metadata`` (including the validity keys). Pass it to
+        :func:`sift.as_result` for a normalized ``SelectionView``.
+    selected_features_ : list
+        Selected feature labels.
+    selected_indices_ : ndarray of shape (n_selected,)
+        Their positions in the fitted feature matrix.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted feature names. A positional
+        ndarray fit stores generated ``x0...`` names here.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    categorical_features_ : list
+        Categorical columns the fitted encoder covered.
+    categorical_encoder_ : object or None
+        The fitted encoder, reused target-blind by ``transform``.
+
+    Raises
+    ------
+    ValueError
+        If ``groups`` or ``time`` is passed in any mode, if ``auto_k_config``
+        is passed, if ``cat_encoding="target_cv"`` is requested, if
+        ``sample_weight``, an explicit ``subsample`` or a supervised
+        ``cat_encoding`` accompanies a ``cache``, or if ``X`` is sparse or not
+        two-dimensional.
+    NotImplementedError
+        From ``inverse_transform`` after a supervised categorical encoding,
+        because the fitted encoder is not invertible.
+
+    Warns
+    -----
+    UserWarning
+        When a legacy supervised ``cat_encoding`` downgrades ``fdr_control`` to
+        ``"none"``, when the estimated correlation is shrunk towards
+        ``min_eig``, and when ``feature_groups="auto"`` is advisable because
+        the median decorrelation ``s`` is tiny.
+
+    See Also
+    --------
+    sift.select_fdr : Function-style knockoff filter with the same options.
+    sift.build_cache : Build the Gaussian-copula cache this can reuse.
+    CEFSPlusSelector : Fixed-``k`` or measured-``k`` filter alternative.
+
+    Notes
+    -----
+    ``fit(X, y, sample_weight=None)`` is the supported contract; ``cache`` may
+    also be passed per call. Row ``groups``/``time`` are refused in every mode
+    (use ``feature_groups`` for grouped *feature* discoveries), and sklearn
+    metadata routing exposes only ``sample_weight``. The 0.9 filter reports
+    plug-in validity metadata: ``fdr_control="approximate_plugin"`` under the
+    fitted Gaussian-copula feature model, so with estimated correlations,
+    shrinkage, weights, derandomization or feature groups the result should be
+    read as an approximate practical knockoff filter.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import KnockoffSelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(400, 20))
+    >>> y = 2.0 * X[:, :5].sum(axis=1) + 0.2 * rng.normal(size=400)
+    >>> selector = KnockoffSelector(q=0.2, random_state=0, verbose=False)
+    >>> sorted(selector.fit(X, y).selected_features_)
+    ['x0', 'x1', 'x2', 'x3', 'x4']
+    >>> selector.result_.selector_metadata["fdr_control"]
+    'approximate_plugin'
     """
 
     _subsample_auto_is_cache_default = True

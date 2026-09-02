@@ -125,7 +125,105 @@ python -m pytest tests/test_docs_smoke.py -q
 
 When adding or renaming public exports, update both `sift/__init__.py` and
 `DOCS.MD`. If the export is a first-screen workflow such as `select_fdr`, also
-update `README.md`, [docs/user-guide.md](user-guide.md), and the release notes.
+update `README.md`, [docs/user-guide.md](user-guide.md),
+[docs/results.md](results.md), and the release notes.
+
+### Docstring standard
+
+Every name in `sift.__all__` carries a substantive
+[numpydoc](https://numpydoc.readthedocs.io/en/latest/format.html) docstring.
+This is a 0.9.0 release gate, not a style preference: the docstrings are the
+source the generated API reference will be built from in 0.9.1, so an export
+without one silently removes a page from that reference.
+
+Two tests enforce the standard. `__version__` is exempt from both; every other
+name in `sift.__all__` is in scope.
+
+`tests/test_docstring_coverage.py` checks structure:
+
+| requirement | applies to |
+| --- | --- |
+| a non-empty summary line | every export |
+| at least 8 non-empty docstring lines | every export |
+| every signature parameter named as a `name : type` entry | functions, under `Parameters`; classes, under `Parameters` or `Attributes`, read off `__init__` |
+| a `Returns` or `Yields` section | functions |
+| an `Examples` section with at least one runnable `>>>` statement | every export, except the four optional-dependency exports pinned by name in `LITERAL_EXAMPLE_EXPORTS` (`select_boruta_shap`, `catboost_select`, `catboost_regression`, `catboost_classif`), whose examples are literal blocks that must name the dependency; the set is asserted exactly, so it cannot grow silently |
+
+The parameter check includes `*args` and `**kwargs`: a variadic in the signature
+has to appear as its own entry, spelled with the stars. For a class the two
+sections are pooled, so a constructor argument documented under `Attributes`
+rather than `Parameters` still satisfies the check.
+
+`tests/test_docstring_examples.py` checks that the examples run. It parses each
+docstring with `doctest` and executes the `>>>` statements under
+warnings-as-errors, so an example that emits an unasserted `UserWarning` or
+`FutureWarning` fails the suite. It deliberately does **not** compare printed
+output: NumPy 2 scalar reprs differ across the CI matrix, so an expected-output
+line would pin the docstring to one interpreter. It also runs the `Examples`
+sections of the public methods and properties that exported classes define
+inside `sift` (ids like `SelectionView.proxies`), executes a statement whose
+documented output is a traceback inside `pytest.raises` with the exception
+type checked, and runs each case in a fresh namespace with a temporary
+working directory. Only three things leave an example unrun — a leading
+`# doctest: +SKIP` (a later one skips just that statement), a missing
+CatBoost extra when the section uses it, and the pinned literal blocks above.
+
+**What neither test checks: defaults and accepted values.** Nothing compares the
+`default=...` text or the listed choices in a description against the actual
+signature, so a docstring can name a stale default and stay green. That stays a
+review responsibility.
+
+Beyond the mechanical floors, a good docstring also has a `Returns` section
+naming the concrete type rather than a bare `object`, and `Raises` for the
+validation errors the entry point owns. A class documents its constructor
+parameters and its fitted attributes (the trailing-underscore ones) rather than
+repeating the function docstring it wraps. Keep parameter descriptions honest
+about defaults that are scheduled to change in 1.0 — the deprecation ledger in
+[docs/release-notes.md](release-notes.md) is the list.
+
+### Executable documentation blocks
+
+Every fenced `python` block in the manual set executes in CI. The covered files
+are:
+
+- `README.md`
+- `DOCS.MD`
+- `docs/API.md`
+- `docs/user-guide.md`
+- `docs/ADVANCED.md`
+- `docs/troubleshooting.md`
+- `docs/results.md`
+
+**Blocks are standalone by default.** Each block runs in a fresh namespace, so
+it must build its own `X`, `y`, and imports. Prefer tiny synthetic data
+(a few hundred rows and a handful of columns) over `make_regression` at scale:
+the runner allows roughly 20 s per block, and the suite runs under
+warnings-as-errors, so a block that emits an unasserted `UserWarning` or
+`FutureWarning` fails the run exactly as a test would.
+
+Three HTML comments change how a block is handled. Put the marker immediately
+before the fence; one blank line between marker and fence is allowed.
+
+| marker | effect |
+| --- | --- |
+| `<!-- sift-doc: skip reason="..." -->` | do not execute; the reason is required |
+| `<!-- sift-doc: requires=catboost -->` | execute only when the named module imports; any module name works (`matplotlib`, `category_encoders`), and several `requires=` tokens may be combined in one marker |
+| `<!-- sift-doc: continues -->` | execute in the *previous* block's namespace |
+
+Use `continues` only where the narrative genuinely builds across two blocks —
+fitting in one and inspecting the fitted object in the next, for example. A
+chain of `continues` blocks fails as a unit and is much harder to debug than
+one self-contained block, and a reader who lands on the page from a search
+result cannot copy it.
+
+`bash` blocks are not executed; neither are blocks in the specs, the release
+notes, `docs/architecture.md`, `docs/ALGORITHMS.md`, or `CONTRIBUTING.md`.
+
+All three gates — docstring coverage, docstring examples, and manual block
+execution — run as part of the ordinary `python -m pytest -q`, so a docs-only
+change still needs a suite run before it ships.
+
+### Stale references
 
 When moving private selector internals, also check docs and tests for stale
 module names:
@@ -206,16 +304,22 @@ rather than assuming it is green.
 ### Verified dependency band
 
 **The whole declared band is supported — there is no ceiling below what
-`pyproject.toml` allows.** Measured on this tree, each row a full-suite run
-under the warnings-as-errors policy:
+`pyproject.toml` allows.** Each row is a full-suite run under the
+warnings-as-errors policy:
 
 | dependency set | result |
 | --- | --- |
 | floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
-| base (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,685 passed / 25 skipped |
+| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,967 passed / 39 skipped (10 doc-block and 4 docstring-example skips are optional-dependency gates) |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+
+Only the base row is re-measured every time this page is touched; it is the
+current count on this tree. The other rows were measured at earlier commits in
+the 0.9 campaign and are not re-run per commit, so their absolute counts trail
+the suite. Read them as green/not-green, and re-measure a row before quoting its
+number.
 
 The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
 13 failures are closed and described in `docs/release-notes.md` under
@@ -319,11 +423,14 @@ python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Release tags must match `v` plus `sift.__version__`. The release workflow verifies
-the exact wheel it attaches to the existing GitHub Release; adding an external
-package index is a future owner decision rather than an implicit release step.
+Release tags must match `v` plus `sift.__version__` — `v0.9.0` for the next
+release, once the release PR bumps `__version__` from its current `0.9.0a1`. The
+release workflow verifies the exact wheel it attaches to the existing GitHub
+Release. There is no publication step and no package index: releasing SIFT means
+creating a GitHub Release with the checked source and wheel distributions
+attached, and nothing else.
 
-For the 0.8.0 release bundle, the focused smoke is:
+For the 0.9.0 release bundle, the focused smoke is:
 
 ```bash
 python -m pytest tests/test_docs_smoke.py tests/test_benchmarks.py -q

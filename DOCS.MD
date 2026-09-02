@@ -11,7 +11,7 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
 ## Documentation Map
 
 - [Standalone API reference](docs/API.md): compact function/class reference for
-  the public 0.8.0 surface.
+  the public 0.9 surface.
 - [Algorithm guide](docs/ALGORITHMS.md): method assumptions, output contracts,
   and selection guidance.
 - [Advanced workflow guide](docs/ADVANCED.md): time series, groups, smart
@@ -48,26 +48,35 @@ import pandas as pd
 from sklearn.datasets import make_regression
 from sift import select_mrmr, select_jmi, select_jmim, select_cefsplus, select_cefsplus_binary, select_fdr
 
-X_arr, y = make_regression(
-    n_samples=500,
-    n_features=30,
-    n_informative=8,
-    noise=0.2,
-    random_state=0,
-)
-X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(X_arr.shape[1])])
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
-mrmr = select_mrmr(X, y, k=10, task="regression", verbose=False)
-jmi = select_jmi(X, y, k=10, task="regression", verbose=False)
-jmim = select_jmim(X, y, k=10, task="regression", verbose=False)
-cefs = select_cefsplus(X, y, k=10, verbose=False)
-binary_cefs = select_cefsplus_binary(X, (y > y.mean()).astype(int), k=10, verbose=False)
-knockoff = select_fdr(X, y, q=0.1, verbose=False)
+mrmr = select_mrmr(X, y, k=8, task="regression", verbose=False)
+jmi = select_jmi(X, y, k=8, task="regression", verbose=False)
+jmim = select_jmim(X, y, k=8, task="regression", verbose=False)
+cefs = select_cefsplus(X, y, k=8, verbose=False)
+binary_cefs = select_cefsplus_binary(X, (y > y.mean()).astype(int), k=8, verbose=False)
+knockoff = select_fdr(X, y, q=0.2, verbose=False)
 ```
 
 Most selectors return feature names for `pandas.DataFrame` inputs and synthetic
 names such as `x0`, `x1`, ... for ndarray inputs. Stability wrappers can also
 return integer indices.
+
+### Example data used in this manual
+
+Every python block on this page is standalone: copy it and it runs. To keep the
+examples comparable, most of them rebuild the same tiny synthetic frame — 300
+rows and 20 numeric columns `f0...f19` — with the four lines above. Blocks that
+need panel structure build a grouped frame instead, with an id column and a
+daily timestamp column, and a few blocks that only refine the example directly
+above them say so with a `<!-- sift-doc: continues -->` marker.
+
+The blocks spell their arguments out rather than leaning on defaults, so a value
+shown in a block is not necessarily the library default; the comments call out
+the ones that differ. The examples are deliberately small and seeded
+(`random_state=0`) so they run in well under a second each. Production calls use
+the same arguments at realistic sizes.
 
 ## Feature Map
 
@@ -286,23 +295,28 @@ or omit those arguments. `KnockoffSelector` likewise rejects row `groups` and
 ### `select_mrmr`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selected = select_mrmr(
     X,
     y,
-    k=20,                    # maximum number of features to return
-    task="regression",        # "regression" or "classification"
+    k=8,                      # required: maximum number of features to return
+    task="regression",        # required: "regression" or "classification"
     estimator="classic",      # "classic" or "gaussian"
-    relevance="f",            # regression: "f", "rf"; classification: "f", "ks", "rf"
+    relevance="f",            # classic only: "f", "rf"; classification adds "ks"
     formula="quotient",       # "quotient" or "difference"
-    top_m=None,               # default max(5*k, 250)
+    top_m=None,               # resolves to max(5*k, 250)
     sample_weight=None,
     subsample=50_000,
     random_state=0,
     n_jobs=1,
     mrmr_backend="auto",      # "auto", "serial", "blas", or "processes"
-    verbose=False,
+    verbose=False,            # the library default is True
 )
 ```
 
@@ -322,7 +336,14 @@ Key options:
 - `relevance="f"`: F-statistic style relevance.
 - `relevance="ks"`: weighted KS relevance for classification only.
 - `relevance="rf"`: random-forest relevance.
-- `top_m`: prefilters candidates by relevance before greedy selection.
+- `relevance` applies to `estimator="classic"` only. The Gaussian route always
+  ranks candidates by copula Gaussian mutual information and ignores the
+  argument, so `relevance="f"` and `relevance="rf"` return the same features
+  there.
+- `top_m`: prefilters candidates by relevance before greedy selection. `None`
+  is a default rather than "keep everything": it resolves to `max(5*k, 250)`.
+- `cache`: accepted only with `estimator="gaussian"`; the classic route raises
+  `ValueError: cache is supported only with estimator='gaussian'`.
 - `subsample`: caps rows used by the filter path. Use `None` to use all rows.
 - `mrmr_backend`: controls the mRMR redundancy/cache execution path. `"serial"`
   is the original Numba path, `"blas"` uses single-process vectorized
@@ -344,23 +365,39 @@ Key options:
 Classification example:
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y_labels = (y > 0).astype(int)
+
 selected = select_mrmr(
     X,
     y_labels,
-    k=15,
+    k=8,
     task="classification",
     relevance="ks",
     verbose=False,
 )
 ```
 
-Gaussian mRMR example:
+Gaussian mRMR example. Keep `k` small enough that the greedy score does not
+start reaching below the Gaussian noise floor; SIFT warns when it does:
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
 selected = select_mrmr(
     X,
     y,
-    k=25,
+    k=5,
     task="regression",
     estimator="gaussian",
     formula="difference",
@@ -371,10 +408,17 @@ selected = select_mrmr(
 Result object example:
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
 result = select_mrmr(
     X,
     y,
-    k=20,
+    k=8,
     task="regression",
     return_result=True,
     verbose=False,
@@ -392,7 +436,10 @@ The additive A2d result view supports `FilterSelectionResult`,
 opt-in `ImportanceResult` from `permutation_importance`; a fitted
 `StabilitySelector` exposes the same view through `selector.result_view_`:
 
+<!-- sift-doc: continues -->
 ```python
+from sift import as_result
+
 view = as_result(result, input_features=X.columns)
 
 view.features
@@ -403,7 +450,8 @@ view.metadata
 ```
 
 `return_result=True` is available on `select_mrmr`, `select_jmi`,
-`select_jmim`, and `select_cefsplus`. The default remains `list[str]`. The
+`select_jmim`, `select_cefsplus`, and `select_cefsplus_binary`. The default
+remains `list[str]`. The
 result object currently contains selected feature names, best-effort input-column
 indices, compact selector metadata, and a conservative diagnostic ranking table.
 Unknown diagnostics, such as relevance for selectors that did not expose it, are
@@ -433,18 +481,23 @@ log-loss routes reject this option.
 ### `select_jmi`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_jmi
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selected = select_jmi(
     X,
     y,
-    k=20,
-    task="regression",
+    k=8,                      # required
+    task="regression",        # required
     estimator="auto",         # "auto", "binned", "r2", "ksg", or "gaussian"
-    relevance="f",
-    top_m=None,
+    relevance="f",            # ignored by estimator="gaussian"
+    top_m=None,               # resolves to max(5*k, 250)
     sample_weight=None,
-    verbose=False,
+    verbose=False,            # the library default is True
 )
 ```
 
@@ -467,15 +520,21 @@ Estimator behavior:
 ### `select_jmim`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_jmim
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y_labels = (y > 0).astype(int)
 
 selected = select_jmim(
     X,
-    y,
-    k=20,
-    task="classification",
+    y_labels,
+    k=8,                      # required
+    task="classification",    # required
     estimator="binned",
-    verbose=False,
+    verbose=False,            # the library default is True
 )
 ```
 
@@ -485,18 +544,23 @@ but aggregates candidate joint information with a minimum instead of a sum.
 ### `select_cefsplus`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_cefsplus
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selected = select_cefsplus(
     X,
     y,
-    k=20,
-    top_m=None,
+    k=8,                      # the library default is 75
+    top_m=None,               # resolves to max(5*k, 250)
     corr_prune=None,
     sample_weight=None,
     subsample=50_000,
     random_state=0,
-    verbose=False,
+    verbose=False,            # the library default is True
 )
 ```
 
@@ -516,12 +580,17 @@ Important options:
 ### `select_fdr`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_fdr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 result = select_fdr(
     X,
     y,
-    q=0.1,                    # target FDR level
+    q=0.2,                    # target FDR level; the library default is 0.1
     statistic="relevance",    # "relevance", "lsm", "ridge", or tie-safe "cefsplus"
     n_draws=1,                # >1 enables derandomized aggregation
     eta=0.5,                  # selection-frequency cutoff for n_draws > 1
@@ -532,7 +601,7 @@ result = select_fdr(
     sample_weight=None,
     subsample=50_000,
     random_state=0,
-    verbose=False,
+    verbose=False,            # the library default is True
 )
 
 selected = result.selected_features
@@ -543,7 +612,7 @@ metadata = result.selector_metadata
 `select_fdr` is q-calibrated rather than fixed-k. It builds or reuses the
 rank-Gaussian `FeatureCache`, samples second-order Gaussian knockoffs in copula
 space, computes antisymmetric feature statistics, and applies the knockoff+
-threshold. In v1 the public guarantee is intentionally framed as approximate
+threshold. In 0.9 the public guarantee is intentionally framed as approximate
 plug-in control: metadata reports `fdr_control="approximate_plugin"` and
 `validity_model="gaussian_copula_plugin"`. Exact finite-sample Model-X FDR would
 require the sampled Gaussian-copula model to be the true feature distribution
@@ -621,7 +690,9 @@ Important options:
   `ceil(1/q)` features must be selected before the estimated FDP can drop to
   `q`, so problems with very few true signals may legitimately return an empty
   set at small `q`.
-- `cache`: pass a prebuilt `FeatureCache`; do not pass `sample_weight` with a
+- `cache`: pass a prebuilt `FeatureCache` *instead of* `X` — `select_fdr`
+  requires exactly one of the two, so the cached form is
+  `select_fdr(y=y, cache=cache, ...)`. Do not pass `sample_weight` with a
   cache because weights already live in the cache.
 - `sample_knockoffs(cache, random_state=...)`: advanced helper that returns one
   sampled knockoff matrix in cache/copula space.
@@ -635,14 +706,20 @@ results: they mean no feature survived the requested q threshold.
 ### `select_cefsplus_binary`
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_cefsplus_binary
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y_binary = (y > 0).astype(int)
 
 selected = select_cefsplus_binary(
     X,
     y_binary,
-    k=20,                 # or "auto"
+    k=8,                  # required; also accepts "auto"
     loss="logloss",
-    top_m=None,
+    top_m=None,           # here None really does mean every finite candidate
     corr_prune=None,
     time=None,
     groups=None,
@@ -652,7 +729,7 @@ selected = select_cefsplus_binary(
     ridge=1e-4,
     refit_every=1,
     subsample=None,
-    verbose=False,
+    verbose=False,        # the library default is True
 )
 ```
 
@@ -711,12 +788,19 @@ Important options:
 Sift also exposes thin transformer wrappers around the filter selectors:
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import Ridge
 from sift import MRMRSelector
 
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+X_train, X_test = X.iloc[:200], X.iloc[200:]
+y_train, y_test = y[:200], y[200:]
+
 pipe = make_pipeline(
-    MRMRSelector(k=20, task="regression", verbose=False),
+    MRMRSelector(k=8, task="regression", verbose=False),
     Ridge(),
 )
 pipe.fit(X_train, y_train)
@@ -741,7 +825,15 @@ dense `inverse_transform`. After fitting, the selectors expose:
 - `feature_names_in_`
 - `n_features_in_`
 - `get_feature_names_out()` for the selected columns
-- `result_` on `KnockoffSelector`
+- `k_`, but **only** after a nested auto-k fit
+  (`AutoKConfig(auto_k_mode="nested", ...)`). Prefix-only and routed
+  (`k_method="auto"`) auto-k fits leave it unset; read the resolved size from
+  `len(selector.selected_features_)`.
+- `result_` on `KnockoffSelector`, and only there: it holds a
+  `KnockoffSelectionResult` that `as_result` accepts. The other filter
+  selector classes retain no result object, and `result_view_` belongs to
+  `StabilitySelector` alone. `as_result` rejects a fitted filter or Boruta
+  selector class; pass its result object instead.
 
 All eight public selector classes, including Boruta and Stability, accept
 `output_order="legacy"` (default) to preserve each family's historical
@@ -803,7 +895,12 @@ path: calls that pass `groups` or `time` now route to EBIC instead of
 context now work instead of requiring split context.
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import select_cefsplus
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selected = select_cefsplus(X, y, k="auto", verbose=False)
 ```
@@ -811,7 +908,15 @@ selected = select_cefsplus(X, y, k="auto", verbose=False)
 Pass `AutoKConfig` when you want a specific method or validation strategy:
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import AutoKConfig, select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+dates = pd.Timestamp("2024-01-01") + pd.to_timedelta(np.arange(300), "D")
+df = pd.DataFrame({"date": dates})
 
 config = AutoKConfig(
     k_method="evaluate",      # or "auto", "gaussian_cv", "perm_gap", etc.
@@ -820,7 +925,7 @@ config = AutoKConfig(
     strategy="time_holdout",  # "time_holdout", "group_cv", or "kfold" for fold curves
     metric="rmse",            # "auto", "rmse", "mae", "logloss", "error"
     min_k=5,
-    max_k=100,
+    max_k=15,
     val_frac=0.2,
 )
 
@@ -839,6 +944,8 @@ Four additive presets cover the common intent-first cases without changing the
 flat constructor:
 
 ```python
+from sift import AutoKConfig
+
 router = AutoKConfig.default()
 predictive = AutoKConfig.predictive(strategy="kfold", rule="best", n_folds=5)
 discovery = AutoKConfig.discovery(alpha=0.05)
@@ -853,15 +960,24 @@ For larger configurations, module-scoped frozen option objects can be flattened
 through `from_groups`:
 
 ```python
-from sift.selection.auto_k_options import AutoKCVOptions, AutoKPermutationOptions
+from sift import AutoKConfig
+from sift.selection.auto_k_options import AutoKPermutationOptions, AutoKTestOptions
 
 config = AutoKConfig.from_groups(
     k_method="perm_gap",
     min_k=0,
-    cv=AutoKCVOptions(strategy="group_cv"),
-    perm=AutoKPermutationOptions(perm_B=50, perm_null="within_group"),
+    perm=AutoKPermutationOptions(
+        perm_B=50, perm_null="within_group", gap_rule="gain_envelope"
+    ),
+    test=AutoKTestOptions(alpha=0.05),
 )
 ```
+
+Only pass groups the chosen method consumes. `perm_gap` reads the permutation
+group, and reads `alpha` from the test group once `gap_rule="gain_envelope"`;
+adding an unused group such as `cv=AutoKCVOptions(strategy="group_cv")` here
+would emit the caller-facing `UserWarning` described below rather than being
+silently ignored.
 
 The 49 original flat fields remain the only stored dataclass fields. Group
 views such as `config.cv` and `config.perm` are immutable snapshots; they do
@@ -939,6 +1055,11 @@ repeat or invent those warnings.
   `forward_stop` are the calibrated no-signal stops; `changepoint` is currently
   an experimental diagnostic and should not be used as a default. These methods
   may legitimately return `k=0` when no discovery is supported.
+  With the default router (`k_method="auto"`, which is what a bare
+  `k="auto"` uses), an empty selection additionally emits a `UserWarning`
+  naming the routed criterion; explicit criteria return `[]` silently. For a
+  hard non-empty floor pass an explicit criterion together with `min_k`, for
+  example `AutoKConfig(k_method="chi2_stop", min_k=1)`.
 - `k_method="perm_gap"` reruns CEFS+ on structure-aware permuted targets and
   compares the real objective curve to the null envelope. Use `perm_null="auto"`
   by default, or set `"within_group"` / `"circular_shift"` when the null must
@@ -1057,6 +1178,8 @@ Which method should I use?
 Recommended patterns:
 
 ```python
+from sift import AutoKConfig
+
 # Split-aware predictive selection.
 AutoKConfig(
     k_method="evaluate",
@@ -1076,17 +1199,29 @@ AutoKConfig(
 Advanced helpers:
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import (
     AutoKConfig,
+    build_cache,
     compute_objective_for_path,
+    select_cefsplus,
     select_k_auto,
     select_k_elbow,
     select_k_penalized_objective,
 )
 
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+groups = np.repeat(np.arange(30), 10)
+cache = build_cache(X, compute_Rxx=True, random_state=0)
+selected_path = select_cefsplus(X, y, k=12, verbose=False)
+config = AutoKConfig(k_method="evaluate", strategy="group_cv", min_k=1, max_k=12)
+
 best_k, best_features, diagnostics = select_k_auto(
     X,
-    y,
+    (y > 0).astype(int),
     feature_path=selected_path,
     config=config,
     groups=groups,
@@ -1097,8 +1232,8 @@ objective_path = compute_objective_for_path(cache, y, selected_path)
 
 best_k, elbow_diagnostics = select_k_elbow(
     objective_path,
-    min_k=5,
-    max_k=100,
+    min_k=1,
+    max_k=12,
     min_rel_gain=0.02,
     patience=3,
 )
@@ -1115,10 +1250,21 @@ Research-oriented auto-k helpers are also available through an additive staged
 namespace:
 
 ```python
+import warnings
+
 import sift.experimental as experimental
 
-curves = experimental.gaussian_cv_curves(...)
+# Importing the module is warning-free; touching a staged name is not.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    gaussian_cv_curves = experimental.gaussian_cv_curves
+
+assert caught[0].category is FutureWarning
 ```
+
+The staged helper is the same object as the top-level
+`sift.gaussian_cv_curves`, which stays warning-free through 0.9; only the
+`sift.experimental` spelling announces the 1.0 move.
 
 Accessing one of the 16 names through `sift.experimental` emits a
 `FutureWarning` because those helpers may change before 1.0. Their existing
@@ -1132,14 +1278,23 @@ Use `evaluate_feature_path` when you already have an ordered feature path and
 want to score explicit prefixes without invoking selector `k="auto"`:
 
 ```python
-from sift import evaluate_feature_path
+import numpy as np
+import pandas as pd
+from sklearn.datasets import make_regression
 from sklearn.linear_model import Ridge
+from sift import evaluate_feature_path, select_cefsplus
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+selected_path = select_cefsplus(X, y, k=12, verbose=False)
+train_idx, val_idx = np.arange(240), np.arange(240, 300)
+weights = np.ones(len(y))
 
 path_result = evaluate_feature_path(
     X,
     y,
     feature_path=selected_path,
-    k_grid=[5, 10, 20, 40],
+    k_grid=[2, 4, 8, 12],
     estimator=Ridge(alpha=1.0),
     scoring="rmse",           # "rmse", "mae", sklearn scorer, or callable
     splitter=(train_idx, val_idx),
@@ -1169,24 +1324,37 @@ Use `build_cache` when selecting against many targets or comparing several
 Gaussian/cache methods on the same `X`.
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import build_cache, select_cached
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 cache = build_cache(
     X,
     sample_weight=None,
     subsample=50_000,
     random_state=0,
-    compute_Rxx=True,
+    compute_Rxx=True,         # the library default is False
+    min_std=0.0,              # column standard-deviation floor for validity
     n_jobs=1,
     rank_backend="serial",    # "serial", "threads", or "processes"
 )
 
-cefs = select_cached(cache, y, k=30, method="cefsplus")
-jmi = select_cached(cache, y, k=30, method="jmi")
-jmim = select_cached(cache, y, k=30, method="jmim")
-mrmr_q = select_cached(cache, y, k=30, method="mrmr_quot")
-mrmr_d = select_cached(cache, y, k=30, method="mrmr_diff")
+cefs = select_cached(cache, y, k=8, method="cefsplus")
+jmi = select_cached(cache, y, k=8, method="jmi")
+jmim = select_cached(cache, y, k=8, method="jmim")
+mrmr_q = select_cached(cache, y, k=5, method="mrmr_quot")
+mrmr_d = select_cached(cache, y, k=5, method="mrmr_diff")
 ```
+
+`select_cached` takes `cache`, `y`, and `k` positionally (all three are
+required) and then `method`, `top_m`, `corr_prune`, `return_objective`,
+`return_indices`, `warn_noise_floor=True`, `callback=None`,
+`return_result`, and `store_proxies`. `warn_noise_floor=False` suppresses the
+Gaussian noise-floor `UserWarning` that the `mrmr_quot`/`mrmr_diff` methods
+raise when a selected feature's marginal relevance sits below the floor.
 
 Cached selectors follow the same fixed-`k` contract as the public filter
 selectors: `k` is a maximum, and fewer features may be returned when fewer valid
@@ -1208,9 +1376,11 @@ when they were built: reuse requires the same row count and feature order/names
 in `X`. Cache-backed filter calls (`select_mrmr`, `select_jmi`, `select_jmim`,
 and `select_cefsplus`) reject call-time `sample_weight` and explicit
 `subsample` or `random_state` overrides; those values belong to cache
-construction. `select_fdr` still accepts `random_state` with a cache because
-there it seeds the new knockoff draw, not cache construction; its
-`sample_weight` and `subsample` arguments remain forbidden.
+construction. For `select_mrmr`, `select_jmi`, and `select_jmim` a `cache=` is
+also rejected unless `estimator="gaussian"`. `select_fdr` still accepts
+`random_state` with a cache because there it seeds the new knockoff draw, not
+cache construction; its `sample_weight` and `subsample` arguments remain
+forbidden, and it takes exactly one of `X` or `cache`.
 An array-built positional cache is matched by row count and feature count and
 requires a positional ndarray at selection time; named DataFrames are rejected
 because the original column alignment cannot be proven. Rebuild the cache from
@@ -1248,14 +1418,20 @@ keeps features that appear often enough.
 ### Convenience wrappers
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import stability_regression, stability_classif
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y_labels = (y > 0).astype(int)
 
 selected_reg = stability_regression(
     X,
     y,
-    k=20,
+    k=8,
     threshold=0.6,
-    n_bootstrap=50,
+    n_bootstrap=20,
     alpha=None,          # estimated by CV when None
     alpha_rule="one_se", # selection-oriented; use "best" for predictive CV
     l1_ratio=1.0,        # 1.0=Lasso; <1.0=ElasticNet
@@ -1267,9 +1443,9 @@ selected_reg = stability_regression(
 selected_cls = stability_classif(
     X,
     y_labels,
-    k=20,
+    k=8,
     threshold=0.6,
-    n_bootstrap=50,
+    n_bootstrap=20,
     random_state=0,
     verbose=False,
 )
@@ -1294,13 +1470,18 @@ The lower-level convenience function `sift.stability.stability_select` returns
 `(selected_indices, selection_frequencies)`:
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift.stability import stability_select
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 idx, frequencies = stability_select(
     X,
     y,
     threshold=0.6,
-    n_bootstrap=50,
+    n_bootstrap=20,
     task="regression",
     random_state=0,
     verbose=False,
@@ -1310,13 +1491,18 @@ idx, frequencies = stability_select(
 ### Class API
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import StabilitySelector
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selector = StabilitySelector(
     task="regression",
-    n_bootstrap=100,
+    n_bootstrap=20,
     threshold=0.65,
-    max_features=25,
+    max_features=10,
     store_coefs=True,
     random_state=0,
     verbose=False,
@@ -1375,15 +1561,32 @@ Important options:
 - `parallel_backend="threads"`: lower memory overhead; `"processes"` isolates
   work at higher memory cost.
 
-Diagnostics and plotting:
+Diagnostics:
 
+<!-- sift-doc: continues -->
 ```python
 info = selector.get_feature_info()
 best_threshold, threshold_scores = selector.tune_threshold(X, y)
 selector.set_threshold(best_threshold)
+```
 
-fig, ax = selector.plot_frequencies(top_n=30, show_coef=True)
-fig, axes = selector.plot_coef_distributions(top_n=12)
+Plotting helpers need `matplotlib`, which is not a SIFT dependency:
+
+<!-- sift-doc: requires=matplotlib -->
+```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import StabilitySelector
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+selector = StabilitySelector(
+    task="regression", n_bootstrap=20, store_coefs=True, random_state=0, verbose=False
+)
+selector.fit(X, y)
+
+fig, ax = selector.plot_frequencies(top_n=10, show_coef=True)
+fig, axes = selector.plot_coef_distributions(top_n=6)
 ```
 
 `tune_threshold` refits stability selection inside each outer fold. If the
@@ -1401,15 +1604,30 @@ If both `groups` and `time` are passed to `fit` or the convenience wrappers,
 stability selection uses a group-aware block bootstrap.
 
 ```python
+import numpy as np
+import pandas as pd
+from sift import stability_regression
+
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["player_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["game_date"] = pd.Timestamp("2024-01-01") + day_offsets
+df["target"] = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
+X = df[[f"f{i}" for i in range(8)]]
+y = df["target"]
+
 selected = stability_regression(
     X,
     y,
-    k=30,
+    k=5,
     groups=df["player_id"].to_numpy(),
     time=df["game_date"].to_numpy(),
     block_size="auto",
     block_method="moving",    # "moving", "circular", or "stationary"
     sample_frac=0.5,
+    n_bootstrap=20,
+    random_state=0,
     verbose=False,
 )
 ```
@@ -1426,12 +1644,21 @@ anchor rows. It returns a sampled DataFrame with an approximate inverse
 probability `sample_weight` column.
 
 ```python
+import numpy as np
+import pandas as pd
 from sift import smart_sample, panel_config
+
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["user_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["timestamp"] = pd.Timestamp("2024-01-01") + day_offsets
+df["target"] = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
 
 config = panel_config(
     group_col="user_id",
     time_col="timestamp",
-    sample_frac=0.15,
+    sample_frac=0.3,
 )
 
 sampled = smart_sample(
@@ -1466,7 +1693,15 @@ are not ensembled. Constant pilot targets disable the residual blend.
 Advanced helper:
 
 ```python
+import numpy as np
+from sklearn.utils.extmath import randomized_svd
 from sift.sampling.smart import leverage_scores_multi_alpha
+
+rng = np.random.default_rng(0)
+Xs = rng.normal(size=(300, 20))
+U, S, Vt = randomized_svd(Xs, n_components=8, random_state=0)
+V = Vt.T
+s2 = S**2
 
 scores = leverage_scores_multi_alpha(
     Xs,
@@ -1478,19 +1713,31 @@ scores = leverage_scores_multi_alpha(
 ```
 
 `leverage_scores_multi_alpha` computes ridge-style leverage scores across
-multiple regularization strengths. The main sampler calls it internally after a
-randomized SVD.
+multiple regularization strengths. `V` and `S` are the right singular vectors
+and singular values of the (already centered/scaled) feature block and `s2` is
+`S ** 2`; the ridge grid is derived from `s2` internally. The main sampler
+calls it after its own randomized SVD.
 
 Use smart sampling inside stability selection:
 
 ```python
+import numpy as np
+import pandas as pd
 from sift import StabilitySelector, panel_config
+
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["user_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["timestamp"] = pd.Timestamp("2024-01-01") + day_offsets
+y = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
 
 selector = StabilitySelector(
     task="regression",
     use_smart_sampler=True,
-    sampler_config=panel_config("user_id", "timestamp", sample_frac=0.15),
+    sampler_config=panel_config("user_id", "timestamp", sample_frac=0.3),
     threshold=0.6,
+    n_bootstrap=20,
     random_state=0,
     verbose=False,
 )
@@ -1540,6 +1787,11 @@ anchor_fn = combine_anchors(
 )
 ```
 
+`no_anchors` is the do-nothing default; `first_per_group` keeps only the first
+row per group. The combined `anchor_fn` above becomes the `anchor_fn` field of a
+`SmartSamplerConfig`, and the columns it names (`month`, `usage`,
+`team_change`) must exist in the sampled frame.
+
 Preset configs:
 
 - `panel_config(group_col, time_col=None, sample_frac=0.15)`: generic grouped
@@ -1560,27 +1812,48 @@ evaluation for held-out-compatible backends.
 ### Functional API
 
 ```python
-from sift import select_boruta, select_boruta_shap
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_boruta
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selected = select_boruta(
     X,
     y,
     task="regression",
     importance="native",      # "native" or "shap"
-    max_iter=50,
+    max_iter=20,
     alpha=0.05,
     perc=100,
-    max_features=30,
+    max_features=10,
     shadow_method="auto",
     random_state=0,
     verbose=False,
 )
+```
+
+`select_boruta_shap(X, y_labels, task="classification", ...)` takes the same
+arguments and forces `importance="shap"`. It needs CatBoost (or another
+SHAP-capable `estimator`), so it is shown here rather than executed:
+
+<!-- sift-doc: requires=catboost -->
+```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_boruta_shap
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y_labels = (y > 0).astype(int)
 
 selected_shap = select_boruta_shap(
     X,
-    y,
+    y_labels,
     task="classification",
-    max_features=25,
+    max_iter=10,
+    max_features=10,
     random_state=0,
     verbose=False,
 )
@@ -1589,7 +1862,16 @@ selected_shap = select_boruta_shap(
 Set `return_result=True` to inspect the full `BorutaResult`:
 
 ```python
-result = select_boruta(X, y, return_result=True, verbose=False)
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_boruta
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
+result = select_boruta(
+    X, y, max_iter=20, return_result=True, random_state=0, verbose=False
+)
 
 accepted = result.selected_features()
 ranking = result.get_feature_ranking()
@@ -1601,14 +1883,19 @@ rejected_mask = result.rejected_mask
 ### Class API
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift import BorutaSelector
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
 
 selector = BorutaSelector(
     task="regression",
     importance="native",
     n_estimators="auto",
-    max_iter=50,
-    max_features=30,
+    max_iter=20,
+    max_features=10,
     random_state=0,
     verbose=False,
 )
@@ -1683,17 +1970,27 @@ callers may pass `groups="column"` and `time="column"`; those metadata columns
 are removed before prediction. Direct arrays remain positional.
 
 ```python
+import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sift import permutation_importance
 
-model = RandomForestRegressor(random_state=0).fit(X, y)
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["player_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["game_date"] = pd.Timestamp("2024-01-01") + day_offsets
+X = df[[f"f{i}" for i in range(8)]]
+y = X["f0"] + 0.7 * X["f1"] - 0.5 * X["f2"] + rng.normal(size=300)
+
+model = RandomForestRegressor(n_estimators=20, random_state=0).fit(X, y)
 
 importance = permutation_importance(
     model,
     X,
     y,
     scoring="neg_rmse",
-    n_repeats=20,
+    n_repeats=3,
     n_jobs=-1,
     parallel_backend="threads",  # "threads" or "processes"
     permute_method="auto",
@@ -1707,11 +2004,11 @@ rich_importance = permutation_importance(
     X,
     y,
     scoring="neg_rmse",
-    n_repeats=20,
+    n_repeats=3,
     random_state=0,
     return_result=True,
 )
-repeat_drops = rich_importance.importances_  # raw feature positions × repeats
+repeat_drops = rich_importance.importances_  # raw feature positions x repeats
 view = rich_importance.result_view()
 ```
 
@@ -1785,22 +2082,31 @@ python -m pip install -e ".[catboost]"
 
 ### Full API
 
+<!-- sift-doc: requires=catboost -->
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+
 import sift
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y = pd.Series(y_arr, name="target")
 
 result = sift.catboost_select(
     X,
     y,
-    k=20,                       # exact k; use None to search k
+    k=8,                        # exact k; the library default None searches k
     task="regression",
-    algorithm="shap",           # "shap", "permutation", "prediction", "forward", "forward_greedy"
-    prefilter_k=200,
+    algorithm="forward",        # the library default is "shap"; also "permutation",
+                                # "prediction", "forward_greedy"
+    prefilter_k=None,           # the library default is 200
     prefilter_method="catboost",
     n_splits=3,
-    n_estimators=500,
+    n_estimators=50,
     eval_metric="RMSE",
     random_state=0,
-    verbose=True,
+    verbose=False,
     groups=None,
     time=None,
     sample_weight=None,
@@ -1811,11 +2117,12 @@ scores = result.scores_by_k
 importances = result.feature_importances
 ```
 
-Algorithm choices:
+Algorithm choices. `"shap"` is the default; the example above passes
+`algorithm="forward"` so that it stays quick:
 
 | Algorithm | Behavior | Relative cost |
 | --- | --- | --- |
-| `"shap"` | Recursive feature elimination using SHAP importance. | Slowest, most interpretability-focused. |
+| `"shap"` | Recursive feature elimination using SHAP importance. Default. | Slowest, most interpretability-focused. |
 | `"permutation"` | Recursive elimination using loss-function-change importance. | Medium. |
 | `"prediction"` | Recursive elimination using prediction-change importance. | Faster RFE path. |
 | `"forward"` | Fit once, rank by importance, evaluate prefixes. | Fast. |
@@ -1862,37 +2169,62 @@ Cross-validation:
 - `catboost_params` collisions with translated SIFT arguments emit one
   `UserWarning` while retaining the 0.9 dictionary-wins precedence.
 
+<!-- sift-doc: requires=catboost -->
 ```python
+import numpy as np
+import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
 
+import sift
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+X["player_id"] = np.repeat(np.arange(30), 10)
+y = pd.Series(X["f0"] + 0.7 * X["f1"] - 0.5 * X["f2"] + rng.normal(size=300))
+
 ts_result = sift.catboost_select(
-    X,
+    X.drop(columns="player_id"),
     y,
-    k=20,
-    cv=TimeSeriesSplit(n_splits=5),
+    k=4,
+    cv=TimeSeriesSplit(n_splits=3),
     algorithm="forward",
+    prefilter_k=None,
+    n_estimators=50,
+    random_state=0,
+    verbose=False,
 )
 
 group_result = sift.catboost_select(
     X,
     y,
-    k=20,
+    k=4,
     group_col="player_id",
-    cv=GroupKFold(n_splits=5),
+    cv=GroupKFold(n_splits=3),
+    algorithm="forward",
+    prefilter_k=None,
+    n_estimators=50,
+    random_state=0,
+    verbose=False,
 )
 ```
 
 Optional stability stage:
 
+<!-- sift-doc: requires=catboost continues -->
 ```python
 result = sift.catboost_select(
     X,
     y,
-    k=20,
+    k=4,
     group_col="player_id",
     use_stability=True,
-    n_bootstrap=20,
+    n_bootstrap=5,
     stability_threshold=0.6,
+    algorithm="forward",
+    prefilter_k=None,
+    n_estimators=50,
+    random_state=0,
+    verbose=False,
 )
 
 stability_scores = result.stability_scores
@@ -1900,22 +2232,38 @@ stability_scores = result.stability_scores
 
 ### Convenience wrappers
 
+<!-- sift-doc: requires=catboost -->
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+
+import sift
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y = pd.Series(y_arr, name="target")
+y_labels = pd.Series((y_arr > 0).astype(int), name="label")
+
 selected_reg = sift.catboost_regression(
     X,
     y,
-    k=20,
+    k=8,
     algorithm="forward",
-    prefilter_k=200,
+    prefilter_k=None,
+    n_estimators=50,
     random_state=0,
+    verbose=False,
 )
 
 selected_cls = sift.catboost_classif(
     X,
     y_labels,
-    k=20,
-    algorithm="shap",
+    k=8,
+    algorithm="forward",
+    prefilter_k=None,
+    n_estimators=50,
     random_state=0,
+    verbose=False,
 )
 ```
 
@@ -1938,8 +2286,30 @@ selected_cls = sift.catboost_classif(
 
 Methods:
 
+<!-- sift-doc: requires=catboost requires=matplotlib -->
 ```python
-mean, std = result.score_at_k(20)
+import pandas as pd
+from sklearn.datasets import make_regression
+
+import sift
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+y = pd.Series(y_arr, name="target")
+
+result = sift.catboost_select(
+    X,
+    y,
+    k=None,                 # search over feature counts so the curve has points
+    min_features=4,
+    algorithm="forward",
+    prefilter_k=None,
+    n_estimators=50,
+    random_state=0,
+    verbose=False,
+)
+
+mean, std = result.score_at_k(result.best_k)
 small_set = result.features_within_tolerance(tolerance=0.01)
 fig, ax = result.plot_scores_vs_k()
 ```
@@ -1959,25 +2329,34 @@ logging. The default `callback=None` makes no calls.
 Advanced utilities are available from `sift.selection`.
 
 ```python
+import numpy as np
+from sklearn.datasets import make_regression
+from sift.estimators import relevance as relevance_estimators
 from sift.selection import mrmr_select, jmi_select
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X_arr = np.asarray(X_arr, dtype=np.float64)
+y_arr = np.asarray(y_arr, dtype=np.float64)
+weights = np.ones(len(y_arr))
+relevance = relevance_estimators.f_regression(X_arr, y_arr, weights)
 
 idx = mrmr_select(
     X_arr,
     relevance,
-    k=20,
+    k=8,
     formula="quotient",
-    top_m=250,
+    top_m=20,
     sample_weight=weights,
 )
 
 jmi_idx = jmi_select(
     X_arr,
     y_arr,
-    k=20,
+    k=8,
     relevance=relevance,
     mi_estimator="r2",
     aggregation="sum",       # "sum" for JMI, "min" for JMIM
-    top_m=250,
+    top_m=20,
     y_kind="continuous",
     sample_weight=weights,
 )
@@ -1990,7 +2369,18 @@ The objective helper is available when you already have a correlation matrix in
 path order:
 
 ```python
+import numpy as np
+from sklearn.datasets import make_regression
+from sift.estimators import copula
 from sift.selection.objective import objective_from_corr_path
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+weights = np.ones(len(y_arr))
+Z = copula.weighted_rank_gauss_2d(np.asarray(X_arr, dtype=np.float64), weights)
+zy = copula.weighted_rank_gauss_1d(np.asarray(y_arr, dtype=np.float64), weights)
+path = [0, 1, 2, 3, 4]
+R_path = copula.weighted_correlation_matrix(Z[:, path], weights)
+r_path = copula.weighted_corr_with_vector(Z[:, path], zy, weights)
 
 objective = objective_from_corr_path(
     R_path,
@@ -2017,7 +2407,15 @@ The `sift.estimators` package exposes four lazily loaded modules:
 ### Relevance estimators
 
 ```python
+import numpy as np
+from sklearn.datasets import make_regression
 from sift.estimators import relevance
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X_arr = np.asarray(X_arr, dtype=np.float64)
+y_arr = np.asarray(y_arr, dtype=np.float64)
+y_labels = (y_arr > 0).astype(int)
+weights = np.ones(len(y_arr))
 
 rel_reg = relevance.f_regression(X_arr, y_arr, weights)
 rel_cls = relevance.f_classif(X_arr, y_labels, weights)
@@ -2037,11 +2435,21 @@ Available relevance methods:
 ### Copula and Gaussian MI utilities
 
 ```python
+import numpy as np
+from sklearn.datasets import make_regression
 from sift.estimators import copula
+
+X_arr, y_arr = make_regression(n_samples=300, n_features=20, random_state=0)
+X_arr = np.asarray(X_arr, dtype=np.float64)
+weights = np.ones(len(y_arr))
+x = X_arr[:, 0]
+candidates = np.arange(X_arr.shape[1])
+scores = np.abs(np.corrcoef(X_arr, y_arr, rowvar=False)[-1, :-1])
 
 z = copula.weighted_rank_gauss_1d(x, weights)
 Z = copula.weighted_rank_gauss_2d(X_arr, weights)
 R = copula.weighted_correlation_matrix(Z, weights, backend="auto")
+r = R[0, 1:]                          # any array of correlations
 mi = copula.gaussian_mi_from_corr(r)
 keep = copula.greedy_corr_prune(candidates, R, scores, threshold=0.95)
 ```
@@ -2062,7 +2470,16 @@ Important helpers:
 ### Joint mutual-information estimators
 
 ```python
+import numpy as np
+from sklearn.datasets import make_regression
 from sift.estimators import joint_mi
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X_arr = np.asarray(X_arr, dtype=np.float64)
+y = np.asarray(y, dtype=np.float64)
+weights = np.ones(len(y))
+selected_feature = X_arr[:, 0]
+candidate_matrix = X_arr[:, 1:]
 
 mi = joint_mi.r2_joint_mi(selected_feature, candidate_matrix, y, weights)
 bins = joint_mi.quantile_bin_matrix(X_arr, n_bins=10)
@@ -2088,6 +2505,9 @@ Most users do not need these directly, but they are useful when building custom
 selection flows on top of the low-level loops.
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.datasets import make_regression
 from sift._impute import mean_impute
 from sift._preprocess import (
     infer_higher_is_better,
@@ -2102,7 +2522,11 @@ from sift._preprocess import (
     encode_categoricals,
 )
 
-X_filled = mean_impute(X_arr, copy=True)
+X_raw, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_raw, columns=[f"f{i}" for i in range(20)])
+sample_weight = None
+
+X_filled = mean_impute(np.asarray(X_raw, dtype=np.float64), copy=True)
 w = ensure_weights(sample_weight, n=len(y), normalize=True)
 X_arr, y_arr, feature_names = validate_inputs(X, y, task="regression")
 X_sub, y_sub, w_sub, row_idx = subsample_xy(
@@ -2138,6 +2562,7 @@ Utility behavior:
 The internal permutation module is public enough for advanced use:
 
 ```python
+import numpy as np
 from sift._permute import (
     resolve_permutation_method,
     build_group_info,
@@ -2145,6 +2570,11 @@ from sift._permute import (
     permute_rows,
     permute_matrix,
 )
+
+rng = np.random.default_rng(0)
+X_arr = rng.normal(size=(300, 8))
+groups = np.repeat(np.arange(30), 10)
+time = np.tile(np.arange(10), 30)
 
 method = resolve_permutation_method("auto", groups=groups, time=time)
 group_info = build_group_info(groups, time)
@@ -2156,6 +2586,16 @@ shadow = permute_matrix(
     seed=0,
     axis="columns",
 )
+
+# permute_array / permute_rows are the single-column and whole-row primitives
+# that permute_matrix dispatches to; they take a Generator rather than a seed.
+generator = np.random.default_rng(0)
+shadow_column = permute_array(
+    X_arr[:, 0], method=method, group_info=group_info, block_size="auto", rng=generator
+)
+shadow_rows = permute_rows(
+    X_arr, method=method, group_info=group_info, block_size="auto", rng=generator
+)
 ```
 
 Methods are `"auto"`, `"global"`, `"within_group"`, `"block"`, and
@@ -2166,12 +2606,19 @@ Methods are `"auto"`, `"global"`, `"within_group"`, `"block"`, and
 ### Fast numeric baseline
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_mrmr
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
 selected = select_mrmr(
     X,
     y,
-    k=50,
+    k=10,
     task="regression",
-    top_m=500,
+    top_m=20,
     verbose=False,
 )
 ```
@@ -2179,14 +2626,34 @@ selected = select_mrmr(
 ### Regression-focused Gaussian workflow
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import build_cache, select_cached
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
 cache = build_cache(X, compute_Rxx=True, random_state=0)
-cefs = select_cached(cache, y, k=50, method="cefsplus")
-jmi = select_cached(cache, y, k=50, method="jmi")
+cefs = select_cached(cache, y, k=10, method="cefsplus")
+jmi = select_cached(cache, y, k=10, method="jmi")
 ```
 
 ### Grouped time-series workflow
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sift import AutoKConfig, permutation_importance, select_mrmr
+
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["player_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["game_date"] = pd.Timestamp("2024-01-01") + day_offsets
+X = df[[f"f{i}" for i in range(8)]]
+y = X["f0"] + 0.7 * X["f1"] - 0.5 * X["f2"] + rng.normal(size=300)
+
 groups = df["player_id"].to_numpy()
 time = df["game_date"].to_numpy()
 
@@ -2197,9 +2664,12 @@ selected = select_mrmr(
     task="regression",
     groups=groups,
     time=time,
-    auto_k_config=AutoKConfig(strategy="time_holdout", max_k=80),
+    auto_k_config=AutoKConfig(strategy="time_holdout", min_k=1, max_k=6),
     verbose=False,
 )
+
+fitted_model = RandomForestRegressor(n_estimators=20, random_state=0)
+fitted_model.fit(X[selected], y)
 
 importance = permutation_importance(
     fitted_model,
@@ -2208,17 +2678,26 @@ importance = permutation_importance(
     groups=groups,
     time=time,
     permute_method="auto",
+    n_repeats=3,
+    random_state=0,
 )
 ```
 
 ### High-confidence all-relevant selection
 
 ```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sift import select_boruta
+
+X_arr, y = make_regression(n_samples=300, n_features=20, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(20)])
+
 result = select_boruta(
     X,
     y,
     task="regression",
-    max_iter=100,
+    max_iter=20,
     perc=100,
     return_result=True,
     random_state=0,
@@ -2232,13 +2711,24 @@ ranking = result.get_feature_ranking()
 ### Large panel data
 
 ```python
+import numpy as np
+import pandas as pd
+from sift import StabilitySelector, panel_config
+
+rng = np.random.default_rng(0)
+df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
+df["entity_id"] = np.repeat(np.arange(30), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df["timestamp"] = pd.Timestamp("2024-01-01") + day_offsets
+y = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
+
 selector = StabilitySelector(
     task="regression",
     use_smart_sampler=True,
-    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.10),
+    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.3),
     threshold=0.6,
-    n_bootstrap=50,
-    max_features=50,
+    n_bootstrap=20,
+    max_features=5,
     random_state=0,
     verbose=False,
 )

@@ -155,17 +155,31 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     threshold : float, default=0.6
         Minimum selection frequency to keep a feature.
     alpha : float, optional
-        Regularization strength. If None, estimated via CV.
+        Regularization strength, a positive float. If None, estimated via CV
+        with ``alpha_rule``. ``penalty`` is a permanent alias for this
+        parameter: set either one, and supplying both with unequal values
+        raises.
     alpha_rule : {'one_se', 'best'}, default='one_se'
         Rule used when ``alpha`` is estimated. ``one_se`` chooses the strongest
         regularization whose CV score is within one standard error of the best;
-        ``best`` chooses the prediction-optimal grid point.
+        ``best`` chooses the prediction-optimal grid point. It is ignored when
+        ``alpha``/``penalty`` fixes the value, and ``alpha_rule_effective_``
+        then reports ``'fixed'``.
     l1_ratio : float, default=1.0
         ElasticNet mixing (1.0 = Lasso, <1.0 = ElasticNet). Only for regression.
     task : str, default='regression'
         Either 'regression' or 'classification'.
     max_features : int, optional
-        Hard cap on number of selected features.
+        Hard cap on number of selected features. The convenience wrappers
+        :func:`stability_regression` and :func:`stability_classif` set it from
+        their ``k`` argument.
+    block_size : int or "auto", default="auto"
+        Block length for the block bootstrap that runs when ``fit`` receives
+        both ``groups`` and ``time``. ``"auto"`` uses ``sqrt(n_per_group)``;
+        an explicit value must be a positive integer. Ignored by the i.i.d.
+        bootstrap used without that row context.
+    block_method : {'moving', 'circular', 'stationary'}, default='moving'
+        Block bootstrap flavor for the same path.
     use_smart_sampler : bool, default=False
         Whether to apply smart sampling before stability selection.
     sampler_config : SmartSamplerConfig, optional
@@ -181,16 +195,25 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Joblib backend preference. 'threads' has lower memory overhead,
         'processes' is more isolated. Set to None for joblib default.
     random_state : int, optional
-        Random seed for reproducibility.
+        Random seed for reproducibility. The 0.9 default is None, which draws
+        nondeterministic entropy and makes ``fit`` emit a ``FutureWarning``;
+        SIFT 1.0 will default to seed 0. Pass an integer to silence it.
     verbose : bool, default=True
-        Print progress information.
+        Emit the bootstrap scheme, the per-fit selection summary and any
+        ``tune_threshold`` table at INFO on the ``sift`` logger. Use
+        :func:`sift.set_verbosity` for a process-wide default.
+    callback : callable, optional
+        Called after each completed bootstrap as
+        ``callback(step, total, info)``. Cross-validation fits inside
+        ``tune_threshold`` do not re-fire it.
+    penalty : float, optional
+        Permanent alias for ``alpha``, kept beside it rather than deprecated.
+        Set one or the other; equal values are accepted and unequal
+        simultaneous values raise.
     output_order : {'legacy', 'original'}, default='legacy'
         Order used by transform, selected support indices, feature names, and
         inverse transform. Legacy is descending selection frequency; original
         is ascending fitted feature position.
-    callback : callable, optional
-        Called after each completed bootstrap as
-        ``callback(step, total, info)``.
 
     Attributes
     ----------
@@ -204,8 +227,43 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Number of selected features.
     alpha_ : float
         Regularization alpha used.
+    alpha_rule_effective_ : str
+        ``alpha_rule`` when alpha was estimated, or ``'fixed'`` when
+        ``alpha``/``penalty`` supplied it.
+    feature_names_in_ : ndarray of shape (n_features_in_,)
+        One-dimensional object array of fitted candidate feature names.
+    n_features_in_ : int
+        Number of candidate features seen during ``fit``.
+    mean_abs_coef_ : ndarray of shape (n_features,)
+        Mean absolute coefficient across bootstrap runs.
     coef_bootstrap_ : ndarray of shape (n_bootstrap, n_features), optional
         Coefficients from each bootstrap run. Only available if store_coefs=True.
+
+    See Also
+    --------
+    stability_regression : One-call regression wrapper returning feature names.
+    stability_classif : One-call classification wrapper.
+    sift.as_result : Normalize a fitted selector into a ``SelectionView``;
+        also exposed as the dynamic ``result_view_`` property.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import StabilitySelector
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> y = 3.0 * X["f0"] + 2.0 * X["f1"] + 0.1 * rng.normal(size=200)
+    >>> selector = StabilitySelector(n_bootstrap=10, threshold=0.6,
+    ...                              max_features=2, random_state=0,
+    ...                              verbose=False)
+    >>> selector.fit(X, y).selected_feature_names_
+    ['f0', 'f1']
+    >>> selector.selection_frequencies_[:2].round(2).tolist()
+    [1.0, 1.0]
+    >>> selector.transform(X).shape
+    (200, 2)
     """
 
     __metadata_request__fit = {"feature_names": UNUSED}
@@ -803,9 +861,14 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         coef_mean = self.coef_bootstrap_.mean(axis=0)
         coef_std = self.coef_bootstrap_.std(axis=0)
+        # ``np.where`` evaluates both branches, so guard the ratio: a feature
+        # that no bootstrap ever selected has a zero mean and a zero std, and
+        # 0/0 would otherwise raise numpy's invalid-value RuntimeWarning.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            coef_ratio = coef_std / np.abs(coef_mean)
         coef_cv = np.where(
             np.abs(coef_mean) > 1e-10,
-            coef_std / np.abs(coef_mean),
+            coef_ratio,
             np.inf
         )
 
@@ -1668,9 +1731,90 @@ def stability_regression(
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for regression.
 
+    One-call wrapper that builds a :class:`StabilitySelector` with
+    ``task="regression"`` and ``max_features=k``, fits it, and returns just the
+    surviving features. Use it when the Lasso/ElasticNet bootstrap heuristic is
+    all that is wanted and the fitted estimator itself is not needed;
+    instantiate :class:`StabilitySelector` directly for ``transform``,
+    ``tune_threshold``, frequency tables or ``result_view_``.
+
     Returns up to ``k`` features whose selection frequency clears ``threshold``
     (``k`` caps the count via ``max_features``; it is not an exact-size
     guarantee). Never-selected features are not used to pad the result.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Candidate feature matrix.
+    y : Series or ndarray of shape (n_samples,)
+        Continuous target.
+    k : int
+        Upper bound on the number of returned features, forwarded as
+        ``max_features``.
+    callback : callable, optional
+        ``callback(step, total, info)``, called after each completed bootstrap.
+    **kwargs
+        ``sample_weight``, ``groups`` and ``time`` are forwarded to ``fit``
+        (supplying both ``groups`` and ``time`` switches on the block
+        bootstrap); ``return_indices`` selects the return kind; every other
+        keyword must be a :class:`StabilitySelector` constructor option and is
+        passed through unchanged. The ones that matter most here are
+        ``threshold`` (default 0.6, the minimum selection frequency),
+        ``n_bootstrap`` (default 50), ``sample_frac`` (default 0.5),
+        ``alpha`` or its permanent alias ``penalty`` (either sets the
+        regularization strength; unequal simultaneous values raise),
+        ``alpha_rule`` (default ``"one_se"``, the strongest alpha within one
+        standard error of the CV best, versus ``"best"``), ``l1_ratio``,
+        ``n_jobs`` (default -1, all cores) and ``random_state``.
+
+    Returns
+    -------
+    list
+        Selected feature labels for DataFrame input, or integer column
+        positions for ndarray input. Pass ``return_indices=True`` or ``False``
+        to choose explicitly. Order is descending selection frequency with
+        stable input-position ties.
+
+    Raises
+    ------
+    TypeError
+        If a keyword is neither a fit-time datum nor a ``StabilitySelector``
+        constructor option.
+    ValueError
+        From the underlying estimator, for example when ``groups``/``time``
+        accompany ``use_smart_sampler=True`` or an option is out of range.
+
+    Warns
+    -----
+    FutureWarning
+        When ``random_state`` is left at its ``None`` default: 0.9 stays
+        nondeterministic, while SIFT 1.0 will default to seed 0.
+
+    See Also
+    --------
+    StabilitySelector : The estimator behind this wrapper.
+    stability_classif : The classification counterpart.
+
+    Notes
+    -----
+    Stability selection here is a practical heuristic inspired by Meinshausen
+    and Buhlmann (2010); it provides no formal false-positive control, unlike
+    :func:`sift.select_fdr`. For 0.9 compatibility, automatic alpha selection
+    passes sample weights to the sparse model fits but keeps the historical
+    unweighted CV validation score and scaler.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import stability_regression
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> y = 3.0 * X["f0"] + 2.0 * X["f1"] + 0.1 * rng.normal(size=200)
+    >>> stability_regression(X, y, k=2, n_bootstrap=10, random_state=0,
+    ...                      verbose=False)
+    ['f0', 'f1']
     """
     return _stability_task_features(
         "regression", X, y, k, callback=callback, **kwargs
@@ -1687,9 +1831,92 @@ def stability_classif(
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for classification.
 
+    One-call wrapper that builds a :class:`StabilitySelector` with
+    ``task="classification"`` and ``max_features=k``, fits L1-penalized
+    logistic regressions on bootstrap subsamples, and returns just the
+    surviving features. Use it when the bootstrap heuristic is all that is
+    wanted and the fitted estimator itself is not needed; instantiate
+    :class:`StabilitySelector` directly for ``transform``, ``tune_threshold``,
+    frequency tables or ``result_view_``.
+
     Returns up to ``k`` features whose selection frequency clears ``threshold``
     (``k`` caps the count via ``max_features``; it is not an exact-size
     guarantee). Never-selected features are not used to pad the result.
+
+    Parameters
+    ----------
+    X : DataFrame or ndarray of shape (n_samples, n_features)
+        Candidate feature matrix.
+    y : Series or ndarray of shape (n_samples,)
+        Class labels; they are label-encoded internally.
+    k : int
+        Upper bound on the number of returned features, forwarded as
+        ``max_features``.
+    callback : callable, optional
+        ``callback(step, total, info)``, called after each completed bootstrap.
+    **kwargs
+        ``sample_weight``, ``groups`` and ``time`` are forwarded to ``fit``
+        (supplying both ``groups`` and ``time`` switches on the block
+        bootstrap); ``return_indices`` selects the return kind; every other
+        keyword must be a :class:`StabilitySelector` constructor option and is
+        passed through unchanged. The ones that matter most here are
+        ``threshold`` (default 0.6, the minimum selection frequency),
+        ``n_bootstrap`` (default 50), ``sample_frac`` (default 0.5),
+        ``alpha`` or its permanent alias ``penalty`` (either sets the
+        regularization strength; unequal simultaneous values raise),
+        ``alpha_rule`` (default ``"one_se"``, the strongest alpha within one
+        standard error of the CV best, versus ``"best"``), ``n_jobs``
+        (default -1, all cores) and ``random_state``. ``l1_ratio`` applies to
+        regression only.
+
+    Returns
+    -------
+    list
+        Selected feature labels for DataFrame input, or integer column
+        positions for ndarray input. Pass ``return_indices=True`` or ``False``
+        to choose explicitly. Order is descending selection frequency with
+        stable input-position ties.
+
+    Raises
+    ------
+    TypeError
+        If a keyword is neither a fit-time datum nor a ``StabilitySelector``
+        constructor option.
+    ValueError
+        From the underlying estimator, for example when ``groups``/``time``
+        accompany ``use_smart_sampler=True`` or an option is out of range.
+
+    Warns
+    -----
+    FutureWarning
+        When ``random_state`` is left at its ``None`` default: 0.9 stays
+        nondeterministic, while SIFT 1.0 will default to seed 0.
+
+    See Also
+    --------
+    StabilitySelector : The estimator behind this wrapper.
+    stability_regression : The regression counterpart.
+
+    Notes
+    -----
+    Stability selection here is a practical heuristic inspired by Meinshausen
+    and Buhlmann (2010); it provides no formal false-positive control, unlike
+    :func:`sift.select_fdr`. For 0.9 compatibility, automatic alpha selection
+    passes sample weights to the sparse model fits but keeps the historical
+    unweighted CV validation score and scaler.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import stability_classif
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)),
+    ...                  columns=[f"f{i}" for i in range(6)])
+    >>> y = (3.0 * X["f0"] + 2.0 * X["f1"] > 0).astype(int)
+    >>> stability_classif(X, y, k=2, n_bootstrap=10, random_state=0,
+    ...                   verbose=False)
+    ['f0', 'f1']
     """
     return _stability_task_features(
         "classification", X, y, k, callback=callback, **kwargs

@@ -887,7 +887,17 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
             raise ValueError("target_cv fit rows have zero total sample_weight")
         weights = sample_weight[active]
         y_active = y[active]
-        total_weight = float(weights.sum())
+        # Individual weights can all be finite while their aggregate overflows
+        # (for example, several values near ``float64.max``). Frequency-weight
+        # semantics make arbitrary rescaling incorrect for ``smooth="auto"``,
+        # so fail before an infinite mass can turn the prior into NaN and the
+        # centered category maps into silent zeros.
+        with np.errstate(over="ignore", invalid="ignore"):
+            total_weight = float(weights.sum())
+        if not np.isfinite(total_weight):
+            raise ValueError(
+                "target_cv fit rows must have finite total sample_weight"
+            )
         centered_y, prior = self._centered_targets(y_active, weights, total_weight)
         auto = smooth == "auto"
         if auto:

@@ -6,17 +6,20 @@ the [API manual](../DOCS.MD); for picking a selector see the
 
 ## Installation
 
-### `ModuleNotFoundError: No module named 'category_encoders'`
+### `ImportError: category_encoders required for categorical encoding`
 
 Raised by `encode_categoricals` when `cat_encoding` is one of `"loo"`,
-`"target"`, or `"james_stein"`. SIFT keeps `category_encoders` optional.
+`"target"`, or `"james_stein"`. SIFT keeps `category_encoders` optional and
+re-raises the underlying `ModuleNotFoundError` with this message.
 
 ```bash
 python -m pip install -e ".[categorical]"
 ```
 
-Alternatively, set `cat_encoding="loo_logit"` (binary targets, no extra
-dependency) or `cat_encoding="none"` after pre-encoding categoricals upstream.
+Alternatively, set `cat_encoding="target_cv"` (SIFT's own cross-fitted encoder,
+any task, no extra dependency), `cat_encoding="loo_logit"` (binary targets, no
+extra dependency), or `cat_encoding="none"` after pre-encoding categoricals
+upstream.
 
 ### `catboost` import errors
 
@@ -38,10 +41,17 @@ Evaluate-mode auto-k always needs a held-out split, so pass either `time=...`,
 require that context:
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import AutoKConfig, select_cefsplus
 
-config = AutoKConfig(k_method="elbow", min_k=5, max_k=80)
-select_cefsplus(X, y, k="auto", auto_k_config=config)
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+
+config = AutoKConfig(k_method="elbow", min_k=2, max_k=10)
+select_cefsplus(X, y, k="auto", auto_k_config=config, verbose=False)
 ```
 
 ### `ValueError: auto-k evaluate with strategy='time_holdout' requires time parameter`
@@ -59,9 +69,9 @@ Auto-k support depends on the selector route:
 | Route | Supported `k_method` |
 | --- | --- |
 | Classic mRMR/JMI/JMIM | `evaluate` |
-| Gaussian mRMR/JMI/JMIM | `evaluate`, `elbow`, `gaussian_cv`, `xfit_objective`, `stability` |
-| CEFS+ | `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `chi2_stop`, `forward_stop`, `changepoint`, `perm_gap`, `knockoff_path`, `gaussian_cv`, `xfit_objective`, `stability`, `consensus` |
-| Binary CEFS+ | `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `changepoint` |
+| Gaussian mRMR/JMI/JMIM | `auto`, `evaluate`, `elbow`, `gaussian_cv`, `xfit_objective`, `stability` |
+| CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `chi2_stop`, `forward_stop`, `changepoint`, `perm_gap`, `knockoff_path`, `gaussian_cv`, `xfit_objective`, `stability`, `consensus` |
+| Binary CEFS+ | `auto`, `evaluate`, `elbow`, `penalized_objective`, `k_posterior`, `changepoint` |
 
 Pick a supported mode or switch selectors.
 
@@ -76,16 +86,33 @@ Function-style selectors only support `auto_k_mode="prefix_only"`. Drop the
 ### `ValueError: cat_encoding='loo' fits a supervised categorical encoder on the full dataset…`
 
 Function-style selectors block full-data target encoding by default to avoid
-leakage. Two safe options:
+leakage. The first fix is usually to switch encoders: `cat_encoding="target_cv"`
+is SIFT's own cross-fitted, fold-centered encoder, needs no optional dependency,
+and takes no opt-in flag because it cannot leak the way a full-data fit does.
 
-- **Opt in explicitly** (only when leakage is handled externally):
-  ```python
-  select_mrmr(X, y, k=20, task="regression",
-              cat_encoding="loo", allow_full_data_target_encoding=True)
-  ```
-- **Pre-encode in a leakage-safe pipeline**, then pass `cat_encoding="none"`.
+```python
+import numpy as np
+import pandas as pd
 
-This applies to `"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"`.
+from sift import select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 8)), columns=[f"x{i}" for i in range(8)])
+X["league"] = rng.choice(["nba", "wnba", "gleague"], size=len(X))
+league_effect = X["league"].map({"nba": 2.0, "wnba": 0.0, "gleague": -2.0})
+y = league_effect + 1.5 * X["x0"] + rng.normal(scale=0.3, size=len(X))
+
+select_mrmr(X, y, k=4, task="regression", cat_encoding="target_cv", verbose=False)
+```
+
+The two other safe options are to **opt in explicitly** with
+`allow_full_data_target_encoding=True`, only when leakage is handled outside
+SIFT, or to **pre-encode in a leakage-safe pipeline** and then pass
+`cat_encoding="none"`.
+
+The block applies to `"target"`, `"loo"`, `"james_stein"`, and `"loo_logit"`.
+It does not apply to `"target_cv"`, which instead *rejects*
+`allow_full_data_target_encoding=True` as contradictory.
 
 ### `TypeError: cat_features/cat_encoding require X to be a pandas DataFrame`
 
@@ -97,8 +124,8 @@ with column names before passing `cat_features` / `cat_encoding`.
 Boruta and the Gaussian cache cannot consume object/string/category columns
 directly. Either:
 
-- Pass `cat_encoding="loo"` (or another supported encoder) to BorutaSelector,
-  or
+- Pass `cat_encoding="target_cv"` (or another supported encoder) to
+  BorutaSelector, or
 - Encode categoricals upstream and pass numeric data.
 
 For `BorutaSelector(importance_data="test")`, supervised categorical encodings
@@ -145,7 +172,19 @@ return fewer than `k` features (including zero). If you want a fixed-size
 ranking regardless of `threshold`, take the top frequencies yourself:
 
 ```python
-selector = StabilitySelector(task="regression", threshold=0.6, max_features=None)
+import numpy as np
+import pandas as pd
+
+from sift import StabilitySelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+k = 5
+
+selector = StabilitySelector(
+    task="regression", threshold=0.6, max_features=None, random_state=0, verbose=False
+)
 selector.fit(X, y)
 order = np.argsort(-selector.selection_frequencies_)
 top_k = [selector.feature_names_in_[i] for i in order[:k]]

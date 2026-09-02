@@ -12,15 +12,23 @@ future rows influence past rows.
 ### Auto-k with a Time Holdout
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import AutoKConfig, select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+timestamps = np.arange(len(X))  # replace with the real chronological key
 
 config = AutoKConfig(
     k_method="evaluate",
     strategy="time_holdout",
     val_frac=0.2,
     metric="rmse",
-    max_k=100,
-    min_k=5,
+    max_k=10,
+    min_k=2,
 )
 
 selected = select_mrmr(
@@ -44,7 +52,16 @@ split. Timestamps must be non-missing and mutually orderable.
 ### Stability Selection with Blocks
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import StabilitySelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+entity_ids = np.repeat(np.arange(20), 10)
+timestamps = np.tile(np.arange(10), 20)
 
 selector = StabilitySelector(
     n_bootstrap=50,
@@ -53,6 +70,7 @@ selector = StabilitySelector(
     block_size="auto",
     block_method="moving",    # "moving", "circular", or "stationary"
     random_state=0,
+    verbose=False,
 )
 
 selector.fit(X, y, groups=entity_ids, time=timestamps)
@@ -66,7 +84,18 @@ Time values must be non-missing and orderable within each group.
 ### Time-Aware Permutation Importance
 
 ```python
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+
 from sift import permutation_importance
+
+rng = np.random.default_rng(0)
+X_test = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+y_test = 2.0 * X_test["x0"] - 1.5 * X_test["x1"] + rng.normal(scale=0.3, size=len(X_test))
+entity_ids = np.repeat(np.arange(20), 10)
+timestamps = np.tile(np.arange(10), 20)
+model = Ridge().fit(X_test, y_test)
 
 importance = permutation_importance(
     model,
@@ -92,7 +121,15 @@ group-aware behavior.
 ### Group CV for Auto-k
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import AutoKConfig, select_jmi
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+entity_ids = np.repeat(np.arange(20), 10)
 
 config = AutoKConfig(
     k_method="evaluate",
@@ -115,11 +152,22 @@ selected = select_jmi(
 ### Group-Aware Stability
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import StabilitySelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+entity_ids = np.repeat(np.arange(20), 10)
+
 selector = StabilitySelector(
     n_bootstrap=50,
     threshold=0.6,
     task="regression",
     random_state=0,
+    verbose=False,
 )
 
 selector.fit(X, y, groups=entity_ids)
@@ -130,23 +178,39 @@ block bootstrap.
 
 ### CatBoost with Grouped Splits
 
+<!-- sift-doc: requires=catboost -->
+
 ```python
+import numpy as np
+import pandas as pd
 from sklearn.model_selection import GroupKFold
+
 import sift
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 10)), columns=[f"x{i}" for i in range(10)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + rng.normal(scale=0.3, size=len(X))
+X["entity_id"] = np.repeat(np.arange(20), 10)
 
 result = sift.catboost_select(
     X,
     y,
     task="regression",
-    k=20,
+    k=5,
+    min_features=2,
+    n_estimators=50,
     cv=GroupKFold(n_splits=5),
     group_col="entity_id",
     algorithm="forward",
+    random_state=0,
+    verbose=False,
 )
 ```
 
 CatBoost helpers accept sklearn-compatible CV splitters and can read group
-labels from a column in `X`.
+labels from a column in `X`. `group_col` and `sample_weight_col` are permanent
+aliases for the trailing `groups`/`sample_weight` arrays; neither spelling is
+deprecated and neither warns.
 
 ## Automatic Feature Counts
 
@@ -195,7 +259,15 @@ Function selectors use prefix-only mode. Selector classes can use nested mode
 where implemented, which fits a train-only path inside each validation fold.
 
 ```python
-from sift import MRMRSelector, AutoKConfig
+import numpy as np
+import pandas as pd
+
+from sift import AutoKConfig, MRMRSelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+entity_ids = np.repeat(np.arange(20), 10)
 
 selector = MRMRSelector(
     k="auto",
@@ -220,12 +292,22 @@ Smart sampling reduces large data before selection while keeping influential
 rows and preserving group/time anchors.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import panel_config, smart_sample
+
+rng = np.random.default_rng(0)
+feature_cols = [f"x{i}" for i in range(10)]
+df = pd.DataFrame(rng.normal(size=(200, 10)), columns=feature_cols)
+df["entity_id"] = np.repeat(np.arange(20), 10)
+df["timestamp"] = np.tile(np.arange(10), 20)
+df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.normal(scale=0.3, size=len(df))
 
 config = panel_config(
     group_col="entity_id",
     time_col="timestamp",
-    sample_frac=0.15,
+    sample_frac=0.3,
 )
 
 sampled = smart_sample(
@@ -233,21 +315,37 @@ sampled = smart_sample(
     feature_cols=feature_cols,
     y_col="target",
     config=config,
+    verbose=False,
 )
 ```
 
-For stability selection:
+For stability selection, name the feature subset explicitly: the sampler needs
+the group and time columns to stay in the frame, and `feature_names` is what
+keeps them (and the target) out of the candidate set.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import StabilitySelector, panel_config
+
+rng = np.random.default_rng(0)
+feature_cols = [f"x{i}" for i in range(10)]
+df = pd.DataFrame(rng.normal(size=(200, 10)), columns=feature_cols)
+df["entity_id"] = np.repeat(np.arange(20), 10)
+df["timestamp"] = np.tile(np.arange(10), 20)
+y = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.normal(scale=0.3, size=len(df))
 
 selector = StabilitySelector(
     threshold=0.6,
+    n_bootstrap=20,
     use_smart_sampler=True,
-    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.15),
+    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.3),
+    random_state=0,
+    verbose=False,
 )
 
-selector.fit(df, y)
+selector.fit(df, y, feature_names=feature_cols)
 ```
 
 Do not pass external `sample_weight` with `use_smart_sampler=True`; the sampler
@@ -258,7 +356,17 @@ creates weights for the retained rows.
 Use `build_cache` when the same `X` feeds many target vectors.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import build_cache, select_cached
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+weights = np.ones(len(X))
+y1 = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
+y2 = X.iloc[:, 8:].sum(axis=1) + rng.normal(size=len(X))
+y3 = X.iloc[:, 4:16].sum(axis=1) + rng.normal(size=len(X))
 
 cache = build_cache(
     X,
@@ -268,9 +376,9 @@ cache = build_cache(
     random_state=0,
 )
 
-first = select_cached(cache, y1, k=20, method="cefsplus")
-second = select_cached(cache, y2, k=20, method="jmi")
-third = select_cached(cache, y3, k=20, method="mrmr_quot")
+first = select_cached(cache, y1, k=8, method="cefsplus")
+second = select_cached(cache, y2, k=8, method="jmi")
+third = select_cached(cache, y3, k=8, method="mrmr_quot")
 ```
 
 A cache stores row subsampling, weights, feature names, valid columns, and the
@@ -284,12 +392,14 @@ rebuild the cache with the desired rows, weights, or construction seed.
 new knockoff draw, as in the example below. Its `subsample` argument must be
 omitted and its sample weights must already be stored in the cache.
 
-`select_fdr` also accepts a cache:
+`select_fdr` also accepts the cache built just above:
+
+<!-- sift-doc: continues -->
 
 ```python
 from sift import select_fdr
 
-result = select_fdr(cache=cache, y=y, q=0.1, random_state=0, verbose=False)
+result = select_fdr(cache=cache, y=y1, q=0.1, random_state=0, verbose=False)
 ```
 
 With a cache, `subsample` must be omitted and sample weights must already be in
@@ -301,7 +411,14 @@ Use knockoffs when a q-calibrated discovery set is more useful than a fixed
 feature count.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import select_fdr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
 
 result = select_fdr(
     X,
@@ -320,7 +437,7 @@ Review these metadata fields:
 
 | Field | Meaning |
 | --- | --- |
-| `fdr_control` | `"approximate_plugin"` in the default 0.7.0 path |
+| `fdr_control` | `"approximate_plugin"` in the default 0.9 path |
 | `validity_model` | `"gaussian_copula_plugin"` |
 | `weighted_model` | Whether non-uniform cache weights were used |
 | `gamma` | Covariance shrinkage applied before sampling |
@@ -331,6 +448,15 @@ Review these metadata fields:
 ### Derandomized Knockoffs
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_fdr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
+
 result = select_fdr(
     X,
     y,
@@ -349,13 +475,22 @@ but remains part of the approximate plug-in contract.
 ### CEFS+ Knockoff Statistic
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_fdr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
+
 result = select_fdr(
     X,
     y,
     q=0.1,
     statistic="cefsplus",
-    statistic_options={"path_depth": 25, "min_gain_ratio": 1e-4},
-    screen_pairs=1000,
+    statistic_options={"path_depth": 16, "min_gain_ratio": 1e-4},
+    screen_pairs=200,
     random_state=0,
     verbose=False,
 )
@@ -369,7 +504,17 @@ may be binding.
 ### Feature Groups
 
 ```python
-groups = ["base_a", "base_a", "base_b", "base_b", "standalone"]
+import numpy as np
+import pandas as pd
+
+from sift import select_fdr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
+
+# One label per column of X, in column order.
+groups = ["base_a", "base_a", "base_b", "base_b"] + [f"standalone_{i}" for i in range(16)]
 
 result = select_fdr(
     X,
@@ -389,7 +534,14 @@ group discovery, not exact feature-level FDR within each selected group.
 ### KnockoffSelector
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift import KnockoffSelector
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
 
 selector = KnockoffSelector(q=0.1, random_state=0, verbose=False)
 selector.fit(X, y)
@@ -408,30 +560,71 @@ stream.
 
 ## Categorical Features
 
-Function selectors support explicit categorical configuration:
+`cat_encoding="target_cv"` is the recommended path. It is SIFT's own
+cross-fitted encoder, it needs no optional dependency, and it is leakage-safe by
+construction, so it takes no opt-in flag:
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 8)), columns=[f"x{i}" for i in range(8)])
+X["league"] = rng.choice(["nba", "wnba", "gleague"], size=len(X))
+X["position"] = rng.choice(["guard", "wing", "big"], size=len(X))
+league_effect = X["league"].map({"nba": 2.0, "wnba": 0.0, "gleague": -2.0})
+y = league_effect + 1.5 * X["x0"] + rng.normal(scale=0.3, size=len(X))
+
 selected = select_mrmr(
     X,
     y,
-    k=20,
+    k=4,
     task="regression",
     cat_features=["league", "position"],
-    cat_encoding="loo",
-    allow_full_data_target_encoding=True,
+    cat_encoding="target_cv",
     verbose=False,
 )
 ```
+
+`target_cv` emits **centered category effects**, not raw category means: out-of-fold
+training rows emit `fold_encoding - fold_training_prior` and inference rows emit
+`full_fit_encoding - full_training_prior`. An unknown or unseen category maps to
+a zero centered effect. That is what closes the fold-marker leak: a unique ID, a
+group proxy, or a timestamp proxy never appears in its own fold's training rows,
+so it emits a constant zero, carries zero relevance, and cannot be selected
+ahead of a real feature.
+
+**Know the boundary of that guarantee.** Centering neutralizes only
+*unseen-in-fold* emissions; it is not a defence against high cardinality as
+such. A level that appears two or more times in a fold's training rows still
+transmits those sibling rows' targets — ordinary target-encoding behavior — so a
+*near*-unique identifier stays selectable when its rows share a latent target.
+On a 300-identifier fixture with two rows each, `corr(enc(id), y)` is about 0.88
+and `select_mrmr(k=2)` picks `id` first. That is genuine cross-row information
+rather than leakage, so the numerics are deliberately unchanged. If it must not
+reach selection, drop ID-like columns, or pass `groups=` so all of an
+identifier's rows land in the same fold — under `groups=` the same column
+encodes to exactly zero.
 
 Encoding options:
 
 | Encoding | Notes |
 | --- | --- |
+| `target_cv` | Built-in cross-fitted, fold-centered target encoding; no extra dependency, no opt-in flag |
 | `none` | Input must already be numeric |
 | `loo` | Leave-one-out encoding via `category_encoders` |
 | `target` | Target encoding via `category_encoders` |
 | `james_stein` | Shrinkage encoding via `category_encoders` |
 | `loo_logit` | Built-in binary-target leave-one-out logit encoding |
+
+The four supervised encoders in that table — `loo`, `target`, `james_stein`,
+and `loo_logit` — fit on the full dataset, so a function-style selector refuses
+them until you pass `allow_full_data_target_encoding=True`. That flag is in turn
+rejected alongside `target_cv`, which is cross-fitted by construction.
+`KnockoffSelector` rejects `target_cv` outright, because target-derived
+preprocessing breaks the Model-X FDR claim.
 
 Selector classes default to `cat_encoding="none"`. For selector classes, use
 `cat_encoding` on the estimator constructor. If a
@@ -444,13 +637,22 @@ Sample weights are accepted by the main function selectors, stability
 selection, permutation importance, Boruta paths, and cache construction.
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import select_cefsplus
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+
 weights = np.ones(len(y))
 weights[-100:] = 2.0
 
 selected = select_cefsplus(
     X,
     y,
-    k=20,
+    k=6,
     sample_weight=weights,
     verbose=False,
 )
@@ -472,12 +674,20 @@ several diagnostics before settling on a production feature set.
 
 ```python
 from collections import Counter
-from sift import select_mrmr, select_jmi, select_cefsplus, select_fdr
+
+import numpy as np
+import pandas as pd
+
+from sift import select_cefsplus, select_fdr, select_jmi, select_mrmr
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(300, 20)), columns=[f"x{i}" for i in range(20)])
+y = X.iloc[:, :12].sum(axis=1) + rng.normal(size=len(X))
 
 paths = [
-    select_mrmr(X, y, k=30, task="regression", verbose=False),
-    select_jmi(X, y, k=30, task="regression", verbose=False),
-    select_cefsplus(X, y, k=30, verbose=False),
+    select_mrmr(X, y, k=10, task="regression", verbose=False),
+    select_jmi(X, y, k=10, task="regression", verbose=False),
+    select_cefsplus(X, y, k=10, verbose=False),
 ]
 
 knockoff = select_fdr(X, y, q=0.1, random_state=0, verbose=False)
