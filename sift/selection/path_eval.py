@@ -32,7 +32,91 @@ Scoring = str | Callable[[np.ndarray, np.ndarray, np.ndarray], float]
 
 @dataclass(frozen=True)
 class FeaturePathEvaluationResult:
-    """Result of explicit feature-path evaluation."""
+    """Result of explicit feature-path evaluation.
+
+    Returned by ``evaluate_feature_path``, the explicit counterpart to the
+    ``AutoKConfig`` rules: instead of choosing a ``k_method``, the caller
+    supplies the ordered path, the exact k grid, the estimator, and the
+    scoring, and gets the whole curve back. It is a predictive-sufficiency
+    object -- every number in it is an out-of-sample score of a fitted model,
+    on a lower-is-better scale -- so it answers "how many of these features
+    does this model need", not "which features carry conditional signal".
+
+    The dataclass is frozen: treat every field as read-only, and build a
+    different result rather than mutating one. ``diagnostics`` is a plain
+    DataFrame and is not copied, so it is the one field that can be edited in
+    place; do not.
+
+    Attributes
+    ----------
+    feature_path : list of str
+        The ordered path as resolved against the input columns: string names
+        matched to the first column with that label, integer entries resolved
+        positionally, and repeats of an already-resolved position dropped
+        while keeping first-seen order. It can therefore be shorter than the
+        ``feature_path`` argument that produced it.
+    k : list of int
+        Evaluated prefix sizes, in the order given, deduplicated. Every entry
+        is at least 1 and at most ``len(feature_path)``.
+    features : list of str
+        The first ``best_k`` names of ``feature_path``; empty when
+        ``best_k == 0``.
+    scores : mapping of int to float
+        Mean validation score per evaluated k, lower is better. A k that
+        produced a non-finite score on any split is recorded as ``inf`` so it
+        cannot win on partial coverage. Estimator-style sklearn scorers are
+        negated into this scale.
+    best_k : int
+        The k with the smallest finite mean score, ties broken toward the
+        smaller k; ``0`` when no k scored finitely.
+    diagnostics : DataFrame
+        One row per evaluated k with ``k``, ``score`` (the mean), ``std``
+        (population standard deviation across splits, NaN with a single
+        finite split), ``n_finite``, ``n_splits``, ``best_score``, and
+        ``scoring`` (the metric name, the sklearn scorer label, or a
+        ``legacy:module.qualname`` tag for a plain callable).
+
+    Methods
+    -------
+    result_view(input_features=None)
+        Return an additive ``SelectionView`` over this result without
+        changing it. ``input_features`` names the original input columns when
+        they cannot be recovered from the result itself.
+
+    See Also
+    --------
+    evaluate_feature_path : Produces this object.
+    select_k_auto : The ``AutoKConfig(k_method='evaluate')`` rule, which picks
+        its own k grid and proxy model.
+    select_k_gaussian_cv : Model-free predictive-risk curve over every k.
+
+    Notes
+    -----
+    ``best_k`` is recomputed by ``result_view`` and by
+    ``sift.selection.view.as_result``, which validate that it agrees with
+    ``scores`` and ``diagnostics``; a hand-assembled instance whose fields
+    disagree is rejected there rather than silently normalized.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import evaluate_feature_path
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(120, 3)), columns=list("abc"))
+    >>> y = X["a"] + 0.6 * X["b"] + 0.8 * rng.normal(size=120)
+    >>> result = evaluate_feature_path(
+    ...     X, y.to_numpy(), ["a", "b", "c"], [1, 2, 3], random_state=0
+    ... )
+    >>> result.best_k, result.features
+    (2, ['a', 'b'])
+    >>> result.k, sorted(result.scores)
+    ([1, 2, 3], [1, 2, 3])
+    >>> result.diagnostics["scoring"].iloc[0]
+    'rmse'
+    >>> view = result.result_view()
+    >>> view.k, view.features
+    (2, ['a', 'b'])
+    """
 
     feature_path: List[str]
     k: List[int]
@@ -396,8 +480,8 @@ def evaluate_feature_path(
     estimator : estimator, optional
         Reusable sklearn-like estimator template to clone per (split, k).
     estimator_factory : callable, optional
-        Factory called to create one estimator per (split, k). If provided,
-        ``estimator`` is not used.
+        Factory called to create one estimator per (split, k). Mutually
+        exclusive with ``estimator``; supplying both raises ``ValueError``.
     scoring : {'rmse', 'mae'}, sklearn scorer object, or callable
         Lower-is-better scoring. Callable signature is
         ``scoring(y_true, y_pred, sample_weight)``.

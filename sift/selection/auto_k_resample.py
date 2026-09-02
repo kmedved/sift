@@ -74,7 +74,107 @@ def null_objective_paths(
     corr_prune,
     random_state: int,
 ) -> np.ndarray:
-    """Build permutation-null CEFS+ objective paths, extended flat to max_k."""
+    """Build permutation-null CEFS+ objective paths, extended flat to max_k.
+
+    This is the null-calibration half of ``AutoKConfig(k_method="perm_gap")``:
+    it reruns the whole CEFS+ greedy against ``B`` permuted targets so the
+    real objective curve can be compared with the curve the same pipeline
+    produces when there is nothing to find. Use it whenever the analytic
+    Gaussian null behind ``chi2_stop`` is suspect -- skewed weights, awkward
+    copulas, grouped or autocorrelated rows -- or to plot a null envelope on
+    its own. It is a discovery quantity; it says nothing about predictive
+    risk.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Duplicate
+        non-synthetic feature names are rejected. A cached ``Rxx`` makes each
+        permutation a cheap slice; without one every permutation pays a
+        ``top_m``-wide weighted correlation, so prefer ``compute_Rxx=True``
+        for moderate p.
+    y : array-like of shape (n_rows_original,)
+        Target aligned to the original rows, not to the cached subsample.
+    B : int
+        Number of null replicates; one row of the result per replicate.
+    max_k : int
+        Path depth for every null run and the column count of the result.
+    null : {'auto', 'permute', 'circular_shift', 'within_group'}
+        Null construction. ``'permute'`` is an iid permutation of ``y``;
+        ``'circular_shift'`` requires ``time`` and preserves autocorrelation;
+        ``'within_group'`` requires ``groups`` and preserves group effects;
+        ``'auto'`` resolves to circular shift with ``time``, within-group with
+        ``groups``, and plain permutation otherwise.
+    time : array-like of shape (n_rows_original,), optional
+        Row timestamps, required by ``null='circular_shift'``.
+    groups : array-like of shape (n_rows_original,), optional
+        Group labels, required by ``null='within_group'``.
+    top_m : int
+        Screening width for the per-permutation candidate panel. The screen is
+        y-dependent, so it is redone for every null target.
+    corr_prune : float, None, or {'auto'}
+        Correlation-pruning threshold forwarded to the panel builder, matching
+        the real run's setting.
+    random_state : int
+        Seed for the permutation streams; replicate ``b`` uses the ``b``-th
+        child of ``SeedSequence(random_state)``, so results are reproducible
+        and independent across replicates.
+
+    Returns
+    -------
+    null_paths : ndarray of shape (B, max_k)
+        Cumulative null objective per replicate. A run that exhausts its
+        candidates before ``max_k`` is extended flat with its last value; a
+        replicate that produced no objective at all stays all zeros.
+
+    Raises
+    ------
+    ValueError
+        If ``y``, ``groups``, or ``time`` do not match the cache's original
+        row count; if ``null`` is not one of the four accepted values; if
+        ``'within_group'`` is requested without ``groups`` or
+        ``'circular_shift'`` without ``time``; or if the cache fails its
+        structural contract or carries duplicate feature names.
+
+    See Also
+    --------
+    select_k_perm_gap : Consumes these paths.
+    bootstrap_paths : Same replicate scaffolding for stability selection.
+    path_gain_pvalues : Analytic alternative to this empirical null.
+
+    Notes
+    -----
+    The raw target is permuted *before* the cache row subsample is taken and
+    before the rank-Gauss transform, because ranks are weight-dependent and a
+    shift applied after subsampling would destroy the time structure the null
+    is supposed to preserve. Each replicate also re-screens and re-prunes its
+    own panel: reusing the real-y panel would understate the null maximum and
+    inflate the gap. Cost is roughly ``B`` times one rank transform, one
+    correlation-with-target, a panel slice, and the greedy loop.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import build_cache, null_objective_paths
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> nulls = null_objective_paths(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     B=5,
+    ...     max_k=3,
+    ...     null="permute",
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     random_state=0,
+    ... )
+    >>> nulls.shape
+    (5, 3)
+    >>> bool(np.all(np.diff(nulls, axis=1) >= 0.0))
+    True
+    """
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
     y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
@@ -131,7 +231,100 @@ def select_k_perm_gap(
     null_paths: np.ndarray,
     config: AutoKConfig,
 ) -> tuple[int, pd.DataFrame]:
-    """Select k by comparing the real objective curve to permutation null paths."""
+    """Select k by comparing the real objective curve to permutation null paths.
+
+    This is the rule behind ``AutoKConfig(k_method="perm_gap")`` and the
+    router's choice under heavy weight skew. It is Tibshirani's gap statistic
+    moved from clustering onto a selection path: the gap
+    ``Gap(k) = obj(k) - mean_b obj_b(k)`` rises while signal remains and goes
+    flat once the real greedy is picking the same kind of maxima a null run
+    would. Because the null is generated by the same pipeline, it stays
+    calibrated where the analytic F/chi-square null of ``chi2_stop`` breaks --
+    skewed weights, awkward copulas, grouped or autocorrelated rows. Its
+    target is support recovery, not predictive sizing.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Real cumulative CEFS+ objective, indexed from ``k=1``. Truncated to
+        ``config.max_k``.
+    null_paths : ndarray of shape (B, L_null)
+        Permutation-null objective curves, one row per replicate, as returned
+        by ``null_objective_paths``. The comparison length is
+        ``min(L, L_null, config.max_k)``.
+    config : AutoKConfig
+        Must have ``k_method='perm_gap'``. Reads ``gap_rule``, ``min_k``,
+        ``max_k``, and -- only under ``gap_rule='gain_envelope'`` -- ``alpha``
+        and ``stop_patience``. ``perm_B`` and ``perm_null`` are consumed
+        upstream by ``null_objective_paths``, not here.
+
+    Returns
+    -------
+    selected_k : int
+        Prefix length in ``[floor, L]`` where ``floor = min(min_k, L)``. Zero
+        is reachable when ``min_k=0``.
+    diagnostics : DataFrame
+        One row per k in ``0..L`` (the ``k=0`` row anchors both curves at 0)
+        with ``k``, ``objective``, ``null_mean``, ``null_sd``, ``gap``,
+        ``gap_se``, ``selected``, ``perm_B``, and ``gap_rule``. Empty when
+        either curve is empty.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'perm_gap'``.
+
+    See Also
+    --------
+    null_objective_paths : Builds the ``null_paths`` argument.
+    select_k_chi2_stop : Analytic null on the same gain path.
+    select_k_changepoint : Empirical noise floor without permutations.
+    AutoKConfig : ``gap_rule``, ``perm_B``, ``perm_null`` fields.
+
+    Notes
+    -----
+    ``gap_se(k) = sd_b(obj_b(k)) * sqrt(1 + 1/B)`` uses the sample standard
+    deviation over replicates (zero when ``B < 2``). The three rules are:
+    ``'tibshirani'`` (default), the smallest ``k >= floor`` with
+    ``Gap(k) >= Gap(k+1) - gap_se(k+1)``, falling back to the argmax;
+    ``'argmax'``, the largest gap with ties broken toward the smaller k; and
+    ``'gain_envelope'``, which stops at the first run of ``stop_patience``
+    steps whose real gain fails to clear
+    ``mean_b gain_b + z_alpha * sd_b(gain_b)``. Cost here is ``O(B * L)``; the
+    expense of the method lives in building ``null_paths``.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import (
+    ...     AutoKConfig,
+    ...     build_cache,
+    ...     compute_objective_for_path,
+    ...     null_objective_paths,
+    ...     select_k_perm_gap,
+    ... )
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> objective = compute_objective_for_path(cache, y.to_numpy(), ["a", "b", "c"])
+    >>> nulls = null_objective_paths(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     B=5,
+    ...     max_k=3,
+    ...     null="permute",
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     random_state=0,
+    ... )
+    >>> config = AutoKConfig(k_method="perm_gap", min_k=0, max_k=3, perm_B=5)
+    >>> selected_k, diag = select_k_perm_gap(objective, nulls, config)
+    >>> selected_k
+    2
+    >>> diag["gap_rule"].iloc[0], int(diag["perm_B"].iloc[0])
+    ('tibshirani', 5)
+    """
     validate_auto_k_config(config)
     if config.k_method != "perm_gap":
         raise ValueError("select_k_perm_gap requires AutoKConfig(k_method='perm_gap')")
@@ -215,7 +408,102 @@ def bootstrap_paths(
     random_state: int,
     method: str = "cefsplus",
 ) -> list[np.ndarray]:
-    """Return bootstrap CEFS+ paths in cache-valid feature coordinates."""
+    """Return bootstrap CEFS+ paths in cache-valid feature coordinates.
+
+    This is the resampling half of ``AutoKConfig(k_method="stability")``: it
+    reruns the greedy under ``B`` reweightings of the same rows so the
+    *reproducibility* of the selected set can be measured as a function of k.
+    Signals keep entering the path across replicates; the noise tail
+    reshuffles. Call it directly when you want per-feature selection
+    frequencies rather than a k. It is a reliability diagnostic, not a
+    predictive or level-controlled discovery rule.
+
+    Parameters
+    ----------
+    cache : FeatureCache
+        Prebuilt Gaussian-copula cache from ``build_cache``. Duplicate
+        non-synthetic feature names are rejected. A cached ``Rxx`` does not
+        help here: replicate weights change, so each replicate recomputes its
+        own panel correlations.
+    y : array-like of shape (n_rows_original,)
+        Target aligned to the original rows, not to the cached subsample.
+    B : int
+        Number of bootstrap replicates; one path per replicate.
+    max_k : int
+        Path depth per replicate, capped by the candidate count.
+    boot_mode : {'bayes', 'half'}
+        ``'bayes'`` multiplies the cache weights by iid ``Exp(1)`` draws,
+        keeping every row; ``'half'`` zeroes a uniformly chosen half of the
+        rows without replacement.
+    top_m : int
+        Screening width for each replicate-local candidate panel.
+    corr_prune : float, None, or {'auto'}
+        Correlation-pruning threshold forwarded to the panel builder.
+    random_state : int
+        Seed for the replicate streams; replicate ``b`` uses the ``b``-th
+        child of ``SeedSequence(random_state)``.
+    method : str, default 'cefsplus'
+        Greedy selector rerun on each replicate: ``'cefsplus'``,
+        ``'mrmr_quot'``, ``'mrmr_diff'``, ``'jmi'``, or ``'jmim'``.
+        Only ``'cefsplus'`` returns
+        an objective internally; the others return the path alone, which is
+        all this function needs.
+
+    Returns
+    -------
+    paths : list of ndarray
+        ``B`` integer arrays of feature positions in cache-valid coordinates
+        (columns of ``cache.Z``, so indices into ``cache.valid_cols``), each
+        at most ``max_k`` long. A replicate whose weights sum to zero
+        contributes an empty array.
+
+    Raises
+    ------
+    ValueError
+        If ``y`` does not have ``cache.n_rows_original`` rows, if
+        ``boot_mode`` is neither ``'bayes'`` nor ``'half'``, if ``method`` is
+        unknown, or if the cache fails its structural contract or carries
+        duplicate feature names.
+
+    See Also
+    --------
+    select_k_stability : Consumes these paths.
+    null_objective_paths : Same replicate scaffolding for the permutation
+        null.
+    build_cache : Builds the ``FeatureCache`` this expects.
+
+    Notes
+    -----
+    The marginal rank transform in ``cache.Z`` is held fixed and only
+    re-standardized under the replicate weights, the same approximation class
+    as ``xfit_mode='shared_z'``. The dominant cost is one
+    ``top_m``-wide weighted correlation per replicate, so runtime scales as
+    ``B * (panel correlation + greedy)`` and grows with rows rather than with
+    the path depth; keep the cache row subsample in mind for large data.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import bootstrap_paths, build_cache
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> paths = bootstrap_paths(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     B=6,
+    ...     max_k=3,
+    ...     boot_mode="bayes",
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     random_state=0,
+    ... )
+    >>> len(paths), paths[0].shape
+    (6, (3,))
+    >>> sorted({int(path[0]) for path in paths})
+    [0]
+    """
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
     y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
@@ -290,7 +578,110 @@ def select_k_stability(
     p_valid: int,
     config: AutoKConfig,
 ) -> tuple[int, pd.DataFrame]:
-    """Select k from chance-corrected bootstrap path stability."""
+    """Select k from chance-corrected bootstrap path stability.
+
+    This is the rule behind ``AutoKConfig(k_method="stability")``. It is the
+    only auto-k rule whose target is the *reliability of the feature list
+    itself*: k is chosen where the selected set stops being reproducible under
+    data perturbation, using the chance-corrected agreement of Nogueira,
+    Sechidis and Brown (2018). Reach for it when the deliverable is a stable
+    feature list rather than a level-controlled discovery set or a predictive
+    size. It is experimental: it did not clear the Auto-K v2 accuracy gate for
+    automatic sizing, so prefer it as a diagnostic (the per-k stability curve
+    and Jaccard overlap are the useful output) over a default.
+
+    Parameters
+    ----------
+    paths : list of ndarray
+        Bootstrap paths in cache-valid feature coordinates, as returned by
+        ``bootstrap_paths``. The evaluated depth is the shortest path length,
+        capped by ``config.max_k``.
+    p_valid : int
+        Number of valid candidate features, i.e. the width of ``cache.Z``
+        (``len(cache.valid_cols)``). It is the ``p`` in the chance correction,
+        and it caps the identifiable depth at ``p_valid - 1`` because the
+        correction is undefined at ``k = p``.
+    config : AutoKConfig
+        Must have ``k_method='stability'``. Reads ``stability_rule``,
+        ``stability_pi`` (threshold rule only), ``min_k``, and ``max_k``.
+        ``boot_B`` and ``boot_mode`` are consumed upstream by
+        ``bootstrap_paths`` and only echoed into the diagnostics here.
+
+    Returns
+    -------
+    selected_k : int
+        Prefix length. Under ``stability_rule='max_one_se'`` the largest k
+        within one jackknife standard error of peak stability; under
+        ``'pi_threshold'`` the count of features whose selection frequency
+        reaches ``stability_pi``, clamped by the stability plateau and the
+        identifiable depth. ``0`` when no depth is identifiable, or when peak
+        agreement is below the 0.5 floor and ``min_k <= 0``.
+    diagnostics : DataFrame
+        One row per k from 1 to the identifiable depth with ``k``, ``phi``
+        (chance-corrected stability), ``phi_se`` (jackknife over replicates,
+        NaN with fewer than two usable replicates), ``mean_jaccard`` (mean
+        pairwise overlap of the prefix sets), ``selected``, ``boot_B``,
+        ``boot_mode``, ``max_phi``, ``stability_floor_threshold``, and
+        ``stopped_by`` (the rule name, ``'stability_floor'``, or
+        ``'degenerate'``). ``max_phi``, ``stability_floor_threshold``, and
+        ``stopped_by`` are also mirrored into ``diagnostics.attrs``. Empty
+        when ``paths`` is empty or nothing is identifiable.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'stability'``.
+
+    See Also
+    --------
+    bootstrap_paths : Builds the ``paths`` argument.
+    select_k_posterior : Reports uncertainty about k instead of about the set.
+    select_k_perm_gap : Permutation-calibrated discovery alternative.
+    AutoKConfig : ``boot_B``, ``boot_mode``, ``stability_rule``,
+        ``stability_pi``.
+
+    Notes
+    -----
+    With ``pi_j(k)`` the fraction of replicates whose length-k prefix contains
+    feature ``j``, stability is
+    ``phi(k) = 1 - mean_j[B/(B-1) * pi_j (1 - pi_j)] / [(k/p)(1 - k/p)]``:
+    1.0 when every replicate picks the same set, near 0 for independent
+    picks. Peak agreement below ``0.5`` is treated as chance level and returns
+    the zero-capable floor with ``stopped_by='stability_floor'``. Redundant
+    feature blocks depress ``phi`` even when the choice is stable at block
+    level, because within-block members swap between replicates; ``corr_prune``
+    upstream is the mitigation. The scan is ``O(max_k * (B + B^2))`` for the
+    pairwise overlap bookkeeping, plus a jackknife over replicates per k.
+
+    Examples
+    --------
+    >>> import numpy as np, pandas as pd
+    >>> from sift import AutoKConfig, bootstrap_paths, build_cache, select_k_stability
+    >>> rng = np.random.default_rng(0)
+    >>> X = pd.DataFrame(rng.normal(size=(200, 6)), columns=list("abcdef"))
+    >>> y = X["a"] + 0.7 * X["b"] + 0.2 * rng.normal(size=200)
+    >>> cache = build_cache(X, compute_Rxx=True)
+    >>> paths = bootstrap_paths(
+    ...     cache,
+    ...     y.to_numpy(),
+    ...     B=6,
+    ...     max_k=3,
+    ...     boot_mode="bayes",
+    ...     top_m=6,
+    ...     corr_prune=None,
+    ...     random_state=0,
+    ... )
+    >>> config = AutoKConfig(
+    ...     k_method="stability", min_k=1, max_k=3, boot_B=6
+    ... )
+    >>> selected_k, diag = select_k_stability(paths, len(cache.valid_cols), config)
+    >>> selected_k
+    2
+    >>> diag["stopped_by"].iloc[0]
+    'max_one_se'
+    >>> [round(float(value), 2) for value in diag["phi"]]
+    [1.0, 1.0, 0.64]
+    """
     validate_auto_k_config(config)
     if config.k_method != "stability":
         raise ValueError("select_k_stability requires AutoKConfig(k_method='stability')")

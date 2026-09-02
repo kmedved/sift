@@ -113,7 +113,86 @@ def path_gain_pvalues(
     m_mode: str = "all",
     panel_eigs: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Return Sidak-corrected max-gain p-values for each evaluated path step."""
+    """Return Sidak-corrected max-gain p-values for each evaluated path step.
+
+    This is the shared inference primitive behind
+    ``AutoKConfig(k_method="chi2_stop")`` and
+    ``AutoKConfig(k_method="forward_stop")``: both rules threshold exactly
+    this p-value sequence, differing only in how they turn it into a stop.
+    Call it directly when you want the evidence curve itself -- to plot where
+    the path stops carrying conditional signal, or to feed a custom stopping
+    rule. It is a discovery quantity (is the next step distinguishable from
+    noise?), not a predictive one, and it costs nothing beyond the path.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative CEFS+ objective after each path step. Step gains are the
+        first difference, floored at 0, with ``gain[0] = obj[0]``.
+    n_eff : float
+        Effective sample size behind the objective, typically the Kish size
+        ``(sum w)^2 / sum w^2``. Must be finite and > 2; it also caps the
+        evaluated path at ``floor(n_eff) - 2`` steps, past which the partial
+        correlation has no residual degrees of freedom.
+    p_candidates : int
+        Number of candidate features before screening or pruning; positive.
+        Drives the multiplicity correction.
+    m_mode : {'all', 'panel', 'li_ji'}, default 'all'
+        Effective test count per step. ``'all'`` uses ``p - t + 1``
+        (conservative, and correct at step 1 because the top-m screen already
+        maximized over all p). ``'panel'`` and ``'li_ji'`` fall back to that
+        same count unless usable ``panel_eigs`` are supplied.
+    panel_eigs : ndarray, optional
+        Eigenvalues of the candidate panel correlation matrix, used only by
+        ``m_mode='li_ji'``. Ignored when None, empty, or non-finite, in which
+        case ``'li_ji'`` degrades to the ``'all'`` count.
+
+    Returns
+    -------
+    p_max : ndarray of shape (n_steps,)
+        Sidak-corrected p-value for each evaluated step ``k = 1..n_steps``,
+        where ``n_steps = min(L, floor(n_eff) - 2)``. Empty when the path is
+        empty or the degrees-of-freedom cap leaves no evaluable step.
+
+    Raises
+    ------
+    ValueError
+        If ``n_eff`` is not finite and > 2, or if ``p_candidates`` < 1.
+
+    See Also
+    --------
+    select_k_chi2_stop : First-failure stop on these p-values.
+    select_k_forward_stop : FDR-flavored accumulation stop on these p-values.
+    select_k_perm_gap : Empirical permutation null when the analytic null is
+        untrustworthy.
+
+    Notes
+    -----
+    The single-candidate p-value at step ``t`` is
+    ``SF_{F(1, nu_t)}(nu_t * (exp(gain_t) - 1))`` with
+    ``nu_t = n_eff - t - 1``, the exact Gaussian test for the partial
+    correlation the greedy step just added. The greedy took a maximum over
+    ``m_eff`` remaining candidates, so the reported value is the Sidak
+    correction ``1 - (1 - p)^m_eff``, evaluated in log space for tiny p. Note
+    that ``corr_prune`` removes near-duplicates before that maximum; their
+    statistics are almost perfectly correlated with the retained features, so
+    the effective count is essentially unchanged and no adjustment is made.
+    Cost is ``O(L)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import path_gain_pvalues
+    >>> gains = np.concatenate([np.full(4, 0.15), np.full(26, 0.002)])
+    >>> objective = np.cumsum(gains)
+    >>> pvalues = path_gain_pvalues(objective, n_eff=200.0, p_candidates=50)
+    >>> pvalues.shape
+    (30,)
+    >>> np.round(pvalues[:4], 3)
+    array([0., 0., 0., 0.])
+    >>> np.round(pvalues[4:8], 3)
+    array([1., 1., 1., 1.])
+    """
     frame = _gain_test_frame(
         objective_path,
         n_eff=n_eff,
@@ -132,7 +211,96 @@ def select_k_chi2_stop(
     p_candidates: int,
     panel_eigs: np.ndarray | None = None,
 ) -> tuple[int, pd.DataFrame]:
-    """Stop at the first patience-smoothed non-significant max-gain run."""
+    """Stop at the first patience-smoothed non-significant max-gain run.
+
+    This is the rule behind ``AutoKConfig(k_method="chi2_stop")`` and the
+    ``AutoKConfig.discovery(alpha)`` preset. It is the calibrated elbow: each
+    path step is tested as a maximum over the remaining candidates, and the
+    path stops just before the first run of ``stop_patience`` consecutive
+    non-significant steps. Its target is support recovery with an
+    interpretable level, so it fits discovery work; it under-selects in dense
+    weak-signal regimes where every effect is individually tiny, and it is not
+    a predictive-sizing rule. For an alpha to mean anything, pair it with
+    ``min_k=0`` so a no-signal path can return nothing.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative CEFS+ objective after each path step. Truncated to
+        ``config.max_k`` before testing.
+    config : AutoKConfig
+        Must have ``k_method='chi2_stop'``. Reads ``alpha``, ``m_mode``,
+        ``stop_patience``, ``min_k``, and ``max_k``.
+    n_eff : float
+        Effective sample size behind the objective; finite and > 2. Also caps
+        the evaluated path at ``floor(n_eff) - 2`` steps.
+    p_candidates : int
+        Number of candidate features before screening or pruning; positive.
+    panel_eigs : ndarray, optional
+        Candidate-panel correlation eigenvalues, used only when
+        ``config.m_mode='li_ji'``.
+
+    Returns
+    -------
+    selected_k : int
+        Prefix length. The step before the first confirmed non-significant
+        run, raised to the effective floor ``min(min_k, max evaluated k)``;
+        the largest evaluated k when no such run occurs; ``0`` when no step is
+        evaluable.
+    diagnostics : DataFrame
+        One row per evaluated step with ``k``, ``objective``, ``gain``,
+        ``F_stat``, ``nu``, ``m_eff``, ``p_single``, ``p_max``,
+        ``stat_max_k``, ``significant``, ``selected``, ``alpha``, ``m_mode``,
+        ``n_eff``, and ``stopped_by`` (``'test'``, ``'floored'`` when the
+        floor overrode the test, or ``'max_k'``). Empty when no step is
+        evaluable.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'chi2_stop'``, if ``n_eff`` is not
+        finite and > 2, or if ``p_candidates`` < 1.
+
+    See Also
+    --------
+    path_gain_pvalues : The p-value sequence this thresholds.
+    select_k_forward_stop : Averages the same p-values instead of stopping at
+        the first failure.
+    select_k_changepoint : Empirical noise floor instead of an analytic null.
+    select_k_perm_gap : Permutation null for weighted or copula-awkward data.
+
+    Notes
+    -----
+    Patience exists because greedy ordering is not monotone in signal: a
+    masked signal can enter after a null feature, and ``stop_patience=2``
+    recovers those at bounded cost. The analytic null assumes the Gaussian
+    partial-correlation F identity; when weights or the copula transform make
+    that suspect, cross-check against ``select_k_perm_gap``, which calibrates
+    the same curve empirically. Cost is ``O(L)`` on top of the path.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import AutoKConfig, select_k_chi2_stop
+    >>> gains = np.concatenate([np.full(4, 0.15), np.full(26, 0.002)])
+    >>> objective = np.cumsum(gains)
+    >>> config = AutoKConfig(k_method="chi2_stop", min_k=0, max_k=30)
+    >>> selected_k, diag = select_k_chi2_stop(
+    ...     objective, config, n_eff=200.0, p_candidates=50
+    ... )
+    >>> selected_k
+    4
+    >>> diag["stopped_by"].iloc[0]
+    'test'
+    >>> print(diag[["k", "p_max", "significant"]].head(6).round(3).to_string(index=False))
+     k  p_max  significant
+     1    0.0         True
+     2    0.0         True
+     3    0.0         True
+     4    0.0         True
+     5    1.0        False
+     6    1.0        False
+    """
     validate_auto_k_config(config)
     if config.k_method != "chi2_stop":
         raise ValueError("select_k_chi2_stop requires AutoKConfig(k_method='chi2_stop')")
@@ -184,7 +352,90 @@ def select_k_forward_stop(
     p_candidates: int,
     panel_eigs: np.ndarray | None = None,
 ) -> tuple[int, pd.DataFrame]:
-    """Select the largest prefix accepted by the ForwardStop accumulation rule."""
+    """Select the largest prefix accepted by the ForwardStop accumulation rule.
+
+    This is the rule behind ``AutoKConfig(k_method="forward_stop")``. It reads
+    the same Sidak-corrected step p-values as ``select_k_chi2_stop`` but
+    interprets ``alpha`` as a false-discovery-rate level over the selected
+    prefix (G'Sell et al. 2016) rather than as a per-step threshold, so a
+    single large interior p-value cannot terminate the path -- the running
+    average has to degrade. Use it for discovery when you want an FDR reading
+    of the prefix and a rule that tolerates masked-then-revealed signals; it
+    is not a predictive-sizing rule.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative CEFS+ objective after each path step. Truncated to
+        ``config.max_k`` before testing.
+    config : AutoKConfig
+        Must have ``k_method='forward_stop'``. Reads ``alpha`` (as the FDR
+        level), ``m_mode``, ``min_k``, and ``max_k``. ``stop_patience`` is not
+        used by this rule.
+    n_eff : float
+        Effective sample size behind the objective; finite and > 2. Also caps
+        the evaluated path at ``floor(n_eff) - 2`` steps.
+    p_candidates : int
+        Number of candidate features before screening or pruning; positive.
+    panel_eigs : ndarray, optional
+        Candidate-panel correlation eigenvalues, used only when
+        ``config.m_mode='li_ji'``.
+
+    Returns
+    -------
+    selected_k : int
+        Largest evaluated k at or above the effective floor
+        ``max(1, min(min_k, max evaluated k))`` whose running mean of
+        ``Y = -log1p(-p_max)`` stays at or below ``alpha``; ``0`` when no k
+        qualifies or no step is evaluable.
+    diagnostics : DataFrame
+        One row per evaluated step with ``k``, ``objective``, ``gain``,
+        ``F_stat``, ``nu``, ``m_eff``, ``p_single``, ``p_max``,
+        ``stat_max_k``, ``Y``, ``Y_running_mean``, ``eligible``,
+        ``selected``, ``alpha``, ``m_mode``, ``n_eff``, and ``stopped_by``
+        (``'forward_stop'`` or ``'empty'``). Empty when no step is evaluable.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'forward_stop'``, if ``n_eff`` is not
+        finite and > 2, or if ``p_candidates`` < 1.
+
+    See Also
+    --------
+    path_gain_pvalues : The p-value sequence this accumulates.
+    select_k_chi2_stop : First-failure stop on the same p-values.
+    select_k_penalized_objective : Information-criterion alternative.
+
+    Notes
+    -----
+    ForwardStop transforms each p-value into ``Y_t = -log1p(-p_t)``, which is
+    near 0 for a decisive step and Exp(1) for a null step, then keeps the
+    largest ``k`` with ``mean(Y_1..Y_k) <= alpha``. Under independent uniform
+    nulls that controls the FDR of the selected prefix at ``alpha``; the path
+    p-values here are sequentially dependent, so the guarantee is approximate
+    and was measured rather than assumed. ``selected_k`` is non-decreasing in
+    ``alpha``. Cost is ``O(L)`` on top of the path.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import AutoKConfig, select_k_forward_stop
+    >>> gains = np.concatenate([np.full(4, 0.15), np.full(26, 0.002)])
+    >>> objective = np.cumsum(gains)
+    >>> config = AutoKConfig(
+    ...     k_method="forward_stop", min_k=0, max_k=30, alpha=0.1
+    ... )
+    >>> selected_k, diag = select_k_forward_stop(
+    ...     objective, config, n_eff=200.0, p_candidates=50
+    ... )
+    >>> selected_k
+    4
+    >>> diag["stopped_by"].iloc[0]
+    'forward_stop'
+    >>> diag.loc[diag["k"] <= 5, "eligible"].tolist()
+    [True, True, True, True, False]
+    """
     validate_auto_k_config(config)
     if config.k_method != "forward_stop":
         raise ValueError("select_k_forward_stop requires AutoKConfig(k_method='forward_stop')")
@@ -243,7 +494,112 @@ def select_k_changepoint(
     n_eff: float,
     p_candidates: int,
 ) -> tuple[int, pd.DataFrame]:
-    """Select k from a noise-floor changepoint on scaled objective gains."""
+    """Select k from a noise-floor changepoint on scaled objective gains.
+
+    This is the rule behind ``AutoKConfig(k_method="changepoint")``: the elbow
+    with its arbitrary relative-gain threshold replaced by a floor estimated
+    from the path's own noise tail and cross-checked against the analytic
+    max-of-chi-square prediction. It costs nothing beyond the path and needs
+    no folds, groups, or permutations, which makes it the cheapest
+    discovery-flavored option when no split context is available. It is
+    experimental: in the Auto-K v2 campaign it over-selected on the deep-null
+    design and did not clear the gate, so read it as a diagnostic on the gain
+    curve rather than as an automatic sizing default.
+
+    Parameters
+    ----------
+    objective_path : ndarray of shape (L,)
+        Cumulative CEFS+ objective after each path step. Truncated to
+        ``config.max_k``. The tail must actually contain noise for the floor
+        estimate to mean anything, so run the path to a generous ``max_k``.
+    config : AutoKConfig
+        Must have ``k_method='changepoint'``. Reads ``floor_z``,
+        ``floor_window``, ``min_k``, ``max_k``, and ``stop_patience`` (reused
+        as the median-smoothing width when > 2, else 3).
+    objective_scale : float
+        Multiplier turning a gain into a chi-square-scale statistic. Gaussian
+        CEFS+ passes the effective sample size; binary CEFS+ log-likelihood or
+        score-test gains pass ``2.0`` by Wilks. Must be positive and finite.
+    n_eff : float
+        Effective sample size. Caps the evaluated path at
+        ``floor(n_eff) - 2`` steps; a non-finite value disables that cap.
+    p_candidates : int
+        Number of candidate features before screening or pruning. Sets the
+        survivor count ``max(1, p_candidates - L_eff + 1)`` used by the
+        analytic floor cross-check.
+
+    Returns
+    -------
+    selected_k : int
+        Position of the last pre-tail gain above the noise threshold; the
+        effective floor ``min(min_k, L_eff)`` when none exceeds it; the
+        effective maximum when the tail is not noise or leaves no pre-tail
+        range; ``0`` when no step is evaluable.
+    diagnostics : DataFrame
+        One row per evaluated step with ``k``, ``objective``, ``gain``,
+        ``log_scaled_gain``, ``objective_scale``, ``n_eff``, ``floor_mu``,
+        ``floor_sigma``, ``analytic_floor_median``, ``threshold``,
+        ``tail_width``, ``floor_not_reached``, ``exceeds``, and ``selected``.
+        The floor columns are NaN on the degenerate branches. Empty when no
+        step is evaluable.
+
+    Raises
+    ------
+    ValueError
+        If ``config.k_method`` is not ``'changepoint'``, or if
+        ``objective_scale`` is not positive and finite.
+
+    Warns
+    -----
+    UserWarning
+        When fewer than three gains are evaluable (falls back to the method
+        floor); when the tail window leaves no pre-tail range (falls back to
+        the effective maximum); and when the estimated floor sits far above
+        the analytic null median, meaning signal extends past ``max_k``
+        (``floor_not_reached=True``, returns the effective maximum -- treat
+        that k as censored).
+
+    See Also
+    --------
+    select_k_elbow : The uncalibrated rule this was written to replace.
+    select_k_chi2_stop : Analytic sequential test on the same gains.
+    select_k_perm_gap : Empirical permutation envelope on the same curve.
+    AutoKConfig : ``floor_z`` and ``floor_window`` fields.
+
+    Notes
+    -----
+    Work happens on ``x_t = log(objective_scale * gain_t + 1e-12)``. The tail
+    window is ``W = min(L_eff - 1, max(10, ceil(floor_window * L_eff)))`` when
+    ``floor_window`` is a fraction, or that many steps when it is an integer;
+    the floor is ``mu = median(x_W)`` and ``sigma = 1.4826 * MAD(x_W)``, and
+    the threshold is ``mu + floor_z * sigma``. Before thresholding, ``x`` is
+    median-smoothed so one heavy-tailed null spike cannot extend k. The
+    analytic cross-check compares ``mu`` against
+    ``log(chi2.isf(-expm1(log(0.5) / m_tail), df=1))``, the null median of a
+    maximum over ``m_tail`` survivors. Cost is ``O(L * width)`` for the
+    smoothing pass, negligible beside the path itself.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import AutoKConfig, select_k_changepoint
+    >>> noise = np.tile([0.0015, 0.0025, 0.002, 0.003, 0.001], 7)
+    >>> objective = np.cumsum(np.concatenate([np.full(5, 0.5), noise]))
+    >>> config = AutoKConfig(k_method="changepoint", min_k=0, max_k=40)
+    >>> selected_k, diag = select_k_changepoint(
+    ...     objective,
+    ...     config,
+    ...     objective_scale=200.0,
+    ...     n_eff=200.0,
+    ...     p_candidates=50,
+    ... )
+    >>> selected_k
+    5
+    >>> bool(diag["floor_not_reached"].iloc[0]), int(diag["tail_width"].iloc[0])
+    (False, 10)
+    >>> diag.loc[diag["k"] <= 6, "exceeds"].tolist()
+    [True, True, True, True, True, False]
+    """
     validate_auto_k_config(config)
     if config.k_method != "changepoint":
         raise ValueError("select_k_changepoint requires AutoKConfig(k_method='changepoint')")
