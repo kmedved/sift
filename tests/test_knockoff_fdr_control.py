@@ -1,6 +1,10 @@
 import numpy as np
+import pytest
 
 from sift.selection.knockoff_filter import select_fdr
+
+
+pytestmark = pytest.mark.slow
 
 
 def _ar1_cov(p: int, rho: float = 0.5) -> np.ndarray:

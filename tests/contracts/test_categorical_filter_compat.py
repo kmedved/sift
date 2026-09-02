@@ -284,6 +284,7 @@ def test_missing_category_encoders_has_clean_dependency_error():
 
 
 @pytest.mark.parametrize("route", CATEGORY_ENCODER_ROUTES, ids=lambda route: route.name)
+@pytest.mark.categorical
 def test_category_encoder_backed_function_and_selector_routes(route):
     pytest.importorskip("category_encoders")
     rng = np.random.default_rng(121)

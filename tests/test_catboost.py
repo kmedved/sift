@@ -6,6 +6,8 @@ import pandas as pd
 
 catboost = pytest.importorskip("catboost")
 
+pytestmark = pytest.mark.catboost
+
 from sift.catboost import (  # noqa: E402
     catboost_select,
     catboost_classif,

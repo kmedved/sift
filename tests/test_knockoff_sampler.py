@@ -51,6 +51,7 @@ def _heterogeneous_cov() -> np.ndarray:
     )
 
 
+@pytest.mark.slow
 def test_sample_gaussian_knockoffs_matches_analytic_joint_covariance():
     rng = np.random.default_rng(0)
     Sigma = _ar1_cov(6, rho=0.35)

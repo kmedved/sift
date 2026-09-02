@@ -52,7 +52,6 @@ def _evaluate_config(metric="rmse", *, nested=False):
         min_k=1,
         max_k=3,
         n_splits=4,
-        random_state=0,
         auto_k_mode="nested" if nested else "prefix_only",
     )
 

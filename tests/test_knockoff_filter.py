@@ -612,10 +612,12 @@ def test_build_active_rxx_skips_copy_when_every_column_is_active(monkeypatch):
 def test_select_fdr_result_metadata_ranking_and_determinism():
     X, y = _signal_frame(n=45, p=70, seed=6)
 
-    with pytest.warns(UserWarning, match="approximate plug-in"):
+    with pytest.warns(UserWarning) as first_record:
         first = select_fdr(X, y, q=0.4, offset=0, random_state=22, verbose=False)
-    with pytest.warns(UserWarning, match="approximate plug-in"):
+    assert any("approximate plug-in" in str(w.message) for w in first_record)
+    with pytest.warns(UserWarning) as second_record:
         second = select_fdr(X, y, q=0.4, offset=0, random_state=22, verbose=False)
+    assert any("approximate plug-in" in str(w.message) for w in second_record)
 
     pd.testing.assert_frame_equal(first.W, second.W)
     assert first.selected_features == second.selected_features
@@ -1014,8 +1016,9 @@ def test_select_fdr_warns_when_knockoffs_have_no_power_and_reports_s_diagnostics
     # Near-duplicate columns force the equicorrelated s towards zero.
     X = np.column_stack([base, base + 1e-3 * rng.normal(size=base.shape)])
     y = base[:, 0] + rng.normal(size=300)
-    with pytest.warns(UserWarning, match="very little power"):
+    with pytest.warns(UserWarning) as record:
         result = select_fdr(X, y, q=0.2, verbose=False)
+    assert any("very little power" in str(w.message) for w in record)
     assert result.selector_metadata["s_median"] < 0.05
     assert result.selector_metadata["n_low_power_features"] == 8
 
@@ -1060,8 +1063,9 @@ def test_select_fdr_auto_feature_groups_expands_selected_clusters():
     columns = [f"f{i}" for i in range(X.shape[1])]
     frame = pd.DataFrame(X, columns=columns)
 
-    with pytest.warns(UserWarning, match="very little power"):
+    with pytest.warns(UserWarning) as record:
         plain = select_fdr(frame, y, q=0.2, statistic="lsm", verbose=False)
+    assert any("very little power" in str(w.message) for w in record)
     auto = select_fdr(frame, y, q=0.2, statistic="lsm", feature_groups="auto", group_corr_threshold=0.7, verbose=False)
 
     md = auto.selector_metadata
