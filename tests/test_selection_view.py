@@ -1819,3 +1819,16 @@ def test_append_rows_like_is_an_identity_on_empty_rows():
     pd.testing.assert_frame_equal(appended, table)
     assert appended["count"].dtype == np.dtype("int64")
     assert appended["selected"].dtype == np.dtype("bool")
+
+
+def test_append_rows_like_keeps_float_dtype_for_mentioned_missing_values():
+    from sift.selection.view import _append_rows_like
+
+    table = pd.DataFrame({"feature": ["a", "b"], "gain": [0.5, 0.25], "flag": [True, False]})
+    appended = _append_rows_like(
+        table, [{"feature": "c", "gain": np.nan, "flag": False}]
+    )
+    assert str(appended["gain"].dtype) == "float64"
+    assert np.isnan(appended["gain"].iloc[-1])
+    assert appended["flag"].dtype == bool
+    assert appended["feature"].tolist() == ["a", "b", "c"]

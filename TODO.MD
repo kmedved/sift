@@ -8,7 +8,9 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
   retitles the release-notes section; a later commit moves it to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
   `catboost` or `category_encoders`): `python -m pytest -q` gives **1,965 passed,
-  39 skipped** in ~91 s. Every skip is an optional-dependency gate.
+  39 skipped** in ~110 s. 37 skips are optional-dependency gates (`catboost`,
+  `category_encoders`, the four literal-block docstring examples) and 2 are the
+  sklearn name-based transform skips on `BorutaSelector`/`StabilitySelector`.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
   and attaches the artifacts; tagging `v` + `sift.__version__` and creating the

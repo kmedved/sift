@@ -72,7 +72,7 @@ def set_verbosity(level: Literal["info", "debug"] | None) -> None:
     progress can be turned up to DEBUG or switched off entirely without any
     :mod:`logging` configuration of your own.  Call it once near import time;
     it mutates process-wide logging state and returns ``None``.  With no call
-    at all the package starts at INFO, which is what ``verbose=True`` prints.
+    at all the package starts at INFO, which is the level ``verbose=True`` emits at.
 
     Parameters
     ----------

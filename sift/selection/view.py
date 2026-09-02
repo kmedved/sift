@@ -1434,6 +1434,10 @@ def _append_rows_like(table: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
                 aligned[column] = pd.array(values.tolist(), dtype=dtype)
             elif pd.api.types.is_object_dtype(dtype):
                 aligned[column] = pd.Series(values.tolist(), dtype=object)
+            elif pd.api.types.is_float_dtype(dtype):
+                # Floats hold NaN natively, so a mentioned missing value keeps
+                # the table's float dtype instead of widening to ``Float64``.
+                aligned[column] = values.to_numpy(dtype=dtype, na_value=np.nan)
             elif values.isna().any():
                 nullable = table[column].convert_dtypes().dtype
                 table = table.astype({column: nullable})

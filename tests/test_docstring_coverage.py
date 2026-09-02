@@ -127,10 +127,20 @@ def expected_parameters(obj: object) -> dict[str, bool]:
 
 
 def example_statements(body: str) -> list[str]:
-    """Return the ``>>>`` statement sources inside an ``Examples`` body."""
+    """Return the runnable ``>>>`` statement sources inside an ``Examples`` body.
+
+    Statements carrying ``# doctest: +SKIP`` never count, and a section whose
+    first statement is skipped counts as having none at all, because the
+    docstring-examples runner then skips the whole case.
+    """
     import doctest
 
-    return [example.source for example in doctest.DocTestParser().get_examples(body)]
+    examples = doctest.DocTestParser().get_examples(body)
+    if examples and examples[0].options.get(doctest.SKIP):
+        return []
+    return [
+        example.source for example in examples if not example.options.get(doctest.SKIP)
+    ]
 
 
 @pytest.mark.parametrize("name", PUBLIC_NAMES)
@@ -189,7 +199,8 @@ def test_public_export_has_numpydoc_docstring(name: str) -> None:
         )
     else:
         assert statements, (
-            f"{name}: the Examples section has no runnable '>>>' statement. Write a "
+            f"{name}: the Examples section has no runnable '>>>' statement (a leading "
+            "'# doctest: +SKIP' skips the whole case). Write a "
             "doctest, or -- only when it needs an optional dependency -- add the "
             "export to LITERAL_EXAMPLE_EXPORTS"
         )
