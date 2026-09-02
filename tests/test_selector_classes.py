@@ -583,6 +583,7 @@ def test_selector_nested_auto_k_uses_fit_transform_train_matrix(monkeypatch):
         task,
         metric,
         k_grid,
+        **_kwargs,  # tolerate library-side keywords such as sample_weight_supplied
     ):
         captured.append(X_train_path.copy())
         return {k: float(k - 1) for k in k_grid}
