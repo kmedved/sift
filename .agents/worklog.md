@@ -1,13 +1,14 @@
 # SIFT 0.9 worklog
 
-## Entry — finite target-CV weight mass and PR #73 closeout (2026-09-02)
+## Entry — 0.9.0 release PR (2026-09-02)
 
-- Objective: Close the final verified target-CV weight-overflow defect, then merge Stage 3 only after the updated PR head passes CI.
-- Decision: Reject a non-finite aggregate frequency mass inside the shared target-CV map fitter. Do not rescale raw weights: their absolute mass controls both explicit and empirical-Bayes smoothing, so rescaling would change the estimand and break row-replication semantics. Do not change global `ensure_weights`; normalized consumers already handle large finite weights safely.
-- Completed: `_fit_custom_maps` now suppresses only the aggregate-overflow warning, checks the result, and raises `ValueError("target_cv fit rows must have finite total sample_weight")` before computing a prior or category map. One regression covers direct `TargetCVEncoder.fit_transform` and public `select_mrmr`; release notes document the contract. The base-suite count is refreshed to 1,967 passed / 39 skipped.
-- Current state: Local focused tests are green. One otherwise-complete local full run hit the host's known loky physical-core discovery warning in `DOCS.MD:L1646`; the exact failed documentation block passed with `LOKY_MAX_CPU_COUNT=4`, leaving no code/test failure. PR #73 must pass on the new exact head before merge.
-- Next action: Commit and push the fix, wait for all required PR #73 jobs, then merge. Keep `__version__="0.9.0a1"`; the version/date change remains a separate release PR.
-- Decisive verification: New regression 1 passed; complete target-CV contract 79 passed; ruff and `git diff --check` clean; aggregate full-run evidence 1,967 passed / 39 skipped after the one environment-only block rerun.
+- Objective: Finalize the already-green 0.9 implementation as `0.9.0` in a narrow release PR, without adding features or changing behavior.
+- Scope: Change `sift.__version__` and its pinned public-spine test, finalize the release-notes heading, and refresh current release-status text. Preserve historical alpha/beta and benchmark-provenance references.
+- Completed: PR #73 merged to `main` as `5a582d9`; all six required jobs passed on its exact head and the post-merge `main` run. The release branch is based on that clean, synchronized commit and sets `__version__="0.9.0"`.
+- Current state: The complete local release gate is green on `codex/release-0.9.0`; only exact-head GitHub CI and merge remain.
+- Next action: Commit and push the narrow release diff, open the release PR, require all six CI jobs on its exact head, and merge. Stop before creating any tag or GitHub Release.
+- Blocker after merge: Creating tag `v0.9.0` and the GitHub Release is an explicit owner action. The asset-only workflow attaches distributions and contains no PyPI publication path. Only after that release should a separate commit set `0.9.1.dev0`.
+- Decisive verification: Focused public-spine, release-ledger, docs-smoke, and benchmark tests 117 passed; full warnings-as-errors suite 1,967 passed / 39 skipped with the local loky core-count guard; Ruff and `git diff --check` clean. The isolated PEP 517 build produced `sift_feature_selection-0.9.0.tar.gz` and `sift_feature_selection-0.9.0-py3-none-any.whl`; both passed `twine check`, and the exact wheel clean-installed with the latest supported dependency band and reported version `0.9.0` from outside the checkout. Both documented quick benchmark commands completed successfully.
 
 ## Entry — adversarial review round on PR #73 (`stage3/0.9-docs-release`, base `7e681b8`): documentation findings (2026-09-02)
 
