@@ -24,6 +24,27 @@ def test_cv_alpha_grid_kwargs_supports_old_and_new_sklearn_signatures():
     assert stability_module._cv_alpha_grid_kwargs(NewCV, 30) == {"alphas": 30}
 
 
+def test_logistic_penalty_kwargs_supports_old_and_new_sklearn_signatures():
+    class OldLogistic:
+        def __init__(self, penalty="l2", *, l1_ratio=None):
+            pass
+
+    class NewLogistic:
+        def __init__(self, penalty="deprecated", *, l1_ratio=0.0):
+            pass
+
+    assert stability_module._logistic_penalty_kwargs(OldLogistic, "l1") == {
+        "penalty": "l1"
+    }
+    assert stability_module._logistic_penalty_kwargs(OldLogistic, "l2") == {
+        "penalty": "l2"
+    }
+    assert stability_module._logistic_penalty_kwargs(NewLogistic, "l1") == {
+        "l1_ratio": 1.0
+    }
+    assert stability_module._logistic_penalty_kwargs(NewLogistic, "l2") == {}
+
+
 def test_stability_selector_regression():
     np.random.seed(42)
     n, p = 200, 20

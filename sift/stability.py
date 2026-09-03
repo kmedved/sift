@@ -133,6 +133,16 @@ def _cv_alpha_grid_kwargs(model_cls, n_alphas: int) -> dict[str, int]:
     return {"alphas": int(n_alphas)}
 
 
+def _logistic_penalty_kwargs(model_cls, penalty: str) -> dict[str, object]:
+    """Return sparse-logistic kwargs across sklearn's penalty transition."""
+    if penalty not in {"l1", "l2"}:
+        raise ValueError("penalty must be 'l1' or 'l2'.")
+    penalty_default = inspect.signature(model_cls).parameters["penalty"].default
+    if penalty_default == "deprecated":
+        return {"l1_ratio": 1.0} if penalty == "l1" else {}
+    return {"penalty": penalty}
+
+
 class StabilitySelector(SelectorMixin, BaseEstimator):
     """
     Stability selection for linear models with optional smart sampling.
@@ -558,8 +568,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         train_idx, train_weight = self._dedupe_train_weights(train_idx, sample_weight)
         if self.task == 'classification':
             model = LogisticRegression(
-                penalty='l1', solver='saga', C=self._classification_C(train_weight),
+                solver='saga', C=self._classification_C(train_weight),
                 max_iter=3000, random_state=seed, n_jobs=1,
+                **_logistic_penalty_kwargs(LogisticRegression, "l1"),
             )
         elif self.l1_ratio >= 1.0:
             model = Lasso(alpha=self.alpha_, max_iter=3000)
@@ -1058,7 +1069,11 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                     continue
 
                 downstream = (
-                    LogisticRegression(penalty='l2', solver='lbfgs', max_iter=1000)
+                    LogisticRegression(
+                        solver='lbfgs',
+                        max_iter=1000,
+                        **_logistic_penalty_kwargs(LogisticRegression, "l2"),
+                    )
                     if self.task == 'classification'
                     else Ridge(alpha=1.0)
                 )
@@ -1555,12 +1570,12 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         if self.task == 'classification':
             model = LogisticRegression(
-                penalty='l1',
                 solver='saga',
                 tol=1e-3,
                 max_iter=2000,
                 random_state=self.random_state,
                 n_jobs=1,
+                **_logistic_penalty_kwargs(LogisticRegression, "l1"),
             )
             # Preserve the sparse-selection contract of the prior
             # LogisticRegressionCV path while keeping imputation/scaling local
