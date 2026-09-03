@@ -4,8 +4,8 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `sift.__version__` is `0.9.0a1`. A small release PR bumps it to `0.9.0` and
-  retitles the release-notes section; a later commit moves it to `0.9.1.dev0`.
+- `sift.__version__` is `0.9.0`, and the release notes are final. A separate
+  post-release commit moves it to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
   `catboost` or `category_encoders`): `python -m pytest -q` gives **1,967 passed,
   39 skipped** in ~110 s. 37 skips are optional-dependency gates (`catboost`,
@@ -24,11 +24,12 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - [x] CI execution of every fenced `python` block in the manual set:
       `tests/test_docs_examples.py` for the six `docs/` manuals and `DOCS.MD`,
       `tests/test_docs_smoke.py` for the README.
-- [ ] Remaining 0.9.0 gate: the release PR. Bump `sift.__version__` from
-      `0.9.0a1` to `0.9.0`, retitle the release-notes section, run the
-      pre-release smoke (`docs/development.md`), and merge. The owner then cuts
-      the `v0.9.0` tag and GitHub Release; a separate commit afterwards moves
-      `__version__` to `0.9.1.dev0`.
+- [x] 0.9.0 release preparation: bump `sift.__version__` to `0.9.0`, finalize
+      the release-notes section, and run the pre-release smoke from
+      `docs/development.md` on the release PR.
+- [ ] Owner release action after the release PR merges: create the `v0.9.0` tag
+      and GitHub Release. A separate commit afterwards moves `__version__` to
+      `0.9.1.dev0`.
 
 ## Target encoding status
 

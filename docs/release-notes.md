@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.9.0 (unreleased)
+## 0.9.0
 
 0.9.0 supersedes the never-published 0.8.0 work — the last published release is v0.7.0, so
 everything recorded under `0.8.0` below reaches users for the first time here. 0.9.0 is
