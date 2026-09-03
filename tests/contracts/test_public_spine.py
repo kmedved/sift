@@ -74,7 +74,7 @@ def _default(callable_, name):
 
 
 def test_version_and_ordered_public_exports():
-    assert sift.__version__ == "0.9.0"
+    assert sift.__version__ == "0.9.1.dev0"
     assert sift.__all__ == EXPECTED_ALL
     assert sift.__all__[:55] == LEGACY_EXPECTED_ALL
     assert sift.__all__[55:] == ["set_verbosity", "SelectionView", "as_result"]

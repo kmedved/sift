@@ -1,4 +1,4 @@
-__version__ = "0.9.0"
+__version__ = "0.9.1.dev0"
 
 from sift._logging import set_verbosity
 from sift.api import (

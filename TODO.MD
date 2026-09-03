@@ -4,10 +4,10 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `sift.__version__` is `0.9.0`, and the release notes are final. A separate
-  post-release commit moves it to `0.9.1.dev0`.
+- `v0.9.0` is published at `94bae05` with the verified wheel and source
+  distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): `python -m pytest -q` gives **1,967 passed,
+  `catboost` or `category_encoders`): `python -m pytest -q` gives **1,968 passed,
   39 skipped** in ~110 s. 37 skips are optional-dependency gates (`catboost`,
   `category_encoders`, the four literal-block docstring examples) and 2 are the
   sklearn name-based transform skips on `BorutaSelector`/`StabilitySelector`.
@@ -27,9 +27,9 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - [x] 0.9.0 release preparation: bump `sift.__version__` to `0.9.0`, finalize
       the release-notes section, and run the pre-release smoke from
       `docs/development.md` on the release PR.
-- [ ] Owner release action after the release PR merges: create the `v0.9.0` tag
-      and GitHub Release. A separate commit afterwards moves `__version__` to
-      `0.9.1.dev0`.
+- [x] Owner release action: `v0.9.0` and its GitHub Release were published at
+      `94bae05`; the asset-only workflow attached both verified distributions
+      and did not publish to PyPI.
 
 ## Target encoding status
 

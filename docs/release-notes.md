@@ -1,5 +1,16 @@
 # Release Notes
 
+## 0.9.1 (unreleased)
+
+### Compatibility
+
+- Stability classification now constructs sparse logistic models without the
+  deprecated explicit `penalty=` argument on scikit-learn 1.8 and newer,
+  while preserving the `penalty="l1"`/`"l2"` path on the supported 1.3-1.7
+  releases. This removes a scikit-learn 1.9 `FutureWarning` that failed
+  warnings-as-errors runs in `stability_classif`, automatic alpha selection,
+  and classification threshold tuning.
+
 ## 0.9.0
 
 0.9.0 supersedes the never-published 0.8.0 work — the last published release is v0.7.0, so
