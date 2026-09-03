@@ -4,11 +4,11 @@
 
 - Objective: Finalize the already-green 0.9 implementation as `0.9.0` in a narrow release PR, without adding features or changing behavior.
 - Scope: Change `sift.__version__` and its pinned public-spine test, finalize the release-notes heading, and refresh current release-status text. Preserve historical alpha/beta and benchmark-provenance references.
-- Completed: PR #73 merged to `main` as `5a582d9`; all six required jobs passed on its exact head and the post-merge `main` run. The release branch is based on that clean, synchronized commit and sets `__version__="0.9.0"`.
-- Current state: The complete local release gate is green on `codex/release-0.9.0`; only exact-head GitHub CI and merge remain.
-- Next action: Commit and push the narrow release diff, open the release PR, require all six CI jobs on its exact head, and merge. Stop before creating any tag or GitHub Release.
-- Blocker after merge: Creating tag `v0.9.0` and the GitHub Release is an explicit owner action. The asset-only workflow attaches distributions and contains no PyPI publication path. Only after that release should a separate commit set `0.9.1.dev0`.
-- Decisive verification: Focused public-spine, release-ledger, docs-smoke, and benchmark tests 117 passed; full warnings-as-errors suite 1,967 passed / 39 skipped with the local loky core-count guard; Ruff and `git diff --check` clean. The isolated PEP 517 build produced `sift_feature_selection-0.9.0.tar.gz` and `sift_feature_selection-0.9.0-py3-none-any.whl`; both passed `twine check`, and the exact wheel clean-installed with the latest supported dependency band and reported version `0.9.0` from outside the checkout. Both documented quick benchmark commands completed successfully.
+- Completed: PR #73 merged to `main` as `5a582d9`; PR #74 then finalized version `0.9.0` and merged as `ec05f49`. All six required jobs passed on both release-PR head `baa117f` and the post-merge `main` commit.
+- Current state: 0.9.0 release preparation is complete on synchronized `main`; no code, documentation, CI, packaging, or benchmark gate remains open.
+- Next action: Stop until the owner explicitly requests the `v0.9.0` tag and GitHub Release. Only after that release should a separate commit set `0.9.1.dev0` and begin the re-scoped 0.9.1 work.
+- Release boundary: Creating tag `v0.9.0` and the GitHub Release is an explicit owner action. The asset-only workflow attaches distributions and contains no PyPI publication path.
+- Decisive verification: Focused public-spine, release-ledger, docs-smoke, and benchmark tests 117 passed; full warnings-as-errors suite 1,967 passed / 39 skipped with the local loky core-count guard; Ruff and `git diff --check` clean. The isolated PEP 517 build produced `sift_feature_selection-0.9.0.tar.gz` and `sift_feature_selection-0.9.0-py3-none-any.whl`; both passed `twine check`, and the exact wheel clean-installed with the latest supported dependency band and reported version `0.9.0` from outside the checkout. Both documented quick benchmark commands completed successfully. GitHub Actions run `33698372952` passed all six required jobs on exact PR head `baa117f`; post-merge run `33698657604` passed the same six jobs on `ec05f49`.
 
 ## Entry — adversarial review round on PR #73 (`stage3/0.9-docs-release`, base `7e681b8`): documentation findings (2026-09-02)
 
