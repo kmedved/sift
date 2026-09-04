@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -72,6 +72,7 @@ class BinaryPathRun:
     #: categorical encoding ran.  Result metadata reads this instead of
     #: reconstructing a split count from rows the encoder never used.
     encoding_cv: dict | None = None
+    include_original: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,8 @@ def build_binary_logloss_path(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     callback: ProgressCallback | None = None,
+    include_idx: np.ndarray | None = None,
+    candidate_idx: np.ndarray | None = None,
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
@@ -274,6 +277,8 @@ def build_binary_logloss_path(
         ridge=options.ridge,
         refit_every=options.refit_every,
         callback=callback,
+        include_idx=include_idx,
+        candidate_idx=candidate_idx,
     )
     return BinaryPathRun(
         path=path,
@@ -285,6 +290,7 @@ def build_binary_logloss_path(
         top_m_eff=top_m_eff,
         cat_features=cat_features,
         encoding_cv=encoding_cv,
+        include_original=tuple(int(i) for i in (include_idx if include_idx is not None else ())),
     )
 
 
@@ -571,11 +577,14 @@ def binary_refit_loglik_gains(
     selected_original: list[int],
     *,
     ridge: float,
+    include_original: Sequence[int] | None = None,
 ) -> tuple[np.ndarray, int]:
     """Compute unpenalized weighted log-likelihood gains along a binary path."""
     if not selected_original:
         return np.empty(0, dtype=np.float64), 0
-    X_selected = np.asarray(X_sub[:, selected_original], dtype=np.float64)
+    base = [int(i) for i in (include_original or ())]
+    columns = base + [int(i) for i in selected_original]
+    X_selected = np.asarray(X_sub[:, columns], dtype=np.float64)
     Z_selected, valid_mask, _, _ = weighted_standardize(X_selected, w_sub)
     gains = np.full(len(selected_original), -np.inf, dtype=np.float64)
     failures = 0
@@ -588,17 +597,32 @@ def binary_refit_loglik_gains(
         w_sub,
         np.full(len(y_sub), p0, dtype=np.float64),
     )
-    max_prefix = min(Z_selected.shape[1], len(selected_original))
+    n_base = len(base)
     beta = None
-    for k in range(1, max_prefix + 1):
+    if n_base:
         try:
-            # Each prefix extends the previous one by a column, so the previous
-            # solution (zero-padded) is a near-converged warm start.
             beta = fit_logistic_ridge(
-                Z_selected[:, :k], y_sub, w_sub, ridge=ridge, beta_init=beta
+                Z_selected[:, :n_base], y_sub, w_sub, ridge=ridge
             )
-            p = predict_logistic(Z_selected[:, :k], beta)
-            gains[k - 1] = binary_loglik_from_prob(y_sub, w_sub, p) - ll0
+            p_base = predict_logistic(Z_selected[:, :n_base], beta)
+            ll0 = binary_loglik_from_prob(y_sub, w_sub, p_base)
+        except (np.linalg.LinAlgError, FloatingPointError, ValueError):
+            raise ValueError(
+                "include features could not be fit in the binary logistic path; "
+                "they cannot initialize exact conditioning"
+            )
+    max_prefix = min(Z_selected.shape[1] - n_base, len(selected_original))
+    for t in range(1, max_prefix + 1):
+        try:
+            beta = fit_logistic_ridge(
+                Z_selected[:, : n_base + t],
+                y_sub,
+                w_sub,
+                ridge=ridge,
+                beta_init=beta,
+            )
+            p = predict_logistic(Z_selected[:, : n_base + t], beta)
+            gains[t - 1] = binary_loglik_from_prob(y_sub, w_sub, p) - ll0
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             failures += 1
             beta = None

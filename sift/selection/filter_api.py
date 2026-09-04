@@ -74,6 +74,7 @@ from sift.selection.result import (
     FilterSelectionResult,
     build_selector_metadata,
 )
+from sift.selection.conditioning import resolve_conditioning
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -167,6 +168,7 @@ class FilterContext:
     n_jobs: int
     mrmr_backend: str
     rank_backend: str
+    conditioning: object | None = None
 
 
 _COMMON_REQUEST_LOCAL_NAMES = frozenset(
@@ -186,6 +188,11 @@ _COMMON_REQUEST_LOCAL_NAMES = frozenset(
     }
 )
 
+CONDITIONING_SELECTOR_KWARGS = (
+    "include",
+    "exclude",
+    "candidates",
+)
 MRMR_SELECTOR_KWARGS = (
     "relevance",
     "estimator",
@@ -203,7 +210,7 @@ MRMR_SELECTOR_KWARGS = (
     "n_jobs",
     "mrmr_backend",
     "verbose",
-)
+) + CONDITIONING_SELECTOR_KWARGS
 JMI_SELECTOR_KWARGS = (
     "estimator",
     "relevance",
@@ -218,7 +225,7 @@ JMI_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-)
+) + CONDITIONING_SELECTOR_KWARGS
 CEFSPLUS_SELECTOR_KWARGS = (
     "top_m",
     "corr_prune",
@@ -232,7 +239,7 @@ CEFSPLUS_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-)
+) + CONDITIONING_SELECTOR_KWARGS
 CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "loss",
     "top_m",
@@ -253,7 +260,7 @@ CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-)
+) + CONDITIONING_SELECTOR_KWARGS
 
 
 def _request_from_public_locals(
@@ -310,6 +317,7 @@ def select_mrmr(
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    include=None, exclude=None, candidates=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Minimum Redundancy Maximum Relevance feature selection.
@@ -456,6 +464,15 @@ def select_mrmr(
         Retain the selection-time copula correlation block so
         ``result_view().proxies()`` can report near-duplicate stand-ins.
         Requires ``return_result=True`` and ``estimator="gaussian"``.
+    include : sequence of names or positions, optional
+        Conditioning set. Redundancy state is initialized from these features
+        before step 1. They appear in the output in caller order but are not
+        discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``.  Exceptions raised
@@ -563,6 +580,7 @@ def select_jmi(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    include=None, exclude=None, candidates=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Joint Mutual Information feature selection.
@@ -684,6 +702,15 @@ def select_jmi(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``estimator="gaussian"``.
+    include : sequence of names or positions, optional
+        Conditioning set. Joint-information state is initialized from these
+        features before step 1. They appear in the output in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -781,6 +808,7 @@ def select_jmim(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    include=None, exclude=None, candidates=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation.
@@ -899,6 +927,15 @@ def select_jmim(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``estimator="gaussian"``.
+    include : sequence of names or positions, optional
+        Conditioning set. Joint-information state is initialized from these
+        features before step 1. They appear in the output in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -997,6 +1034,7 @@ def select_cefsplus(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    include=None, exclude=None, candidates=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """CEFS+ feature selection using log-det Gaussian MI proxy.
@@ -1128,6 +1166,15 @@ def select_cefsplus(
         block so ``result_view().proxies()`` can report near-duplicate
         stand-ins for a selected feature.  Requires ``return_result=True``;
         the block never contains ``X`` or a cache.
+    include : sequence of names or positions, optional
+        Conditioning set. Partial-Cholesky residual state is initialized from
+        these features before step 1. They appear in the output in caller
+        order but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed greedy step with a one-based ``step``.  Exceptions raised
@@ -1240,6 +1287,7 @@ def select_cefsplus_binary(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = None, random_state: int = 0,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    include=None, exclude=None, candidates=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy.
@@ -1380,6 +1428,15 @@ def select_cefsplus_binary(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``loss="brier"``; the log-loss path rejects it rather than ignoring it.
+    include : sequence of names or positions, optional
+        Conditioning set. The logistic score-test state is initialized from
+        these features before step 1. They appear in the output in caller
+        order but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -1542,6 +1599,19 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         selector_kwargs.get("mrmr_backend", "auto"),
         n_jobs,
     )
+    feature_names = (
+        list(request.X.columns)
+        if isinstance(request.X, pd.DataFrame)
+        else [f"x{i}" for i in range(n_features)]
+    )
+    conditioning = resolve_conditioning(
+        selector_kwargs.get("include"),
+        selector_kwargs.get("exclude"),
+        selector_kwargs.get("candidates"),
+        feature_names=feature_names,
+        named=isinstance(request.X, pd.DataFrame),
+        k=request.k,
+    )
     return FilterContext(
         spec=spec,
         request=request,
@@ -1552,13 +1622,12 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         auto_k_config=request.auto_k_config,
         n_rows=n_rows,
         n_features_input=n_features,
-        feature_names=list(request.X.columns)
-        if isinstance(request.X, pd.DataFrame)
-        else [f"x{i}" for i in range(n_features)],
+        feature_names=feature_names,
         estimator=spec.estimator,
         n_jobs=n_jobs,
         mrmr_backend=mrmr_backend,
         rank_backend="threads" if n_jobs != 1 else "serial",
+        conditioning=conditioning,
     )
 
 
@@ -1665,6 +1734,18 @@ def _format_payload(
             )
     if payload.metadata_extra:
         extra.update(payload.metadata_extra)
+    if ctx.conditioning is not None and getattr(ctx.conditioning, "active", False):
+        from sift.selection.conditioning import conditioning_record
+
+        discovered_idx = payload.selected_indices
+        if discovered_idx is not None and ctx.conditioning.include:
+            include_set = set(ctx.conditioning.include)
+            discovered_idx = [i for i in discovered_idx if int(i) not in include_set]
+        extra["conditioning"] = conditioning_record(
+            ctx.conditioning,
+            feature_names=ctx.feature_names,
+            discovered_idx=discovered_idx,
+        )
 
     metadata = build_selector_metadata(
         ctx.spec.selector,
@@ -1804,6 +1885,9 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         subsample=options.subsample,
         random_state=kw("random_state"),
         verbose=kw("verbose"),
+        include=kw("include"),
+        exclude=kw("exclude"),
+        candidates=kw("candidates"),
         callback=request.callback,
         return_result=request.return_result,
         store_proxies=request.store_proxies,

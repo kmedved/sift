@@ -46,6 +46,7 @@ from sift.selection.filter_auto_k_cache import (
 )
 from sift.selection.filter_auto_k_common import (
     _effective_max_k as _effective_max_k,
+    _discovery_n_candidates as _discovery_n_candidates,
     _gain_test_candidate_inputs as _gain_test_candidate_inputs,
     _objective_n_eff as _objective_n_eff,
     _print_selected_k as _print_selected_k,
@@ -78,9 +79,15 @@ GaussianAutoKResult = tuple[list[str], list[int], pd.DataFrame, dict]
 
 
 def _run_gaussian_routed_path(routed_config: AutoKConfig, **kwargs) -> GaussianAutoKResult:
+    from sift.selection.conditioning import omitted_conditioning, require_supported_auto_k
+
     method = routed_config.k_method
     kwargs = dict(kwargs)
     kwargs["auto_k_config"] = routed_config
+    if not omitted_conditioning(
+        kwargs.get("include"), kwargs.get("exclude"), kwargs.get("candidates")
+    ):
+        require_supported_auto_k(method)
     if method == "gaussian_cv":
         return select_gaussian_cv_path(**kwargs)
     if method == "perm_gap":
@@ -242,6 +249,9 @@ def select_gaussian_evaluate_path(
         want_indices=True,
         return_objective=False,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
@@ -258,6 +268,7 @@ def select_gaussian_evaluate_path(
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
         warmup_policy=warmup_policy,
+        base_features=list(_unused.get("include_names") or ()),
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     summary = auto_k_summary(
@@ -289,6 +300,9 @@ def select_gaussian_elbow_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     selected_count, auto_diag = _select_elbow_count(objective, auto_k_config, len(path))
     _print_selected_k("Elbow", selected_count, verbose)
@@ -319,6 +333,9 @@ def select_gaussian_penalized_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     selected_count, auto_diag = _select_penalized_count(
         objective,
@@ -326,7 +343,7 @@ def select_gaussian_penalized_path(
         objective_scale="n_eff",
         n_samples=len(cache.sample_weight),
         sample_weight=cache.sample_weight,
-        n_candidates=len(cache.valid_cols),
+        n_candidates=_discovery_n_candidates(cache, _unused),
         path_length=len(path),
     )
     _print_selected_k("Penalized objective", selected_count, verbose)
@@ -367,6 +384,9 @@ def select_gaussian_posterior_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     selected_count, auto_diag = _select_posterior_count(
         objective,
@@ -374,7 +394,7 @@ def select_gaussian_posterior_path(
         objective_scale="n_eff",
         n_samples=len(cache.sample_weight),
         sample_weight=cache.sample_weight,
-        n_candidates=len(cache.valid_cols),
+        n_candidates=_discovery_n_candidates(cache, _unused),
         path_length=len(path),
     )
     _print_selected_k("K posterior", selected_count, verbose)
@@ -418,6 +438,9 @@ def select_gaussian_chi2_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -428,6 +451,7 @@ def select_gaussian_chi2_path(
         corr_prune,
         method,
         auto_k_config,
+        unused=_unused,
     )
     selected_count, auto_diag = select_k_chi2_stop(
         objective,
@@ -450,6 +474,7 @@ def select_gaussian_chi2_path(
             "m_mode": auto_k_config.m_mode,
             "n_eff": n_eff,
             "n_eff_source": n_eff_source,
+            "p_candidates": int(p_candidates),
             "proxy_only_objective": True,
         },
     )
@@ -472,6 +497,9 @@ def select_gaussian_forward_stop_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -482,6 +510,7 @@ def select_gaussian_forward_stop_path(
         corr_prune,
         method,
         auto_k_config,
+        unused=_unused,
     )
     selected_count, auto_diag = select_k_forward_stop(
         objective,
@@ -504,6 +533,7 @@ def select_gaussian_forward_stop_path(
             "m_mode": auto_k_config.m_mode,
             "n_eff": n_eff,
             "n_eff_source": n_eff_source,
+            "p_candidates": int(p_candidates),
             "proxy_only_objective": True,
         },
     )
@@ -526,6 +556,9 @@ def select_gaussian_changepoint_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     selected_count, auto_diag = select_k_changepoint(
@@ -583,6 +616,9 @@ def select_gaussian_perm_gap_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     nulls = null_objective_paths(
         cache,
@@ -638,6 +674,9 @@ def select_gaussian_xfit_objective_path(
         want_indices=True,
         return_objective=False,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     curves = xfit_objective_curves(
         cache,
@@ -699,6 +738,9 @@ def select_gaussian_cv_path(
         want_indices=True,
         return_objective=False,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     curves = gaussian_cv_curves(
         cache,
@@ -769,6 +811,9 @@ def select_gaussian_knockoff_path(
             want_indices=True,
             return_objective=False,
             callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
         )
         selected_count = min(selected_count, len(path))
         selected = path[:selected_count]
@@ -842,6 +887,9 @@ def select_gaussian_stability_path(
         want_indices=True,
         return_objective=False,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     boot = bootstrap_paths(
         cache,
@@ -1021,6 +1069,17 @@ def select_gaussian_auto_path(
                 "automatic-k optimum."
             )
         warnings.warn(message, UserWarning, stacklevel=2)
+    from sift.selection.conditioning import omitted_conditioning
+
+    if not omitted_conditioning(
+        runner_kwargs.get("include"),
+        runner_kwargs.get("exclude"),
+        runner_kwargs.get("candidates"),
+    ) and bool(auto_k_config.auto_dense_check):
+        raise ValueError(
+            "auto_dense_check cannot honor exact include/exclude/candidates "
+            "conditioning because it rebuilds an unconditioned gaussian_cv path"
+        )
     with auto_k_module._suppress_auto_k_unused_field_warnings():
         _run_auto_dense_check(
             config=auto_k_config,
@@ -1079,7 +1138,7 @@ def _consensus_method_k(
             objective_scale="n_eff",
             n_samples=len(cache.sample_weight),
             sample_weight=cache.sample_weight,
-            n_candidates=len(cache.valid_cols),
+            n_candidates=_discovery_n_candidates(cache, None),
             path_length=path_length,
         )
         return k_hat, ""
@@ -1091,7 +1150,7 @@ def _consensus_method_k(
             objective_scale="n_eff",
             n_samples=len(cache.sample_weight),
             sample_weight=cache.sample_weight,
-            n_candidates=len(cache.valid_cols),
+            n_candidates=_discovery_n_candidates(cache, None),
             path_length=path_length,
         )
         return k_hat, ""
@@ -1244,6 +1303,9 @@ def select_gaussian_consensus_path(
         want_indices=True,
         return_objective=True,
         callback=_unused.get("callback"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     rows = []
     for name in auto_k_config.consensus_methods:

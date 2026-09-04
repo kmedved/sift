@@ -1,14 +1,11 @@
 # SIFT 0.9 worklog
 
-## Current objective — split oversized router/adapter modules (2026-09-04)
+## Current objective — F1 conditioning sets (2026-09-04)
 
-- Objective: Split `sift/selection/view.py`, `sift/selection/filter_auto_k.py`, and `sift/selection/auto_k.py` along cohesive adapter/router boundaries before adding the 0.9.x capabilities.
-- Constraints: Preserve observable behavior, public and internal import paths, signatures, warnings/errors, ordering, floating-point/RNG behavior, and the monkeypatch seams used by the tests. Keep the original modules as stable facades where needed. One coherent extraction per commit; no PyPI publication. Do not rerun the 18-cell runtime benchmark after each small extraction.
-- Completed: 0.9.1 base merged as `2370631`. V1–V7, R1–R5, and A1–A5 are accepted. The original three-module split is committed as `fa74d63`. A5 moved `AutoKConfig` and the validation/config cluster into leaf `auto_k_config.py` with historical `__module__` on the four public/addressable callables. `_DEFAULT_AUTOK_CONFIG` is not re-exported. Fifteen unique incidental facade attributes (seven option-group types, `AUTO_K_OPTION_GROUP_TYPES`, `ContextVar`, `Iterator`, `contextmanager`, `dataclass`, `dataclass_fields`, `replace`, `warn_external`) plus `_DEFAULT_AUTOK_CONFIG` are no longer on the facade; that is accepted non-exported surface narrowing. Known introspection loss: `inspect.getsource(AutoKConfig)` raises `OSError`; method source still works.
-- Current state: Branch `codex/0.9x-router-splits`. Split implementation committed as `fa74d63a0f07423d4d12d06aeb679d3de36b3fda`. The clean-commit 18-cell runtime benchmark has been regenerated with `dirty=false`; its CSV SHA-256 is `47edb1eb76d2a1c2b26795f107cfd0837e96928d9ba78ad0a98d9e53ad3f7152`, with 72 executed-source hashes.
-- Next action: Push, run full GitHub CI, and merge. No PyPI publication.
-- Decisive verification: Pre-commit integration suite **2,026 passed / 40 skipped / 1 intentionally deselected stale-provenance assertion** under `-W error`; the refreshed binding test now passes in the **94 passed / 3 skipped** artifact/docs gate. Codex A5 focused **882 passed / 15 skipped**; Opus independently ran 288 `validate_auto_k_config` and 32 `resolve_auto_k_config` differentials with zero mismatches and found no defects. Opus also accepted the benchmark refresh after matching all 72 source hashes to both the working tree and implementation commit. Both generators, repo Ruff, `git diff --check`, and strict MkDocs are clean. The refreshed benchmark has 18 rows, one warm-up and seven samples per cell, one thread in every recorded pool, stable selection fingerprints, commit `fa74d63a0f07423d4d12d06aeb679d3de36b3fda`, `dirty=false`, and an empty captured status.
-
+- Objective: Record the review-accepted F1 conditioning-set API (`include=`, `exclude=`, `candidates=`) before its implementation commit.
+- Current state: F1 is review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` / PR #78). No F1 implementation commit or PR yet. 0.9.1 docs closeout was PR #77 at `2370631`; router-split/integration closeout was PR #78 at `3b9ac0a`. Runtime-scaling executed-source hashes are expected-stale until regenerated from the clean F1 commit.
+- Next action: Commit the F1 implementation, regenerate runtime evidence from that clean commit with `dirty=false`, commit the artifact, run the full CI gate, merge; then F2.
+- Decisive verification: `tests/test_conditioning.py` **27 passed**. Codex affected slice **491 passed / 4 skipped**. Opus Max xhigh round 3 **1115 passed / 14 skipped**, no actionable findings. Full suite **2053 passed / 40 skipped**, with the only failure the expected stale runtime-scaling provenance hashes. Ruff and both generator `--check` commands passed. Strict MkDocs was not run locally (base interpreter lacks `.[docs]`; CI installs it). No commit.
 
 ## Entry — 0.9.1 pre-commit integration gate (2026-09-03)
 

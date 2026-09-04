@@ -160,6 +160,59 @@ def _objective_n_eff(config: AutoKConfig, sample_weight, n_samples: int) -> tupl
     return float(n_eff), str(n_eff_source)
 
 
+def _conditioning_valid_sets(cache, unused: dict | None) -> tuple[np.ndarray | None, np.ndarray | None]:
+    from sift.selection.conditioning import (
+        map_original_to_valid,
+        named_feature_space,
+        omitted_conditioning,
+        resolve_conditioning,
+    )
+
+    unused = unused or {}
+    if omitted_conditioning(unused.get("include"), unused.get("exclude"), unused.get("candidates")):
+        return None, None
+    cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+        f"x{i}"
+        for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+    ]
+    named = named_feature_space(
+        cache.feature_names,
+        synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+        or cache.feature_names is None,
+    )
+    resolved = resolve_conditioning(
+        unused.get("include"),
+        unused.get("exclude"),
+        unused.get("candidates"),
+        feature_names=cache_names,
+        named=named,
+        k=1,
+    )
+    if resolved is None:
+        return None, None
+    protect = map_original_to_valid(
+        resolved.include,
+        cache.valid_cols,
+        feature_names=cache_names,
+        label="include",
+    )
+    pool = map_original_to_valid(
+        resolved.discovery,
+        cache.valid_cols,
+        feature_names=cache_names,
+        label="candidates",
+        missing="drop",
+    )
+    return protect, pool
+
+
+def _discovery_n_candidates(cache, unused: dict | None = None) -> int:
+    _protect, pool = _conditioning_valid_sets(cache, unused)
+    if pool is None:
+        return len(cache.valid_cols)
+    return int(pool.size)
+
+
 def _gain_test_candidate_inputs(
     cache,
     y,
@@ -168,9 +221,11 @@ def _gain_test_candidate_inputs(
     corr_prune,
     method: str,
     config: AutoKConfig,
+    unused: dict | None = None,
 ) -> tuple[int, np.ndarray | None]:
+    protect, pool = _conditioning_valid_sets(cache, unused)
     if config.m_mode == "all":
-        return len(cache.valid_cols), None
+        return _discovery_n_candidates(cache, unused), None
     panel = build_candidate_panel(
         cache,
         y,
@@ -178,7 +233,51 @@ def _gain_test_candidate_inputs(
         top_m=top_m,
         corr_prune=corr_prune,
         method=method,
+        protect_valid=protect,
+        pool_valid=pool,
     )
+    n_protect = 0 if protect is None else int(np.asarray(protect).size)
+    if n_protect and panel.cand.size >= n_protect:
+        n_panel_disc = int(panel.cand.size) - n_protect
+    else:
+        n_panel_disc = int(panel.cand.size)
     if config.m_mode == "panel":
-        return len(panel.cand), None
-    return len(cache.valid_cols), np.linalg.eigvalsh(panel.R) if panel.R.size else None
+        return n_panel_disc, None
+    if n_protect:
+        eigs = _conditioned_discovery_correlation_eigs(panel.R, n_protect)
+    else:
+        eigs = np.linalg.eigvalsh(panel.R) if panel.R.size else None
+    return _discovery_n_candidates(cache, unused), eigs
+
+
+def _conditioned_discovery_correlation_eigs(
+    R: np.ndarray,
+    n_protect: int,
+    *,
+    shrink: float = 1e-6,
+) -> np.ndarray | None:
+    """Eigenvalues of discovery correlation after partialling out include.
+
+    Uses the same off-diagonal shrink as the conditioned CEFS+ Gaussian
+    objective, then the Schur complement of the include block, renormalized
+    to a correlation. ``n_protect=0`` is handled by the caller so omitted
+    include stays on ``eigvalsh(panel.R)``.
+    """
+    R = np.asarray(R, dtype=np.float64)
+    n_protect = int(n_protect)
+    if R.size == 0 or n_protect <= 0 or R.shape[0] <= n_protect:
+        return None
+    scale = 1.0 - float(shrink)
+    G = scale * R
+    np.fill_diagonal(G, 1.0)
+    rss = np.ascontiguousarray(G[:n_protect, :n_protect])
+    rsd = np.ascontiguousarray(G[:n_protect, n_protect:])
+    rdd = np.ascontiguousarray(G[n_protect:, n_protect:])
+    schur = rdd - rsd.T @ np.linalg.solve(rss, rsd)
+    schur = 0.5 * (schur + schur.T)
+    diag = np.clip(np.diag(schur), 0.0, np.inf)
+    scale_d = np.sqrt(diag)
+    inv = np.divide(1.0, scale_d, out=np.zeros_like(scale_d), where=scale_d > 1e-12)
+    corr = schur * inv[:, None] * inv[None, :]
+    np.fill_diagonal(corr, np.where(scale_d > 1e-12, 1.0, 0.0))
+    return np.linalg.eigvalsh(corr)

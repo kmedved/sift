@@ -30,6 +30,14 @@ from sift.estimators.knockoffs import (
     gaussian_knockoff_mean,
     sample_gaussian_knockoffs,
 )
+from sift.selection.conditioning import (
+    FDR_COMPATIBLE_PROVENANCE,
+    compose_selected,
+    conditioning_record,
+    named_feature_space,
+    require_include_provenance,
+    resolve_conditioning,
+)
 
 
 _STATISTIC_NOT_ENABLED = (
@@ -430,6 +438,7 @@ def _input_width_provenance(
     cache: FeatureCache,
     *,
     inactive_valid_positions: np.ndarray | None = None,
+    extra_valid_drops: list[tuple[int, str]] | None = None,
 ) -> dict[str, Any]:
     """Describe the raw input width and the columns knockoffs could not use.
 
@@ -444,6 +453,9 @@ def _input_width_provenance(
     ``"zero_weight_variance"``
         Kept in the cache but carrying no weighted variance, so it takes no
         part in knockoff construction.  These columns still have a ``W`` row.
+    ``"zero_residual_variance"``
+        Usable before conditioning, then residualized to (near) zero variance
+        given ``include``.  Never reported as ``zero_weight_variance``.
 
     The keys are omitted when the cache cannot prove the raw width, which
     happens only for a prebuilt cache that carries no ``feature_names``.
@@ -460,6 +472,11 @@ def _input_width_provenance(
         dropped.extend(
             (int(valid[int(position)]), "zero_weight_variance")
             for position in np.asarray(inactive_valid_positions, dtype=np.int64)
+        )
+    if extra_valid_drops:
+        dropped.extend(
+            (int(valid[int(position)]), str(reason))
+            for position, reason in extra_valid_drops
         )
     dropped.sort(key=lambda item: item[0])
     return {
@@ -1442,6 +1459,80 @@ def sample_knockoffs(
     return Zt
 
 
+def _unclipped_weighted_gram(Z: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Weighted Gram of already-standardized columns, without off-diagonal clip.
+
+    ``weighted_correlation_matrix`` clips correlations to ``±0.999999``, which
+    lifts the smallest eigenvalue of an exact duplicate block to ``1e-6``.
+    The include-rank guard needs the raw Gram so exact and numerical
+    singularity remain visible.
+    """
+    Z64 = np.ascontiguousarray(Z, dtype=np.float64)
+    w64 = np.asarray(w, dtype=np.float64).ravel()
+    w_sum = float(w64.sum())
+    zw = Z64 * np.sqrt(w64)[:, None]
+    gram = zw.T @ zw
+    gram /= w_sum
+    return 0.5 * (gram + gram.T)
+
+
+def _residualize_discovery_given_include(
+    Z: np.ndarray,
+    zy: np.ndarray,
+    w: np.ndarray,
+    *,
+    include_valid: np.ndarray,
+    discovery_valid: np.ndarray,
+    shrink: float = 1e-6,
+    min_eig: float = 1e-8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Partial out include columns in rank-Gaussian space (Schur complement).
+
+    ``min_eig`` is the documented tolerance on the *unregularized* include
+    Gram (weighted, unclipped). Exact copies and rank-equivalent monotone
+    transforms fall below it and raise. Ridge-style ``shrink`` is applied
+    only after that check, and only for the Schur solve.
+    """
+    from sift.selection.panel import local_standardize
+
+    if include_valid.size == 0:
+        active = np.zeros(Z.shape[1], dtype=bool)
+        active[np.asarray(discovery_valid, dtype=np.int64)] = True
+        return np.asarray(Z, dtype=np.float64), np.asarray(zy, dtype=np.float64), active
+    Zs = np.ascontiguousarray(Z[:, include_valid], dtype=np.float64)
+    Zd = np.ascontiguousarray(Z[:, discovery_valid], dtype=np.float64)
+    n_s = int(Zs.shape[1])
+    w_arr = np.asarray(w, dtype=np.float64)
+    Z_joint = np.ascontiguousarray(np.concatenate([Zs, Zd], axis=1), dtype=np.float64)
+    G_joint = _unclipped_weighted_gram(Z_joint, w_arr)
+    R_ss_raw = np.ascontiguousarray(G_joint[:n_s, :n_s])
+    eig_min = float(np.min(np.linalg.eigvalsh(R_ss_raw)))
+    if not np.isfinite(eig_min) or eig_min < min_eig:
+        raise ValueError(
+            "include set is numerically singular; cannot condition the knockoff model"
+        )
+    raw_coef = np.linalg.solve(R_ss_raw, G_joint[:n_s, n_s:])
+    residual_var = _weighted_variance(Zd - Zs @ raw_coef, w_arr)
+    R = weighted_correlation_matrix(Z_joint, w_arr, backend="blas")
+    R_ss = (1.0 - shrink) * np.asarray(R[:n_s, :n_s], dtype=np.float64) + shrink * np.eye(
+        n_s, dtype=np.float64
+    )
+    R_sd = np.asarray(R[:n_s, n_s:], dtype=np.float64)
+    coef = np.linalg.solve(R_ss, R_sd)
+    Zd_res = Zd - Zs @ coef
+    r_ys = np.asarray(weighted_corr_with_vector(Zs, zy, w_arr), dtype=np.float64)
+    b_y = np.linalg.solve(R_ss, r_ys)
+    zy_res = np.asarray(zy, dtype=np.float64) - Zs @ b_y
+    Zd_res = local_standardize(Zd_res, w_arr)
+    zy_res = local_standardize(zy_res.reshape(-1, 1), w_arr).ravel()
+    Z_out = np.array(Z, dtype=np.float64, copy=True)
+    Z_out[:, np.asarray(discovery_valid, dtype=np.int64)] = Zd_res
+    active = np.zeros(Z.shape[1], dtype=bool)
+    keep = residual_var > 1e-12
+    active[np.asarray(discovery_valid, dtype=np.int64)[keep]] = True
+    return Z_out, np.asarray(zy_res, dtype=np.float64), active
+
+
 def _all_zero_result(
     *,
     cache: FeatureCache,
@@ -1451,6 +1542,11 @@ def _all_zero_result(
     relevance: np.ndarray,
     metadata: dict[str, Any],
     diagnostic_reason: str,
+    resolved_sets=None,
+    cache_names: list[Any] | None = None,
+    include_valid: np.ndarray | None = None,
+    provenance: str | None = None,
+    discovery_valid_mask: np.ndarray | None = None,
 ) -> KnockoffSelectionResult:
     n_draws = int(metadata.get("n_draws", 1))
     if n_draws == 1:
@@ -1465,17 +1561,37 @@ def _all_zero_result(
             index=feature_names,
             name="selection_frequency",
         )
-    W_table = pd.DataFrame(
-        {
-            "feature": feature_names,
-            "selected_index": cache.valid_cols.astype(np.int64),
-            "W": np.zeros(len(feature_names), dtype=np.float64),
-            "selected": np.zeros(len(feature_names), dtype=bool),
-            "selection_frequency": selection_frequency_arr,
-            "relevance": relevance,
-            "selector": "knockoff_fdr",
-        }
-    )
+    selected_mask = np.zeros(len(feature_names), dtype=bool)
+    role = np.array(["ineligible"] * len(feature_names), dtype=object)
+    if discovery_valid_mask is not None:
+        mask = np.asarray(discovery_valid_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] == role.shape[0]:
+            role[mask] = "discovery"
+    selected_features: list[Any] = []
+    selected_indices: list[int] = []
+    if resolved_sets is not None and resolved_sets.include:
+        names = cache_names if cache_names is not None else feature_names
+        selected_features, selected_indices = compose_selected(
+            names, resolved_sets.include, []
+        )
+        if include_valid is not None:
+            for valid_i in include_valid:
+                selected_mask[int(valid_i)] = True
+                role[int(valid_i)] = "include"
+                if n_draws != 1:
+                    selection_frequency_arr[int(valid_i)] = 1.0
+    zero_cols = {
+        "feature": feature_names,
+        "selected_index": cache.valid_cols.astype(np.int64),
+        "W": np.zeros(len(feature_names), dtype=np.float64),
+        "selected": selected_mask,
+        "selection_frequency": selection_frequency_arr,
+        "relevance": relevance,
+    }
+    if resolved_sets is not None and getattr(resolved_sets, "active", False):
+        zero_cols["role"] = role
+    zero_cols["selector"] = "knockoff_fdr"
+    W_table = pd.DataFrame(zero_cols)
     if group_labels is not None and group_codes is not None:
         W_table["feature_group"] = [group_labels[int(code)] for code in group_codes]
     for draw_idx in range(n_draws):
@@ -1492,9 +1608,19 @@ def _all_zero_result(
             for _ in range(n_draws)
         ]
         diagnostics["group_thresholds"] = [float(np.inf)] * n_draws
+    cond_record = conditioning_record(
+        resolved_sets,
+        feature_names=cache_names or feature_names,
+        discovered_idx=[],
+        include_provenance=provenance,
+    )
+    if cond_record is not None:
+        diagnostics["conditioning"] = cond_record
+        metadata = dict(metadata)
+        metadata["conditioning"] = cond_record
     return KnockoffSelectionResult(
-        selected_features=[],
-        selected_indices=[],
+        selected_features=selected_features,
+        selected_indices=selected_indices,
         selector_metadata=metadata,
         W=W_table,
         threshold=threshold,
@@ -1729,6 +1855,10 @@ def select_fdr(
     random_state: int = 0,
     n_jobs: int = 1,
     verbose: bool = True,
+    include=None,
+    exclude=None,
+    candidates=None,
+    include_provenance=None,
 ) -> KnockoffSelectionResult:
     """Select features by a q-calibrated Gaussian-copula knockoff filter.
 
@@ -1844,6 +1974,23 @@ def select_fdr(
     verbose : bool, default True
         Log the threshold, selected count, and ``s_mean`` at INFO on the
         ``"sift"`` logger.
+    include : sequence of names or positions, optional
+        Conditioning set. These features are not tested; they are prepended
+        to ``selected_features`` in caller order. Any of ``include``,
+        ``exclude``, or ``candidates`` requires ``include_provenance``.
+    exclude : sequence of names or positions, optional
+        Features removed from the tested discovery universe. Requires
+        ``include_provenance``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for the tested discovery universe. ``include`` may
+        sit outside it. Overlap with ``exclude`` is rejected. Requires
+        ``include_provenance``.
+    include_provenance : {"prespecified", "sample_split", "data_derived"} or None
+        Required when ``include``, ``exclude``, or ``candidates`` is
+        provided. FDR-compatible wording is allowed only for
+        ``prespecified`` and ``sample_split``. A ``data_derived``
+        conditioning set is labeled exploratory and reports
+        ``fdr_control="none"``.
 
     Returns
     -------
@@ -1952,6 +2099,39 @@ def select_fdr(
         n_jobs=n_jobs,
     )
     _reject_duplicate_feature_names(resolved_cache)
+    cache_names = list(resolved_cache.feature_names) if resolved_cache.feature_names is not None else [
+        f"x{i}"
+        for i in range(
+            int(np.max(resolved_cache.valid_cols)) + 1 if len(resolved_cache.valid_cols) else 0
+        )
+    ]
+    named = named_feature_space(
+        resolved_cache.feature_names,
+        synthetic=bool(getattr(resolved_cache, "feature_names_are_synthetic", False))
+        or resolved_cache.feature_names is None,
+    )
+    resolved_sets = resolve_conditioning(
+        include,
+        exclude,
+        candidates,
+        feature_names=cache_names,
+        named=named,
+        k=1,
+    )
+    provenance = require_include_provenance(
+        include_provenance,
+        conditioning_active=bool(resolved_sets is not None and resolved_sets.active),
+    )
+    if (
+        resolved_sets is not None
+        and resolved_sets.active
+        and isinstance(feature_groups, str)
+        and feature_groups == "auto"
+    ):
+        raise ValueError(
+            "feature_groups='auto' cannot be combined with include/exclude/candidates; "
+            "cluster the discovery universe yourself or omit conditioning"
+        )
     p_valid = resolved_cache.Z.shape[1]
     if resolved_cache.valid_cols.shape[0] != p_valid:
         raise ValueError("cache.valid_cols length must match cache.Z columns")
@@ -2004,12 +2184,69 @@ def select_fdr(
         raise ValueError("cache.sample_weight must be finite, non-negative, and sum to > 0")
 
     variances = _weighted_variance(resolved_cache.Z, w)
-    active = variances > 1e-12
-    n_zero_variance = int((~active).sum())
+    zero_var = variances <= 1e-12
+    n_zero_variance = int(zero_var.sum())
+    valid_cols_arr = np.asarray(resolved_cache.valid_cols, dtype=np.int64)
+    include_valid = np.empty(0, dtype=np.int64)
+    if resolved_sets is not None and resolved_sets.include:
+        include_orig = {int(i) for i in resolved_sets.include}
+        include_valid = np.array(
+            [i for i, orig in enumerate(valid_cols_arr) if int(orig) in include_orig],
+            dtype=np.int64,
+        )
+        if include_valid.size != len(resolved_sets.include):
+            raise ValueError(
+                "include features are not present in the cache valid columns "
+                "(dropped as constant/non-finite or never cached)"
+            )
+        if np.any(zero_var[include_valid]):
+            raise ValueError(
+                "include features have no usable variation for knockoff conditioning"
+            )
+    if resolved_sets is not None and resolved_sets.active:
+        discovery_original = set(int(i) for i in resolved_sets.discovery)
+        discovery_valid = np.array(
+            [i for i, orig in enumerate(valid_cols_arr) if int(orig) in discovery_original],
+            dtype=np.int64,
+        )
+        discovery_mask = np.zeros(p_valid, dtype=bool)
+        if discovery_valid.size:
+            discovery_mask[discovery_valid] = True
+        active = (~zero_var) & discovery_mask
+    else:
+        active = ~zero_var
     if not bool(active.any()):
         raise ValueError("No active non-constant features remain for knockoffs")
 
-    R_active = _build_active_rxx(resolved_cache, active, verbose=verbose)
+    ys = y_arr[resolved_cache.row_idx]
+    zy = np.asarray(weighted_rank_gauss_1d(ys, w), dtype=np.float64)
+    zy_var = float(_weighted_variance(zy[:, None], w)[0])
+    Z_work = np.asarray(resolved_cache.Z, dtype=np.float64)
+    residual_zero_valid = np.empty(0, dtype=np.int64)
+    if include_valid.size:
+        pre_resid = np.flatnonzero(active).astype(np.int64)
+        Z_work, zy, active = _residualize_discovery_given_include(
+            Z_work,
+            zy,
+            w,
+            include_valid=include_valid,
+            discovery_valid=pre_resid,
+        )
+        residual_zero_valid = np.array(
+            [int(i) for i in pre_resid if not bool(active[int(i)])],
+            dtype=np.int64,
+        )
+        if not bool(active.any()):
+            raise ValueError(
+                "No active residual features remain after conditioning on include"
+            )
+        R_active = weighted_correlation_matrix(
+            np.ascontiguousarray(Z_work[:, active], dtype=np.float64),
+            w,
+            backend="blas",
+        )
+    else:
+        R_active = _build_active_rxx(resolved_cache, active, verbose=verbose)
     model = fit_gaussian_knockoffs(R_active, s_method=s_method, min_eig=min_eig)
     s_median = float(np.median(model.s))
     n_low_s = int(np.sum(model.s < _LOW_POWER_S))
@@ -2048,14 +2285,10 @@ def select_fdr(
     else:
         path_depth_effective = None
     Z_active = (
-        np.asarray(resolved_cache.Z, dtype=np.float32)
+        np.asarray(Z_work, dtype=np.float32)
         if bool(active.all())
-        else np.ascontiguousarray(resolved_cache.Z[:, active], dtype=np.float32)
+        else np.ascontiguousarray(Z_work[:, active], dtype=np.float32)
     )
-
-    ys = y_arr[resolved_cache.row_idx]
-    zy = np.asarray(weighted_rank_gauss_1d(ys, w), dtype=np.float64)
-    zy_var = float(_weighted_variance(zy[:, None], w)[0])
 
     relevance = np.zeros(p_valid, dtype=np.float64)
     r_orig_active = None
@@ -2106,10 +2339,31 @@ def select_fdr(
         "group_mode": None if group_labels is None else "signed_max_heuristic",
         "group_fdr_control": None if group_labels is None else "none",
     }
+    if provenance == "data_derived":
+        metadata["fdr_control"] = "none"
+        metadata["per_draw_fdr_control"] = "none"
+        metadata["aggregation_preserves_per_draw_fdr"] = False
+        metadata["exploratory"] = True
+        metadata["include_provenance"] = provenance
+    elif provenance is not None:
+        metadata["include_provenance"] = provenance
+        metadata["exploratory"] = False
+        if provenance not in FDR_COMPATIBLE_PROVENANCE:
+            metadata["aggregation_preserves_per_draw_fdr"] = False
+    if resolved_sets is not None and (resolved_sets.exclude or resolved_sets.candidates is not None):
+        metadata["discovery_universe_constrained"] = True
+        if provenance not in FDR_COMPATIBLE_PROVENANCE:
+            metadata["fdr_control"] = "none"
+            metadata["exploratory"] = True
+            metadata["aggregation_preserves_per_draw_fdr"] = False
     metadata.update(
         _input_width_provenance(
             resolved_cache,
-            inactive_valid_positions=np.flatnonzero(~active),
+            inactive_valid_positions=np.flatnonzero(zero_var),
+            extra_valid_drops=[
+                (int(position), "zero_residual_variance")
+                for position in residual_zero_valid
+            ],
         )
     )
 
@@ -2122,6 +2376,11 @@ def select_fdr(
             relevance=relevance,
             metadata=metadata,
             diagnostic_reason="zero_target_variance",
+            resolved_sets=resolved_sets,
+            cache_names=cache_names,
+            include_valid=include_valid,
+            provenance=provenance,
+            discovery_valid_mask=active,
         )
 
     seed_sequence = np.random.SeedSequence(random_state)
@@ -2223,20 +2482,43 @@ def select_fdr(
     selected_order = selected_valid_positions[
         np.lexsort((selected_valid_positions, -mean_W[selected_valid_positions]))
     ]
+    discovered_original = [int(resolved_cache.valid_cols[int(i)]) for i in selected_order]
     selected_features = [feature_names[int(i)] for i in selected_order]
-    selected_indices = [int(resolved_cache.valid_cols[int(i)]) for i in selected_order]
+    selected_indices = list(discovered_original)
+    if resolved_sets is not None and resolved_sets.include:
+        selected_features, selected_indices = compose_selected(
+            cache_names,
+            resolved_sets.include,
+            discovered_original,
+        )
+        include_valid_set = set(int(i) for i in include_valid)
+        selected_mask = selected_mask.copy()
+        for valid_i in include_valid_set:
+            selected_mask[int(valid_i)] = True
+            mean_W[int(valid_i)] = 0.0
+            if n_draws_int == 1:
+                selection_frequency_arr[int(valid_i)] = np.nan
+            else:
+                selection_frequency_arr[int(valid_i)] = 1.0
+                if selection_frequency is not None:
+                    selection_frequency.iloc[int(valid_i)] = 1.0
 
-    W_table = pd.DataFrame(
-        {
-            "feature": feature_names,
-            "selected_index": resolved_cache.valid_cols.astype(np.int64),
-            "W": mean_W,
-            "selected": selected_mask,
-            "selection_frequency": selection_frequency_arr,
-            "relevance": relevance,
-            "selector": "knockoff_fdr",
-        }
-    )
+    W_cols = {
+        "feature": feature_names,
+        "selected_index": resolved_cache.valid_cols.astype(np.int64),
+        "W": mean_W,
+        "selected": selected_mask,
+        "selection_frequency": selection_frequency_arr,
+        "relevance": relevance,
+    }
+    if resolved_sets is not None and resolved_sets.active:
+        role = np.array(["ineligible"] * p_valid, dtype=object)
+        role[active_positions] = "discovery"
+        if include_valid.size:
+            role[include_valid] = "include"
+        W_cols["role"] = role
+    W_cols["selector"] = "knockoff_fdr"
+    W_table = pd.DataFrame(W_cols)
     if group_codes is not None and group_labels is not None:
         W_table["feature_group"] = [group_labels[int(code)] for code in group_codes]
     for draw_idx in range(n_draws_int):
@@ -2250,6 +2532,19 @@ def select_fdr(
         ],
         "active_valid_positions": active_positions.astype(int).tolist(),
     }
+    cond_record = conditioning_record(
+        resolved_sets,
+        feature_names=cache_names,
+        discovered_idx=[
+            int(resolved_cache.valid_cols[int(i)])
+            for i in selected_order
+        ],
+        include_provenance=provenance,
+        discovery_universe=None if resolved_sets is None else resolved_sets.discovery,
+    )
+    if cond_record is not None:
+        diagnostics["conditioning"] = cond_record
+        metadata["conditioning"] = cond_record
     if group_codes is not None and group_labels is not None:
         diagnostics["feature_groups"] = group_labels
         diagnostics["group_W_draws"] = group_W_draws

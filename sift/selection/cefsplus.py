@@ -18,6 +18,13 @@ from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
 from sift.selection.proxies import proxy_frame_from_panel
 from sift.selection.result import _PROXY_CORRELATIONS_ATTR
+from sift.selection.conditioning import (
+    compose_selected,
+    conditioning_record,
+    map_original_to_valid,
+    named_feature_space,
+    resolve_conditioning,
+)
 from sift.selection.knockoff_filter import (
     _reject_duplicate_feature_names,
     _validate_prebuilt_cache_structure,
@@ -36,16 +43,47 @@ def _gaussian_mrmr_select(
     use_quotient: bool,
     floor: float = 1e-6,
     callback: ProgressCallback | None = None,
+    preselected: np.ndarray | None = None,
+    eligible: np.ndarray | None = None,
 ) -> np.ndarray:
     m = len(rel)
-    k = min(k, m)
-    selected = np.empty(k, dtype=np.int64)
     is_sel = np.zeros(m, dtype=bool)
+    if eligible is None:
+        eligible_mask = np.ones(m, dtype=bool)
+    else:
+        eligible_mask = np.asarray(eligible, dtype=bool)
+    if preselected is not None and len(preselected):
+        is_sel[np.asarray(preselected, dtype=np.int64)] = True
+    eligible_mask = eligible_mask & ~is_sel
+    k = min(k, int(np.sum(eligible_mask)))
+    if k <= 0:
+        return np.empty(0, dtype=np.int64)
+    selected = np.empty(k, dtype=np.int64)
     red_sum = np.zeros(m, dtype=np.float64)
+    n_pre = int(np.sum(is_sel))
+    if n_pre:
+        for j_pre in np.flatnonzero(is_sel):
+            red = gaussian_mi_from_corr(R[int(j_pre)])
+            mask = ~is_sel
+            red_sum[mask] += red[mask]
+        t0 = n_pre
+        mean_red = red_sum / t0
+        if use_quotient:
+            score = rel / np.maximum(mean_red, floor)
+        else:
+            score = rel - mean_red
+        score[~eligible_mask] = -np.inf
+        j0 = int(np.argmax(score))
+        if not np.isfinite(score[j0]):
+            return np.empty(0, dtype=np.int64)
+    else:
+        scores0 = np.where(eligible_mask, rel, -np.inf)
+        j0 = int(np.argmax(scores0))
+        t0 = 0
 
-    j0 = int(np.argmax(rel))
     selected[0] = j0
     is_sel[j0] = True
+    eligible_mask[j0] = False
     count = 1
     if callback is not None:
         report_progress(
@@ -62,19 +100,20 @@ def _gaussian_mrmr_select(
         mask = ~is_sel
         red_sum[mask] += red[mask]
 
-        mean_red = red_sum / t
+        mean_red = red_sum / (t + t0)
         if use_quotient:
             score = rel / np.maximum(mean_red, floor)
         else:
             score = rel - mean_red
 
-        score[is_sel] = -np.inf
+        score[~eligible_mask] = -np.inf
         j = int(np.argmax(score))
         if not np.isfinite(score[j]):
             break
 
         selected[t] = j
         is_sel[j] = True
+        eligible_mask[j] = False
         count += 1
         if callback is not None:
             report_progress(
@@ -95,16 +134,56 @@ def _gaussian_jmi_select(
     k: int,
     use_min: bool,
     callback: ProgressCallback | None = None,
+    preselected: np.ndarray | None = None,
+    eligible: np.ndarray | None = None,
 ) -> np.ndarray:
     m = len(r_y)
-    k = min(k, m)
-    selected = np.empty(k, dtype=np.int64)
     is_sel = np.zeros(m, dtype=bool)
+    if eligible is None:
+        eligible_mask = np.ones(m, dtype=bool)
+    else:
+        eligible_mask = np.asarray(eligible, dtype=bool)
+    if preselected is not None and len(preselected):
+        is_sel[np.asarray(preselected, dtype=np.int64)] = True
+    eligible_mask = eligible_mask & ~is_sel
+    k = min(k, int(np.sum(eligible_mask)))
+    if k <= 0:
+        return np.empty(0, dtype=np.int64)
+    selected = np.empty(k, dtype=np.int64)
     scores = np.full(m, np.inf, dtype=np.float64) if use_min else np.zeros(m, dtype=np.float64)
 
-    j0 = int(np.argmax(rel))
+    r2 = np.empty(m, dtype=np.float64)
+    frac = np.empty(m, dtype=np.float64)
+    eps = 1e-8
+
+    def _accumulate_from(last: int) -> None:
+        r_ys = float(r_y[last])
+        r_fs = R[last]
+        denom = 1.0 - r_fs * r_fs
+        a = r_y - r_ys * r_fs
+        r2.fill(r_ys * r_ys)
+        frac.fill(0.0)
+        np.divide(a * a, denom, out=frac, where=denom >= eps)
+        np.add(r2, frac, out=r2)
+        np.clip(r2, 0.0, 0.99999, out=r2)
+        mi = -0.5 * np.log(1.0 - r2)
+        mask = eligible_mask
+        if use_min:
+            scores[mask] = np.minimum(scores[mask], mi[mask])
+        else:
+            scores[mask] += mi[mask]
+
+    if np.any(is_sel):
+        for last in np.flatnonzero(is_sel):
+            _accumulate_from(int(last))
+        pick_scores = np.where(eligible_mask, scores, -np.inf)
+        pick_scores = np.where(np.isfinite(pick_scores), pick_scores, rel)
+        j0 = int(np.argmax(np.where(eligible_mask, pick_scores, -np.inf)))
+    else:
+        j0 = int(np.argmax(np.where(eligible_mask, rel, -np.inf)))
     selected[0] = j0
     is_sel[j0] = True
+    eligible_mask[j0] = False
     count = 1
     if callback is not None:
         report_progress(
@@ -115,43 +194,16 @@ def _gaussian_jmi_select(
             selector="jmim" if use_min else "jmi",
         )
 
-    # Scratch buffers to avoid per-iteration allocations.
-    r2 = np.empty(m, dtype=np.float64)
-    frac = np.empty(m, dtype=np.float64)
-    eps = 1e-8
-
     for t in range(1, k):
-        last = selected[t - 1]
-        r_ys = float(r_y[last])
-
-        # Use row access (contiguous) rather than column access (strided).
-        r_fs = R[last]
-        denom = 1.0 - r_fs * r_fs
-        a = r_y - r_ys * r_fs
-        # Match the original scalar fallback exactly, but without np.where() eager
-        # evaluation (which can emit divide-by-zero warnings):
-        #   if denom < eps: r2 = r_ys^2
-        #   else:          r2 = r_ys^2 + a^2 / denom
-        r2.fill(r_ys * r_ys)
-        frac.fill(0.0)
-        np.divide(a * a, denom, out=frac, where=denom >= eps)
-        r2 += frac
-        np.clip(r2, 0.0, 0.99999, out=r2)
-        mi = -0.5 * np.log(1.0 - r2)
-
-        mask = ~is_sel
-        if use_min:
-            scores[mask] = np.minimum(scores[mask], mi[mask])
-        else:
-            scores[mask] += mi[mask]
-
-        scores[is_sel] = -np.inf
-        j = int(np.argmax(scores))
-        if not np.isfinite(scores[j]):
+        _accumulate_from(int(selected[t - 1]))
+        pick_scores = np.where(eligible_mask, scores, -np.inf)
+        j = int(np.argmax(pick_scores))
+        if not np.isfinite(pick_scores[j]):
             break
 
         selected[t] = j
         is_sel[j] = True
+        eligible_mask[j] = False
         count += 1
         if callback is not None:
             report_progress(
@@ -275,6 +327,152 @@ def _cefsplus_loop_core(
             objective[count] = logdet_S - logdet_yS
         remaining[j] = False
         count += 1
+
+    return selected[:count], objective[:count]
+
+
+@njit_optional_cache(cache=True)
+def _cefsplus_loop_core_conditioned(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    want_objective: bool,
+    forced: np.ndarray,
+    eligible: np.ndarray,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """CEFS+ path with a pre-conditioned partial-Cholesky state.
+
+    ``forced`` columns are applied in order to ``L``, ``d``, ``c`` and ``dy``
+    and are not returned as discoveries. Greedy steps then run among
+    ``eligible`` remaining columns for up to ``k`` additional features.
+    """
+    m = len(r)
+    n_forced = len(forced)
+    if k <= 0 or m == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    k = min(k, int(np.sum(eligible)))
+    if k <= 0 and n_forced == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+
+    scale = 1.0 - shrink
+    selected = np.empty(k, dtype=np.int64)
+    objective = np.empty(k if want_objective else 0, dtype=np.float64)
+    remaining = eligible.copy()
+    for i in range(n_forced):
+        remaining[forced[i]] = True
+
+    total = n_forced + k
+    L = np.zeros((m, total), dtype=np.float64)
+    Ly = np.zeros(total, dtype=np.float64)
+    d = np.ones(m, dtype=np.float64)
+    c = np.empty(m, dtype=np.float64)
+    for j in range(m):
+        c[j] = scale * r[j]
+    dy = 1.0
+
+    logdet_S = 0.0
+    logdet_yS = 0.0
+    score = np.empty(m, dtype=np.float64)
+    s1 = np.empty(m, dtype=np.float64)
+    s2 = np.empty(m, dtype=np.float64)
+
+    t = 0
+    for f in range(n_forced):
+        j = int(forced[f])
+        if t == 0:
+            s1_best = 1.0
+            s2_best = max(1.0 - c[j] * c[j], eps)
+        else:
+            s1_best = max(d[j], eps)
+            s2_best = max(d[j] - c[j] * c[j] / dy, eps)
+        sq = np.sqrt(s1_best)
+        ly = c[j] / sq
+        Ly[t] = ly
+        dy -= ly * ly
+        for i in range(m):
+            if not remaining[i] or i == j:
+                continue
+            acc = R[i, j] * scale
+            for a in range(t):
+                acc -= L[i, a] * L[j, a]
+            lij = acc / sq
+            L[i, t] = lij
+            d[i] -= lij * lij
+            c[i] -= lij * ly
+        logdet_S += np.log(s1_best)
+        logdet_yS += np.log(s2_best)
+        remaining[j] = False
+        t += 1
+
+    baseline = logdet_S - logdet_yS
+    count = 0
+    while count < k:
+        if t == 0:
+            j = -1
+            best_rel = -np.inf
+            for jj in range(m):
+                if not remaining[jj]:
+                    continue
+                if j < 0 or tie_break_rel[jj] > best_rel:
+                    best_rel = tie_break_rel[jj]
+                    j = jj
+            if j < 0:
+                break
+            s1_best = 1.0
+            s2_best = max(1.0 - c[j] * c[j], eps)
+        else:
+            best_pos = -1
+            best_score = -np.inf
+            for jj in range(m):
+                if not remaining[jj]:
+                    continue
+                s1_j = max(d[jj], eps)
+                s2_j = max(d[jj] - c[jj] * c[jj] / dy, eps)
+                s1[jj] = s1_j
+                s2[jj] = s2_j
+                sc = np.log(s1_j) - np.log(s2_j)
+                score[jj] = sc
+                if best_pos < 0 or sc > best_score:
+                    best_score = sc
+                    best_pos = jj
+            if best_pos < 0:
+                break
+            j = best_pos
+            best_rel = tie_break_rel[j]
+            for jj in range(m):
+                if remaining[jj] and np.abs(score[jj] - best_score) < 1e-12:
+                    if tie_break_rel[jj] > best_rel:
+                        best_rel = tie_break_rel[jj]
+                        j = jj
+            s1_best = s1[j]
+            s2_best = s2[j]
+
+        sq = np.sqrt(s1_best)
+        ly = c[j] / sq
+        Ly[t] = ly
+        dy -= ly * ly
+        for i in range(m):
+            if not remaining[i] or i == j:
+                continue
+            acc = R[i, j] * scale
+            for a in range(t):
+                acc -= L[i, a] * L[j, a]
+            lij = acc / sq
+            L[i, t] = lij
+            d[i] -= lij * lij
+            c[i] -= lij * ly
+
+        logdet_S += np.log(s1_best)
+        logdet_yS += np.log(s2_best)
+        selected[count] = j
+        if want_objective:
+            objective[count] = (logdet_S - logdet_yS) - baseline
+        remaining[j] = False
+        count += 1
+        t += 1
 
     return selected[:count], objective[:count]
 
@@ -473,6 +671,31 @@ def cefsplus_loop_with_objective(
     )
 
 
+def _conditional_discovery_objective(
+    R: np.ndarray,
+    r: np.ndarray,
+    forced_local: np.ndarray,
+    sel_local: np.ndarray,
+) -> np.ndarray:
+    """Cumulative Gaussian-MI of discoveries given an include prefix."""
+    selected = np.asarray(sel_local, dtype=np.int64).reshape(-1)
+    if selected.size == 0:
+        return np.empty(0, dtype=np.float64)
+    forced = np.asarray(forced_local, dtype=np.int64).reshape(-1)
+    if forced.size == 0:
+        return objective_from_corr_path(
+            np.asarray(R)[np.ix_(selected, selected)],
+            np.asarray(r)[selected],
+        )
+    path = np.concatenate([forced, selected])
+    full = objective_from_corr_path(
+        np.asarray(R)[np.ix_(path, path)],
+        np.asarray(r)[path],
+    )
+    baseline = float(full[forced.size - 1])
+    return np.asarray(full[forced.size:], dtype=np.float64) - baseline
+
+
 def gaussian_noise_floor_mi(p_valid: int, n_eff: float) -> float:
     """Gaussian-MI relevance expected from the strongest of ``p_valid`` null features.
 
@@ -529,6 +752,9 @@ def select_cached(
     callback: ProgressCallback | None = None,
     return_result: bool = False,
     store_proxies: bool = False,
+    include=None,
+    exclude=None,
+    candidates=None,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
 ] | "SelectionView":
@@ -604,6 +830,16 @@ def select_cached(
         block on the view so ``view.proxies()`` and ``view.proxies_at()`` can
         report near-duplicate stand-ins for a selected feature.  Requires
         ``return_result=True``.  The block never contains ``X`` or the cache.
+    include : sequence of names or positions, optional
+        Conditioning set. The greedy state is initialized from these features
+        before step 1. They are not discoveries; ``k`` counts additional
+        features. Included names are prepended to the returned list in
+        caller order.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
 
     Returns
     -------
@@ -615,7 +851,11 @@ def select_cached(
         ``(features, indices)`` for ``return_indices=True``, and
         ``(features, indices, objective)`` for both, where ``indices`` is a
         ``list[int]`` of original column positions and ``objective`` is a
-        float64 array of shape ``(n_selected,)``.  With ``return_result=True``
+        float64 array of shape ``(n_discoveries,)``.  Without conditioning
+        that equals the number of returned features; with ``include`` it is
+        the number of additional discoveries, each value being cumulative
+        Gaussian MI relative to the include-only baseline.  With
+        ``return_result=True``
         a ``sift.SelectionView`` whose ``raw_table`` covers every cached
         input feature and whose ``diagnostics`` carry ``objective`` and
         ``candidate_indices``.
@@ -682,6 +922,45 @@ def select_cached(
     >>> view.k, view.indices
     (2, [5, 2])
     """
+    return _select_cached_impl(
+        cache,
+        y,
+        k,
+        method=method,
+        top_m=top_m,
+        corr_prune=corr_prune,
+        return_objective=return_objective,
+        return_indices=return_indices,
+        warn_noise_floor=warn_noise_floor,
+        callback=callback,
+        return_result=return_result,
+        store_proxies=store_proxies,
+        include=include,
+        exclude=exclude,
+        candidates=candidates,
+        compose_include=True,
+    )
+
+
+def _select_cached_impl(
+    cache: FeatureCache,
+    y,
+    k: int,
+    method: Literal["cefsplus", "jmi", "jmim", "mrmr_quot", "mrmr_diff"] = "cefsplus",
+    top_m: Optional[int] = None,
+    corr_prune: CorrPrune = "auto",
+    return_objective: bool = False,
+    return_indices: bool = False,
+    warn_noise_floor: bool = True,
+    callback: ProgressCallback | None = None,
+    return_result: bool = False,
+    store_proxies: bool = False,
+    include=None,
+    exclude=None,
+    candidates=None,
+    *,
+    compose_include: bool = True,
+):
     from sift._preprocess import to_numpy, validate_k
 
     if not isinstance(return_result, (bool, np.bool_)):
@@ -696,11 +975,50 @@ def select_cached(
             "return_indices; the normalized result already carries both"
         )
     k = validate_k(k, allow_auto=False)
+    if not isinstance(compose_include, (bool, np.bool_)):
+        raise ValueError("compose_include must be a boolean")
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
     y_arr = to_numpy(y, dtype=np.float64).ravel()
     if not np.isfinite(y_arr).all():
         raise ValueError("y contains non-finite values")
+    cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+        f"x{i}" for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+    ]
+    named = named_feature_space(
+        cache.feature_names,
+        synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+        or cache.feature_names is None,
+    )
+    resolved = resolve_conditioning(
+        include,
+        exclude,
+        candidates,
+        feature_names=cache_names,
+        named=named,
+        k=k,
+    )
+    protect_valid = None
+    pool_valid = None
+    forced_local = np.empty(0, dtype=np.int64)
+    if resolved is not None:
+        protect_valid = map_original_to_valid(
+            resolved.include,
+            cache.valid_cols,
+            feature_names=cache_names,
+            label="include",
+        )
+        pool_valid = map_original_to_valid(
+            resolved.discovery,
+            cache.valid_cols,
+            feature_names=cache_names,
+            label="candidates",
+            missing="drop",
+        )
+        if resolved.candidates is not None and pool_valid.size == 0:
+            raise ValueError(
+                "candidates contains no valid cache columns eligible for discovery"
+            )
     panel = build_candidate_panel(
         cache,
         y_arr,
@@ -708,16 +1026,45 @@ def select_cached(
         top_m=top_m,
         corr_prune=corr_prune,
         method=method,
+        protect_valid=protect_valid,
+        pool_valid=pool_valid,
     )
     R_cand = panel.R
     r_cand = panel.r
     rel_cand = panel.rel
-
-    k_actual = min(k, len(panel.cand))
+    n_forced = 0 if protect_valid is None else int(protect_valid.size)
+    eligible_local = np.ones(len(panel.cand), dtype=bool)
+    if n_forced:
+        forced_local = np.arange(n_forced, dtype=np.int64)
+        eligible_local[:n_forced] = False
+    k_actual = min(k, int(np.sum(eligible_local)))
+    use_forced = n_forced > 0
 
     objective = None
     if method == "cefsplus":
-        if callback is not None:
+        if use_forced:
+            want_objective = bool(return_objective or return_result)
+            sel_local, cond_objective = _cefsplus_loop_core_conditioned(
+                R_cand,
+                r_cand,
+                k_actual,
+                rel_cand,
+                want_objective,
+                forced_local,
+                eligible_local,
+            )
+            if want_objective:
+                objective = cond_objective
+            if callback is not None:
+                for step in range(1, len(sel_local) + 1):
+                    report_progress(
+                        callback,
+                        step,
+                        k_actual,
+                        stage="path",
+                        selector="cefsplus",
+                    )
+        elif callback is not None:
             sel_local, callback_objective = _cefsplus_loop_with_callback(
                 R_cand,
                 r_cand,
@@ -739,6 +1086,8 @@ def select_cached(
             k_actual,
             use_quotient=method == "mrmr_quot",
             callback=callback,
+            preselected=forced_local if use_forced else None,
+            eligible=eligible_local if use_forced else None,
         )
         if warn_noise_floor:
             _warn_gaussian_mrmr_noise_floor(panel, sel_local, method)
@@ -750,12 +1099,22 @@ def select_cached(
             k_actual,
             use_min=method == "jmim",
             callback=callback,
+            preselected=forced_local if use_forced else None,
+            eligible=eligible_local if use_forced else None,
         )
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    selected_original = panel.original[sel_local]
-
+    discovered_original = panel.original[sel_local].astype(np.int64, copy=False)
+    if compose_include and resolved is not None and resolved.include:
+        _composed_names, composed_idx = compose_selected(
+            cache_names,
+            resolved.include,
+            discovered_original.tolist(),
+        )
+        selected_original = np.asarray(composed_idx, dtype=np.int64)
+    else:
+        selected_original = discovered_original
     if cache.feature_names is not None:
         out = [cache.feature_names[i] for i in selected_original]
     else:
@@ -763,9 +1122,9 @@ def select_cached(
 
     if return_result:
         if objective is None:
-            R_path = R_cand[np.ix_(sel_local, sel_local)]
-            r_path = r_cand[sel_local]
-            objective = objective_from_corr_path(R_path, r_path)
+            objective = _conditional_discovery_objective(
+                R_cand, r_cand, forced_local, sel_local
+            )
         if cache.feature_names is None:
             raise ValueError(
                 "return_result=True requires cache.feature_names so the normalized "
@@ -802,6 +1161,28 @@ def select_cached(
         from sift.selection.result import FilterSelectionResult, build_selector_metadata
         from sift.selection.view import as_result
 
+        cond_record = conditioning_record(
+            resolved,
+            feature_names=feature_names,
+            discovered_idx=discovered_original.tolist(),
+        )
+        extra = {
+            "cache_backed": True,
+            "method": method,
+            "corr_prune": corr_prune,
+            "n_rows_original": int(cache.n_rows_original),
+            "n_rows_cached": int(len(cache.row_idx)),
+        }
+        diagnostics = {
+            "objective": np.asarray(objective, dtype=np.float64).copy(),
+            "candidate_indices": np.asarray(
+                panel.original,
+                dtype=np.int64,
+            ).copy(),
+        }
+        if cond_record is not None:
+            extra["conditioning"] = cond_record
+            diagnostics["conditioning"] = cond_record
         result = FilterSelectionResult(
             selected_features=list(out),
             selected_indices=selected_indices,
@@ -812,22 +1193,10 @@ def select_cached(
                 top_m=top_m,
                 n_features=len(feature_names),
                 auto_k=False,
-                extra={
-                    "cache_backed": True,
-                    "method": method,
-                    "corr_prune": corr_prune,
-                    "n_rows_original": int(cache.n_rows_original),
-                    "n_rows_cached": int(len(cache.row_idx)),
-                },
+                extra=extra,
             ),
             ranking_=ranking,
-            diagnostics_={
-                "objective": np.asarray(objective, dtype=np.float64).copy(),
-                "candidate_indices": np.asarray(
-                    panel.original,
-                    dtype=np.int64,
-                ).copy(),
-            },
+            diagnostics_=diagnostics,
         )
         if store_proxies:
             proxy_correlations = proxy_frame_from_panel(
@@ -844,9 +1213,9 @@ def select_cached(
 
     if return_objective:
         if objective is None:
-            R_path = R_cand[np.ix_(sel_local, sel_local)]
-            r_path = r_cand[sel_local]
-            objective = objective_from_corr_path(R_path, r_path)
+            objective = _conditional_discovery_objective(
+                R_cand, r_cand, forced_local, sel_local
+            )
         if return_indices:
             return out, selected_original.tolist(), objective
         return out, objective

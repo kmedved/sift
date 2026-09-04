@@ -2,6 +2,25 @@
 
 ## 0.9.1 (unreleased)
 
+### Features
+
+- Added additive `include=`, `exclude=`, and `candidates=` keywords on the
+  public filter selectors, `select_cached`, the sklearn filter wrappers, and
+  `select_fdr`. `include` initializes the actual greedy/conditional state
+  before step 1; `exclude` and `candidates` constrain the discovery pool.
+  `k` counts additional discoveries. Conditioned features are prepended to
+  the output in caller order and are not treated as discoveries. Omitted
+  keywords leave existing calls unchanged. Auto-k methods that rebuild an
+  unconditioned path (`stability`, `knockoff_path`, `consensus`,
+  `gaussian_cv`, `perm_gap`, `xfit_objective`) reject conditioning instead
+  of approximating. `k_method="auto"` is checked after routing, and
+  `auto_dense_check` is rejected when conditioning is active.
+  Knockoff `include`/`exclude`/`candidates` require `include_provenance`;
+  only `prespecified` and `sample_split` keep FDR-compatible metadata, while
+  `data_derived` is labeled exploratory with `fdr_control="none"`. FDR
+  applies to discoveries only; the include set is residualized out of the
+  Gaussian-copula knockoff model.
+
 ### Documentation
 
 - Replaced the handwritten `docs/API.md` page with a generated reference page

@@ -89,6 +89,15 @@ information objective, and greedily adds features by incremental log-det gain.
 At a high level, it asks: "How much extra information about `y` remains in this
 candidate after conditioning on the selected set?"
 
+`include=` is a true conditioning set: CEFS+ initializes the partial-Cholesky
+residual state from those features before the first greedy step. `exclude=`
+and `candidates=` only change who is eligible to be discovered. `k` is the
+number of additional discoveries; included features are returned first in
+caller order and are not counted as discoveries. The same contract applies
+to classic mRMR/JMI/JMIM, Gaussian JMI/mRMR, binary log-loss CEFS+, and
+cache-backed selection. Auto-k methods that cannot reuse that conditioned
+path reject the keywords instead of post-filtering an unconditioned run.
+
 Use CEFS+ when:
 
 - the task is regression;
