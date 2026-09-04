@@ -1,0 +1,3 @@
+Command: LOKY_MAX_CPU_COUNT=8 /opt/anaconda3/bin/python -W error -m pytest -q
+Result: 1982 passed, 40 skipped in 118.10s
+Warning policy: warnings treated as errors

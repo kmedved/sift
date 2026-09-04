@@ -1,0 +1,9 @@
+{
+  "base_commit": "237063195707c3a45571b8c59824b29f52665f61",
+  "files": {
+    "sift/selection/view.py": 3113,
+    "sift/selection/filter_auto_k.py": 2139,
+    "sift/selection/auto_k.py": 2587
+  },
+  "target_total_lines": 7839
+}

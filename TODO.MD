@@ -86,9 +86,10 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
 - [ ] F5 multi-target CEFS+; F6 generic `ModelSelector` with purged/embargoed
       time-series splits.
-- [ ] Outside §F: split `selection/view.py`, `selection/filter_auto_k.py` and
-      `selection/auto_k.py` along their adapter/router boundaries before any of
-      the above; then the reusable standardized/cache path for classic
+- [x] Outside §F: split `selection/view.py`, `selection/filter_auto_k.py` and
+      `selection/auto_k.py` along their adapter/router boundaries (accepted on
+      `codex/0.9x-router-splits`; implementation commit still pending).
+- [ ] After that split: the reusable standardized/cache path for classic
       selectors, leakage-free unsupervised `ordinal`/`frequency` fallbacks, and
       reproducibility manifests (`result.reproducibility_`).
 
