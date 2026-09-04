@@ -983,6 +983,15 @@ class MRMRSelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
+    include : sequence of names or positions, optional
+        Conditioning set. Selector state is initialized from these features
+        before step 1. They appear in the fitted selection in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1091,6 +1100,9 @@ class MRMRSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        include=None,
+        exclude=None,
+        candidates=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1195,6 +1207,15 @@ class JMISelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
+    include : sequence of names or positions, optional
+        Conditioning set. Selector state is initialized from these features
+        before step 1. They appear in the fitted selection in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1300,6 +1321,9 @@ class JMISelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        include=None,
+        exclude=None,
+        candidates=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1405,6 +1429,15 @@ class JMIMSelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
+    include : sequence of names or positions, optional
+        Conditioning set. Selector state is initialized from these features
+        before step 1. They appear in the fitted selection in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1511,6 +1544,9 @@ class JMIMSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        include=None,
+        exclude=None,
+        candidates=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1611,6 +1647,15 @@ class CEFSPlusSelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
+    include : sequence of names or positions, optional
+        Conditioning set. Selector state is initialized from these features
+        before step 1. They appear in the fitted selection in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1714,6 +1759,9 @@ class CEFSPlusSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        include=None,
+        exclude=None,
+        candidates=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1830,6 +1878,15 @@ class CEFSPlusBinarySelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
+    include : sequence of names or positions, optional
+        Conditioning set. Selector state is initialized from these features
+        before step 1. They appear in the fitted selection in caller order
+        but are not discoveries; ``k`` counts additional features.
+    exclude : sequence of names or positions, optional
+        Features removed from the discovery pool. Cannot overlap ``include``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for discovery. ``include`` may sit outside it.
+        Overlap with ``exclude`` is rejected. An empty remaining pool raises.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1940,6 +1997,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
         random_state: int = 0,
         verbose: bool = True,
         auto_k_config=None,
+        include=None,
+        exclude=None,
+        candidates=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -2242,6 +2302,22 @@ class KnockoffSelector(_BaseSelector):
         positional features requires the matching ndarray. A cache already
         stores row weights, so ``sample_weight`` is rejected beside it, and a
         supervised ``cat_encoding`` is rejected too.
+    include : sequence of names or positions, optional
+        Conditioning set. These features are not tested by the knockoff
+        filter; they are prepended to the selected set in caller order.
+        Any of ``include``, ``exclude``, or ``candidates`` requires
+        ``include_provenance``.
+    exclude : sequence of names or positions, optional
+        Features removed from the tested discovery universe. Requires
+        ``include_provenance``.
+    candidates : sequence of names or positions, optional
+        Hard allow-list for the tested discovery universe. Requires
+        ``include_provenance``.
+    include_provenance : {"prespecified", "sample_split", "data_derived"} or None
+        Required when ``include``, ``exclude``, or ``candidates`` is
+        provided. FDR-compatible wording is allowed only for
+        ``prespecified`` and ``sample_split``. ``data_derived`` is labeled
+        exploratory and reports ``fdr_control="none"``.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -2352,6 +2428,10 @@ class KnockoffSelector(_BaseSelector):
         n_jobs: int = 1,
         verbose: bool = True,
         cache=None,
+        include=None,
+        exclude=None,
+        candidates=None,
+        include_provenance=None,
         output_order: str = "legacy",
     ):
         self._init_selector(select_fdr, locals())

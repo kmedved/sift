@@ -60,10 +60,11 @@ def prepare_filter_eval_data(
 def _cached_filter_path(
     cache, y, k: int, *, method: str, top_m: int, corr_prune,
     want_indices: bool, return_objective: bool, callback=None,
+    include=None, exclude=None, candidates=None,
 ) -> tuple[list[str], list[int], np.ndarray | None]:
-    from sift.selection.cefsplus import select_cached
+    from sift.selection.cefsplus import _select_cached_impl
 
-    result = select_cached(
+    result = _select_cached_impl(
         cache,
         y,
         k,
@@ -74,6 +75,10 @@ def _cached_filter_path(
         return_objective=return_objective,
         warn_noise_floor=False,
         callback=callback,
+        include=include,
+        exclude=exclude,
+        candidates=candidates,
+        compose_include=False,
     )
     if return_objective and want_indices:
         path, indices, objective = result
@@ -116,6 +121,7 @@ def select_filter_classic_auto_k(
     verbose: bool = True,
     return_indices: bool = False,
     return_diagnostics: bool = False,
+    base_features: list | None = None,
 ) -> list[str] | tuple:
     path = [feature_names[i] for i in path_idx]
     _require_eval_split_context(auto_k_config, eval_groups, eval_time)
@@ -134,6 +140,7 @@ def select_filter_classic_auto_k(
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
         warmup_policy=warmup_policy,
+        base_features=base_features,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     result: tuple = (selected,)

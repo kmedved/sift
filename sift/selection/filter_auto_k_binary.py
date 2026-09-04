@@ -81,6 +81,7 @@ def select_binary_penalized(
             run.w_sub.astype(np.float64, copy=False),
             run.path.selected_original,
             ridge=options.ridge,
+            include_original=run.include_original,
         )
         score_test_ic_approximation = False
 
@@ -161,6 +162,7 @@ def select_binary_posterior(
             run.w_sub.astype(np.float64, copy=False),
             run.path.selected_original,
             ridge=options.ridge,
+            include_original=run.include_original,
         )
         score_test_ic_approximation = False
 
@@ -285,6 +287,7 @@ def select_binary_evaluate(
         groups=eval_groups,
         time=eval_time,
         task="classification",
+        base_features=[run.feature_names[int(i)] for i in run.include_original],
         cat_features=run.cat_features,
         cat_encoding=cat_encoding,
         sample_weight=(

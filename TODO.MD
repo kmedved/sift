@@ -61,13 +61,13 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `fa74d63a0f07423d4d12d06aeb679d3de36b3fda` with `dirty=false`.
-- [ ] 0.9.1 integration closeout: push, run full GitHub CI (including strict
-      MkDocs and optional-dependency jobs), and merge. PyPI publication does
-      not.
+      `b2a11bdf0d6131ba2714207378619e79a7ea833b` with `dirty=false`.
+- [x] 0.9.1 integration closeout: pushed, required GitHub CI jobs passed, and
+      merged as PR #78 at `3b9ac0a`. PyPI publication did not follow.
 
 Do not treat the tutorial page or the clean runtime-scaling refresh as open
-documentation work. GitHub CI has not been claimed for this closeout yet.
+documentation work. The 0.9.1 integration closeout is merged; PyPI remains
+out of scope.
 
 The `group_col`/`sample_weight_col` and `StabilitySelector` `alpha`/`penalty`
 aliases are permanent as of the same decision: no deprecation, no 1.0 removal.
@@ -77,21 +77,26 @@ aliases are permanent as of the same decision: no deprecation, no 1.0 removal.
 Authoritative list and design detail: `docs/specs/0.9-product-layer.md` §F, in
 the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
 
-- [ ] F1 conditioning sets (`include=`, `exclude=`, `candidates=`).
+- [x] Router/adapter split of `selection/view.py`, `selection/filter_auto_k.py`,
+      and `selection/auto_k.py`. Merged as PR #78 at `3b9ac0a` (implementation
+      commit `fa74d63`).
+- [x] F1 conditioning sets (`include=`, `exclude=`, `candidates=`).
+      Review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` /
+      PR #78). Implementation commit `b2a11bdf0d6131ba2714207378619e79a7ea833b`.
+      Artifact commit has not landed yet.
 - [ ] F2 proxy/redundancy and cluster reports.
 - [ ] F7 panel within/between transforms.
 - [ ] F8a knockoff feasibility and UX metadata; F8b/F8c validated e-value
       aggregation and the statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
+- [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
+- [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
+- [ ] Reproducibility manifests (`result.reproducibility_`).
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
-- [ ] F5 multi-target CEFS+; F6 generic `ModelSelector` with purged/embargoed
-      time-series splits.
-- [x] Outside §F: split `selection/view.py`, `selection/filter_auto_k.py` and
-      `selection/auto_k.py` along their adapter/router boundaries (accepted on
-      `codex/0.9x-router-splits`; implementation commit `fa74d63`).
-- [ ] After that split: the reusable standardized/cache path for classic
-      selectors, leakage-free unsupervised `ordinal`/`frequency` fallbacks, and
-      reproducibility manifests (`result.reproducibility_`).
+- [ ] F5 multi-target CEFS+.
+- [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
+- [ ] Standardized classic-selector caches, then leakage-free unsupervised
+      `ordinal`/`frequency` categorical fallbacks.
 
 ## Closed history
 

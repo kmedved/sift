@@ -71,6 +71,11 @@ from sift.selection.filter_auto_k import (
     select_gaussian_stability_path,
     select_gaussian_xfit_objective_path,
 )
+from sift.selection.conditioning import (
+    compose_selected,
+    conditioning_record,
+    require_supported_auto_k,
+)
 from sift.selection.loops import jmi_select, mrmr_select
 from sift.selection.panel import build_candidate_panel
 from sift.selection.proxies import proxy_frame_from_panel
@@ -119,7 +124,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 f"{prep.X_arr.shape[1]} (top_m={top_m})"
             )
         selected_idx = path_func(ctx, prep, k, top_m)
-        selected = [prep.feature_names[i] for i in selected_idx]
+        selected_idx, selected = _compose_classic_selection(ctx, prep, selected_idx)
         ranking = None
         diagnostics = None
         if ctx.request.return_result:
@@ -137,11 +142,14 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 ctx.spec.selector,
             )
             diagnostics = {
-                "path_relevance": relevance[selected_idx].astype(float).tolist(),
+                "path_relevance": relevance[np.asarray(selected_idx, dtype=np.int64)].astype(float).tolist(),
             }
+            cond = _conditioning_diag(ctx, selected_idx)
+            if cond is not None:
+                diagnostics["conditioning"] = cond
         return SelectionPayload(
             selected_features=selected,
-            selected_indices=selected_idx.astype(int).tolist()
+            selected_indices=np.asarray(selected_idx, dtype=np.int64).astype(int).tolist()
             if ctx.request.return_result
             else None,
             top_m=top_m,
@@ -192,6 +200,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             verbose=_kw(ctx, "verbose"),
             return_indices=True,
             return_diagnostics=want_result,
+            base_features=_include_names(ctx),
         )
         ranking = None
         diagnostics = None
@@ -199,6 +208,11 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             selected, selected_indices = outcome
         else:
             selected, selected_indices, auto_diag, auto_summary = outcome
+        composed_idx, selected = _compose_classic_selection(
+            ctx, prep, np.asarray(selected_indices, dtype=np.int64)
+        )
+        selected_indices = composed_idx.tolist()
+        if want_result:
             relevance = _compute_relevance(
                 prep.X_arr,
                 prep.y_arr,
@@ -208,14 +222,12 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             )
             ranking = _path_ranking(
                 prep.feature_names,
-                np.asarray(selected_indices, dtype=np.int64),
+                composed_idx,
                 relevance,
                 ctx.spec.selector,
             )
             diagnostics = {
-                "path_relevance": relevance[
-                    np.asarray(selected_indices, dtype=np.int64)
-                ].astype(float).tolist(),
+                "path_relevance": relevance[composed_idx].astype(float).tolist(),
                 "auto_k": auto_summary,
                 "auto_k_diagnostics": auto_diag,
                 AUTO_K_CURVE_KEY: build_auto_k_curve_payload(
@@ -224,6 +236,9 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                     summary=auto_summary,
                 ),
             }
+            cond = _conditioning_diag(ctx, composed_idx)
+            if cond is not None:
+                diagnostics["conditioning"] = cond
         return SelectionPayload(
             selected_features=selected,
             selected_indices=selected_indices,
@@ -256,6 +271,9 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 return_indices=True,
                 return_objective=True,
                 callback=ctx.request.callback,
+                include=_kw(ctx, "include"),
+                exclude=_kw(ctx, "exclude"),
+                candidates=_kw(ctx, "candidates"),
             )
         else:
             selected, selected_indices = select_cached(
@@ -267,6 +285,9 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 corr_prune=_kw(ctx, "corr_prune", "auto"),
                 return_indices=True,
                 callback=ctx.request.callback,
+                include=_kw(ctx, "include"),
+                exclude=_kw(ctx, "exclude"),
+                candidates=_kw(ctx, "candidates"),
             )
             objective = None
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
@@ -301,6 +322,10 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                     relevance,
                     ctx.spec.selector,
                 )
+            cond = _conditioning_diag(ctx, selected_indices or [])
+            if cond is not None:
+                diagnostics = dict(diagnostics or {})
+                diagnostics["conditioning"] = cond
         return SelectionPayload(
             selected_features=selected_features,
             selected_indices=selected_indices,
@@ -324,6 +349,8 @@ def make_auto_gaussian(
 ) -> Callable[["FilterContext"], SelectionPayload]:
     def auto_gaussian(ctx: "FilterContext") -> SelectionPayload:
         assert ctx.auto_k_config is not None
+        if ctx.conditioning is not None and getattr(ctx.conditioning, "active", False):
+            require_supported_auto_k(ctx.auto_k_config.k_method)
         cache, cat_features, effective_weight, target_cv_metadata = _cache_for_gaussian(ctx)
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
@@ -365,6 +392,13 @@ def make_auto_gaussian(
             target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
             target_prior=_kw(ctx, "target_prior"),
             warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+            include=_kw(ctx, "include"),
+            exclude=_kw(ctx, "exclude"),
+            candidates=_kw(ctx, "candidates"),
+            include_names=_include_names(ctx),
+        )
+        selected, selected_indices = _compose_gaussian_auto_selection(
+            ctx, selected, selected_indices
         )
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
             ctx,
@@ -401,6 +435,9 @@ def make_auto_gaussian(
                     relevance,
                     ctx.spec.selector,
                 )
+            cond = _conditioning_diag(ctx, selected_indices or [])
+            if cond is not None:
+                diagnostics["conditioning"] = cond
         metadata_extra = {}
         if target_cv_metadata:
             metadata_extra.update(target_cv_metadata)
@@ -435,6 +472,16 @@ def _gaussian_proxy_correlations(
         raise ValueError(
             "store_proxies=True requires unambiguous raw selected-feature positions"
         )
+    from sift.selection.filter_auto_k_common import _conditioning_valid_sets
+
+    protect, pool = _conditioning_valid_sets(
+        cache,
+        {
+            "include": _kw(ctx, "include"),
+            "exclude": _kw(ctx, "exclude"),
+            "candidates": _kw(ctx, "candidates"),
+        },
+    )
     panel = build_candidate_panel(
         cache,
         ctx.request.y,
@@ -442,6 +489,8 @@ def _gaussian_proxy_correlations(
         top_m=top_m,
         corr_prune=_kw(ctx, "corr_prune", "auto"),
         method=method,
+        protect_valid=protect,
+        pool_valid=pool,
     )
     return proxy_frame_from_panel(
         panel.R,
@@ -560,6 +609,8 @@ def make_jmi_classic_path(*, aggregation: str, pass_sample_weight: bool) -> Clas
             if pass_sample_weight
             else None,
             callback=ctx.request.callback,
+            include_idx=_include_indices(ctx),
+            candidate_idx=_candidate_indices(ctx),
         )
 
     return jmi_classic_path
@@ -755,6 +806,8 @@ def _build_binary_run(ctx: "FilterContext") -> tuple[BinaryProblem, BinaryOption
         target_prior=_kw(ctx, "target_prior"),
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         callback=ctx.request.callback,
+        include_idx=_include_indices(ctx),
+        candidate_idx=_candidate_indices(ctx),
     )
     return problem, options, run
 
@@ -784,6 +837,21 @@ def _binary_payload_from_selection(
     ctx: "FilterContext", problem: BinaryProblem, options: BinaryOptions,
     run: BinaryPathRun, selection: BinarySelection,
 ) -> SelectionPayload:
+    include_idx = _include_indices(ctx)
+    if include_idx.size:
+        names, indices = compose_selected(
+            run.feature_names,
+            include_idx,
+            selection.selected_original,
+        )
+        selection = BinarySelection(
+            selected_features=names,
+            selected_original=indices,
+            selected_scores=selection.selected_scores,
+            auto_diag=selection.auto_diag,
+            auto_objective=selection.auto_objective,
+            auto_summary=selection.auto_summary,
+        )
     if not ctx.request.return_result:
         return SelectionPayload(
             selected_features=selection.selected_features,
@@ -792,6 +860,9 @@ def _binary_payload_from_selection(
         )
 
     diagnostics = make_diagnostics(run.path)
+    cond = _conditioning_diag(ctx, selection.selected_original)
+    if cond is not None:
+        diagnostics["conditioning"] = cond
     diagnostics.update(
         {
             "subsample_row_idx": None
@@ -821,8 +892,9 @@ def _binary_payload_from_selection(
         run.path.univariate_scores,
         "cefsplus_binary",
     )
+    discovery_original = list(run.path.selected_original)
     path_score_by_index = dict(
-        zip(selection.selected_original, selection.selected_scores)
+        zip(discovery_original, selection.selected_scores)
     )
     ranking.insert(
         ranking.columns.get_loc("selector"),
@@ -930,6 +1002,8 @@ def _mrmr_classic_path(ctx: "FilterContext", prep: ClassicPrepared, k: int, top_
         n_jobs=ctx.n_jobs,
         mrmr_backend=ctx.mrmr_backend,
         callback=ctx.request.callback,
+        include_idx=_include_indices(ctx),
+        candidate_idx=_candidate_indices(ctx),
     )
 
 
@@ -1163,6 +1237,65 @@ def _path_ranking(
 
 def _kw(ctx: "FilterContext", name: str, default=None):
     return ctx.selector_kwargs.get(name, default)
+
+
+def _include_names(ctx: "FilterContext") -> list[str] | None:
+    include_idx = _include_indices(ctx)
+    if not include_idx.size:
+        return None
+    return [ctx.feature_names[int(i)] for i in include_idx]
+
+
+def _include_indices(ctx: "FilterContext") -> np.ndarray:
+    cond = getattr(ctx, "conditioning", None)
+    if cond is None or not cond.include:
+        return np.empty(0, dtype=np.int64)
+    return np.asarray(cond.include, dtype=np.int64)
+
+
+def _candidate_indices(ctx: "FilterContext") -> np.ndarray | None:
+    cond = getattr(ctx, "conditioning", None)
+    if cond is None:
+        return None
+    if cond.candidates is None and not cond.exclude:
+        return None
+    return np.asarray(cond.discovery, dtype=np.int64)
+
+
+def _compose_classic_selection(ctx, prep, selected_idx: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    include_idx = _include_indices(ctx)
+    if not include_idx.size:
+        selected = [prep.feature_names[i] for i in selected_idx]
+        return np.asarray(selected_idx, dtype=np.int64), selected
+    names, indices = compose_selected(prep.feature_names, include_idx, selected_idx)
+    return np.asarray(indices, dtype=np.int64), names
+
+
+def _compose_gaussian_auto_selection(ctx, selected, selected_indices):
+    include_idx = _include_indices(ctx)
+    if not include_idx.size:
+        return selected, selected_indices
+    names, indices = compose_selected(
+        ctx.feature_names,
+        include_idx,
+        selected_indices if selected_indices is not None else [],
+    )
+    return names, indices
+
+
+def _conditioning_diag(ctx, selected_idx) -> dict | None:
+    cond = getattr(ctx, "conditioning", None)
+    if cond is None or not getattr(cond, "active", False):
+        return None
+    discovered = np.asarray(selected_idx, dtype=np.int64)
+    if cond.include:
+        include_set = set(int(i) for i in cond.include)
+        discovered = np.array([int(i) for i in discovered if int(i) not in include_set], dtype=np.int64)
+    return conditioning_record(
+        cond,
+        feature_names=ctx.feature_names,
+        discovered_idx=discovered.tolist(),
+    )
 
 GAUSSIAN_EVALUATE = select_gaussian_evaluate_path
 GAUSSIAN_AUTO = select_gaussian_auto_path

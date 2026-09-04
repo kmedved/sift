@@ -99,14 +99,28 @@ def local_standardize(
     return out
 
 
-def _candidate_order(r: np.ndarray, *, top_m: int) -> np.ndarray:
+def _candidate_order(
+    r: np.ndarray,
+    *,
+    top_m: int,
+    pool: np.ndarray | None = None,
+) -> np.ndarray:
     p_valid = int(len(r))
-    top_m_eff = min(max(int(top_m), 0), p_valid)
+    if pool is None:
+        eligible = np.arange(p_valid, dtype=np.int64)
+    else:
+        eligible = np.asarray(pool, dtype=np.int64)
+        if eligible.size:
+            if np.any(eligible < 0) or np.any(eligible >= p_valid):
+                raise ValueError("candidate pool positions must be in-range valid columns")
+    n_eligible = int(eligible.size)
+    top_m_eff = min(max(int(top_m), 0), n_eligible)
     if top_m_eff <= 0:
         return np.empty(0, dtype=np.int64)
-    if top_m_eff < p_valid:
-        return np.argpartition(np.abs(r), -top_m_eff)[-top_m_eff:].astype(np.int64)
-    return np.arange(p_valid, dtype=np.int64)
+    if top_m_eff < n_eligible:
+        pick = np.argpartition(np.abs(r[eligible]), -top_m_eff)[-top_m_eff:]
+        return eligible[pick].astype(np.int64)
+    return eligible.astype(np.int64, copy=False)
 
 
 def _panel_from_corr(
@@ -120,9 +134,16 @@ def _panel_from_corr(
     method: GaussianMethod,
     original: np.ndarray | None,
     names_all: list[str] | None,
+    protect: np.ndarray | None = None,
+    pool: np.ndarray | None = None,
 ) -> CandidatePanel:
     p_valid = int(len(r))
-    cand = _candidate_order(r, top_m=top_m)
+    protect_arr = (
+        np.empty(0, dtype=np.int64)
+        if protect is None
+        else np.asarray(protect, dtype=np.int64)
+    )
+    cand = _candidate_order(r, top_m=top_m, pool=pool)
     corr_prune_eff = resolve_corr_prune(method, corr_prune)
 
     if cand.size == 0:
@@ -147,6 +168,33 @@ def _panel_from_corr(
         )
         cand = cand[keep]
         R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)], dtype=np.float64)
+
+    if protect_arr.size:
+        protect_unique = []
+        seen_protect = set()
+        for idx in protect_arr:
+            key = int(idx)
+            if key in seen_protect:
+                continue
+            if key < 0 or key >= p_valid:
+                raise ValueError("protected feature positions must be in-range valid columns")
+            protect_unique.append(key)
+            seen_protect.add(key)
+        discovery = [int(i) for i in cand if int(i) not in seen_protect]
+        ordered = np.asarray(protect_unique + discovery, dtype=np.int64)
+        if R_all is not None:
+            R_full = np.asarray(R_all, dtype=np.float64)
+            R_cand = np.ascontiguousarray(R_full[np.ix_(ordered, ordered)], dtype=np.float64)
+        elif ordered.size:
+            Z_cand = np.ascontiguousarray(np.asarray(Z, dtype=np.float64)[:, ordered])
+            R_cand = weighted_correlation_matrix(
+                Z_cand,
+                np.asarray(w, dtype=np.float64),
+                backend="blas",
+            )
+        else:
+            R_cand = np.empty((0, 0), dtype=np.float64)
+        cand = ordered
 
     original_arr = cand if original is None else np.asarray(original, dtype=np.int64)[cand]
     rel = gaussian_mi_from_corr(r)
@@ -177,6 +225,8 @@ def build_candidate_panel(
     corr_prune: CorrPrune = "auto",
     method: GaussianMethod = "cefsplus",
     zy: np.ndarray | None = None,
+    protect_valid: np.ndarray | None = None,
+    pool_valid: np.ndarray | None = None,
 ) -> CandidatePanel:
     """Build the screened/pruned candidate panel used by cache selectors."""
     if zy is None:
@@ -211,6 +261,8 @@ def build_candidate_panel(
         method=method,
         original=np.asarray(cache.valid_cols, dtype=np.int64),
         names_all=names_all,
+        protect=protect_valid,
+        pool=pool_valid,
     )
 
 

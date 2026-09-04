@@ -596,7 +596,7 @@ def test_callback_parameters_are_appended_without_rebinding_legacy_positionals()
         sift.StabilitySelector: ["penalty", "output_order"],
         sift.BorutaSelector: ["output_order"],
         sift.catboost_select: ["groups", "time", "sample_weight"],
-        sift.select_cached: ["return_result", "store_proxies"],
+        sift.select_cached: ["return_result", "store_proxies", "include", "exclude", "candidates"],
         sift.MRMRSelector: ["output_order"],
         sift.JMISelector: ["output_order"],
         sift.JMIMSelector: ["output_order"],

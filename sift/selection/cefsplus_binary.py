@@ -418,6 +418,8 @@ def select_binary_logistic_path(
     ridge: float,
     refit_every: int,
     callback: ProgressCallback | None = None,
+    include_idx: np.ndarray | None = None,
+    candidate_idx: np.ndarray | None = None,
 ) -> BinaryCEFSPlusPath:
     Z, valid_mask, _, _ = weighted_standardize(X, w)
     valid_original = np.flatnonzero(valid_mask)
@@ -427,6 +429,23 @@ def select_binary_logistic_path(
     }
     univariate_scores_original = np.full(len(feature_names), -np.inf, dtype=np.float64)
     invalid_information = 0
+    include_arr = (
+        np.empty(0, dtype=np.int64)
+        if include_idx is None
+        else np.asarray(include_idx, dtype=np.int64)
+    )
+    include_valid = []
+    for orig in include_arr:
+        matches = np.flatnonzero(valid_original == int(orig))
+        if matches.size == 0:
+            raise ValueError(
+                f"include feature {feature_names[int(orig)]!r} is not a valid "
+                "non-constant column for binary CEFS+"
+            )
+        include_valid.append(int(matches[0]))
+    include_valid_arr = np.asarray(include_valid, dtype=np.int64)
+    include_valid_set = set(include_valid)
+    discovery_original = None if candidate_idx is None else set(int(i) for i in candidate_idx)
     if Z.shape[1] == 0:
         return _empty_path(
             univariate_scores=univariate_scores_original,
@@ -450,7 +469,27 @@ def select_binary_logistic_path(
     invalid_information += invalid
     univariate_scores_original[valid_original] = univariate_scores
     finite = np.flatnonzero(np.isfinite(univariate_scores))
-    if finite.size == 0:
+    if discovery_original is not None:
+        finite = np.array(
+            [
+                int(i)
+                for i in finite
+                if int(valid_original[int(i)]) in discovery_original
+                and int(i) not in include_valid_set
+            ],
+            dtype=np.int64,
+        )
+    else:
+        finite = np.array(
+            [int(i) for i in finite if int(i) not in include_valid_set],
+            dtype=np.int64,
+        )
+    if candidate_idx is not None and finite.size == 0:
+        raise ValueError(
+            "candidates contains no usable discovery columns after "
+            "validity/score screening"
+        )
+    if finite.size == 0 and include_valid_arr.size == 0:
         return _empty_path(
             univariate_scores=univariate_scores_original,
             valid_original=valid_original,
@@ -468,7 +507,7 @@ def select_binary_logistic_path(
     else:
         top_m_eff = max(int(top_m), int(k))
         top_m_eff = min(top_m_eff, len(finite))
-    ranked = _rank_desc(univariate_scores[finite], finite)
+    ranked = _rank_desc(univariate_scores[finite], finite) if finite.size else np.empty(0, dtype=np.int64)
     screened = ranked[:top_m_eff]
     for local_idx in ranked[top_m_eff:]:
         dropped[feature_names[int(valid_original[local_idx])]] = "outside_top_m"
@@ -479,24 +518,54 @@ def select_binary_logistic_path(
         screened,
         univariate_scores,
         corr_prune,
-        tie_break_indices=valid_original[screened],
+        tie_break_indices=valid_original[screened] if screened.size else screened,
     )
     for local_idx in pruned:
         dropped[feature_names[int(valid_original[local_idx])]] = "corr_pruned"
 
     candidate_valid = np.asarray(candidates, dtype=np.int64)
+    if include_valid_arr.size:
+        protect = [int(i) for i in include_valid_arr if int(i) not in set(int(x) for x in candidate_valid)]
+        if protect:
+            candidate_valid = np.concatenate(
+                [include_valid_arr, candidate_valid]
+            ) if candidate_valid.size else include_valid_arr
+        else:
+            # Keep include first in the working matrix.
+            rest = np.array([int(i) for i in candidate_valid if int(i) not in include_valid_set], dtype=np.int64)
+            candidate_valid = np.concatenate([include_valid_arr, rest]) if rest.size else include_valid_arr
     Z_work = np.ascontiguousarray(Z[:, candidate_valid], dtype=np.float64)
     work_to_original = valid_original[candidate_valid]
+    n_forced = int(include_valid_arr.size)
 
     selected: list[int] = []
     selected_mask = np.zeros(Z_work.shape[1], dtype=bool)
     path_scores: list[float] = []
     beta: np.ndarray | None = None
-    if use_block_gram and Z_work.shape[1]:
+    if n_forced:
+        selected = list(range(n_forced))
+        selected_mask[:n_forced] = True
+        try:
+            beta = fit_logistic_ridge(
+                Z_work[:, selected], y, w, ridge=ridge
+            )
+            p = predict_logistic(Z_work[:, selected], beta)
+            n_logistic_refits += 1
+            block_refit_count = n_forced
+            if use_block_gram and Z_work.shape[1]:
+                block = compute_logistic_block_gram(Z_work, y, w, p)
+                n_gram_blocks += 1
+        except (np.linalg.LinAlgError, FloatingPointError) as exc:
+            raise ValueError(
+                "include features could not be fit in the binary logistic path; "
+                "they cannot initialize exact conditioning"
+            ) from exc
+    elif use_block_gram and Z_work.shape[1]:
         block = compute_logistic_block_gram(Z_work, y, w, p)
         n_gram_blocks += 1
 
-    while len(selected) < min(k, Z_work.shape[1]):
+    target_count = min(int(k) + n_forced, Z_work.shape[1])
+    while len(selected) < target_count:
         if selected and len(selected) - block_refit_count >= refit_every:
             try:
                 # Warm-start from the previous refit (new coefficients start at 0).
@@ -561,17 +630,19 @@ def select_binary_logistic_path(
         selected_mask[best_local] = True
         path_scores.append(float(scores[best_pos]))
         if callback is not None:
+            discovery_step = len(selected) - n_forced
             report_progress(
                 callback,
-                len(selected),
-                min(int(k), int(Z_work.shape[1])),
+                discovery_step,
+                int(k),
                 stage="path",
                 selector="cefsplus_binary",
             )
 
-    selected_original = [int(work_to_original[i]) for i in selected]
+    discovered = selected[n_forced:]
+    selected_original = [int(work_to_original[i]) for i in discovered]
     selected_features = [feature_names[i] for i in selected_original]
-    candidate_original = [int(i) for i in work_to_original]
+    candidate_original = [int(i) for i in work_to_original[n_forced:]]
     return BinaryCEFSPlusPath(
         selected_original=selected_original,
         selected_features=selected_features,
@@ -583,7 +654,7 @@ def select_binary_logistic_path(
         numerical_failures=failures,
         invalid_conditional_information=invalid_information,
         n_valid_features=Z.shape[1],
-        n_screened_features=len(candidates),
+        n_screened_features=len(candidate_original),
         n_gram_blocks=n_gram_blocks,
         n_logistic_refits=n_logistic_refits,
     )

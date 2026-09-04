@@ -200,8 +200,7 @@ def _evaluate_prefix_split(
     if cat_features is None:
         fold_cat = (
             Xtr_df.select_dtypes(include=["object", "category", "string"])
-            .columns.intersection(valid_features)
-            .tolist()
+            .columns.tolist()
         )
     else:
         fold_cat = [col for col in cat_features if col in Xtr_df.columns]
@@ -307,6 +306,7 @@ def select_k_auto(
     target_cv_smoothing: Literal["auto"] | float = "auto",
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    base_features: Optional[List] = None,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path.
 
@@ -374,6 +374,12 @@ def select_k_auto(
         Explicit prior for ``cat_encoding='target_cv'``; None estimates it.
     warmup_policy : {'exclude', 'zero_weight'}, default 'zero_weight'
         How ``cat_encoding='target_cv'`` treats warm-up rows.
+    base_features : list, optional
+        Features always present in every evaluated model, in caller order.
+        Prefix length ``k`` then counts *additional* ``feature_path``
+        entries: the fitted columns are ``base_features + feature_path[:k]``.
+        ``min_k``/``max_k`` and the returned ``best_k`` stay in that
+        additional-discovery unit. When omitted, behavior is unchanged.
 
     Returns
     -------
@@ -473,7 +479,18 @@ def select_k_auto(
             "objective-path auto-k."
         )
 
-    if not feature_path:
+    base_valid: List = []
+    base_seen: set = set()
+    for name in list(base_features or []):
+        if name not in X.columns:
+            continue
+        if name in base_seen:
+            continue
+        base_valid.append(name)
+        base_seen.add(name)
+    n_base = len(base_valid)
+
+    if not feature_path and n_base == 0:
         return 0, [], pd.DataFrame()
     if isinstance(X, pd.DataFrame) and not X.columns.is_unique:
         duplicates = pd.Index(X.columns[X.columns.duplicated()]).unique().astype(str).tolist()
@@ -493,19 +510,22 @@ def select_k_auto(
         else None
     )
     w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
-    max_k = min(config.max_k, len(feature_path))
-    min_k = max(1, min(config.min_k, max_k))
-
-    valid_features = [f for f in feature_path if f in X.columns]
-    if not valid_features:
+    valid_features = [f for f in feature_path if f in X.columns and f not in base_seen]
+    if not valid_features and n_base == 0:
         return 0, [], pd.DataFrame()
 
-    max_k = min(max_k, len(valid_features))
-    min_k = max(1, min(config.min_k, max_k))
+    max_k = min(int(config.max_k), len(valid_features))
+    if n_base:
+        min_k = max(0, min(int(config.min_k), max_k))
+    else:
+        min_k = max(1, min(int(config.min_k), max_k)) if max_k else 0
+        if not valid_features:
+            return 0, [], pd.DataFrame()
     valid_features = valid_features[:max_k]
     k_grid = build_k_grid(min_k, max_k)
+    k_grid_eval = [int(k) + n_base for k in k_grid]
 
-    X_path_df = X[valid_features]
+    X_path_df = X[base_valid + valid_features]
 
     metric = resolve_metric(config.metric, task)
     eval_kwargs = {
@@ -515,7 +535,7 @@ def select_k_auto(
         "w_arr": w_arr,
         "task": task,
         "metric": metric,
-        "k_grid": k_grid,
+        "k_grid": k_grid_eval,
         "sample_weight_supplied": sample_weight_supplied,
         "cat_features": cat_features,
         "cat_encoding": cat_encoding,
@@ -541,6 +561,7 @@ def select_k_auto(
             val_idx=val_idx,
             **eval_kwargs,
         )
+        scores = {int(k) - n_base: v for k, v in scores.items()}
         split_scores = {k: [score] for k, score in scores.items()}
         diag = build_score_curve_diagnostics(k_grid, split_scores)
 
@@ -563,7 +584,7 @@ def select_k_auto(
                 **eval_kwargs,
             )
             for k, score in fold_scores.items():
-                all_scores[k].append(score)
+                all_scores[int(k) - n_base].append(score)
 
         diag = build_score_curve_diagnostics(k_grid, all_scores)
 
