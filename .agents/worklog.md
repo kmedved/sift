@@ -2,10 +2,10 @@
 
 ## Current objective — F1 conditioning sets (2026-09-04)
 
-- Objective: Record the review-accepted F1 conditioning-set API (`include=`, `exclude=`, `candidates=`) before its implementation commit.
-- Current state: F1 is review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` / PR #78). No F1 implementation commit or PR yet. 0.9.1 docs closeout was PR #77 at `2370631`; router-split/integration closeout was PR #78 at `3b9ac0a`. Runtime-scaling executed-source hashes are expected-stale until regenerated from the clean F1 commit.
-- Next action: Commit the F1 implementation, regenerate runtime evidence from that clean commit with `dirty=false`, commit the artifact, run the full CI gate, merge; then F2.
-- Decisive verification: `tests/test_conditioning.py` **27 passed**. Codex affected slice **491 passed / 4 skipped**. Opus Max xhigh round 3 **1115 passed / 14 skipped**, no actionable findings. Full suite **2053 passed / 40 skipped**, with the only failure the expected stale runtime-scaling provenance hashes. Ruff and both generator `--check` commands passed. Strict MkDocs was not run locally (base interpreter lacks `.[docs]`; CI installs it). No commit.
+- Objective: Record the completed full local F1 integration gate before the artifact/status commit.
+- Current state: F1 is review-accepted on `codex/0.9x-f1-conditioning`. Implementation commit is `b2a11bdf0d6131ba2714207378619e79a7ea833b`. The clean `runtime_scaling_2026-09-03` rerun is complete (`dirty=false`, empty status, 18 rows, 73 executed-source hashes, every measured pool `num_threads=1`, 7 samples/cell, CSV SHA-256 `3412f6d48a7f8071060b0f2a2da3f8e4bf166a11d8d2dcfbc0762a28f4e0b28d`). The full local gate is complete. No artifact commit, PR, CI, push, or merge yet. 0.9.1 docs closeout was PR #77 at `2370631`; router-split/integration closeout was PR #78 at `3b9ac0a`.
+- Next action: Artifact/status commit, push, GitHub CI, merge; then F2.
+- Decisive verification: Full suite **2054 passed / 40 skipped** under `-W error`. Focused runtime artifact + conditioning tests **30 passed**. `mkdocs build --strict` passed in an isolated `/private/tmp` target with the documented docs extra. Repo Ruff passed. Both generator `--check` commands passed (API reference 58 exports plus index; data-type matrix). `git diff --check` passed. Provenance `git.commit=b2a11bdf0d6131ba2714207378619e79a7ea833b`, `dirty=false`. No commit.
 
 ## Entry — 0.9.1 pre-commit integration gate (2026-09-03)
 

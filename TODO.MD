@@ -61,7 +61,7 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `fa74d63a0f07423d4d12d06aeb679d3de36b3fda` with `dirty=false`.
+      `b2a11bdf0d6131ba2714207378619e79a7ea833b` with `dirty=false`.
 - [x] 0.9.1 integration closeout: pushed, required GitHub CI jobs passed, and
       merged as PR #78 at `3b9ac0a`. PyPI publication did not follow.
 
@@ -82,7 +82,8 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       commit `fa74d63`).
 - [x] F1 conditioning sets (`include=`, `exclude=`, `candidates=`).
       Review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` /
-      PR #78). Implementation commit has not landed yet.
+      PR #78). Implementation commit `b2a11bdf0d6131ba2714207378619e79a7ea833b`.
+      Artifact commit has not landed yet.
 - [ ] F2 proxy/redundancy and cluster reports.
 - [ ] F7 panel within/between transforms.
 - [ ] F8a knockoff feasibility and UX metadata; F8b/F8c validated e-value

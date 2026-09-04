@@ -35,7 +35,7 @@
   Its committed CSV and provenance sidecar retain all raw timing samples,
   environment and thread-pool state, effective options, data and selection
   fingerprints, clean-commit Git state (`dirty=false` at
-  `fa74d63a0f07423d4d12d06aeb679d3de36b3fda`), and hashes for the runner and
+  `b2a11bdf0d6131ba2714207378619e79a7ea833b`), and hashes for the runner and
   executed SIFT sources.
 - Added an executable data-type support matrix over the public selector entry
   points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,

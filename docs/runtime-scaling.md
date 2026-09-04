@@ -38,24 +38,24 @@ warm-up, and timing—not incremental selector allocation.
 <!-- runtime-scaling-table:start -->
 | workload | n | p | method | p50 s | p95 s | peak RSS MB | M cells/s | selected |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| baseline | 2,000 | 100 | `mrmr_classic` | 0.0010 | 0.0013 | 250.4 | 208.73 | 10 |
-| baseline | 2,000 | 100 | `jmi_r2` | 0.0031 | 0.0034 | 260.0 | 63.60 | 10 |
-| baseline | 2,000 | 100 | `jmim_r2` | 0.0031 | 0.0035 | 257.8 | 64.75 | 10 |
-| baseline | 2,000 | 100 | `cefsplus` | 0.0102 | 0.0106 | 262.9 | 19.52 | 10 |
-| baseline | 2,000 | 100 | `cefsplus_binary` | 0.0153 | 0.0159 | 264.4 | 13.09 | 10 |
-| baseline | 2,000 | 100 | `fdr_relevance` | 0.0131 | 0.0134 | 273.1 | 15.32 | 0 |
-| tall | 20,000 | 100 | `mrmr_classic` | 0.0068 | 0.0069 | 295.8 | 295.91 | 10 |
-| tall | 20,000 | 100 | `jmi_r2` | 0.0152 | 0.0158 | 327.2 | 131.94 | 10 |
-| tall | 20,000 | 100 | `jmim_r2` | 0.0152 | 0.0156 | 331.1 | 131.50 | 10 |
-| tall | 20,000 | 100 | `cefsplus` | 0.1118 | 0.1143 | 326.2 | 17.89 | 10 |
-| tall | 20,000 | 100 | `cefsplus_binary` | 0.1308 | 0.1344 | 390.0 | 15.30 | 10 |
-| tall | 20,000 | 100 | `fdr_relevance` | 0.1288 | 0.1296 | 380.6 | 15.52 | 0 |
-| wide | 2,000 | 500 | `mrmr_classic` | 0.0049 | 0.0054 | 352.3 | 204.17 | 10 |
-| wide | 2,000 | 500 | `jmi_r2` | 0.0072 | 0.0075 | 330.8 | 138.88 | 10 |
-| wide | 2,000 | 500 | `jmim_r2` | 0.0075 | 0.0079 | 368.1 | 133.21 | 10 |
-| wide | 2,000 | 500 | `cefsplus` | 0.0472 | 0.0482 | 355.9 | 21.17 | 10 |
-| wide | 2,000 | 500 | `cefsplus_binary` | 0.0555 | 0.0666 | 496.7 | 18.02 | 10 |
-| wide | 2,000 | 500 | `fdr_relevance` | 0.0993 | 0.1000 | 401.3 | 10.07 | 0 |
+| baseline | 2,000 | 100 | `mrmr_classic` | 0.0010 | 0.0013 | 249.8 | 205.45 | 10 |
+| baseline | 2,000 | 100 | `jmi_r2` | 0.0032 | 0.0033 | 268.2 | 63.15 | 10 |
+| baseline | 2,000 | 100 | `jmim_r2` | 0.0031 | 0.0033 | 263.2 | 64.48 | 10 |
+| baseline | 2,000 | 100 | `cefsplus` | 0.0097 | 0.0103 | 263.5 | 20.58 | 10 |
+| baseline | 2,000 | 100 | `cefsplus_binary` | 0.0150 | 0.0153 | 273.0 | 13.33 | 10 |
+| baseline | 2,000 | 100 | `fdr_relevance` | 0.0122 | 0.0126 | 280.7 | 16.37 | 0 |
+| tall | 20,000 | 100 | `mrmr_classic` | 0.0068 | 0.0072 | 299.1 | 293.21 | 10 |
+| tall | 20,000 | 100 | `jmi_r2` | 0.0159 | 0.0166 | 328.5 | 125.59 | 10 |
+| tall | 20,000 | 100 | `jmim_r2` | 0.0158 | 0.0160 | 329.7 | 126.58 | 10 |
+| tall | 20,000 | 100 | `cefsplus` | 0.1119 | 0.1134 | 345.5 | 17.87 | 10 |
+| tall | 20,000 | 100 | `cefsplus_binary` | 0.1310 | 0.1387 | 396.6 | 15.27 | 10 |
+| tall | 20,000 | 100 | `fdr_relevance` | 0.1315 | 0.1333 | 417.7 | 15.21 | 0 |
+| wide | 2,000 | 500 | `mrmr_classic` | 0.0043 | 0.0047 | 341.5 | 232.02 | 10 |
+| wide | 2,000 | 500 | `jmi_r2` | 0.0074 | 0.0075 | 377.3 | 135.31 | 10 |
+| wide | 2,000 | 500 | `jmim_r2` | 0.0074 | 0.0076 | 361.8 | 134.54 | 10 |
+| wide | 2,000 | 500 | `cefsplus` | 0.0467 | 0.0473 | 350.4 | 21.40 | 10 |
+| wide | 2,000 | 500 | `cefsplus_binary` | 0.0522 | 0.0553 | 472.3 | 19.17 | 10 |
+| wide | 2,000 | 500 | `fdr_relevance` | 0.1005 | 0.1010 | 439.8 | 9.95 | 0 |
 <!-- runtime-scaling-table:end -->
 
 On this design, classic mRMR is the fastest path. R2 JMI and JMIM cluster
@@ -91,11 +91,11 @@ contracts.
 The recorded run used CPython 3.12.7 on macOS arm64, NumPy 1.26.4, pandas
 2.2.2, scikit-learn 1.5.1, SciPy 1.13.1, Numba 0.60.0, and one OpenBLAS
 0.3.23.dev thread. It ran from clean implementation commit
-`fa74d63a0f07423d4d12d06aeb679d3de36b3fda`; `dirty=false`, captured before
+`b2a11bdf0d6131ba2714207378619e79a7ea833b`; `dirty=false`, captured before
 measurement and artifact creation. That is release-grade evidence for 0.9.1.
 
 The [CSV artifact](https://github.com/kmedved/sift/blob/main/benchmarks/results/runtime_scaling_2026-09-03.csv) is
-SHA-256 `47edb1eb76d2a1c2b26795f107cfd0837e96928d9ba78ad0a98d9e53ad3f7152`.
+SHA-256 `3412f6d48a7f8071060b0f2a2da3f8e4bf166a11d8d2dcfbc0762a28f4e0b28d`.
 Its [provenance sidecar](https://github.com/kmedved/sift/blob/main/benchmarks/results/runtime_scaling_2026-09-03.provenance.json)
 binds that checksum, the command, environment, raw samples, effective options,
 data and selection fingerprints, thread-pool state, Git status, and SHA-256 for
