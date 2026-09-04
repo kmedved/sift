@@ -61,10 +61,10 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `5f3f1078cac76477562249d456fca7c01c6edcd4` with `dirty=false`.
-- [ ] 0.9.1 integration closeout: commit this refreshed artifact, push, run
-      full GitHub CI (including strict MkDocs and optional-dependency jobs),
-      and merge. PyPI publication does not.
+      `fa74d63a0f07423d4d12d06aeb679d3de36b3fda` with `dirty=false`.
+- [ ] 0.9.1 integration closeout: push, run full GitHub CI (including strict
+      MkDocs and optional-dependency jobs), and merge. PyPI publication does
+      not.
 
 Do not treat the tutorial page or the clean runtime-scaling refresh as open
 documentation work. GitHub CI has not been claimed for this closeout yet.
@@ -86,9 +86,10 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
 - [ ] F5 multi-target CEFS+; F6 generic `ModelSelector` with purged/embargoed
       time-series splits.
-- [ ] Outside §F: split `selection/view.py`, `selection/filter_auto_k.py` and
-      `selection/auto_k.py` along their adapter/router boundaries before any of
-      the above; then the reusable standardized/cache path for classic
+- [x] Outside §F: split `selection/view.py`, `selection/filter_auto_k.py` and
+      `selection/auto_k.py` along their adapter/router boundaries (accepted on
+      `codex/0.9x-router-splits`; implementation commit `fa74d63`).
+- [ ] After that split: the reusable standardized/cache path for classic
       selectors, leakage-free unsupervised `ordinal`/`frequency` fallbacks, and
       reproducibility manifests (`result.reproducibility_`).
 

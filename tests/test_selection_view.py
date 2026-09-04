@@ -8,6 +8,9 @@ from dataclasses import fields
 import datetime
 import json
 import pickle
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -581,18 +584,295 @@ def test_as_result_rejects_legacy_lists_and_tuples(legacy):
         sift.as_result(legacy)
 
 
-def test_non_catboost_result_dispatch_does_not_import_optional_catboost(monkeypatch):
+def test_filter_result_dispatch_loads_only_its_adapter_sibling(monkeypatch):
     real_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
-        if name == "sift.catboost_common":
-            raise AssertionError("unrelated result dispatch imported CatBoost")
+        if name in {
+            "sift.catboost_common",
+            "sift.selection.view_catboost",
+            "sift.selection.view_importance",
+            "sift.selection.view_boruta",
+            "sift.selection.view_stability",
+            "sift.selection.view_path",
+            "sift.selection.view_knockoff",
+        }:
+            raise AssertionError(
+                "filter result dispatch imported an unrelated lazy adapter module"
+            )
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     view = sift.as_result(_full_filter_result(["a"], selected_indices=[0]))
 
     assert view.features == ["a"]
+    assert "sift.selection.view_filter" in sys.modules
+
+
+def test_public_view_symbols_keep_their_module() -> None:
+    assert sift.SelectionView.__module__ == "sift.selection.view"
+    assert sift.as_result.__module__ == "sift.selection.view"
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert 'sift.selection.view_catboost' not in sys.modules\n"
+                "assert 'sift.selection.view_importance' not in sys.modules\n"
+                "assert 'sift.selection.view_boruta' not in sys.modules\n"
+                "assert 'sift.selection.view_stability' not in sys.modules\n"
+                "assert 'sift.selection.view_path' not in sys.modules\n"
+                "assert 'sift.selection.view_knockoff' not in sys.modules\n"
+                "assert 'sift.selection.view_filter' not in sys.modules"
+            ),
+        ),
+        (
+            "import sift.selection.view",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert 'sift.selection.view_catboost' not in sys.modules\n"
+                "assert 'sift.selection.view_importance' not in sys.modules\n"
+                "assert 'sift.selection.view_boruta' not in sys.modules\n"
+                "assert 'sift.selection.view_stability' not in sys.modules\n"
+                "assert 'sift.selection.view_path' not in sys.modules\n"
+                "assert 'sift.selection.view_knockoff' not in sys.modules\n"
+                "assert 'sift.selection.view_filter' not in sys.modules"
+            ),
+        ),
+        (
+            "import sift.selection.view_catboost",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert sift.selection.view_catboost._as_catboost_result.__module__ "
+                "== 'sift.selection.view_catboost'"
+            ),
+        ),
+        (
+            "from sift.selection.view_catboost import _as_catboost_result",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert _as_catboost_result.__module__ "
+                "== 'sift.selection.view_catboost'"
+            ),
+        ),
+    ],
+)
+def test_view_catboost_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_importance",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert sift.selection.view_importance._as_importance_result.__module__ "
+                "== 'sift.selection.view_importance'"
+            ),
+        ),
+        (
+            "from sift.selection.view_importance import _as_importance_result",
+            (
+                "assert 'sift.catboost_common' not in sys.modules\n"
+                "assert _as_importance_result.__module__ "
+                "== 'sift.selection.view_importance'"
+            ),
+        ),
+    ],
+)
+def test_view_importance_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_boruta",
+            (
+                "assert sift.selection.view_boruta._as_boruta_result.__module__ "
+                "== 'sift.selection.view_boruta'"
+            ),
+        ),
+        (
+            "from sift.selection.view_boruta import _as_boruta_result",
+            (
+                "assert _as_boruta_result.__module__ "
+                "== 'sift.selection.view_boruta'"
+            ),
+        ),
+    ],
+)
+def test_view_boruta_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_stability",
+            (
+                "assert sift.selection.view_stability._as_stability_selector.__module__ "
+                "== 'sift.selection.view_stability'"
+            ),
+        ),
+        (
+            "from sift.selection.view_stability import _as_stability_selector",
+            (
+                "assert _as_stability_selector.__module__ "
+                "== 'sift.selection.view_stability'"
+            ),
+        ),
+    ],
+)
+def test_view_stability_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_path",
+            (
+                "assert sift.selection.view_path._as_feature_path_result.__module__ "
+                "== 'sift.selection.view_path'"
+            ),
+        ),
+        (
+            "from sift.selection.view_path import _as_feature_path_result",
+            (
+                "assert _as_feature_path_result.__module__ "
+                "== 'sift.selection.view_path'"
+            ),
+        ),
+    ],
+)
+def test_view_path_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_knockoff",
+            (
+                "assert sift.selection.view_knockoff._as_knockoff_result.__module__ "
+                "== 'sift.selection.view_knockoff'"
+            ),
+        ),
+        (
+            "from sift.selection.view_knockoff import _as_knockoff_result",
+            (
+                "assert _as_knockoff_result.__module__ "
+                "== 'sift.selection.view_knockoff'"
+            ),
+        ),
+    ],
+)
+def test_view_knockoff_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("statement", "checks"),
+    [
+        (
+            "import sift.selection.view_filter",
+            (
+                "assert sift.selection.view_filter._as_filter_result.__module__ "
+                "== 'sift.selection.view_filter'"
+            ),
+        ),
+        (
+            "from sift.selection.view_filter import _as_filter_result",
+            (
+                "assert _as_filter_result.__module__ "
+                "== 'sift.selection.view_filter'"
+            ),
+        ),
+    ],
+)
+def test_view_filter_adapter_imports_in_a_fresh_interpreter(
+    statement: str, checks: str
+) -> None:
+    script = f"import sys\n{statement}\n{checks}\n"
+    proc = subprocess.run(
+        [sys.executable, "-W", "error", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def _boruta_result(**overrides) -> sift.BorutaResult:
