@@ -27,7 +27,7 @@ class FilterSelectionResult:
         Configuration used by the selector.
     ranking_ : DataFrame, optional
         Optional diagnostic ranking. When omitted, a compact selected-feature
-        ranking is built on demand by :meth:`get_feature_ranking`.
+        ranking is built on demand by ``get_feature_ranking``.
     diagnostics_ : dict or DataFrame, optional
         Optional selector-specific diagnostics.
 

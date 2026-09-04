@@ -181,7 +181,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Either 'regression' or 'classification'.
     max_features : int, optional
         Hard cap on number of selected features. The convenience wrappers
-        :func:`stability_regression` and :func:`stability_classif` set it from
+        ``stability_regression`` and ``stability_classif`` set it from
         their ``k`` argument.
     block_size : int or "auto", default="auto"
         Block length for the block bootstrap that runs when ``fit`` receives
@@ -211,7 +211,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     verbose : bool, default=True
         Emit the bootstrap scheme, the per-fit selection summary and any
         ``tune_threshold`` table at INFO on the ``sift`` logger. Use
-        :func:`sift.set_verbosity` for a process-wide default.
+        ``sift.set_verbosity`` for a process-wide default.
     callback : callable, optional
         Called after each completed bootstrap as
         ``callback(step, total, info)``. Cross-validation fits inside
@@ -906,7 +906,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         """Choose a threshold with nested, fold-local stability selection.
 
         Pass the same ``sample_weight``, ``groups``, and ``time`` context used
-        for :meth:`fit`. Group labels select group-disjoint outer folds; time
+        for ``fit``. Group labels select group-disjoint outer folds; time
         values select ordered time-series folds when groups are absent. The
         context is also forwarded to each fold-local stability fit.
         """
@@ -1746,11 +1746,11 @@ def stability_regression(
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for regression.
 
-    One-call wrapper that builds a :class:`StabilitySelector` with
+    One-call wrapper that builds a ``StabilitySelector`` with
     ``task="regression"`` and ``max_features=k``, fits it, and returns just the
     surviving features. Use it when the Lasso/ElasticNet bootstrap heuristic is
     all that is wanted and the fitted estimator itself is not needed;
-    instantiate :class:`StabilitySelector` directly for ``transform``,
+    instantiate ``StabilitySelector`` directly for ``transform``,
     ``tune_threshold``, frequency tables or ``result_view_``.
 
     Returns up to ``k`` features whose selection frequency clears ``threshold``
@@ -1772,7 +1772,7 @@ def stability_regression(
         ``sample_weight``, ``groups`` and ``time`` are forwarded to ``fit``
         (supplying both ``groups`` and ``time`` switches on the block
         bootstrap); ``return_indices`` selects the return kind; every other
-        keyword must be a :class:`StabilitySelector` constructor option and is
+        keyword must be a ``StabilitySelector`` constructor option and is
         passed through unchanged. The ones that matter most here are
         ``threshold`` (default 0.6, the minimum selection frequency),
         ``n_bootstrap`` (default 50), ``sample_frac`` (default 0.5),
@@ -1814,7 +1814,7 @@ def stability_regression(
     -----
     Stability selection here is a practical heuristic inspired by Meinshausen
     and Buhlmann (2010); it provides no formal false-positive control, unlike
-    :func:`sift.select_fdr`. For 0.9 compatibility, automatic alpha selection
+    ``sift.select_fdr``. For 0.9 compatibility, automatic alpha selection
     passes sample weights to the sparse model fits but keeps the historical
     unweighted CV validation score and scaler.
 
@@ -1846,12 +1846,12 @@ def stability_classif(
 ) -> Union[List[Hashable], List[int]]:
     """Stability selection for classification.
 
-    One-call wrapper that builds a :class:`StabilitySelector` with
+    One-call wrapper that builds a ``StabilitySelector`` with
     ``task="classification"`` and ``max_features=k``, fits L1-penalized
     logistic regressions on bootstrap subsamples, and returns just the
     surviving features. Use it when the bootstrap heuristic is all that is
     wanted and the fitted estimator itself is not needed; instantiate
-    :class:`StabilitySelector` directly for ``transform``, ``tune_threshold``,
+    ``StabilitySelector`` directly for ``transform``, ``tune_threshold``,
     frequency tables or ``result_view_``.
 
     Returns up to ``k`` features whose selection frequency clears ``threshold``
@@ -1873,7 +1873,7 @@ def stability_classif(
         ``sample_weight``, ``groups`` and ``time`` are forwarded to ``fit``
         (supplying both ``groups`` and ``time`` switches on the block
         bootstrap); ``return_indices`` selects the return kind; every other
-        keyword must be a :class:`StabilitySelector` constructor option and is
+        keyword must be a ``StabilitySelector`` constructor option and is
         passed through unchanged. The ones that matter most here are
         ``threshold`` (default 0.6, the minimum selection frequency),
         ``n_bootstrap`` (default 50), ``sample_frac`` (default 0.5),
@@ -1916,7 +1916,7 @@ def stability_classif(
     -----
     Stability selection here is a practical heuristic inspired by Meinshausen
     and Buhlmann (2010); it provides no formal false-positive control, unlike
-    :func:`sift.select_fdr`. For 0.9 compatibility, automatic alpha selection
+    ``sift.select_fdr``. For 0.9 compatibility, automatic alpha selection
     passes sample weights to the sparse model fits but keeps the historical
     unweighted CV validation score and scaler.
 

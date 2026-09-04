@@ -80,7 +80,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOC_FILES = (
     "README.md",
     "DOCS.MD",
-    "docs/API.md",
     "docs/user-guide.md",
     "docs/ADVANCED.md",
     "docs/troubleshooting.md",

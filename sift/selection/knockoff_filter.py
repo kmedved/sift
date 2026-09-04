@@ -81,12 +81,12 @@ _SUBSAMPLE_DEFAULT = _SubsampleDefaultType()
 class KnockoffSelectionResult:
     """Result object for q-calibrated knockoff selection.
 
-    Returned by :func:`select_fdr`.  Alongside the selected set it carries the
+    Returned by ``select_fdr``.  Alongside the selected set it carries the
     full per-feature ``W`` table, the threshold that produced the selection,
     and the validity metadata that says how strong the FDR claim actually is
     -- read ``selector_metadata["fdr_control"]`` before quoting one.  The
     object is a frozen dataclass, so it is safe to keep and pass around; call
-    :meth:`result_view` for the normalized :class:`~sift.SelectionView`.
+    ``result_view`` for the normalized ``sift.SelectionView``.
 
     Parameters
     ----------
@@ -181,7 +181,7 @@ class KnockoffSelectionResult:
     def get_feature_ranking(self) -> pd.DataFrame:
         """Return the ``W`` table sorted into a stable feature ranking.
 
-        Reorders a copy of :attr:`W` by descending ``W``, breaking ties by the
+        Reorders a copy of ``W`` by descending ``W``, breaking ties by the
         original row order so the result is deterministic, and inserts a
         one-based ``rank`` column.  Unselected features are ranked too, which
         makes this the table to read when you want to see how close the
@@ -194,7 +194,7 @@ class KnockoffSelectionResult:
             ``rank``, ``selected``, ``selection_frequency``,
             ``selected_index``, ``relevance``, and ``selector``, with a fresh
             zero-based index.  The per-draw ``W_draw_<i>`` columns of
-            :attr:`W` are not carried over.
+            ``W`` are not carried over.
 
         See Also
         --------
@@ -245,7 +245,7 @@ class KnockoffSelectionResult:
     def result_view(self, input_features=None):
         """Return an additive normalized view without changing this result.
 
-        Convenience wrapper around :func:`sift.as_result`.  This result object
+        Convenience wrapper around ``sift.as_result``.  This result object
         is left exactly as it is; the view is a separate, normalized copy.
 
         Parameters
@@ -1342,7 +1342,7 @@ def sample_knockoffs(
     copula correlation matrix and returns one sampled knockoff copy of
     ``cache.Z``, laid out on exactly the same columns.  This is an advanced
     helper for diagnostics and for building custom feature statistics -- for
-    ordinary discovery use :func:`select_fdr`, which does the fitting,
+    ordinary discovery use ``select_fdr``, which does the fitting,
     sampling, statistic, and thresholding in one call.  With defaults it uses
     equicorrelated decorrelation and seed 0, and returns a fresh float32
     array; nothing is cached or mutated on ``cache``.
@@ -1350,7 +1350,7 @@ def sample_knockoffs(
     Parameters
     ----------
     cache : FeatureCache
-        Cache from :func:`sift.build_cache`.  Its structural contract is
+        Cache from ``sift.build_cache``.  Its structural contract is
         revalidated here, duplicate non-synthetic feature names are rejected,
         and its weights must be finite, non-negative, and sum above zero.
         ``Rxx`` is used when present and recomputed locally otherwise.
@@ -1360,7 +1360,7 @@ def sample_knockoffs(
         and can raise power on correlated designs.
     min_eig : float, default 0.001
         Minimum eigenvalue required of the correlation matrix.  A matrix that
-        falls short is mixed with the identity and a :class:`UserWarning` is
+        falls short is mixed with the identity and a ``UserWarning`` is
         emitted.
     random_state : int, default 0
         Seed for the knockoff noise draw.  The same seed and cache reproduce
@@ -1734,7 +1734,7 @@ def select_fdr(
 
     Answers "which features survive a target false-discovery level?" rather
     than "which ``k`` features are best": it builds or reuses a copula
-    :class:`~sift.FeatureCache`, fits and samples second-order Gaussian
+    ``sift.FeatureCache``, fits and samples second-order Gaussian
     knockoffs, computes a swap-antisymmetric statistic ``W`` per feature, and
     keeps everything at or above the knockoff+ threshold for ``q``.  Use it
     when you want error control instead of a fixed count; use the filter
@@ -1742,7 +1742,7 @@ def select_fdr(
     ``q=0.1`` with the fast marginal ``"relevance"`` statistic, one knockoff
     draw, the knockoff+ offset, equicorrelated decorrelation, a 50,000-row
     subsample seeded at 0, and returns a
-    :class:`KnockoffSelectionResult`.  An empty selection is a valid answer:
+    ``KnockoffSelectionResult``.  An empty selection is a valid answer:
     it means nothing survived the threshold.
 
     ``feature_groups="auto"`` clusters near-collinear features (average-linkage
@@ -1795,7 +1795,7 @@ def select_fdr(
     min_eig : float, default 0.001
         Minimum eigenvalue required of the copula correlation matrix.  When
         the empirical matrix falls short it is mixed with the identity by a
-        factor ``gamma`` and a :class:`UserWarning` is emitted; ``gamma`` and
+        factor ``gamma`` and a ``UserWarning`` is emitted; ``gamma`` and
         ``lambda_min`` are reported in metadata.
     screen_pairs : int or None, default 2000
         Cap on the number of original/knockoff pairs handed to statistics that
@@ -1830,7 +1830,7 @@ def select_fdr(
         Row cap for cache construction from ``X``.  ``None`` uses every
         positive-weight row.  Rejected with a prebuilt ``cache``.
     cache : FeatureCache or None, default None
-        Prebuilt copula cache from :func:`sift.build_cache`, used instead of
+        Prebuilt copula cache from ``sift.build_cache``, used instead of
         ``X``.  Build it with ``compute_Rxx=True`` so the correlation matrix
         the knockoff model needs is already there.
     random_state : int, default 0

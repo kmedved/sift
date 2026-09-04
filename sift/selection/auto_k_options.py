@@ -1,4 +1,4 @@
-"""Immutable option-group views for :class:`~sift.AutoKConfig`.
+"""Immutable option-group views for ``sift.AutoKConfig``.
 
 These types are module-scoped ergonomic helpers.  ``AutoKConfig`` remains the
 sole storage format, with its original flat dataclass fields.

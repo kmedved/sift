@@ -877,7 +877,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
 
 
 class MRMRSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_mrmr`.
+    """Sklearn-style wrapper for ``sift.select_mrmr``.
 
     Minimum-redundancy maximum-relevance grows a greedy path that trades target
     relevance against redundancy with the features already chosen, and stops at
@@ -909,7 +909,7 @@ class MRMRSelector(_BaseSelector):
     estimator : {"classic", "gaussian"}, default="classic"
         Redundancy estimator. ``"classic"`` scores redundancy on the raw rows;
         ``"gaussian"`` is a regression-only fast path over the Gaussian-copula
-        :class:`~sift.FeatureCache` and the only route that accepts ``cache``.
+        ``sift.FeatureCache`` and the only route that accepts ``cache``.
     formula : {"quotient", "difference"}, default="quotient"
         Objective shape: relevance divided by mean redundancy, or relevance
         minus mean redundancy.
@@ -1098,7 +1098,7 @@ class MRMRSelector(_BaseSelector):
 
 
 class JMISelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_jmi`.
+    """Sklearn-style wrapper for ``sift.select_jmi``.
 
     Joint mutual information adds, at every step, the candidate whose *summed*
     joint information with the target given each already-selected feature is
@@ -1307,9 +1307,9 @@ class JMISelector(_BaseSelector):
 
 
 class JMIMSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_jmim`.
+    """Sklearn-style wrapper for ``sift.select_jmim``.
 
-    JMI Maximization is the conservative sibling of :class:`JMISelector`: at
+    JMI Maximization is the conservative sibling of ``JMISelector``: at
     each step it scores a candidate by the *minimum* joint information taken
     over the already-selected features instead of the sum, so one strongly
     redundant pairing is enough to hold a candidate back. Prefer it when a
@@ -1518,7 +1518,7 @@ class JMIMSelector(_BaseSelector):
 
 
 class CEFSPlusSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_cefsplus`.
+    """Sklearn-style wrapper for ``sift.select_cefsplus``.
 
     CEFS+ is a regression-only Gaussian-copula filter: it ranks a candidate by
     the log-determinant conditional-information gain it adds to the features
@@ -1724,7 +1724,7 @@ class CEFSPlusSelector(_BaseSelector):
 
 
 class CEFSPlusBinarySelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_cefsplus_binary`.
+    """Sklearn-style wrapper for ``sift.select_cefsplus_binary``.
 
     The binary CEFS+ path scores candidates by the conditional Bernoulli
     deviance they remove, refitting a ridge-penalized logistic model along a
@@ -2126,11 +2126,11 @@ _KNOCKOFF_SUPERVISED_ENCODING_NOTE = (
 
 
 class KnockoffSelector(_BaseSelector):
-    """Sklearn-style wrapper for :func:`sift.select_fdr`.
+    """Sklearn-style wrapper for ``sift.select_fdr``.
 
     This selector is sized by a target false-discovery rate ``q`` rather than
     by a feature count: it builds or reuses a Gaussian-copula
-    :class:`~sift.FeatureCache`, samples second-order knockoffs, computes
+    ``sift.FeatureCache``, samples second-order knockoffs, computes
     antisymmetric ``W`` statistics and applies the knockoff+ threshold. Use it
     when the question is "which features are trustworthy discoveries" rather
     than "give me the best ``k``". It has no ``k`` and no ``auto_k_config``.
@@ -2148,7 +2148,7 @@ class KnockoffSelector(_BaseSelector):
     ``cat_encoding="target_cv"`` is rejected: cross-fitted target encoding is
     still target-derived preprocessing and would silently invalidate the
     Model-X claim. The 0.8 supervised encodings remain available for
-    compatibility, but only with an explicit :class:`UserWarning` and result
+    compatibility, but only with an explicit ``UserWarning`` and result
     metadata that downgrades ``fdr_control`` to ``"none"``.
 
     Parameters
@@ -2201,7 +2201,7 @@ class KnockoffSelector(_BaseSelector):
         ``"loo_logit"``. ``"target_cv"`` is rejected outright here.
         ``"none"`` is the only value that preserves the Model-X FDR claim; the
         four legacy supervised encodings warn and downgrade the claim as
-        described above. Note that :func:`sift.select_fdr` itself has no
+        described above. Note that ``sift.select_fdr`` itself has no
         ``cat_encoding`` parameter: the encoders live in this class.
     target_cv_n_splits : int, default=5
         Inherited constructor option of the shared preprocessing block. It has
@@ -2254,7 +2254,7 @@ class KnockoffSelector(_BaseSelector):
         The full result: ``selected_features``, ``selected_indices``, the ``W``
         diagnostics table, ``threshold``, ``selection_frequency`` and
         ``selector_metadata`` (including the validity keys). Pass it to
-        :func:`sift.as_result` for a normalized ``SelectionView``.
+        ``sift.as_result`` for a normalized ``SelectionView``.
     selected_features_ : list
         Selected feature labels.
     selected_indices_ : ndarray of shape (n_selected,)

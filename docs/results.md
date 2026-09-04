@@ -2,7 +2,9 @@
 
 SIFT 0.9 introduces an additive `SelectionView` without replacing any legacy
 result type. Existing functions still return the same lists, tuples, DataFrames,
-or result classes by default. The completed core adapter slice supports
+or result classes by default. The [glossary](glossary.md) defines
+[result view](glossary.md#result-view) and
+[selection curve](glossary.md#selection-curve). The completed core adapter slice supports
 `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`,
 `FeaturePathEvaluationResult`, `CatBoostSelectionResult`, and the opt-in
 `ImportanceResult`. It also adapts a fitted `StabilitySelector` through its

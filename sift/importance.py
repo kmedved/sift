@@ -84,7 +84,7 @@ def _importance_feature_digest(values: list[Any]) -> str:
 class ImportanceResult:
     """Rich permutation-importance result with repeat-level diagnostics.
 
-    The default :func:`permutation_importance` return remains its historical
+    The default ``permutation_importance`` return remains its historical
     four-column DataFrame.  Request this object with ``return_result=True``
     when repeat-level importance drops or a normalized result view are needed.
     All array, table, and mapping accessors return defensive copies.
@@ -231,7 +231,7 @@ class ImportanceResult:
 
     @property
     def ranking_indices(self) -> list[int]:
-        """Original feature position for each row of :attr:`ranking_`."""
+        """Original feature position for each row of ``ranking_``."""
         return list(self._ranking_indices)
 
     @property
@@ -384,12 +384,12 @@ def permutation_importance(
         Seed for the permutation draws. One seed per (feature, repeat) is
         derived from it, so a given seed reproduces the run exactly, including
         under parallelism. The ``None`` default draws nondeterministic entropy
-        and emits a :class:`FutureWarning`: SIFT 1.0 will resolve it to
+        and emits a ``FutureWarning``: SIFT 1.0 will resolve it to
         ``random_state=0``. Pass an integer to make the call reproducible and
         silence that warning.
     return_result : bool
         If ``False`` (default), return the historical four-column DataFrame.
-        If ``True``, return :class:`ImportanceResult`, including the
+        If ``True``, return ``ImportanceResult``, including the
         per-feature, per-repeat importance-drop matrix.
 
     Returns
@@ -398,7 +398,7 @@ def permutation_importance(
         The default DataFrame has columns ``feature``, ``importance_mean``,
         ``importance_std``, and ``baseline_score``, one row per feature,
         sorted by descending ``importance_mean``. With ``return_result=True``,
-        an :class:`ImportanceResult` exposing that table as ``ranking_``, the
+        an ``ImportanceResult`` exposing that table as ``ranking_``, the
         ``(n_features, n_repeats)`` matrix of raw score drops as
         ``importances_`` in *raw feature order*, ``feature_names``,
         ``ranking_indices`` mapping ranking rows back to those positions,

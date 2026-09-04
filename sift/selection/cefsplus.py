@@ -535,9 +535,9 @@ def select_cached(
     """Select features using pre-built cache.
 
     Runs one greedy Gaussian-copula selection against a target using a
-    :class:`~sift.estimators.copula.FeatureCache` that already holds the
+    ``sift.estimators.copula.FeatureCache`` that already holds the
     rank-Gaussian transform.  This is the entry point for multi-target work:
-    build the cache once with :func:`sift.build_cache`, then call this per
+    build the cache once with ``sift.build_cache``, then call this per
     ``y``.  Only the target-dependent work -- the marginal correlations, the
     candidate panel, and the greedy path -- is repeated.  By default it runs
     CEFS+, screens to ``max(5 * k, 250)`` candidates, applies no correlation
@@ -552,7 +552,7 @@ def select_cached(
     Parameters
     ----------
     cache : FeatureCache
-        Cache built by :func:`sift.build_cache` from the feature matrix.  Its
+        Cache built by ``sift.build_cache`` from the feature matrix.  Its
         structural contract is revalidated on every call, and duplicate
         non-synthetic ``feature_names`` are rejected.
     y : array-like of shape (n_rows_original,)
@@ -586,7 +586,7 @@ def select_cached(
         Also return the selected positions in the original feature matrix.
         Cannot be combined with ``return_result=True``.
     warn_noise_floor : bool, default True
-        Emit the Gaussian-mRMR noise-floor :class:`UserWarning` when
+        Emit the Gaussian-mRMR noise-floor ``UserWarning`` when
         ``method`` is ``"mrmr_quot"`` or ``"mrmr_diff"``.  Auto-k path builders
         pass ``False`` because they truncate the path afterwards and the check
         would fire on features they are about to drop.
@@ -595,7 +595,7 @@ def select_cached(
         completed greedy step, with a one-based ``step``.  Exceptions raised
         inside it propagate.  Supplements, never replaces, ``verbose`` logging.
     return_result : bool, default False
-        Return a normalized :class:`~sift.SelectionView` instead of the legacy
+        Return a normalized ``sift.SelectionView`` instead of the legacy
         list/tuple forms.  Requires ``cache.feature_names``; rejects
         ``return_objective`` and ``return_indices``, whose information the view
         already carries.
@@ -616,7 +616,7 @@ def select_cached(
         ``(features, indices, objective)`` for both, where ``indices`` is a
         ``list[int]`` of original column positions and ``objective`` is a
         float64 array of shape ``(n_selected,)``.  With ``return_result=True``
-        a :class:`~sift.SelectionView` whose ``raw_table`` covers every cached
+        a ``sift.SelectionView`` whose ``raw_table`` covers every cached
         input feature and whose ``diagnostics`` carry ``objective`` and
         ``candidate_indices``.
 

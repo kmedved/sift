@@ -292,7 +292,7 @@ def _json_safe(value: Any) -> Any:
     - ``pathlib.Path`` becomes its string form.
     - NumPy scalars/arrays, pandas ``Series``/``DataFrame``, and dataclasses
       become their plain Python equivalents (``DataFrame`` uses
-      ``orient="split"``; dataclasses use :func:`dataclasses.asdict`).
+      ``orient="split"``; dataclasses use ``dataclasses.asdict``).
     - Sequences and sets become lists.
 
     Mapping envelope
@@ -420,10 +420,10 @@ class SelectionView:
     matrix.
 
     One shape for every selector: whichever of SIFT's result families produced
-    a selection, the view exposes the same five accessors -- :attr:`features`,
-    :attr:`indices`, :attr:`k`, :attr:`table`, and :attr:`metadata` -- so
+    a selection, the view exposes the same five accessors -- ``features``,
+    ``indices``, ``k``, ``table``, and ``metadata`` -- so
     downstream code does not branch on the selector.  Build one with
-    :func:`as_result` or a result object's ``result_view()`` rather than
+    ``as_result`` or a result object's ``result_view()`` rather than
     calling this constructor, which exists for the adapters.  Every accessor
     returns a defensive copy, so a view is safe to hand around and cannot be
     mutated through what it hands back.
@@ -462,13 +462,13 @@ class SelectionView:
     encoded_table : DataFrame or None, default None
         Per-feature table in the encoded space.
     transformer : callable or None, default None
-        ``X -> X_selected`` callable backing :meth:`transform`.  ``None``
-        leaves the method raising :class:`NotImplementedError`.
+        ``X -> X_selected`` callable backing ``transform``.  ``None``
+        leaves the method raising ``NotImplementedError``.
     inverse_transformer : callable or None, default None
-        Callable backing :meth:`inverse_transform`, under the same rule.
+        Callable backing ``inverse_transform``, under the same rule.
     proxy_correlations : DataFrame or None, default None
-        Candidate-by-selected correlation block backing :meth:`proxies` and
-        :meth:`proxies_at`.  Normalized and size-checked on construction.
+        Candidate-by-selected correlation block backing ``proxies`` and
+        ``proxies_at``.  Normalized and size-checked on construction.
 
     Attributes
     ----------
@@ -498,7 +498,7 @@ class SelectionView:
     raw_table : DataFrame
         The normalized per-feature table.
     table : DataFrame
-        Alias of :attr:`raw_table`.
+        Alias of ``raw_table``.
     encoded_table : DataFrame or None
         Per-feature table in the encoded space, or ``None``.
     curve : DataFrame
@@ -525,13 +525,13 @@ class SelectionView:
     labels, positions, tables, metadata and diagnostics.  Result-only sources
     cannot prove whether their input was named or positional, so those views
     report ``metadata["input_kind"] == "unknown"``; passing ``input_features``
-    to :func:`as_result` establishes an ordered raw identity and a
+    to ``as_result`` establishes an ordered raw identity and a
     ``raw_columns_hash`` without rewriting that provenance.  Likewise, only a
     view built from a fitted selector can transform data: result-only views
-    raise :class:`NotImplementedError` from :meth:`transform` and report
+    raise ``NotImplementedError`` from ``transform`` and report
     ``metadata["transform_available"] is False``.  A partial table -- one that
     does not cover every raw position -- is marked by
-    ``metadata["table_complete"] is False`` and limits :meth:`plot`.
+    ``metadata["table_complete"] is False`` and limits ``plot``.
 
     Examples
     --------
@@ -871,7 +871,7 @@ class SelectionView:
         ----------
         X_selected : DataFrame or ndarray
             Matrix over the selected columns, as returned by
-            :meth:`transform`.
+            ``transform``.
 
         Returns
         -------
@@ -906,8 +906,8 @@ class SelectionView:
         ----------
         feature : hashable
             Label of the selected feature.  Resolved against
-            :attr:`raw_features` when known, otherwise against
-            :attr:`features`; an ambiguous or missing label is an error.
+            ``raw_features`` when known, otherwise against
+            ``features``; an ambiguous or missing label is an error.
         r_min : float, default 0.8
             Minimum absolute correlation to report, in ``[0, 1]``.
 
@@ -923,7 +923,7 @@ class SelectionView:
         NotImplementedError
             If proxy correlations were not stored.
         ValueError
-            If ``feature`` is missing or ambiguous -- use :meth:`proxies_at`
+            If ``feature`` is missing or ambiguous -- use ``proxies_at``
             for positional access -- or if ``r_min`` is outside ``[0, 1]``.
 
         See Also
@@ -969,7 +969,7 @@ class SelectionView:
     def proxies_at(self, selected_index: int, r_min: float = 0.8) -> pd.DataFrame:
         """Return unselected proxy candidates for one selected raw position.
 
-        Positional form of :meth:`proxies`, and the one to use when labels are
+        Positional form of ``proxies``, and the one to use when labels are
         duplicated or absent.  Requires the selection to have run with
         ``store_proxies=True``.
 
@@ -1052,7 +1052,7 @@ class SelectionView:
     def plot(self, ax=None):
         """Plot the selection curve, or the per-feature metric as a fallback.
 
-        Draws :attr:`curve` (``criterion`` against ``k``, with the chosen
+        Draws ``curve`` (``criterion`` against ``k``, with the chosen
         points marked) when the route reported one.  Otherwise it falls back
         to a bar chart of ``gain`` or ``relevance`` from the table, which
         requires that table to cover every raw position.
@@ -2972,7 +2972,7 @@ def _as_importance_result(result: Any, input_features: Any) -> SelectionView:
 
 
 def as_result(obj: Any, input_features: Any = None) -> SelectionView:
-    """Return an additive :class:`SelectionView` for a supported SIFT result.
+    """Return an additive ``SelectionView`` for a supported SIFT result.
 
     Passing an existing view is an identity operation.  Legacy list and tuple
     returns are intentionally not guessed; request the corresponding result
@@ -2987,11 +2987,11 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
     Parameters
     ----------
     obj : result object or SelectionView
-        A :class:`~sift.selection.result.FilterSelectionResult`,
-        :class:`~sift.KnockoffSelectionResult`, ``BorutaResult``,
+        A ``sift.selection.result.FilterSelectionResult``,
+        ``sift.KnockoffSelectionResult``, ``BorutaResult``,
         ``FeaturePathEvaluationResult``, ``ImportanceResult``,
         ``CatBoostSelectionResult``, or a fitted ``StabilitySelector``.  An
-        existing :class:`SelectionView` is returned unchanged.  Subclasses of
+        existing ``SelectionView`` is returned unchanged.  Subclasses of
         the result types are not accepted: dispatch is by exact type so an
         adapter cannot silently mis-read an extended object.
     input_features : sequence or None, default None
@@ -2999,7 +2999,7 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
         the view's raw feature identity and ``raw_columns_hash`` for a result
         that cannot prove its own, which is what lets ``support_`` and a
         complete table exist.  Must not be given when ``obj`` is already a
-        :class:`SelectionView`.
+        ``SelectionView``.
 
     Returns
     -------
@@ -3011,11 +3011,11 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
     TypeError
         If ``obj`` is a bare list or tuple (rerun the selector with
         ``return_result=True``), a permutation-importance DataFrame (rerun
-        :func:`sift.permutation_importance` with ``return_result=True``), or
+        ``sift.permutation_importance`` with ``return_result=True``), or
         any other unsupported type.
     ValueError
         If ``input_features`` is supplied together with an existing
-        :class:`SelectionView`, or if it contradicts the identity, width, or
+        ``SelectionView``, or if it contradicts the identity, width, or
         positions the result already carries.
 
     See Also
@@ -3031,7 +3031,7 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
     result cannot say whether its input was named or positional, so those
     views report ``metadata["input_kind"] == "unknown"`` even when
     ``input_features`` is supplied.  Result-only sources also carry no fitted
-    preprocessing state, so :meth:`SelectionView.transform` raises and
+    preprocessing state, so ``SelectionView.transform`` raises and
     ``metadata["transform_available"]`` is ``False``; only a fitted selector
     yields a transforming view.  Metrics a selector never reported stay
     ``NaN`` rather than being guessed, and a table that cannot cover every raw

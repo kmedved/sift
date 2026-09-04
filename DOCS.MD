@@ -10,14 +10,22 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
 
 ## Documentation Map
 
-- [Standalone API reference](docs/API.md): compact function/class reference for
-  the public 0.9 surface.
+- [Generated API reference source](docs/reference/index.md): MkDocs inputs for
+  signatures and parameter documentation rendered from the public docstrings;
+  install `.[docs]` and run `mkdocs serve` to browse the rendered reference.
 - [Algorithm guide](docs/ALGORITHMS.md): method assumptions, output contracts,
   and selection guidance.
+- [Runtime and scaling](docs/runtime-scaling.md): reproducible single-thread
+  timings, memory context, and provenance.
+- [Data-type support](docs/data-type-support.md): observed public behavior for
+  numeric, categorical, sparse, datetime/timedelta, ndarray/DataFrame, sample
+  weights, groups, and time.
+- [Glossary](docs/glossary.md): SIFT-specific terms for the product mental
+  model and current APIs.
 - [Advanced workflow guide](docs/ADVANCED.md): time series, groups, smart
   sampling, caches, categorical handling, sample weights, and knockoffs.
-- [User guide](docs/user-guide.md): task-oriented examples and practical
-  selector usage.
+- [Tutorial](docs/user-guide.md): one selection job from a first pass through
+  diagnostics, with robustness and specialized row context as explicit branches.
 - [Troubleshooting](docs/troubleshooting.md): common errors and diagnostics.
 - [Release notes](docs/release-notes.md): user-facing release changes.
 
@@ -35,6 +43,7 @@ Optional extras:
 python -m pip install -e ".[categorical]"  # category_encoders for target/LOO encoders
 python -m pip install -e ".[catboost]"     # CatBoost selectors and SHAP-style backends
 python -m pip install -e ".[test]"         # pytest
+python -m pip install -e ".[docs]"         # MkDocs + generated API reference
 python -m pip install -e ".[all]"          # category_encoders + catboost
 ```
 
@@ -78,25 +87,15 @@ the ones that differ. The examples are deliberately small and seeded
 (`random_state=0`) so they run in well under a second each. Production calls use
 the same arguments at realistic sizes.
 
-## Feature Map
+## Choosing a Selector
 
-| Feature | Main entry points | Best for |
-| --- | --- | --- |
-| mRMR | `select_mrmr` | Fast relevance/redundancy filtering for regression or classification. |
-| JMI | `select_jmi` | Joint mutual-information ranking, usually less pairwise than mRMR. |
-| JMIM | `select_jmim` | Conservative JMI variant using a minimum joint score. |
-| CEFS+ | `select_cefsplus` | Regression-only Gaussian-copula filter with log-det objective. |
-| Binary CEFS+ | `select_cefsplus_binary` | Binary logistic-score filter using conditional Bernoulli deviance proxy. |
-| Knockoff FDR | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` | q-calibrated approximate Gaussian-copula knockoff selection and advanced sampler access. |
-| Auto-k | `AutoKConfig`, `k="auto"`, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` | Choosing feature count by holdout/CV, calibrated objective stops, permutation gaps, knockoffs, stability, or information criteria. |
-| Gaussian cache | `build_cache`, `select_cached`, `FeatureCache` | Reusing transformed features across many targets or methods. |
-| Stability selection | `StabilitySelector`, `stability_regression`, `stability_classif` | Robust feature sets across bootstrap resamples. |
-| Smart sampling | `smart_sample`, `SmartSamplerConfig`, sampler presets | Reducing large panel/cross-section datasets before selection. |
-| Boruta | `BorutaSelector`, `select_boruta` | All-relevant feature selection against shadow features. |
-| Boruta-Shap | `select_boruta_shap`, `BorutaSelector(importance="shap")` | SHAP-backed Boruta using CatBoost or a compatible estimator. |
-| Permutation importance | `permutation_importance` | Model-agnostic importance with grouped/time-aware permutations. |
-| CatBoost selection | `catboost_select`, `catboost_regression`, `catboost_classif` | Feature selection with CatBoost RFE, SHAP, permutation, or forward search. |
-| Low-level estimators | `sift.estimators.*`, `sift.selection.*` | Custom pipelines and advanced experimentation. |
+Use the canonical [selector decision tree](docs/choosing-a-selector.md) to
+choose among fixed-size filter paths, q-calibrated knockoffs, all-relevant
+search, stability diagnostics, model-specific selection, and post-fit
+importance. The guide also explains when auto-k, sklearn wrappers, caches, and
+row sampling modify the chosen workflow rather than replace the selector.
+
+### Public surface
 
 Top-level exports:
 
