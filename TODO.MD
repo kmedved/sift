@@ -60,16 +60,14 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A data-type support matrix.
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
-- [ ] 0.9.1 integration: after committing the implementation, rerun the
-      existing `runtime_scaling_2026-09-03` artifact from that clean commit
-      with release-grade `dirty=false`, then commit the refreshed CSV,
-      sidecar, and docs table. Keep the stable basename; do not rename the
-      artifact. Full CI and merge follow that refresh. PyPI publication does
-      not.
+- [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
+      `5f3f1078cac76477562249d456fca7c01c6edcd4` with `dirty=false`.
+- [ ] 0.9.1 integration closeout: commit this refreshed artifact, push, run
+      full GitHub CI (including strict MkDocs and optional-dependency jobs),
+      and merge. PyPI publication does not.
 
-Do not treat the tutorial page as open documentation work. The currently
-committed runtime-scaling artifact is preliminary `dirty=true` evidence and is
-not the closeout artifact.
+Do not treat the tutorial page or the clean runtime-scaling refresh as open
+documentation work. GitHub CI has not been claimed for this closeout yet.
 
 The `group_col`/`sample_weight_col` and `StabilitySelector` `alpha`/`penalty`
 aliases are permanent as of the same decision: no deprecation, no 1.0 removal.

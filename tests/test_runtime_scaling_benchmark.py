@@ -59,7 +59,7 @@ def test_committed_runtime_evidence_and_documented_table_are_bound() -> None:
     assert provenance["configuration"]["full"] is True
     assert provenance["configuration"]["methods"] == list(runtime.METHODS)
     assert re.fullmatch(r"[0-9a-f]{40}", provenance["git"]["commit"])
-    assert isinstance(provenance["git"]["dirty"], bool)
+    assert provenance["git"]["dirty"] is False
     assert len(provenance["measurements"]) == len(rows)
     assert all(
         len(measurement["runtime_samples_s"]) == 7
@@ -83,6 +83,8 @@ def test_committed_runtime_evidence_and_documented_table_are_bound() -> None:
     doc = DOC.read_text(encoding="utf-8")
     documented_table = doc.split(TABLE_START, 1)[1].split(TABLE_END, 1)[0]
     assert documented_table == runtime.render_markdown_table(rows)
+    assert provenance["artifact"]["sha256"] in doc
+    assert provenance["git"]["commit"] in doc
 
 
 def test_worker_executes_a_seeded_selector_twice_with_one_fingerprint() -> None:

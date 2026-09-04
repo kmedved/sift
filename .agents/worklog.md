@@ -1,6 +1,15 @@
 # SIFT 0.9 worklog
 
-## Current objective — 0.9.1 pre-commit integration gate (2026-09-03)
+## Current objective — 0.9.1 integration closeout (2026-09-04)
+
+- Objective: Land the clean runtime-scaling evidence, push the two-commit 0.9.1 branch, run every required GitHub CI job, and merge without publishing to PyPI.
+- Constraints: Keep the stable `runtime_scaling_2026-09-03` basename and the artifact bound to the clean implementation commit. Do not tag, create a release, or publish to PyPI. Do not claim GitHub CI before it runs.
+- Completed: Committed the implementation as `5f3f1078cac76477562249d456fca7c01c6edcd4`, reran the full 18-cell benchmark from that clean tree, and independently verified `dirty=false`, empty `status_porcelain`, CSV SHA-256 `bd18e7d00e617556a3e0bd56caae212e112e9dfa03e948f75872db529d4aa7e6`, one warm-up and seven samples per cell, one thread in every timing pool, and 55 matching source hashes. The rendered table, checksum/commit prose, strict `dirty is False` test, README, TODO, specs, and release notes now bind that evidence. The test also pins the documented checksum and commit to the sidecar.
+- Current state: The clean benchmark refresh is complete and reviewed in the working tree. GitHub CI has not run for this closeout.
+- Next action: Commit the refreshed artifact, push, run full GitHub CI (including strict MkDocs and optional-dependency jobs), and merge. Do not publish to PyPI.
+- Decisive verification: The implementation commit passed **1,982 tests / 40 optional skips** under warnings-as-errors. The artifact test passes **3**; both generators are current; Ruff and `git diff --check` are clean. Codex and the resumed Opus session independently reproduced every artifact binding; Opus found no blocker and judged it safe to commit. The raw wide/baseline knockoff p50 ratio is 8.036× and the guide reports about 8.0×. GitHub CI remains pending.
+
+## Entry — 0.9.1 pre-commit integration gate (2026-09-03)
 
 - Objective: Close the accepted pre-commit review findings so the implementation commit can land, then treat the clean runtime-scaling rerun as the next integration step.
 - Constraints: Do not commit or push in this pass. Do not rerun the full suite; Codex already ran it after the tutorial fix. Keep the existing verified count **1,982 passed / 40 skipped**. Do not rename `runtime_scaling_2026-09-03`.

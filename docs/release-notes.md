@@ -15,7 +15,9 @@
 - Added a runtime/scaling guide backed by a reproducible six-method benchmark.
   Its committed CSV and provenance sidecar retain all raw timing samples,
   environment and thread-pool state, effective options, data and selection
-  fingerprints, Git state, and hashes for the runner and executed SIFT sources.
+  fingerprints, clean-commit Git state (`dirty=false` at
+  `5f3f1078cac76477562249d456fca7c01c6edcd4`), and hashes for the runner and
+  executed SIFT sources.
 - Added an executable data-type support matrix over the public selector entry
   points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,
   sparse matrices, datetime/timedelta feature columns, sample weights, groups,
