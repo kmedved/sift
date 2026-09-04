@@ -1,8 +1,9 @@
 # Troubleshooting
 
 Common errors, what they mean, and how to fix them. For full API behavior see
-the [API manual](../DOCS.MD); for picking a selector see the
-[user guide](user-guide.md).
+the [API manual](https://github.com/kmedved/sift/blob/main/DOCS.MD); for picking a selector see the
+[tutorial](user-guide.md). Term definitions live in the
+[glossary](glossary.md).
 
 ## Installation
 

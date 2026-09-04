@@ -20,10 +20,10 @@ class FeatureCache:
 
     Holds the weighted rank-Gaussian (copula) transform of a feature matrix
     together with the row/column bookkeeping needed to map results back to the
-    caller's original matrix.  Build one with :func:`build_cache` and reuse it
+    caller's original matrix.  Build one with ``build_cache`` and reuse it
     across many targets: the expensive per-column rank transform (and, when
     requested, the ``p x p`` correlation matrix) is paid once, after which
-    :func:`sift.select_cached`, :func:`sift.select_fdr` and the Gaussian filter
+    ``sift.select_cached``, ``sift.select_fdr`` and the Gaussian filter
     routes only need a fresh ``y``.  Instances are plain mutable dataclasses
     and are safe to pickle, but the consumers validate their structural
     contract on every call, so do not hand-edit the fields.
@@ -55,7 +55,7 @@ class FeatureCache:
         target of exactly this length.
     feature_names : list of str or None, default None
         Labels of *every* original column (length ``n_features``, not
-        ``n_valid_features``).  :func:`build_cache` always fills this in;
+        ``n_valid_features``).  ``build_cache`` always fills this in;
         ``None`` only appears on hand-constructed caches and disables the
         name-based result paths.
     feature_names_are_synthetic : bool, default False
@@ -130,10 +130,10 @@ def build_cache(
 
     Applies the weighted rank-Gaussian (copula) transform column by column and
     packages the result, together with the retained row and column positions,
-    as a :class:`FeatureCache`.  Reach for this when several targets share one
+    as a ``FeatureCache``.  Reach for this when several targets share one
     feature matrix: the transform (and optionally the ``p x p`` correlation
-    matrix) is computed once here, and :func:`sift.select_cached`,
-    :func:`sift.select_fdr` and the Gaussian filter routes then reuse it for
+    matrix) is computed once here, and ``sift.select_cached``,
+    ``sift.select_fdr`` and the Gaussian filter routes then reuse it for
     each ``y``.  By default it subsamples to 50,000 positive-weight rows with
     seed 0, skips the correlation matrix, drops only exactly-constant columns,
     and returns the cache; nothing about the target is involved, so one cache
@@ -164,7 +164,7 @@ def build_cache(
         and store it as ``FeatureCache.Rxx``.  Costs ``O(n * p^2)`` time and
         ``p^2`` float32 entries of memory, but lets every later selection skip
         that work.  Pass ``True`` when the cache will be reused, particularly
-        for :func:`sift.select_fdr`, which needs the matrix for knockoffs.
+        for ``sift.select_fdr``, which needs the matrix for knockoffs.
     min_std : float, default 0.0
         Columns whose standard deviation over the retained, mean-imputed rows
         is not greater than this are dropped from the cache and omitted from
@@ -345,7 +345,7 @@ def weighted_rank_gauss_1d(
 
     Ties receive the same weighted mid-rank. Weights are accumulated in
     float64 regardless of the input dtype. ``_template`` is an internal
-    fast-path hook used by :func:`weighted_rank_gauss_2d`: when all weights are
+    fast-path hook used by ``weighted_rank_gauss_2d``: when all weights are
     equal and a column has no ties or missing values, the standardized scores
     of the sorted column equal a precomputed template and only need to be
     scattered back into row order.

@@ -1,0 +1,67 @@
+site_name: SIFT Documentation
+site_description: Feature-selection reference for SIFT
+repo_url: https://github.com/kmedved/sift
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: build/mkdocs
+strict: true
+
+nav:
+  - Home: index.md
+  - Choosing a Selector: choosing-a-selector.md
+  - Runtime and Scaling: runtime-scaling.md
+  - Data-Type Support: data-type-support.md
+  - Glossary: glossary.md
+  - API Reference: reference/index.md
+  - Tutorial: user-guide.md
+  - Algorithm Guide: ALGORITHMS.md
+  - Advanced Workflows: ADVANCED.md
+  - Reading Results: results.md
+  - Troubleshooting: troubleshooting.md
+  - Architecture: architecture.md
+  - Development: development.md
+  - Release Notes: release-notes.md
+
+exclude_docs: |
+  /specs/
+
+not_in_nav: |
+  /reference/*.md
+  !/reference/index.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: numpy
+            show_source: false
+            show_root_heading: false
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            inherited_members: true
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js
+  - javascripts/mermaid.js
+
+validation:
+  omitted_files: warn
+  unrecognized_links: warn
+  anchors: warn

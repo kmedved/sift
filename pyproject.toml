@@ -37,6 +37,11 @@ classifiers = [
 categorical = ["category_encoders"]
 catboost = ["catboost"]
 test = ["pytest", "ruff>=0.6"]
+docs = [
+  "mkdocs>=1.6,<2",
+  "mkdocstrings[python]>=1,<2",
+  "pymdown-extensions>=11,<12",
+]
 all = [
   "category_encoders",
   "catboost",

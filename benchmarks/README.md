@@ -41,6 +41,7 @@ its `--output` JSON, and reports any rows whose `promotion_status` starts with
 | `auto_k_designs.py` | Shared synthetic DGP registry and support-scoring helpers for auto-k gates. |
 | `bench_auto_k.py` | Auto-k synthetic DGP harness with oracle-risk rows and support-recovery metrics. |
 | `bench_auto_k_path_timing.py` | Focused D9 fixed-k `select_cached` path timing with a checksum-bound provenance sidecar. |
+| `bench_runtime_scaling.py` | User-facing single-thread scaling matrix for six dependency-free selector paths, with raw samples, output/data fingerprints, and a checksum-bound provenance sidecar. |
 | `bench_utils.py` | Shared helpers and `SCHEMA_VERSION` for the emitted JSON. |
 
 Each script accepts:
@@ -58,9 +59,19 @@ python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
+python benchmarks/bench_runtime_scaling.py --quick --output /tmp/runtime-scaling.csv
 python benchmarks/bench_auto_k.py --designs D1,D2,D5 --seeds 3 \
   --output /tmp/bench-auto-k.csv
 ```
+
+`bench_runtime_scaling.py` is intentionally outside `run_benchmarks.py`: it
+produces a descriptive CSV plus provenance sidecar for the user guide, not a
+promotion record in the shared JSON schema.
+
+The currently committed `runtime_scaling_2026-09-03` CSV and sidecar are
+preliminary `dirty=true` evidence from the 0.9.1 working tree. Regenerate that
+same basename from the clean implementation commit before 0.9.1 integration
+closeout; do not introduce a new dated filename.
 
 `bench_auto_k.py --methods ...` accepts comma-separated methods including
 `penalized/ebic`, `penalized/ric`, `k_posterior`, `chi2_stop`,

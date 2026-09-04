@@ -2,7 +2,9 @@
 
 This guide collects SIFT patterns for real-world datasets: time ordering,
 groups, large samples, repeated targets, categorical variables, sample weights,
-and q-calibrated knockoffs.
+and q-calibrated knockoffs. See the [glossary](glossary.md) for
+[row metadata](glossary.md#row-metadata), [`target_cv`](glossary.md#target_cv),
+and [approximate plugin](glossary.md#approximate-plugin) knockoff language.
 
 ## Time Series Selection
 
@@ -704,7 +706,8 @@ A practical workflow:
 
 1. Use mRMR or JMI for a fast path.
 2. Use auto-k or downstream CV to choose a predictive prefix.
-3. Use `select_fdr` to identify q-calibrated trusted discoveries.
+3. Use `select_fdr` for a q-calibrated set under its documented plug-in
+   Gaussian-copula assumptions.
 4. Use stability selection or Boruta when robustness or all-relevant behavior
    matters.
 5. Use CatBoost selection when the final model class is tree-based and

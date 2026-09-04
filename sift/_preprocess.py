@@ -656,7 +656,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     split construction and its ``smooth="auto"`` empirical-Bayes shrinkage,
     generalized to weighted rows.  ``smooth="auto"`` is available on every fold
     kind, weighted or not, because that generalization replaces integer counts
-    with weighted row mass (see :meth:`_auto_smoothed_encoding`).
+    with weighted row mass (see ``_auto_smoothed_encoding``).
 
     The encoder intentionally preserves one output column per raw categorical
     feature.  sklearn's multiclass target encoding expands every input feature
@@ -707,7 +707,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
         ``"auto"`` is accepted on all of them.  The empirical-Bayes prior it
         needs is defined by *weighted row mass* rather than integer counts (see
-        :meth:`_auto_smoothed_encoding`), and every quantity that definition
+        ``_auto_smoothed_encoding``), and every quantity that definition
         requires -- the weighted prior ``sum(w*y)/sum(w)``, the weighted target
         variance ``sum(w*(y-prior)^2)/sum(w)``, each category's weighted mass and
         its weighted sum of squared deviations -- exists for any fitting slice

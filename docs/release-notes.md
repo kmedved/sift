@@ -2,6 +2,34 @@
 
 ## 0.9.1 (unreleased)
 
+### Documentation
+
+- Replaced the handwritten `docs/API.md` page with a generated reference page
+  for every `sift.__all__` export. MkDocs and mkdocstrings now render the
+  numpydoc source of truth, while CI checks the committed page inventory and
+  runs `mkdocs build --strict`. Legacy Sphinx-role markers in docstrings were
+  normalized to inline code so they render cleanly in the generated pages.
+- Replaced five overlapping selector-choice tables with one canonical decision
+  tree. The README, manual, tutorial, and algorithm guide now link to that
+  page instead of maintaining separate recommendations.
+- Added a runtime/scaling guide backed by a reproducible six-method benchmark.
+  Its committed CSV and provenance sidecar retain all raw timing samples,
+  environment and thread-pool state, effective options, data and selection
+  fingerprints, Git state, and hashes for the runner and executed SIFT sources.
+- Added an executable data-type support matrix over the public selector entry
+  points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,
+  sparse matrices, datetime/timedelta feature columns, sample weights, groups,
+  and time, classified as supported, rejected, conditional, or dependency-gated.
+  The probes do not change selector mathematics or public defaults.
+- Added a canonical glossary of SIFT-specific terms, linked from MkDocs
+  navigation, the root documentation maps, the selector/user/algorithm/advanced
+  guides, and the generated API and data-type pages.
+- Converted `docs/user-guide.md` from a topic catalog into a task-oriented
+  tutorial. The page now walks one selection job from a first pass through
+  diagnostics, with stability, knockoff FDR, cache reuse, CatBoost, and
+  permutation importance as explicit branches rather than a second choice
+  table. MkDocs navigation labels the page as Tutorial.
+
 ### Compatibility
 
 - Stability classification now constructs sparse logistic models without the

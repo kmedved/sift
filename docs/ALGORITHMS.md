@@ -1,22 +1,17 @@
 # Feature Selection Algorithms
 
 This guide explains the algorithms exposed by SIFT, what they optimize, and
-when each one is a good fit. For exact parameters, see [API.md](API.md) and the
-full manual in [`DOCS.MD`](../DOCS.MD).
+when each one is a good fit. For exact parameters, see the
+[generated API reference](reference/index.md) and the
+[full manual](https://github.com/kmedved/sift/blob/main/DOCS.MD).
 
 ## Algorithm Map
 
-| Method | Type | Output contract | Best for |
-| --- | --- | --- | --- |
-| mRMR | Filter | Up to fixed `k` | Fast relevance/redundancy baseline |
-| JMI | Filter | Up to fixed `k` | Complementary features and interactions |
-| JMIM | Filter | Up to fixed `k` | Conservative, diverse feature sets |
-| CEFS+ | Filter | Up to fixed `k` | Regression paths with conditional information |
-| Binary CEFS+ | Filter | Up to fixed `k` | Bernoulli targets with logistic/Brier scoring |
-| Knockoff FDR | Model-X style filter | q-calibrated set | Trusted discoveries instead of fixed size |
-| Stability selection | Embedded heuristic | Frequency-thresholded set | Robustness across resamples |
-| Boruta | Wrapper | All-relevant set | Finding every feature that beats shadows |
-| CatBoost selection | Wrapper | Fixed `k` or searched `k` | Model-aware production feature sets |
+The canonical [selector decision tree](choosing-a-selector.md) maps output
+contracts to public entry points. This page supplies the mathematical and
+algorithmic detail behind each leaf rather than maintaining another choice map.
+Shared vocabulary — relevance, redundancy, knockoffs, stability frequency —
+is in the [glossary](glossary.md).
 
 ## Filter Methods
 
@@ -234,18 +229,9 @@ SIFT uses several information proxies internally:
 
 ## Choosing a Method
 
-| Scenario | Start with |
-| --- | --- |
-| Quick regression baseline | `select_mrmr(..., estimator="gaussian")` |
-| Quick classification baseline | `select_mrmr(..., task="classification")` |
-| Complementary interactions | `select_jmi` |
-| Compact regression subset | `select_cefsplus` |
-| Binary target conditional path | `select_cefsplus_binary` |
-| Trusted q-level discoveries | `select_fdr` |
-| Noisy features and robustness | `StabilitySelector` |
-| All relevant features | `BorutaSelector` |
-| Model-aware nonlinear selection | `catboost_select` |
-| Many related targets | `build_cache` plus `select_cached` |
+Apply the [selector decision tree](choosing-a-selector.md) before using the
+practical notes below. In particular, choose the result contract first; then
+decide whether auto-k, a cache, or an sklearn wrapper belongs in the workflow.
 
 ## Practical Notes
 

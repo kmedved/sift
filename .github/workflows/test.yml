@@ -64,11 +64,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
           pip install -e ".[categorical]"
+          if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
+            pip install -e ".[docs]"
+          fi
       - name: Run tests
         run: pytest
       - name: Run critical lint checks
         if: matrix.python-version == '3.12'
-        run: ruff check sift tests
+        run: ruff check sift tests scripts
+      - name: Build generated API reference
+        if: matrix.python-version == '3.12'
+        run: |
+          python scripts/generate_api_reference.py --check
+          mkdocs build --strict
 
   # A Python 3.13 job is DEFERRED, and the reason is now only that it has never
   # been run in CI -- not that it cannot pass.

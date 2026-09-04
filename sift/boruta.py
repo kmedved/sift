@@ -83,12 +83,12 @@ class BorutaResult:
     A plain snapshot of one finished Boruta run: the accept/reject/tentative
     verdict for every candidate feature, the hit counts and shadow thresholds
     the verdicts came from, and the mean importance used to rank them. It is
-    returned by :func:`select_boruta` and :func:`select_boruta_shap` under
+    returned by ``select_boruta`` and ``select_boruta_shap`` under
     ``return_result=True``, and by ``BorutaSelector.result_()`` after ``fit``,
     which copies its arrays so later refits cannot mutate an earlier result.
     Every array is positional and aligned with ``feature_names``, so ordinary
     NumPy masking works directly; the convenience masks and
-    :meth:`get_feature_ranking` are built on exactly that alignment.
+    ``get_feature_ranking`` are built on exactly that alignment.
 
     Unlike the fixed-``k`` filters, Boruta is an all-relevant selector: it
     keeps every feature that beats its shadow, so the accepted count is a
@@ -726,7 +726,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         groups : array-like of shape (n_samples,), optional
             Group labels for time-series shadow permutation.
         time : array-like of shape (n_samples,), optional
-        Time values for ordering within groups.
+            Time values for ordering within groups.
         """
         self._clear_fit_state()
         try:
@@ -1274,7 +1274,7 @@ def select_boruta(
     """
     Boruta feature selection.
 
-    Function-style entry point that builds a :class:`BorutaSelector`, fits it,
+    Function-style entry point that builds a ``BorutaSelector``, fits it,
     and returns the accepted features. Boruta is an all-relevant selector: at
     each iteration it compares every still-undecided feature against a
     permuted "shadow" copy of the matrix and accepts or rejects it by a
@@ -1386,7 +1386,7 @@ def select_boruta(
     -------
     list[str] or BorutaResult
         Accepted feature labels in input-column order, or the full
-        :class:`BorutaResult` when ``return_result=True``.
+        ``BorutaResult`` when ``return_result=True``.
 
     Raises
     ------
@@ -1512,12 +1512,12 @@ def select_boruta_shap(
     """
     Boruta-Shap feature selection (convenience wrapper for importance='shap').
 
-    Identical to :func:`select_boruta` except that the importance backend is
+    Identical to ``select_boruta`` except that the importance backend is
     fixed to SHAP values, which score a feature by its attributed contribution
     to individual predictions rather than by the impurity or split statistics a
     tree ensemble happens to expose. Prefer it when native importances are
     known to be biased (high-cardinality or highly correlated features);
-    prefer :func:`select_boruta` when runtime matters, because SHAP is
+    prefer ``select_boruta`` when runtime matters, because SHAP is
     markedly more expensive per iteration.
 
     Parameters
@@ -1620,7 +1620,7 @@ def select_boruta_shap(
     -------
     list[str] or BorutaResult
         Accepted feature labels in input-column order, or the full
-        :class:`BorutaResult` when ``return_result=True``.
+        ``BorutaResult`` when ``return_result=True``.
 
     Raises
     ------
@@ -1644,7 +1644,7 @@ def select_boruta_shap(
     SHAP values come from CatBoost natively when the estimator is a CatBoost
     model, and from the optional ``shap`` package otherwise, so one of the two
     must be installed. Everything else, including the all-relevant accept
-    semantics, matches :func:`select_boruta`.
+    semantics, matches ``select_boruta``.
 
     Examples
     --------

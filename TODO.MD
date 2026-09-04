@@ -7,10 +7,9 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): `python -m pytest -q` gives **1,968 passed,
-  39 skipped** in ~110 s. 37 skips are optional-dependency gates (`catboost`,
-  `category_encoders`, the four literal-block docstring examples) and 2 are the
-  sklearn name-based transform skips on `BorutaSelector`/`StabilitySelector`.
+  `catboost` or `category_encoders`): `python -m pytest -q` gives **1,982 passed,
+  40 skipped**. The matrix-stage count was 1,973 / 40. All public docstring
+  examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
   and attaches the artifacts; tagging `v` + `sift.__version__` and creating the
@@ -55,11 +54,22 @@ export, and CI execution of every fenced `python` block in the manual set — an
 both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves to
 0.9.1:
 
-- [ ] Generated API reference from those docstrings, which retires `docs/API.md`.
-- [ ] One selector decision tree replacing the five "which selector" tables.
-- [ ] A measured runtime/scaling table from a committed script with provenance.
-- [ ] A data-type support matrix.
-- [ ] A glossary.
+- [x] Generated API reference from those docstrings, which retires `docs/API.md`.
+- [x] One selector decision tree replacing the five "which selector" tables.
+- [x] A measured runtime/scaling table from a committed script with provenance.
+- [x] A data-type support matrix.
+- [x] A glossary.
+- [x] Convert `docs/user-guide.md` into the promised tutorial.
+- [ ] 0.9.1 integration: after committing the implementation, rerun the
+      existing `runtime_scaling_2026-09-03` artifact from that clean commit
+      with release-grade `dirty=false`, then commit the refreshed CSV,
+      sidecar, and docs table. Keep the stable basename; do not rename the
+      artifact. Full CI and merge follow that refresh. PyPI publication does
+      not.
+
+Do not treat the tutorial page as open documentation work. The currently
+committed runtime-scaling artifact is preliminary `dirty=true` evidence and is
+not the closeout artifact.
 
 The `group_col`/`sample_weight_col` and `StabilitySelector` `alpha`/`penalty`
 aliases are permanent as of the same decision: no deprecation, no 1.0 removal.

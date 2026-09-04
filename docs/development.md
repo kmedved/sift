@@ -16,6 +16,7 @@ Optional dependencies:
 ```bash
 python -m pip install -e ".[categorical]"
 python -m pip install -e ".[catboost]"
+python -m pip install -e ".[docs]"
 python -m pip install -e ".[all]"
 ```
 
@@ -43,7 +44,7 @@ python -m pytest tests/test_importance.py tests/test_permute.py -q
 Check formatting-sensitive diffs:
 
 ```bash
-python -m ruff check sift tests
+python -m ruff check sift tests scripts
 git diff --check
 ```
 
@@ -188,11 +189,18 @@ are:
 
 - `README.md`
 - `DOCS.MD`
-- `docs/API.md`
 - `docs/user-guide.md`
 - `docs/ADVANCED.md`
 - `docs/troubleshooting.md`
 - `docs/results.md`
+
+The API reference is generated from the public docstrings rather than carrying
+its own runnable examples. `python scripts/generate_api_reference.py --check`
+proves that each `sift.__all__` export has exactly one current source page;
+`python scripts/generate_data_type_matrix.py --check` proves that
+[docs/data-type-support.md](data-type-support.md) matches a live probe of the
+public selector entry points; `mkdocs build --strict` renders those pages and
+fails on documentation warnings.
 
 **Blocks are standalone by default.** Each block runs in a fresh namespace, so
 it must build its own `X`, `y`, and imports. Prefer tiny synthetic data

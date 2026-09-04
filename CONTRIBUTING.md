@@ -19,6 +19,7 @@ Install optional extras only when the change needs them:
 ```bash
 python -m pip install -e ".[categorical]"
 python -m pip install -e ".[catboost]"
+python -m pip install -e ".[docs]"
 python -m pip install -e ".[all]"
 ```
 
@@ -42,7 +43,11 @@ Public API changes should update the relevant docs:
 
 - `DOCS.MD` is the canonical full manual and is checked by docs smoke tests.
 - `README.md` should remain a fast orientation page.
-- `docs/API.md` is a standalone public API reference.
+- `docs/reference/` is generated from `sift.__all__`; run
+  `python scripts/generate_api_reference.py` after changing the public surface.
+- `docs/data-type-support.md` is generated from live public-entry-point
+  probes; rerun `python scripts/generate_data_type_matrix.py` after changing
+  accepted input kinds or row-metadata contracts.
 - `docs/ALGORITHMS.md` explains method behavior and assumptions.
 - `docs/ADVANCED.md` covers workflow patterns such as time splits, caches,
   sample weights, smart sampling, and knockoffs.
@@ -61,6 +66,8 @@ you touched public docs or exports.
 ```bash
 python -m pytest -q tests/test_smoke.py
 python -m pytest -q tests/test_docs_smoke.py
+python scripts/generate_api_reference.py --check
+mkdocs build --strict
 ```
 
 Useful focused slices:

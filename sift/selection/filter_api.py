@@ -317,8 +317,8 @@ def select_mrmr(
     Greedily grows a feature set that trades relevance to the target against
     redundancy with the features already chosen, and returns the selected
     names in selection order.  Reach for it as the fast relevance/redundancy
-    baseline on a wide matrix.  Prefer :func:`sift.select_jmi`,
-    :func:`sift.select_jmim`, or :func:`sift.select_cefsplus` when the
+    baseline on a wide matrix.  Prefer ``sift.select_jmi``,
+    ``sift.select_jmim``, or ``sift.select_cefsplus`` when the
     informative features are mutually redundant: those condition on the whole
     selected set rather than penalizing pairwise redundancy, which is the
     regime in which mRMR can promote a low-relevance, low-redundancy noise
@@ -345,7 +345,7 @@ def select_mrmr(
         Required keyword.  Chooses the relevance estimators and the target
         validation applied to ``y``.
     cache : FeatureCache or None, default None
-        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        Prebuilt copula cache from ``sift.build_cache``, accepted only
         with ``estimator="gaussian"``.  A named cache requires ``X`` to be the
         DataFrame whose column labels and order built it; a positional cache
         requires the matching ndarray.  Because a cache freezes its rows and
@@ -448,9 +448,9 @@ def select_mrmr(
         to opt into joblib workers.
     verbose : bool, default True
         Log progress at INFO on the ``"sift"`` logger.  Use
-        :func:`sift.set_verbosity` for a process-wide default.
+        ``sift.set_verbosity`` for a process-wide default.
     return_result : bool, default False
-        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        Return a ``sift.selection.result.FilterSelectionResult`` instead
         of the bare list.
     store_proxies : bool, default False
         Retain the selection-time copula correlation block so
@@ -466,10 +466,10 @@ def select_mrmr(
     list of str or FilterSelectionResult
         By default the selected feature names in selection order.  With
         ``return_result=True``, a
-        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``sift.selection.result.FilterSelectionResult`` carrying
         ``selected_features``, ``selected_indices`` (positions in ``X``),
         ``selector_metadata``, a ``ranking_`` table, and ``diagnostics_``;
-        pass it to :func:`sift.as_result` for a normalized view.
+        pass it to ``sift.as_result`` for a normalized view.
 
     Raises
     ------
@@ -520,7 +520,7 @@ def select_mrmr(
     win.  The classic route measures redundancy with correlations of the raw
     columns; the Gaussian route measures it as ``-0.5 * log(1 - r**2)`` on
     rank-Gaussian correlations, which makes it monotone-invariant and lets a
-    :class:`~sift.FeatureCache` be reused across targets.  ``k`` is an upper
+    ``sift.FeatureCache`` be reused across targets.  ``k`` is an upper
     bound throughout, and every screening or pruning step can only lower the
     count actually returned.
 
@@ -573,7 +573,7 @@ def select_jmi(
     conditions on what is already chosen instead of penalizing pairwise
     redundancy, JMI prefers complementary features and does not share mRMR's
     tendency to promote low-relevance noise columns.  Use it as the default
-    filter when features overlap; use :func:`sift.select_jmim` for the
+    filter when features overlap; use ``sift.select_jmim`` for the
     conservative minimum-pair variant.  With defaults it resolves the
     estimator from ``task``, screens to ``max(5 * k, 250)`` candidates,
     subsamples 50,000 rows with seed 0, logs progress, and returns a plain
@@ -595,7 +595,7 @@ def select_jmi(
         Required keyword.  Chooses the estimator resolution and the target
         validation applied to ``y``.
     cache : FeatureCache or None, default None
-        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        Prebuilt copula cache from ``sift.build_cache``, accepted only
         with ``estimator="gaussian"``.  A named cache requires the DataFrame
         whose labels and order built it; a positional cache requires the
         matching ndarray.  ``sample_weight``, ``subsample``, and
@@ -678,7 +678,7 @@ def select_jmi(
     verbose : bool, default True
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
-        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        Return a ``sift.selection.result.FilterSelectionResult`` instead
         of the bare list.
     store_proxies : bool, default False
         Retain the selection-time copula correlation block for
@@ -693,7 +693,7 @@ def select_jmi(
     list of str or FilterSelectionResult
         By default the selected feature names in selection order.  With
         ``return_result=True``, a
-        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``sift.selection.result.FilterSelectionResult`` carrying
         ``selected_features``, ``selected_indices``, ``selector_metadata``, a
         ``ranking_`` table, and ``diagnostics_``.
 
@@ -738,10 +738,10 @@ def select_jmi(
     information it adds *jointly* with each incumbent rather than penalized
     for correlating with it.  Summing keeps the score growing with ``|S|`` and
     makes it comparatively tolerant of one redundant pair;
-    :func:`sift.select_jmim` takes the minimum instead and is stricter.  The
+    ``sift.select_jmim`` takes the minimum instead and is stricter.  The
     Gaussian route evaluates the pair term in closed form from rank-Gaussian
     correlations, costing one correlation-row update per step, and can reuse a
-    :class:`~sift.FeatureCache` across targets.  ``k`` is an upper bound.
+    ``sift.FeatureCache`` across targets.  ``k`` is an upper bound.
 
     Examples
     --------
@@ -785,7 +785,7 @@ def select_jmim(
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation.
 
-    Identical to :func:`sift.select_jmi` except that a candidate is scored by
+    Identical to ``sift.select_jmi`` except that a candidate is scored by
     its *worst* pairing with the already-selected set rather than the sum over
     all of them.  A feature therefore has to add joint information alongside
     every incumbent, not merely on average, which makes JMIM the conservative
@@ -811,7 +811,7 @@ def select_jmim(
         Required keyword.  Chooses the estimator resolution and the target
         validation applied to ``y``.
     cache : FeatureCache or None, default None
-        Prebuilt copula cache from :func:`sift.build_cache`, accepted only
+        Prebuilt copula cache from ``sift.build_cache``, accepted only
         with ``estimator="gaussian"``.  A named cache requires the DataFrame
         whose labels and order built it; a positional cache requires the
         matching ndarray.  ``sample_weight``, ``subsample``, and
@@ -893,7 +893,7 @@ def select_jmim(
     verbose : bool, default True
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
-        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        Return a ``sift.selection.result.FilterSelectionResult`` instead
         of the bare list.
     store_proxies : bool, default False
         Retain the selection-time copula correlation block for
@@ -908,7 +908,7 @@ def select_jmim(
     list of str or FilterSelectionResult
         By default the selected feature names in selection order.  With
         ``return_result=True``, a
-        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``sift.selection.result.FilterSelectionResult`` carrying
         ``selected_features``, ``selected_indices``, ``selector_metadata``, a
         ``ranking_`` table, and ``diagnostics_``.
 
@@ -1027,7 +1027,7 @@ def select_cefsplus(
         Number of features to select, treated as an *upper bound*.  ``"auto"``
         hands the count to the auto-k machinery -- see ``auto_k_config``.
     cache : FeatureCache or None, default None
-        Prebuilt copula cache from :func:`sift.build_cache`, reused instead of
+        Prebuilt copula cache from ``sift.build_cache``, reused instead of
         transforming ``X`` again.  A named cache requires the DataFrame whose
         labels and order built it; a positional cache requires the matching
         ndarray.  Because a cache freezes its rows and weights,
@@ -1118,9 +1118,9 @@ def select_cefsplus(
         want.
     verbose : bool, default True
         Log progress at INFO on the ``"sift"`` logger.  Use
-        :func:`sift.set_verbosity` for a process-wide default.
+        ``sift.set_verbosity`` for a process-wide default.
     return_result : bool, default False
-        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        Return a ``sift.selection.result.FilterSelectionResult`` instead
         of the bare list.  Required to inspect the objective path and the
         auto-k diagnostics.
     store_proxies : bool, default False
@@ -1138,7 +1138,7 @@ def select_cefsplus(
     list of str or FilterSelectionResult
         By default the selected feature names in selection order.  With
         ``return_result=True``, a
-        :class:`~sift.selection.result.FilterSelectionResult` carrying
+        ``sift.selection.result.FilterSelectionResult`` carrying
         ``selected_features``, ``selected_indices`` (positions in ``X``),
         ``selector_metadata``, a ``ranking_`` table, and ``diagnostics_``
         holding the cumulative ``"objective_path"`` and its per-step
@@ -1168,7 +1168,7 @@ def select_cefsplus(
         When ``y`` holds only 3-20 distinct integer-valued levels and so looks
         like multiclass labels rather than a numeric target -- use a
         ``task="classification"`` selector or
-        :func:`sift.select_cefsplus_binary` instead.  Also when ``k="auto"``
+        ``sift.select_cefsplus_binary`` instead.  Also when ``k="auto"``
         with ``k_method="auto"`` selects zero features: the routed criterion
         supported no feature, which is a real answer on noise-like data.
         Inspect ``diagnostics_["auto_k"]`` with ``return_result=True``, or
@@ -1193,8 +1193,8 @@ def select_cefsplus(
     candidates, so ``O(m * k**2)`` overall, and it issues no BLAS calls, so it
     cannot thrash the caller's thread pool.  Because everything before the
     greedy loop is target-independent, passing a prebuilt
-    :class:`~sift.FeatureCache` makes repeated selection across targets cheap;
-    :func:`sift.select_cached` is the direct form of that loop.  ``k`` is an
+    ``sift.FeatureCache`` makes repeated selection across targets cheap;
+    ``sift.select_cached`` is the direct form of that loop.  ``k`` is an
     upper bound throughout.
 
     Examples
@@ -1248,7 +1248,7 @@ def select_cefsplus_binary(
     candidate on the conditional Bernoulli deviance it would remove from a
     weighted logistic fit on the features already selected, scored with a
     Rao/Fisher score-test update.  Use it as the binary counterpart of
-    :func:`sift.select_cefsplus` when the target really is a label and a
+    ``sift.select_cefsplus`` when the target really is a label and a
     logistic path is the right proxy; it is a different estimator, not the
     Gaussian log-determinant objective under another name.  With defaults it
     runs the log-loss path over all finite candidates and all rows, refits the
@@ -1272,7 +1272,7 @@ def select_cefsplus_binary(
     loss : {"logloss", "brier"}, default "logloss"
         Selection proxy.  ``"logloss"`` runs the greedy logistic score-test
         path described above.  ``"brier"`` instead delegates to
-        :func:`sift.select_cefsplus` with the 0/1 target cast to float, which
+        ``sift.select_cefsplus`` with the 0/1 target cast to float, which
         makes the Gaussian-only options (notably ``store_proxies``) available
         and reports ``delegate_selector="cefsplus"`` in metadata.
     top_m : int or None, default None
@@ -1374,7 +1374,7 @@ def select_cefsplus_binary(
     verbose : bool, default True
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
-        Return a :class:`~sift.selection.result.FilterSelectionResult` instead
+        Return a ``sift.selection.result.FilterSelectionResult`` instead
         of the bare list.
     store_proxies : bool, default False
         Retain the selection-time copula correlation block for
@@ -1389,7 +1389,7 @@ def select_cefsplus_binary(
     list of str or FilterSelectionResult
         By default the selected feature names in selection order.  With
         ``return_result=True``, a
-        :class:`~sift.selection.result.FilterSelectionResult` whose
+        ``sift.selection.result.FilterSelectionResult`` whose
         ``selector_metadata`` records ``selector="cefsplus_binary"``, the
         ``loss``, the ``target_mapping`` from raw labels to ``0``/``1``,
         whether the run was ``weighted``, and the ``class_weight`` scope.

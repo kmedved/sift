@@ -72,7 +72,7 @@ trusted_features = result.selected_features
 ```
 
 `select_fdr` reports approximate plug-in Gaussian-copula validity metadata; see
-the user guide for the exact Model-X assumptions behind the q-calibrated result.
+the tutorial for the exact Model-X assumptions behind the q-calibrated result.
 The default knockoff+ threshold either returns nothing or at least `1/q`
 features, so a small `q` on a narrow design legitimately selects none.
 
@@ -224,10 +224,15 @@ importable from `sift` itself, warning-free, throughout 0.9.
 ## Documentation
 
 - [Full API manual](https://github.com/kmedved/sift/blob/main/DOCS.MD)
-- [Standalone API reference](https://github.com/kmedved/sift/blob/main/docs/API.md)
+- [Generated API reference source](https://github.com/kmedved/sift/blob/main/docs/reference/index.md)
+  (render locally with `mkdocs serve`)
+- [Selector decision tree](https://github.com/kmedved/sift/blob/main/docs/choosing-a-selector.md)
+- [Runtime and scaling](https://github.com/kmedved/sift/blob/main/docs/runtime-scaling.md)
+- [Data-type support matrix](https://github.com/kmedved/sift/blob/main/docs/data-type-support.md)
+- [Glossary](https://github.com/kmedved/sift/blob/main/docs/glossary.md)
 - [Algorithm guide](https://github.com/kmedved/sift/blob/main/docs/ALGORITHMS.md)
 - [Advanced workflow guide](https://github.com/kmedved/sift/blob/main/docs/ADVANCED.md)
-- [User guide](https://github.com/kmedved/sift/blob/main/docs/user-guide.md)
+- [Tutorial](https://github.com/kmedved/sift/blob/main/docs/user-guide.md)
 - [Reading results](https://github.com/kmedved/sift/blob/main/docs/results.md)
 - [Troubleshooting](https://github.com/kmedved/sift/blob/main/docs/troubleshooting.md)
 - [Architecture and module boundaries](https://github.com/kmedved/sift/blob/main/docs/architecture.md)
@@ -252,16 +257,11 @@ importable from `sift` itself, warning-free, throughout 0.9.
 
 ## Choosing a Selector
 
-| Goal | Start with |
-| --- | --- |
-| Fast relevance/redundancy baseline | `select_mrmr` |
-| Complementary information path | `select_jmi` or `select_jmim` |
-| Compact regression subset | `select_cefsplus` |
-| Binary-target conditional path | `select_cefsplus_binary` |
-| q-calibrated trusted discoveries | `select_fdr` or `KnockoffSelector` |
-| Robustness across resamples | `StabilitySelector` |
-| All-relevant feature discovery | `BorutaSelector` |
-| Model-aware nonlinear selection | `catboost_select` |
+Start with the canonical
+[selector decision tree](https://github.com/kmedved/sift/blob/main/docs/choosing-a-selector.md).
+It separates fixed-size rankings, all-relevant searches, resampling diagnostics,
+model-specific importance, and q-calibrated knockoff sets before recommending
+an entry point.
 
 ## Development
 

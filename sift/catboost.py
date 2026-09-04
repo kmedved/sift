@@ -1187,11 +1187,11 @@ def catboost_regression(
 ) -> List[str]:
     """CatBoost feature selection for regression.
 
-    One-call wrapper that runs :func:`catboost_select` with
+    One-call wrapper that runs ``catboost_select`` with
     ``task="regression"`` and returns only the retained column names. Use it
     when the score curve, importances and diagnostics are not needed; call
-    :func:`catboost_select` directly for the full
-    :class:`~sift.catboost_common.CatBoostSelectionResult`.
+    ``catboost_select`` directly for the full
+    ``sift.catboost_common.CatBoostSelectionResult``.
 
     Parameters
     ----------
@@ -1205,7 +1205,7 @@ def catboost_regression(
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed split.
     **kwargs
-        Every other :func:`catboost_select` keyword, including ``algorithm``,
+        Every other ``catboost_select`` keyword, including ``algorithm``,
         ``cv``, ``prefilter_k``, ``catboost_params``, ``random_state``, the
         ``groups``/``time``/``sample_weight`` row arrays and their permanent
         ``group_col``/``sample_weight_col`` aliases (a direct value and its
@@ -1221,13 +1221,13 @@ def catboost_regression(
     ImportError
         If the optional ``catboost`` package is not installed.
     ValueError
-        Propagated from :func:`catboost_select` for invalid options, alias
+        Propagated from ``catboost_select`` for invalid options, alias
         conflicts or unorderable ``time`` values.
 
     Warns
     -----
     UserWarning
-        Propagated from :func:`catboost_select`, notably the
+        Propagated from ``catboost_select``, notably the
         ``catboost_params``-wins collision notice.
     FutureWarning
         When ``random_state`` is left at ``None``.
@@ -1270,11 +1270,11 @@ def catboost_classif(
 ) -> List[str]:
     """CatBoost feature selection for classification.
 
-    One-call wrapper that runs :func:`catboost_select` with
+    One-call wrapper that runs ``catboost_select`` with
     ``task="classification"`` and returns only the retained column names. Use
     it when the score curve, importances and diagnostics are not needed; call
-    :func:`catboost_select` directly for the full
-    :class:`~sift.catboost_common.CatBoostSelectionResult`.
+    ``catboost_select`` directly for the full
+    ``sift.catboost_common.CatBoostSelectionResult``.
 
     Parameters
     ----------
@@ -1289,7 +1289,7 @@ def catboost_classif(
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed split.
     **kwargs
-        Every other :func:`catboost_select` keyword, including ``algorithm``,
+        Every other ``catboost_select`` keyword, including ``algorithm``,
         ``cv``, ``prefilter_k``, ``catboost_params``, ``random_state``, the
         ``groups``/``time``/``sample_weight`` row arrays and their permanent
         ``group_col``/``sample_weight_col`` aliases (a direct value and its
@@ -1305,13 +1305,13 @@ def catboost_classif(
     ImportError
         If the optional ``catboost`` package is not installed.
     ValueError
-        Propagated from :func:`catboost_select` for invalid options, alias
+        Propagated from ``catboost_select`` for invalid options, alias
         conflicts or unorderable ``time`` values.
 
     Warns
     -----
     UserWarning
-        Propagated from :func:`catboost_select`, notably the
+        Propagated from ``catboost_select``, notably the
         ``catboost_params``-wins collision notice.
     FutureWarning
         When ``random_state`` is left at ``None``.

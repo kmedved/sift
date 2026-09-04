@@ -62,7 +62,7 @@ class AutoKConfig:
     is actually read. Setting a field that the chosen ``k_method`` ignores
     emits a ``UserWarning`` naming that field, so a config cannot quietly
     pretend to control something. ``AutoKConfig.from_groups(...)`` accepts the
-    frozen option groups in :mod:`sift.selection.auto_k_options` and flattens
+    frozen option groups in `sift.selection.auto_k_options` and flattens
     them into these same fields; the ``objective``, ``test``, ``perm``,
     ``knockoff``, ``cv``, ``stability``, and ``experimental`` properties are
     read-only snapshots of the corresponding subsets.
@@ -1456,7 +1456,7 @@ def select_k_auto(
     to ``n_splits`` under ``'group_cv'`` -- which makes this the most
     expensive auto-k rule in the library. ``k_method='auto'`` is *not*
     handled here: the router
-    lives in :mod:`sift.selection.filter_auto_k` and dispatches to a concrete
+    lives in `sift.selection.filter_auto_k` and dispatches to a concrete
     rule (EBIC by default for CEFS+), so this function rejects any
     ``k_method`` other than ``'evaluate'``.
 

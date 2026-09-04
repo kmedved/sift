@@ -161,7 +161,7 @@ class SmartSamplerConfig:
     (2, 0.05)
 
     The dataclass is mutable, so a preset can be adjusted in place or copied
-    with :func:`dataclasses.replace`:
+    with ``dataclasses.replace``:
 
     >>> dataclasses.replace(config, sample_frac=0.1).sample_frac
     0.1
@@ -677,7 +677,7 @@ def smart_sample(
     config : SmartSamplerConfig, optional
         Configuration object. If None, uses defaults with any kwargs overrides.
     **kwargs
-        Override individual :class:`SmartSamplerConfig` fields by name. They
+        Override individual ``SmartSamplerConfig`` fields by name. They
         win over the matching fields of ``config``; a keyword that is not a
         config field raises ``TypeError``.
 

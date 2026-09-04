@@ -196,13 +196,13 @@ def panel_config(
 ) -> SmartSamplerConfig:
     """Generic preset for panel/longitudinal data.
 
-    Builds a :class:`~sift.SmartSamplerConfig` for repeated observations of the
+    Builds a ``sift.SmartSamplerConfig`` for repeated observations of the
     same entities: rows are grouped by ``group_col``, at least two rows per
     group survive, and the first and last observation of every group are
     anchored so each entity keeps its endpoints instead of being reduced to a
     random interior slice. Use it whenever ``smart_sample`` runs on
     entity-over-time data (customers, patients, tickers, players); use
-    :func:`cross_section_config` when rows are independent.
+    ``cross_section_config`` when rows are independent.
 
     Parameters
     ----------
@@ -273,11 +273,11 @@ def panel_config(
 def cross_section_config(sample_frac: float = 0.15) -> SmartSamplerConfig:
     """Preset for cross-sectional (non-grouped) data.
 
-    Builds a :class:`~sift.SmartSamplerConfig` for independent rows: no entity
+    Builds a ``sift.SmartSamplerConfig`` for independent rows: no entity
     column, no time ordering and no anchoring, so ``smart_sample`` treats the
     whole frame as one group and keeps rows purely on leverage and residual
     evidence. Use it for one-row-per-subject tables; use
-    :func:`panel_config` when the same entity appears repeatedly, because
+    ``panel_config`` when the same entity appears repeatedly, because
     ignoring that structure lets a large entity crowd the sample.
 
     Parameters
