@@ -197,6 +197,13 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     store_coefs : bool, default=True
         Whether to store full coefficient matrix from all bootstraps.
         Set False to save memory (disables get_coef_stability and plot_coef_distributions).
+    store_proxies : bool, default=False
+        If True, retain the rank-Gaussian candidate×selected correlation
+        block and per-resample boolean selection indicators for
+        ``SelectionView.redundancy_report`` and ``proxy_clusters``.
+        Independent of ``store_coefs``. False or omitted leaves existing
+        fits bit-identical. The resample matrix is capped by actual
+        retained bool bytes (default 16 MiB).
     coef_threshold : float, default=1e-8
         Threshold for considering a coefficient as non-zero.
     n_jobs : int, default=-1
@@ -301,6 +308,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         callback: ProgressCallback | None = None,
         penalty: Optional[float] = None,
         output_order: str = "legacy",
+        store_proxies: bool = False,
     ):
         self.n_bootstrap = n_bootstrap
         self.sample_frac = sample_frac
@@ -323,6 +331,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         self.output_order = output_order
         self.callback = callback
         self.penalty = penalty
+        self.store_proxies = store_proxies
 
     def fit(
         self,
@@ -417,8 +426,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                             "feature_names must reference existing DataFrame "
                             f"columns; missing: {sample}{suffix}"
                         )
-            X_scaled, y, sample_weight, feature_names, groups, time = self._prepare_stability_fit(
-                X, y, sample_weight, groups, time, feature_names
+            X_proxy, w_proxy, X_scaled, y, sample_weight, feature_names, groups, time = (
+                self._prepare_stability_fit(
+                    X, y, sample_weight, groups, time, feature_names
+                )
             )
             split_iter = self._make_stability_split_iterator(len(y), y, groups, time)
             sel_count, sum_abs_coef, n_runs = self._run_stability_chunks(
@@ -428,6 +439,8 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 split_iter,
             )
             self._finalize_stability_selection(sel_count, sum_abs_coef, n_runs, feature_names)
+            if self.store_proxies:
+                self._store_proxy_payload(X_proxy, w_proxy)
         except Exception:
             self._clear_fit_state()
             raise
@@ -458,6 +471,8 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             "selected_feature_names_",
             "selected_features_",
             "selection_frequencies_",
+            "_proxy_correlations",
+            "_resample_selections_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -517,6 +532,22 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             self.alpha_ = configured_alpha
             self.alpha_rule_effective_ = "fixed"
 
+        X_proxy = None
+        w_proxy = None
+        if self.store_proxies:
+            from sift._impute import mean_impute
+            from sift._preprocess import ensure_weights
+
+            X_arr = np.asarray(X, dtype=np.float64)
+            weights = ensure_weights(sample_weight, n, normalize=True)
+            positive = np.flatnonzero(weights > 0.0)
+            if positive.size == 0:
+                raise ValueError(
+                    "store_proxies=True requires at least one positive-weight row"
+                )
+            X_proxy = mean_impute(X_arr[positive], copy=True)
+            w_proxy = np.asarray(weights[positive], dtype=np.float64).copy()
+
         # Impute and standardize the final fit data after alpha is chosen.
         X = self._impute_with_fit_stats(X, fit=True)
         self._scaler = StandardScaler()
@@ -529,7 +560,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 f"α={self.alpha_:.4f}, threshold={self.threshold}"
             )
 
-        return X_scaled, y, sample_weight, feature_names, groups, time
+        return X_proxy, w_proxy, X_scaled, y, sample_weight, feature_names, groups, time
 
     def _make_stability_split_iterator(self, n: int, y, groups, time):
         use_block = groups is not None and time is not None
@@ -620,6 +651,20 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         if self.store_coefs:
             self.coef_bootstrap_ = np.empty((self.n_bootstrap, p), dtype=np.float32)
+        resample_selections = None
+        if self.store_proxies:
+            from sift.selection.proxies import MAX_RESAMPLE_SELECTION_BYTES
+
+            storage_bytes = int(self.n_bootstrap) * int(p) * np.dtype(bool).itemsize
+            if storage_bytes > MAX_RESAMPLE_SELECTION_BYTES:
+                limit_mib = MAX_RESAMPLE_SELECTION_BYTES / 1024**2
+                requested_mib = storage_bytes / 1024**2
+                raise ValueError(
+                    "store_proxies=True would retain "
+                    f"{requested_mib:.2f} MiB of resample selection indicators, "
+                    f"exceeding the {limit_mib:.0f} MiB limit"
+                )
+            resample_selections = np.zeros((self.n_bootstrap, p), dtype=bool)
 
         bootstrap_idx = 0
         split_iterator = iter(split_iter)
@@ -656,6 +701,8 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
                 if self.store_coefs:
                     self.coef_bootstrap_[bootstrap_idx] = coef_summary
+                if resample_selections is not None:
+                    resample_selections[bootstrap_idx] = selected.astype(bool, copy=False)
                 bootstrap_idx += 1
                 if self.callback is not None:
                     report_progress(
@@ -674,6 +721,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         if self.store_coefs:
             self.coef_bootstrap_ = self.coef_bootstrap_[:bootstrap_idx]
+        if resample_selections is not None:
+            self._resample_selections_ = np.ascontiguousarray(
+                resample_selections[:bootstrap_idx]
+            )
 
         return sel_count, sum_abs_coef, bootstrap_idx
 
@@ -700,6 +751,57 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             logger.info(f"Selected {self.n_features_selected_} / {p} features")
 
         return self
+
+    def _store_proxy_payload(self, X_proxy, sample_weight) -> None:
+        """Retain copula correlations from a positive-weight imputed slice."""
+        from sift.estimators.copula import weighted_rank_gauss_2d
+        from sift.selection.proxies import (
+            _check_storage_size,
+            weighted_correlation_columns,
+        )
+
+        Xs = np.asarray(X_proxy, dtype=np.float64)
+        ws = np.asarray(sample_weight, dtype=np.float64).ravel()
+        if Xs.ndim != 2:
+            raise ValueError("proxy features must be a 2-d array")
+        if ws.shape[0] != Xs.shape[0]:
+            raise ValueError("proxy weights length must match proxy rows")
+        if Xs.shape[0] == 0 or float(ws.sum()) <= 0.0:
+            raise ValueError(
+                "store_proxies=True requires at least one positive-weight row"
+            )
+        p = int(Xs.shape[1])
+        varying = np.array(
+            [float(np.ptp(Xs[:, j])) > 0.0 for j in range(p)],
+            dtype=bool,
+        )
+        selected = [int(i) for i in np.asarray(self.selected_features_)]
+        varying_raw = np.flatnonzero(varying).astype(np.int64)
+        candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
+        _check_storage_size(len(candidate_raw), len(selected))
+        varying_selected = [pos for pos in selected if bool(varying[pos])]
+        if varying_raw.size and varying_selected:
+            Z = weighted_rank_gauss_2d(Xs[:, varying_raw], ws)
+            raw_to_local = {int(raw): local for local, raw in enumerate(varying_raw.tolist())}
+            local_selected = [raw_to_local[pos] for pos in varying_selected]
+            varying_block = weighted_correlation_columns(Z, ws, local_selected)
+        else:
+            raw_to_local = {}
+            local_selected = []
+            varying_block = np.zeros((int(varying_raw.size), 0), dtype=np.float64)
+        varsel_to_col = {pos: j for j, pos in enumerate(varying_selected)}
+        block = np.zeros((len(candidate_raw), len(selected)), dtype=np.float64)
+        for row, cand in enumerate(candidate_raw):
+            for col, sel in enumerate(selected):
+                if cand == sel:
+                    block[row, col] = 1.0
+                elif cand in raw_to_local and sel in varsel_to_col:
+                    block[row, col] = varying_block[raw_to_local[cand], varsel_to_col[sel]]
+        self._proxy_correlations = pd.DataFrame(
+            block.astype(np.float32, copy=False),
+            index=pd.Index(candidate_raw, name="selected_index"),
+            columns=pd.Index(selected, name="selected_index"),
+        )
 
     @property
     def result_view_(self):
@@ -1032,6 +1134,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         for train_idx, val_idx in split_iter:
             fold_selector = clone(self).set_params(
                 store_coefs=False,
+                store_proxies=False,
                 verbose=False,
                 callback=None,
             )
@@ -1322,6 +1425,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         if not isinstance(self.l1_ratio, numbers.Real) or not (0 <= float(self.l1_ratio) <= 1):
             raise ValueError("l1_ratio must be in [0, 1].")
+
+        if not isinstance(self.store_proxies, (bool, np.bool_)):
+            raise ValueError("store_proxies must be a boolean")
+        self.store_proxies = bool(self.store_proxies)
 
     def _impute_with_fit_stats(self, X: np.ndarray, *, fit: bool = False) -> np.ndarray:
         """Mean-impute using fit-time statistics, optionally storing them."""

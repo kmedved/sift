@@ -107,7 +107,9 @@ Use CEFS+ when:
 
 `corr_prune` can remove near-duplicates from the path. This helps keep the
 subset compact, but if correlated feature families are meaningful, review the
-path before pruning too aggressively.
+path before pruning too aggressively. With `store_proxies=True`,
+`SelectionView.redundancy_report` and `proxy_clusters` expose those
+near-duplicates from the stored copula block without retaining `X`.
 
 ### Binary CEFS+
 

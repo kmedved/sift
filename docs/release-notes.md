@@ -20,6 +20,12 @@
   `data_derived` is labeled exploratory with `fdr_control="none"`. FDR
   applies to discoveries only; the include set is residualized out of the
   Gaussian-copula knockoff model.
+- Added `SelectionView.redundancy_report` and `SelectionView.proxy_clusters`
+  on stored proxy correlations: an all-selected edge report and
+  selected-anchored connected components, with exact per-cluster selection
+  frequencies on `StabilitySelector(store_proxies=True)` resamples.
+  `store_proxies` remains opt-in and default-false; omitted calls are
+  unchanged. Cluster frequency is nullable when no resample payload exists.
 
 ### Documentation
 

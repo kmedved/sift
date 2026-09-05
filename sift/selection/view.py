@@ -16,7 +16,13 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from sift.selection.proxies import normalize_proxy_frame
+from sift.selection.proxies import (
+    normalize_proxy_frame,
+    normalize_resample_selections,
+    proxy_cluster_frame,
+    redundancy_report_frame,
+    validate_r_min,
+)
 
 
 SCHEMA_VERSION = "1"
@@ -466,8 +472,13 @@ class SelectionView:
     inverse_transformer : callable or None, default None
         Callable backing ``inverse_transform``, under the same rule.
     proxy_correlations : DataFrame or None, default None
-        Candidate-by-selected correlation block backing ``proxies`` and
-        ``proxies_at``.  Normalized and size-checked on construction.
+        Candidate-by-selected correlation block backing ``proxies``,
+        ``proxies_at``, ``redundancy_report``, and ``proxy_clusters``.
+        Normalized and size-checked on construction.
+    resample_selections : ndarray or None, default None
+        Completed-resample boolean matrix of shape
+        ``(n_resamples, n_raw_features)`` used for cluster selection
+        frequencies. Copied and size-checked; never retains ``X``.
 
     Attributes
     ----------
@@ -507,7 +518,8 @@ class SelectionView:
         Copied selector metadata plus ``schema_version``, ``input_kind``,
         ``table_complete``, ``transform_available``,
         ``inverse_transform_available``, ``raw_columns_hash``,
-        ``encoded_columns_hash``, and the ``proxy_*`` counters.
+        ``encoded_columns_hash``, the ``proxy_*`` counters, and resample
+        cluster-frequency availability.
     diagnostics : any
         Copied selector diagnostics.
 
@@ -567,6 +579,7 @@ class SelectionView:
         "_n_raw_features",
         "_proxy_correlations",
         "_raw_features",
+        "_resample_selections",
         "_raw_table",
         "_support",
         "_transformer",
@@ -589,6 +602,7 @@ class SelectionView:
         transformer: Callable[[Any], Any] | None = None,
         inverse_transformer: Callable[[Any], Any] | None = None,
         proxy_correlations: pd.DataFrame | None = None,
+        resample_selections: np.ndarray | None = None,
     ) -> None:
         selected = list(features)
         selected_indices = _coerce_indices(indices, label="indices")
@@ -735,16 +749,32 @@ class SelectionView:
         )
         self._transformer = transformer
         self._inverse_transformer = inverse_transformer
+        if resample_selections is not None and proxy_correlations is None:
+            raise ValueError(
+                "resample_selections require proxy_correlations; cluster "
+                "frequencies cannot be advertised without a stored proxy block"
+            )
         self._proxy_correlations, proxy_storage_bytes = normalize_proxy_frame(
             proxy_correlations,
             selected_indices=selected_indices,
             n_raw_features=n_raw_features,
+        )
+        self._resample_selections, resample_storage_bytes = normalize_resample_selections(
+            resample_selections,
+            n_features=n_raw_features,
         )
         self._metadata["proxy_correlations_stored"] = self._proxy_correlations is not None
         self._metadata["proxy_candidate_count"] = (
             0 if self._proxy_correlations is None else len(self._proxy_correlations)
         )
         self._metadata["proxy_storage_bytes"] = proxy_storage_bytes
+        self._metadata["cluster_frequencies_available"] = (
+            self._resample_selections is not None
+        )
+        self._metadata["n_resamples_stored"] = (
+            0 if self._resample_selections is None else int(self._resample_selections.shape[0])
+        )
+        self._metadata["resample_selection_storage_bytes"] = resample_storage_bytes
 
     @property
     def features(self) -> list[Any]:
@@ -928,6 +958,8 @@ class SelectionView:
         See Also
         --------
         SelectionView.proxies_at : The positional form of this lookup.
+        SelectionView.redundancy_report : Every qualifying proxy edge.
+        SelectionView.proxy_clusters : Selected-anchored proxy components.
 
         Examples
         --------
@@ -1011,14 +1043,7 @@ class SelectionView:
         position = int(selected_index)
         if position not in self._proxy_correlations.columns:
             raise ValueError(f"raw feature position {position} is not a selected proxy feature")
-        if isinstance(r_min, (bool, np.bool_)) or not isinstance(
-            r_min,
-            (Real, np.integer, np.floating),
-        ):
-            raise ValueError("r_min must be a finite number between 0 and 1")
-        threshold = float(r_min)
-        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-            raise ValueError("r_min must be a finite number between 0 and 1")
+        threshold = validate_r_min(r_min)
 
         values = self._proxy_correlations[position]
         candidate_positions = np.asarray(values.index, dtype=np.int64)
@@ -1047,6 +1072,102 @@ class SelectionView:
                 "correlation": correlations,
             }
         )
+
+    def redundancy_report(self, r_min: float = 0.8) -> pd.DataFrame:
+        """Return every qualifying unselected-candidate ↔ selected-feature edge.
+
+        This is the all-selected companion to ``proxies`` / ``proxies_at``:
+        one row per stored copula correlation whose absolute value is at
+        least ``r_min``.  Selected features never appear as proxy
+        candidates.  Requires ``store_proxies=True``.
+
+        Parameters
+        ----------
+        r_min : float, default 0.8
+            Minimum absolute correlation to report, in ``[0, 1]``.
+
+        Returns
+        -------
+        DataFrame
+            Columns ``selected_feature``, ``selected_index`` (the selected
+            raw position), ``feature``, ``candidate_index`` (the unselected
+            raw position), and signed ``correlation``.  Sorted by selected
+            path order, then descending absolute correlation, then candidate
+            raw position.  Empty when nothing qualifies.
+
+        Raises
+        ------
+        NotImplementedError
+            If proxy correlations were not stored.
+        ValueError
+            If ``r_min`` is not a finite number in ``[0, 1]``.
+        """
+        block = self._require_proxy_block()
+        threshold = validate_r_min(r_min)
+        selected = [] if self._indices is None else list(self._indices)
+        raw_names = None if self._raw_features is None else list(self._raw_features)
+        return redundancy_report_frame(
+            block,
+            selected_indices=selected,
+            raw_features=raw_names,
+            r_min=threshold,
+        )
+
+    def proxy_clusters(self, r_min: float = 0.8) -> pd.DataFrame:
+        """Return selected-anchored connected components of proxy edges.
+
+        Nodes are selected features plus unselected candidates with
+        ``|correlation| >= r_min`` to at least one selected feature.
+        Edges come from that stored candidate×selected block, including
+        qualifying selected↔selected correlations: this is not an all-pairs
+        clustering of unselected columns.  A candidate linked to two selected
+        anchors joins those anchors, as does a direct selected-selected edge.
+        Each selected feature is at least a singleton cluster.
+
+        When the view carries completed-resample selection indicators,
+        ``cluster_frequency`` is the fraction of those resamples in which
+        any cluster member was selected.  Otherwise the column is nullable
+        ``Float64`` and entirely missing.
+
+        Parameters
+        ----------
+        r_min : float, default 0.8
+            Absolute-correlation threshold for an edge, in ``[0, 1]``.
+            Signed correlations are preserved in ``redundancy_report``;
+            clustering uses the absolute value.
+
+        Returns
+        -------
+        DataFrame
+            One row per member, columns ``cluster_id`` (dense, 0-based,
+            ordered by first selected path member), ``feature``,
+            ``selected_index``, ``selected``, and ``cluster_frequency``.
+
+        Raises
+        ------
+        NotImplementedError
+            If proxy correlations were not stored.
+        ValueError
+            If ``r_min`` is not a finite number in ``[0, 1]``.
+        """
+        block = self._require_proxy_block()
+        threshold = validate_r_min(r_min)
+        selected = [] if self._indices is None else list(self._indices)
+        raw_names = None if self._raw_features is None else list(self._raw_features)
+        return proxy_cluster_frame(
+            block,
+            selected_indices=selected,
+            raw_features=raw_names,
+            r_min=threshold,
+            resample_selections=self._resample_selections,
+        )
+
+    def _require_proxy_block(self) -> pd.DataFrame:
+        if self._proxy_correlations is None:
+            raise NotImplementedError(
+                "proxy correlations were not stored; rerun selection with store_proxies=True"
+            )
+        return self._proxy_correlations
 
     def plot(self, ax=None):
         """Plot the selection curve, or the per-feature metric as a fallback.
@@ -1118,9 +1239,9 @@ class SelectionView:
     def to_dict(self) -> dict[str, Any]:
         """Serialize the view to a versioned, JSON-safe payload.
 
-        Everything the view holds except the proxy-correlation block, which is
-        deliberately omitted because it is bounded working data rather than
-        part of the result.
+        Everything the view holds except the proxy-correlation block and any
+        resample-selection indicators, which are deliberately omitted because
+        they are bounded working data rather than part of the result.
 
         Returns
         -------

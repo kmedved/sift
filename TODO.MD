@@ -81,10 +81,12 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       and `selection/auto_k.py`. Merged as PR #78 at `3b9ac0a` (implementation
       commit `fa74d63`).
 - [x] F1 conditioning sets (`include=`, `exclude=`, `candidates=`).
-      Review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` /
-      PR #78). Implementation commit `b2a11bdf0d6131ba2714207378619e79a7ea833b`.
-      Artifact commit has not landed yet.
-- [ ] F2 proxy/redundancy and cluster reports.
+      Merged as PR #79 at `14bfb5c` (implementation `b2a11bd`, artifact
+      `682af22`; required GitHub CI green).
+- [x] F2 proxy/redundancy and cluster reports.
+      Codex and Opus review accepted on `codex/0.9x-f2-proxy-reports`
+      (base merge `14bfb5c` / PR #79). Clean benchmark refresh, CI and merge
+      remain the integration gate before F7.
 - [ ] F7 panel within/between transforms.
 - [ ] F8a knockoff feasibility and UX metadata; F8b/F8c validated e-value
       aggregation and the statistic bakeoff.
