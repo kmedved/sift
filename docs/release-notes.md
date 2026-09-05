@@ -35,6 +35,17 @@
   nested mode and non-fold auto-k methods reject the new option explicitly.
   Stable anchored means preserve group-constant large-offset data and genuine
   small signals; removing all feature variation raises a clear error.
+- Added opt-in knockoff `aggregation="evalues"` for `n_draws > 1` and
+  `offset=1`. Draws keep the same knockoff samples as the omitted frequency
+  vote; e-values use the common tested universe, zero-pad screened-out
+  coordinates, average, and apply e-BH. Validated ungrouped FDR remains
+  `approximate_plugin` only for `relevance` and `ridge`, whose sign-flip
+  identities are algebraic. `lsm` and `cefsplus` e-value runs are exploratory
+  because truncated LARS and adaptive CEFS+ paths are not swap-equivariant.
+  Grouped/representative mode, varying pair-screens, and supervised encodings
+  also report `fdr_control="none"` with matching aggregation validity fields.
+  Rankings and normalized views carry the `evalue` column. Omitted aggregation
+  is unchanged.
 
 ### Documentation
 

@@ -129,7 +129,7 @@ def _as_knockoff_result(result: Any, input_features: Any) -> SelectionView:
     if not np.isfinite(gain.to_numpy(dtype=float)).all():
         raise ValueError("knockoff W statistics must be finite")
     table["gain"] = gain.to_numpy(copy=True)
-    for column in ("relevance", "selection_frequency", "feature_group"):
+    for column in ("relevance", "selection_frequency", "feature_group", "evalue"):
         if column in result.W:
             values = result.W[column]
             if values.notna().any():

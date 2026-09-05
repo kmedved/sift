@@ -523,7 +523,21 @@ result = select_fdr(
 
 For `n_draws > 1`, SIFT samples multiple knockoff draws and selects features
 whose selection frequency is at least `eta`. This improves run-to-run stability
-but remains part of the approximate plug-in contract.
+but remains part of the approximate plug-in contract and reports
+`fdr_control="none"` for the voted set.
+
+Opt-in `aggregation="evalues"` (Ren and Barber 2022) instead forms per-draw
+knockoff e-values `e_j = m · 1{W_j ≥ T_q} / (1 + #{W ≤ −T_q})` on the common
+tested universe `T` with `m = |T|`, averages them, and applies e-BH at `q`.
+A coordinate screened out of one draw stays in `T` with `e_j = 0` for that
+draw and does not shrink that draw's denominator. Validated ungrouped mode
+is `relevance` (`W = g(r)-g(r̃)`) and `ridge` (swap-invariant Gram solve);
+it keeps `fdr_control="approximate_plugin"` and does not upgrade
+Gaussian-copula plug-in exchangeability. `lsm`, `cefsplus`, grouped runs, and
+a screening union that was not fixed before the statistics stay exploratory.
+The recorded bound is the aggregate null expectation, not `E[e_j] ≤ 1` for
+each null. `n_draws == 1` and `offset=0` are rejected with this aggregation so
+legacy calls stay unchanged.
 
 ### CEFS+ Knockoff Statistic
 

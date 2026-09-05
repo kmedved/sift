@@ -204,10 +204,10 @@ class KnockoffSelectionResult:
         -------
         DataFrame
             Columns ``feature``, optionally ``feature_group``, then ``W``,
-            ``rank``, ``selected``, ``selection_frequency``,
-            ``selected_index``, ``relevance``, and ``selector``, with a fresh
-            zero-based index.  The per-draw ``W_draw_<i>`` columns of
-            ``W`` are not carried over.
+            ``evalue`` when e-value aggregation ran, ``rank``, ``selected``,
+            ``selection_frequency``, ``selected_index``, ``relevance``, and
+            ``selector``, with a fresh zero-based index.  The per-draw
+            ``W_draw_<i>`` columns of ``W`` are not carried over.
 
         See Also
         --------
@@ -242,9 +242,11 @@ class KnockoffSelectionResult:
         columns = ["feature"]
         if "feature_group" in ranking.columns:
             columns.append("feature_group")
+        columns.append("W")
+        if "evalue" in ranking.columns:
+            columns.append("evalue")
         columns.extend(
             [
-                "W",
                 "rank",
                 "selected",
                 "selection_frequency",
@@ -488,6 +490,126 @@ def _warn_knockoff_plus_infeasible(metadata: dict[str, Any]) -> None:
             "not raw input width."
         )
     warn_external(message, UserWarning)
+
+
+_VALIDATED_EVALUE_STATISTICS = frozenset({"relevance", "ridge"})
+_EVALUE_BOUND = "aggregate_null_expectation"
+
+
+def _evalue_statistic_invalid_reason(statistic: str) -> str | None:
+    """Return why a statistic cannot carry a validated e-value FDR claim.
+
+    ``relevance`` and ``ridge`` have algebraic sign-flip identities (Gaussian-MI
+    difference, and the swap-invariant ridge solve). ``lsm`` and ``cefsplus``
+    use truncated or adaptive paths whose used depth and ties are not
+    swap-equivariant, so they stay exploratory in e-value mode.
+    """
+    key = str(statistic).lower()
+    if key in _VALIDATED_EVALUE_STATISTICS:
+        return None
+    if key == "cefsplus":
+        return "cefsplus_path_not_sign_flip_guaranteed"
+    if key == "lsm":
+        return "lsm_truncated_path_not_sign_flip_guaranteed"
+    return "statistic_sign_flip_unvalidated"
+
+
+def _validate_aggregation(
+    aggregation: str | None,
+    *,
+    n_draws: int,
+    offset: int,
+) -> str:
+    if aggregation is None:
+        return "single_draw" if int(n_draws) == 1 else "selection_frequency"
+    if isinstance(aggregation, (bool, np.bool_)):
+        raise ValueError("aggregation must be None, 'evalues', or 'selection_frequency'")
+    key = str(aggregation).lower()
+    if key not in {"evalues", "selection_frequency"}:
+        raise ValueError("aggregation must be None, 'evalues', or 'selection_frequency'")
+    if int(n_draws) <= 1:
+        raise ValueError(f"aggregation={key!r} requires n_draws > 1")
+    if key == "evalues" and int(offset) != 1:
+        raise ValueError("aggregation='evalues' requires offset=1 (knockoff+)")
+    return key
+
+
+def _knockoff_draw_evalues(
+    W: np.ndarray,
+    *,
+    threshold: float,
+    tested_mask: np.ndarray,
+    m: int,
+) -> np.ndarray:
+    """Per-draw knockoff e-values on a common universe of size ``m``.
+
+    ``e_j = m * 1{W_j >= T} / (1 + #{tested k: W_k <= -T})`` for tested
+    coordinates and 0 for screened-out coordinates. The construction satisfies
+    the aggregate null bound ``sum_{j in H0} E[e_j] <= m``, not necessarily
+    ``E[e_j] <= 1`` for each null.
+    """
+    W_arr = np.asarray(W, dtype=np.float64).ravel()
+    tested = np.asarray(tested_mask, dtype=bool).ravel()
+    if W_arr.shape[0] != tested.shape[0]:
+        raise ValueError("tested_mask length must match W")
+    e = np.zeros(W_arr.shape[0], dtype=np.float64)
+    if int(m) <= 0 or not np.isfinite(threshold):
+        return e
+    n_neg = int(np.sum(tested & (W_arr <= -float(threshold))))
+    weight = float(m) / float(1 + n_neg)
+    e[tested & (W_arr >= float(threshold))] = weight
+    return e
+
+
+def e_bh_threshold(e: np.ndarray, q: float, *, m: int | None = None) -> float:
+    """Return the e-BH cutoff over ``m`` hypotheses, or ``inf`` if none reject."""
+    e_arr = np.asarray(e, dtype=np.float64).ravel()
+    q_float = _validate_probability(q, "q")
+    m_eff = int(e_arr.size if m is None else m)
+    if m_eff <= 0 or e_arr.size == 0:
+        return float("inf")
+    if e_arr.size != m_eff:
+        raise ValueError("e-BH is applied to the common universe; len(e) must equal m")
+    e_sorted = np.sort(e_arr)[::-1]
+    k_hat = 0
+    for k in range(1, m_eff + 1):
+        if e_sorted[k - 1] >= m_eff / (q_float * k):
+            k_hat = k
+    if k_hat == 0:
+        return float("inf")
+    return float(m_eff / (q_float * k_hat))
+
+
+def e_bh_reject(e: np.ndarray, q: float, *, m: int | None = None) -> np.ndarray:
+    """Boolean e-BH rejection mask on the common tested universe."""
+    e_arr = np.asarray(e, dtype=np.float64).ravel()
+    thresh = e_bh_threshold(e_arr, q, m=m)
+    if not np.isfinite(thresh):
+        return np.zeros(e_arr.shape[0], dtype=bool)
+    return e_arr >= thresh
+
+
+def _evalue_validity(
+    *,
+    statistic: str,
+    grouped: bool,
+    screening_fixed_before_statistics: bool,
+    screening_swap_invariant: bool,
+    fdr_already_none: bool,
+) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if grouped:
+        reasons.append("grouped_or_representative_heuristic")
+    statistic_reason = _evalue_statistic_invalid_reason(statistic)
+    if statistic_reason is not None:
+        reasons.append(statistic_reason)
+    if not screening_swap_invariant:
+        reasons.append("screening_not_swap_invariant")
+    if not screening_fixed_before_statistics:
+        reasons.append("screening_universe_not_fixed_before_statistics")
+    if fdr_already_none:
+        reasons.append("existing_fdr_downgrade")
+    return (not reasons), reasons
 
 
 def _validate_screen_pairs(screen_pairs: int | None) -> int | None:
@@ -1774,6 +1896,22 @@ def _all_zero_result(
     )
     diagnostics["offset_zero_selection_sets"] = []
     diagnostics["tested_state"] = "not_run"
+    if str(metadata.get("aggregation")) == "evalues":
+        metadata["evalue_m"] = 0
+        metadata["evalue_universe"] = []
+        metadata["evalue_bound"] = _EVALUE_BOUND
+        metadata["evalue_validated"] = False
+        metadata["evalue_exploratory_reasons"] = ["not_run"]
+        metadata["evalue_zero_padded"] = False
+        metadata["aggregation_threshold"] = None
+        metadata["aggregation_fdr_control"] = "none"
+        metadata["aggregation_preserves_per_draw_fdr"] = False
+        metadata["q_scope"] = "aggregated"
+        metadata["fdr_control"] = "none"
+        diagnostics["screening_sets"] = []
+        diagnostics["evalues_per_draw"] = []
+        diagnostics["evalue_universe"] = []
+        W_table["evalue"] = np.zeros(len(feature_names), dtype=np.float64)
     _warn_knockoff_plus_infeasible(metadata)
     return KnockoffSelectionResult(
         selected_features=selected_features,
@@ -1847,6 +1985,7 @@ def _select_fdr_cluster_representatives(
     random_state: int,
     n_jobs: int,
     verbose: bool,
+    aggregation: str | None = None,
 ) -> KnockoffSelectionResult:
     p_valid = cache.Z.shape[1]
     active_all = np.ones(p_valid, dtype=bool)
@@ -1881,6 +2020,7 @@ def _select_fdr_cluster_representatives(
         screen_pairs=screen_pairs,
         statistic_options=statistic_options,
         feature_groups=None,
+        aggregation=aggregation,
         random_state=random_state,
         n_jobs=n_jobs,
         verbose=verbose,
@@ -1910,7 +2050,7 @@ def _select_fdr_cluster_representatives(
         }
     )
     for col in rep_result.W.columns:
-        if col.startswith("W_draw_"):
+        if col.startswith("W_draw_") or col == "evalue":
             W_table[col] = rep_result.W[col].to_numpy()[idx_in_rep]
 
     # Selected features: members of selected clusters, ordered by cluster W
@@ -1949,7 +2089,11 @@ def _select_fdr_cluster_representatives(
             "aggregation": (
                 "cluster_expansion"
                 if int(rep_result.selector_metadata.get("n_draws", 1)) == 1
-                else "selection_frequency_then_cluster_expansion"
+                else (
+                    "evalues_then_cluster_expansion"
+                    if str(rep_result.selector_metadata.get("aggregation")) == "evalues"
+                    else "selection_frequency_then_cluster_expansion"
+                )
             ),
             "aggregation_fdr_control": "none",
             "aggregation_preserves_per_draw_fdr": False,
@@ -1957,6 +2101,13 @@ def _select_fdr_cluster_representatives(
             "n_representatives": int(reps_sorted.shape[0]),
         }
     )
+    if str(rep_result.selector_metadata.get("aggregation")) == "evalues":
+        metadata["evalue_validated"] = False
+        reasons = list(metadata.get("evalue_exploratory_reasons") or [])
+        if "grouped_or_representative_heuristic" not in reasons:
+            reasons.append("grouped_or_representative_heuristic")
+        metadata["evalue_exploratory_reasons"] = reasons
+        metadata["exploratory"] = True
     # The representative run only saw one column per cluster, so its dropped
     # positions describe the reduced cache.  This result expands back to every
     # valid column, so recompute the provenance against the full cache.
@@ -2038,6 +2189,7 @@ def select_fdr(
     statistic: str = "relevance",
     n_draws: int = 1,
     eta: float = 0.5,
+    aggregation: str | None = None,
     offset: int = 1,
     s_method: str = "equi",
     min_eig: float = 1e-3,
@@ -2103,11 +2255,21 @@ def select_fdr(
         ``"mrmr_quot"``, ``"jmi"``, and ``"jmim"`` are reserved and raise.
     n_draws : int, default 1
         Number of independent knockoff draws.  Values above 1 derandomize by
-        selecting features chosen in at least a fraction ``eta`` of draws --
-        which drops the FDR claim; see Notes.
+        selecting features chosen in at least a fraction ``eta`` of draws,
+        which drops the FDR claim, unless ``aggregation="evalues"``; see Notes.
     eta : float, default 0.5
         Selection-frequency threshold in ``(0, 1]`` applied when
-        ``n_draws > 1``.  Ignored for a single draw.
+        ``n_draws > 1`` and ``aggregation`` is omitted or
+        ``"selection_frequency"``.  Ignored for a single draw and for
+        ``aggregation="evalues"``.
+    aggregation : {None, "evalues", "selection_frequency"}, default None
+        How to combine ``n_draws > 1``.  ``None`` keeps the legacy rule:
+        one draw uses the knockoff threshold; several draws vote by
+        ``eta`` and drop the FDR claim.  ``"evalues"`` is the opt-in
+        Ren–Barber average of knockoff e-values followed by e-BH over the
+        common tested universe; it requires ``n_draws > 1`` and
+        ``offset=1``.  ``"selection_frequency"`` names the legacy vote
+        explicitly and also requires ``n_draws > 1``.
     offset : {0, 1}, default 1
         ``1`` is the knockoff+ threshold, which adds one to the negative count
         in the estimated FDP.  ``0`` is the less conservative plain knockoff
@@ -2203,8 +2365,12 @@ def select_fdr(
         If neither or both of ``X`` and ``cache`` are given; if ``y`` is
         ``None``, non-finite, or has the wrong row count; if ``q`` or ``eta``
         is outside its interval, ``n_draws`` is not a positive integer,
-        ``offset`` is not 0 or 1, or ``screen_pairs`` is not a positive
-        integer or ``None``; if ``statistic`` is unknown or reserved; if
+        ``offset`` is not 0 or 1, ``aggregation`` is not ``None``,
+        ``"evalues"`` or ``"selection_frequency"``, ``aggregation="evalues"``
+        is paired with ``n_draws == 1`` or ``offset != 1``,
+        ``aggregation="selection_frequency"`` is paired with ``n_draws == 1``,
+        or ``screen_pairs`` is not a positive integer or ``None``; if
+        ``statistic`` is unknown or reserved; if
         ``statistic_options`` carries keys the statistic does not accept; if
         ``feature_groups`` is a string other than ``"auto"``, has the wrong
         length, or contains missing or unhashable labels; if
@@ -2246,9 +2412,25 @@ def select_fdr(
     correlations, shrinkage, or weights, read the output as an approximate
     practical knockoff filter.  The claim is dropped outright -- metadata
     reports ``fdr_control="none"``, ``q_scope="per_draw"``, and
-    ``aggregation_fdr_control="none"`` -- whenever ``n_draws > 1`` or any
-    ``feature_groups`` mode is used, because ``q`` then calibrates each draw
-    or each representative rather than the reported set.  Note also that
+    ``aggregation_fdr_control="none"`` -- whenever ``n_draws > 1`` uses the
+    legacy selection-frequency vote, or any ``feature_groups`` mode is used,
+    because ``q`` then calibrates each draw or each representative rather
+    than the reported set.  Opt-in ``aggregation="evalues"`` averages
+    knockoff e-values
+    ``e_j = m·1{W_j ≥ T_q}/(1 + #{W ≤ −T_q})`` over draws and runs e-BH
+    over the common tested universe ``T`` with ``m = |T|``.  Screened-out
+    coordinates stay in ``T`` with ``e_j = 0`` for that draw; they do not
+    change the per-draw denominator.  A varying screening union that was not
+    fixed before the statistics, grouped/representative heuristics, ``lsm``,
+    or ``cefsplus`` is exploratory (``fdr_control="none"``): truncated LARS
+    and adaptive/greedy CEFS+ paths are not swap-equivariant.  Validated
+    ungrouped e-value mode is ``relevance`` (``W = g(r)-g(r̃)``) and
+    ``ridge`` (swap-invariant ``(G+λI)^{-1}`` flips ``|β_j|-|β_{j+m}|``)
+    with a screening universe fixed before the statistics.  It still reports
+    ``approximate_plugin``: it inherits Gaussian-copula plug-in
+    exchangeability and does not upgrade it.  The recorded bound is the
+    aggregate null expectation ``sum_{H0} E[e_j] ≤ m``, not a unit bound on
+    each null.  Note also that
     knockoff+ is discrete: at level ``q`` with ``offset=1`` at least
     ``ceil(1 / q)`` tested units must clear the threshold before the estimated
     FDP can reach ``q``, so a problem with few true signals can legitimately
@@ -2294,6 +2476,9 @@ def select_fdr(
     n_draws_int = _validate_positive_int(n_draws, "n_draws")
     eta_float = _validate_probability(eta, "eta", upper_inclusive=True)
     offset_int = _validate_offset(offset)
+    aggregation_resolved = _validate_aggregation(
+        aggregation, n_draws=n_draws_int, offset=offset_int
+    )
     screen_pairs_int = _validate_screen_pairs(screen_pairs)
     stat_spec = _get_statistic(statistic)
     options = dict(statistic_options or {})
@@ -2369,6 +2554,7 @@ def select_fdr(
             random_state=random_state,
             n_jobs=n_jobs,
             verbose=verbose,
+            aggregation=aggregation,
         )
     feature_names = _feature_names_for_valid_cols(resolved_cache)
     group_info = _resolve_feature_groups(resolved_cache, feature_groups)
@@ -2514,6 +2700,11 @@ def select_fdr(
 
     manual_group_heuristic = group_labels is not None
     per_draw_fdr_control = "none" if manual_group_heuristic else "approximate_plugin"
+    if (
+        aggregation_resolved == "evalues"
+        and _evalue_statistic_invalid_reason(stat_spec.name) is not None
+    ):
+        per_draw_fdr_control = "none"
     metadata: dict[str, Any] = {
         "selector": "knockoff_fdr",
         "n_features": int(p_valid),
@@ -2542,8 +2733,12 @@ def select_fdr(
         ),
         "per_draw_fdr_control": per_draw_fdr_control,
         "q_scope": "per_draw",
-        "aggregation": "single_draw" if n_draws_int == 1 else "selection_frequency",
-        "aggregation_threshold": None if n_draws_int == 1 else eta_float,
+        "aggregation": aggregation_resolved,
+        "aggregation_threshold": (
+            None
+            if n_draws_int == 1 or aggregation_resolved == "evalues"
+            else eta_float
+        ),
         "aggregation_fdr_control": "not_applicable" if n_draws_int == 1 else "none",
         "aggregation_preserves_per_draw_fdr": n_draws_int == 1 and not manual_group_heuristic,
         "validity_model": "gaussian_copula_plugin",
@@ -2730,6 +2925,10 @@ def select_fdr(
     _warn_knockoff_plus_infeasible(metadata)
 
     mean_W = W_draws.mean(axis=0)
+    evalue_avg = None
+    evalue_draws = None
+    evalue_universe_valid: list[int] = []
+    screening_sets_original: list[list[int]] = []
     if n_draws_int == 1:
         selection_frequency_arr = np.full(p_valid, np.nan, dtype=np.float64)
         threshold_out: float | None = thresholds[0]
@@ -2745,6 +2944,113 @@ def select_fdr(
         threshold_out = None
         selected_mask = selection_frequency_arr >= eta_float
         selection_frequency = pd.Series(selection_frequency_arr, index=feature_names, name="selection_frequency")
+        if aggregation_resolved == "evalues":
+            universe = tuple(sorted({idx for draw in tested_id_sets for idx in draw}))
+            evalue_m = len(universe)
+            screening_fixed = (not stat_spec.needs_screening) or (
+                screen_pairs_int is None or screen_pairs_int >= int(active_positions.size)
+            )
+            if group_labels is None:
+                evalue_universe_valid = [int(i) for i in universe]
+                evalue_draws = np.zeros((n_draws_int, p_valid), dtype=np.float64)
+                for draw_idx in range(n_draws_int):
+                    tested_mask = np.zeros(p_valid, dtype=bool)
+                    tested_mask[np.asarray(tested_id_sets[draw_idx], dtype=np.int64)] = True
+                    evalue_draws[draw_idx] = _knockoff_draw_evalues(
+                        W_draws[draw_idx],
+                        threshold=thresholds[draw_idx],
+                        tested_mask=tested_mask,
+                        m=evalue_m,
+                    )
+                    screening_sets_original.append(
+                        [int(resolved_cache.valid_cols[int(i)]) for i in tested_id_sets[draw_idx]]
+                    )
+                evalue_avg = evalue_draws.mean(axis=0)
+                if evalue_m:
+                    universe_idx = np.asarray(evalue_universe_valid, dtype=np.int64)
+                    reject = e_bh_reject(evalue_avg[universe_idx], q_float, m=evalue_m)
+                    selected_mask = np.zeros(p_valid, dtype=bool)
+                    selected_mask[universe_idx[reject]] = True
+                    ebh_cut = e_bh_threshold(evalue_avg[universe_idx], q_float, m=evalue_m)
+                else:
+                    selected_mask = np.zeros(p_valid, dtype=bool)
+                    ebh_cut = float("inf")
+            else:
+                n_groups = len(group_labels)
+                evalue_draws = np.zeros((n_draws_int, n_groups), dtype=np.float64)
+                group_W_arr = np.asarray(group_W_draws, dtype=np.float64)
+                for draw_idx in range(n_draws_int):
+                    tested_mask = np.zeros(n_groups, dtype=bool)
+                    tested_mask[np.asarray(tested_id_sets[draw_idx], dtype=np.int64)] = True
+                    evalue_draws[draw_idx] = _knockoff_draw_evalues(
+                        group_W_arr[draw_idx],
+                        threshold=group_thresholds[draw_idx],
+                        tested_mask=tested_mask,
+                        m=evalue_m,
+                    )
+                    screening_sets_original.append(
+                        [int(code) for code in tested_id_sets[draw_idx]]
+                    )
+                evalue_avg_groups = evalue_draws.mean(axis=0)
+                selected_groups = np.zeros(n_groups, dtype=bool)
+                if evalue_m:
+                    universe_idx = np.asarray(universe, dtype=np.int64)
+                    reject = e_bh_reject(
+                        evalue_avg_groups[universe_idx], q_float, m=evalue_m
+                    )
+                    selected_groups[universe_idx[reject]] = True
+                    ebh_cut = e_bh_threshold(
+                        evalue_avg_groups[universe_idx], q_float, m=evalue_m
+                    )
+                else:
+                    ebh_cut = float("inf")
+                selected_mask = np.zeros(p_valid, dtype=bool)
+                active_selected = active & np.isin(
+                    group_codes, np.flatnonzero(selected_groups)
+                )
+                selected_mask[active_selected] = True
+                evalue_avg = np.zeros(p_valid, dtype=np.float64)
+                evalue_avg[active] = evalue_avg_groups[np.asarray(group_codes)[active]]
+                evalue_universe_valid = [int(i) for i in universe]
+            already_none = metadata.get("fdr_control") == "none" and (
+                provenance == "data_derived"
+                or (
+                    resolved_sets is not None
+                    and (resolved_sets.exclude or resolved_sets.candidates is not None)
+                    and provenance not in FDR_COMPATIBLE_PROVENANCE
+                )
+            )
+            validated, reasons = _evalue_validity(
+                statistic=stat_spec.name,
+                grouped=group_labels is not None,
+                screening_fixed_before_statistics=screening_fixed,
+                screening_swap_invariant=True,
+                fdr_already_none=already_none,
+            )
+            metadata["evalue_m"] = int(evalue_m)
+            metadata["evalue_universe"] = (
+                [int(resolved_cache.valid_cols[int(i)]) for i in evalue_universe_valid]
+                if group_labels is None
+                else list(evalue_universe_valid)
+            )
+            metadata["evalue_bound"] = _EVALUE_BOUND
+            metadata["evalue_validated"] = bool(validated)
+            metadata["evalue_exploratory_reasons"] = list(reasons)
+            metadata["evalue_zero_padded"] = any(
+                len(draw) < evalue_m for draw in tested_id_sets
+            )
+            metadata["q_scope"] = "aggregated"
+            metadata["aggregation_threshold"] = (
+                None if not np.isfinite(ebh_cut) else float(ebh_cut)
+            )
+            metadata["aggregation_preserves_per_draw_fdr"] = False
+            if validated:
+                metadata["fdr_control"] = "approximate_plugin"
+                metadata["aggregation_fdr_control"] = "approximate_plugin"
+            else:
+                metadata["fdr_control"] = "none"
+                metadata["aggregation_fdr_control"] = "none"
+                metadata["exploratory"] = True
 
     selected_valid_positions = np.where(selected_mask)[0]
     selected_order = selected_valid_positions[
@@ -2779,6 +3085,8 @@ def select_fdr(
         "selection_frequency": selection_frequency_arr,
         "relevance": relevance,
     }
+    if evalue_avg is not None:
+        W_cols["evalue"] = np.asarray(evalue_avg, dtype=np.float64)
     if resolved_sets is not None and resolved_sets.active:
         role = np.array(["ineligible"] * p_valid, dtype=object)
         role[active_positions] = "discovery"
@@ -2821,6 +3129,14 @@ def select_fdr(
         diagnostics["feature_groups"] = group_labels
         diagnostics["group_W_draws"] = group_W_draws
         diagnostics["group_thresholds"] = group_thresholds
+    if aggregation_resolved == "evalues":
+        diagnostics["screening_sets"] = screening_sets_original
+        diagnostics["evalue_universe"] = list(metadata.get("evalue_universe") or [])
+        diagnostics["evalues_per_draw"] = (
+            np.asarray(evalue_draws, dtype=np.float64).tolist()
+            if evalue_draws is not None
+            else []
+        )
 
     if verbose:
         threshold_text = "derandomized" if threshold_out is None else f"threshold={threshold_out:.6g}"
@@ -2848,6 +3164,8 @@ __all__ = [
     "KnockoffStatSpec",
     "VALID_KNOCKOFF_STATISTICS",
     "knockoff_threshold",
+    "e_bh_threshold",
+    "e_bh_reject",
     "sample_knockoffs",
     "select_fdr",
 ]

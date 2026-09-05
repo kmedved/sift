@@ -2,46 +2,43 @@
 
 ## Objective and constraints
 
-- Complete the full owner-approved 0.9.1 and ordered 0.9.x roadmap in TODO.MD and docs/specs/0.9-product-layer.md; the goal is active.
-- Grok 4.6 is primary coder; Codex independently verifies; Claude Opus xhigh reviews concurrently with Codex between stages. Return accepted defects to Grok. The owner approved private SIFT source/diff/test transmission to xAI and Anthropic.
-- Resume exact provider sessions in this task. No PyPI publication. Preserve unrelated edits. Codex owns commits, pushes and merges. GitHub Releases/tags remain separate owner actions.
-- Grok session 6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace / medium, last completed stage 59.
-- Opus session 72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only / xhigh, last completed stage 49.
-- Use installed grok_run.py / claude_cli_run.py launchers with the same cwd/envelope, no fresh session or turn cap. No provider run is active; caller prompts are removed after completion.
+- Active goal: complete the owner-approved 0.9.1 closeout and ordered 0.9.x roadmap in TODO.MD and docs/specs/0.9-product-layer.md.
+- Grok4.6 is primary coder; Codex independently verifies; Claude Opus xhigh reviews concurrently between stages. Return verified defects to Grok. Relevant private source transmission to xAI/Anthropic is approved.
+- Resume exact sessions: Grok6942c6e1-14da-42e0-8ef2-27e77a0ab942 workspace/medium, completed stage63; Opus72bc11aa-3fc5-4cae-8b5a-9197b89f270c read-only/xhigh, completed stage53. No provider active; caller prompts removed. Installed launchers, same cwd/envelope, no fresh session/turn cap. Redact incidental sc_token output.
+- Codex owns commits/push/merge. Preserve unrelated changes. No PyPI publication; GitHub Releases/tags remain separate owner actions. Development0.9.1.dev0; v0.9.0 immutable94bae05.
 
 ## Completed milestones
 
-- 0.9.1 generated reference, decision tree, data-type matrix, glossary, tutorial and integration complete. Router/adapter split PR #78 merged at 3b9ac0a.
-- F1 conditioning PR #79 merged at 14bfb5c (implementation b2a11bd, artifact 682af22).
-- F2 proxy/cluster reports PR #80 merged at 17fe3bf (implementation 081ca04, artifact a495f33).
-- F7 panel within/between PR #81 merged at 76e4d5164e857d74f09d77f629f1bfc77d1a42a4 (implementation 2d04754, artifact d3938e4).
-- All six required GitHub CI jobs passed for each merged capability. F7 final full local gate: 2107 passed / 40 skipped under -W error, no deselections. Development remains 0.9.1.dev0; v0.9.0 is immutable at 94bae05.
+- 0.9.1 docs/matrix/glossary/tutorial/integration and router split: PR78 merged3b9ac0a.
+- F1 conditioning: PR79 merged14bfb5c (implementationb2a11bd, artifact682af22).
+- F2 proxy/cluster reports: PR80 merged17fe3bf (implementation081ca04, artifacta495f33).
+- F7 panel transforms: PR81 merged76e4d51 (implementation2d04754, artifactd3938e4).
+- F8a knockoff UX: PR82 merged40f8af77cccebf5b1842e932cda0a9464dae38fa (implementation308dfe1, artifact0c62a44, test-only CI correction449f063).
+- All six required GitHub CI jobs passed for each milestone. F8a full local gate2118 passed/40 skipped under pytest7 and pytest9. Pytest9 exposed unmatched warning cases fixed in449f063; preserve strict warning categories/messages.
 
-## Current stage: F8a CI warning-filter correction (uncommitted)
+## Current stage: F8b integration
 
-- PR #82 head `0c62a44` failed five test jobs in run 33944942510 on two tests that used `pytest.warns(UserWarning, match="no FDR claim applies")`. Pytest 9.1.1 re-emits the additional intentional F8a knockoff+ feasibility warning (`offset=1`, `m=3`, `q=0.2`, `m*q<1`) under warnings-as-errors; local pytest 7.4.4 did not. Production behavior is correct and unchanged.
-- Test-only fix: `tests/contracts/test_target_cv_encoding.py::test_knockoff_legacy_supervised_encoding_warns_and_drops_the_fdr_claim` and `tests/test_release_readiness.py::test_knockoff_fdr_claims_stay_honest_under_categorical_encoding` now require both the legacy FDR-downgrade warning and the feasibility warning. Every captured warning must be a `UserWarning` before message checks; unrelated categories are no longer filtered away. Metadata / no-FDR assertions are unchanged. No production, docs, or default changes.
-- Grok58/59 CI corrections accepted by Codex and Opus48/49. Full pytest9 run: 2118 passed / 40 skipped, no deselections; after final category-assert tightening, both affected modules plus runtime binding: 146 passed. Direct injection rejects unexpected RuntimeWarning, DeprecationWarning and UserWarning in both tests. Grok verified decisive tests under pytest7 and pytest9. Source hashes and artifact binding unchanged. No remaining CI-correction blocker.
-- Runtime artifact from clean `308dfe1` remains valid: only tests and this worklog change. F8b/F8c not started.
-- New diagnostics distinguish actual post-screening tested units from pre-screen eligibility, grouped/representative units from reported feature counts, and not-run early returns. Offset-0 counterfactual reuses the same W without extra draws. Selections, defaults and existing FDR labels remain unchanged.
-- Four accepted corrections: per-draw warnings no longer claim aggregate impossibility when group counts vary; constant-target returns no longer invent completed screened counts; encoding C4 expects only the new feasibility warning; warn_external attributes warnings to the caller.
-- Codex: 120 affected tests passed under -W error; direct zero-target and cluster counterfactual probes passed. Ruff, both generators and strict MkDocs passed. Opus47: 431 passed / 10 skipped and 12 HEAD/current A/B configurations with unchanged selections/shared W/existing metadata. Review hashes unchanged. No remaining review defect.
-- Review synthesis/protocol: /private/tmp/sift_f8a_review_findings.md and /private/tmp/sift_f8a_review_protocol.md. Probe: /private/tmp/sift_f8a_codex_probe.py. Frozen initial packet: /private/tmp/sift-f8a-review/.
-- Final full integration run after artifact refresh: 2118 passed / 40 skipped under -W error in 65s, no deselections. This supersedes the earlier pre-artifact run's fixed C4 warning failure and deferred runtime-binding test.
-- Next: commit/push this test-only CI correction on PR #82, verify all six required CI jobs at the new exact head, then merge. No further review round is needed absent a new concrete defect.
+- Branch codex/0.9x-f8b-evalues, base40f8af7; reviewed implementation committed at dde1f50b2f9aa68539d5bd7c25003cc9cf8e1027. Refreshed runtime evidence/docs are ready to commit. Remote main verified still40f8af7. No unrelated changes.
+- Opt-in aggregation="evalues" requires n_draws>1/offset1; common tested universe m, zero padding, averaging, e-BH, wrapper/results/rankings/views and provenance implemented. Omitted-option selections/draws/metadata remain unchanged.
+- Validated configurations: ungrouped relevance/ridge, fixed-before-statistics universe, no inherited downgrade; retain approximate_plugin, aggregate-null expectation bound only. CEFS+/LSM, grouped/representative expansion, varying screening unions and supervised encodings are exploratory as applicable. Per-draw validity distinguishes invalid statistics from aggregate-only screening downgrades.
+- Codex/Opus final review accepted. Six primary corrections, two metadata propagation fixes and the legacy recursion guard are closed. Saturating CEFS+ and tied/truncated LSM violate sign-flip; legacy statistics were not rewritten, but new e-value validation excludes them. Encoded nested representative results are downgraded only for opted-in e-value runs. Excluded group members remain unselected with zero evidence.
+- Review artifacts: /private/tmp/sift_f8b_review_findings.md and /private/tmp/sift_f8b_review_protocol.md; initial packet /private/tmp/sift-f8b-review/. Probes: /private/tmp/sift_f8b_codex_probe.py, /private/tmp/sift_f8b_adaptive_data_probe.py, /private/tmp/sift_f8b_parity_oracle.py, /private/tmp/sift_f8b_legacy_wrapper_probe.py.
+- Evidence: 20 focused F8b tests pass; 12 baseline function cases + actual baseline wrapper parity and 4 public literal arithmetic cases pass. Opus53 final targeted78 passed/6 skipped. Earlier full pre-artifact run2135 passed/40 skipped/1 runtime-binding deselection (before last two tests). All reviewer checkout hash manifests unchanged. Ruff/generators/strict docs pass. No remaining review defect.
+- Final local integration gate: 2138 passed / 40 skipped under pytest9/-W error, no deselections, in65s. Runtime binding, both generators, strict MkDocs, Ruff and whitespace checks pass. This supersedes the pre-artifact run. All18 data/selection fingerprints match the preceding artifact.
+- Next: commit refreshed evidence/status, push PR, verify all six required exact-head CI jobs, merge with merge commit. No F8c implementation yet.
 
 ## Runtime evidence
 
-- Current artifact binds clean F8a implementation 308dfe1ad30c052c3bcf09567dbe65322934b973, captured 2026-09-05T04:30:27.939633+00:00, dirty=false and empty status, 74 source hashes, 18 cells / 7 samples / all native pools=1. All data/selection fingerprints match the prior evidence. CSV SHA256 e3b4f82b70d0ac7e65ee6ab586aa59dcad7681913029650e1cde655da30399ac.
-- Stable basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json; bound displayed table/commit/hash references updated. Measured wide/baseline FDR ratio 8.1x is descriptive, not a power or asymptotic complexity claim.
+- Current artifact binds clean F8b dde1f50b2f9aa68539d5bd7c25003cc9cf8e1027, captured2026-09-05T05:49:34.274465+00:00; dirty=false, status[], 74 source hashes, 18 cells/7 samples/all pools1. CSV SHA25662a00e7abc2d6b53ace375158250d24d858a69e4d1d8e8d415a268e93daa84ee.
+- Stable basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json. Runtime binding guard is live and passes. No concurrent tests/providers during benchmark. All18 data/selection fingerprints unchanged; wide/baseline FDR ratio8.0x is descriptive, not a quality or asymptotic claim.
 
 ## Remaining ordered roadmap
 
-F8a integration; F8b validated e-values; F8c statistic bakeoff; F3 block selection; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector and purged splits; classic caches; unsupervised ordinal/frequency fallbacks. Do not mark the overall goal complete at F8a.
+F8b integration; F8c statistic bakeoff; F3 blocks; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector/purged splits; classic caches; unsupervised ordinal/frequency fallbacks. Keep overall goal active at intermediate milestones.
 
 ## Tooling
 
-- Test/benchmark Python /opt/anaconda3/bin/python (3.12.7, NumPy 1.26.4, pandas 2.2.2, sklearn 1.5.1); LOKY_MAX_CPU_COUNT=8, all native thread limits=1. Local environment lacks CatBoost/category_encoders; CI covers them.
-- Prefer /private/tmp/sift-pytest9.5nI4QH/bin/python for test runs (pytest9.1.1 with the same base scientific dependencies); base/docs Python has pytest7.4.4 and can hide unmatched pytest.warns warnings. Base environment was not modified. Keep benchmark Python unchanged for provenance continuity.
-- Docs Python /private/tmp/sift-docs-venv/bin/python; strict build output /private/tmp/sift-f8a-review-site. Use PYTHONPATH="$PWD" for /private/tmp probe scripts.
-- Specify --repo kmedved/sift for gh commands (there is an upstream remote). Merge with --merge to retain implementation ancestry for source provenance, after exact-head CI passes.
+- Tests: /private/tmp/sift-pytest9.5nI4QH/bin/python (pytest9.1.1, system scientific deps). Base /opt/anaconda3/bin/python: Python3.12.7, NumPy1.26.4/pandas2.2.2/sklearn1.5.1, pytest7.4.4. Keep base environment unchanged; benchmark/ruff/generators use base Python. No local CatBoost/category_encoders; CI covers optional deps.
+- Native thread pools1; LOKY_MAX_CPU_COUNT8. PYTHONPATH="$PWD" for /private/tmp probes.
+- Docs: /private/tmp/sift-docs-venv/bin/python; strict MkDocs output /private/tmp/sift-f8b-review-site.
+- Always gh --repo kmedved/sift and explicit PR number. Merge with --merge after exact-head CI; retain implementation ancestry for runtime provenance.
