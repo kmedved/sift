@@ -18,18 +18,19 @@
 
 ## Current stage: F8b integration
 
-- Branch codex/0.9x-f8b-evalues, base40f8af7; implementation/tests/docs and Codex status changes uncommitted. Remote main verified still40f8af7. No unrelated changes.
+- Branch codex/0.9x-f8b-evalues, base40f8af7; reviewed implementation committed at dde1f50b2f9aa68539d5bd7c25003cc9cf8e1027. Refreshed runtime evidence/docs are ready to commit. Remote main verified still40f8af7. No unrelated changes.
 - Opt-in aggregation="evalues" requires n_draws>1/offset1; common tested universe m, zero padding, averaging, e-BH, wrapper/results/rankings/views and provenance implemented. Omitted-option selections/draws/metadata remain unchanged.
 - Validated configurations: ungrouped relevance/ridge, fixed-before-statistics universe, no inherited downgrade; retain approximate_plugin, aggregate-null expectation bound only. CEFS+/LSM, grouped/representative expansion, varying screening unions and supervised encodings are exploratory as applicable. Per-draw validity distinguishes invalid statistics from aggregate-only screening downgrades.
 - Codex/Opus final review accepted. Six primary corrections, two metadata propagation fixes and the legacy recursion guard are closed. Saturating CEFS+ and tied/truncated LSM violate sign-flip; legacy statistics were not rewritten, but new e-value validation excludes them. Encoded nested representative results are downgraded only for opted-in e-value runs. Excluded group members remain unselected with zero evidence.
 - Review artifacts: /private/tmp/sift_f8b_review_findings.md and /private/tmp/sift_f8b_review_protocol.md; initial packet /private/tmp/sift-f8b-review/. Probes: /private/tmp/sift_f8b_codex_probe.py, /private/tmp/sift_f8b_adaptive_data_probe.py, /private/tmp/sift_f8b_parity_oracle.py, /private/tmp/sift_f8b_legacy_wrapper_probe.py.
 - Evidence: 20 focused F8b tests pass; 12 baseline function cases + actual baseline wrapper parity and 4 public literal arithmetic cases pass. Opus53 final targeted78 passed/6 skipped. Earlier full pre-artifact run2135 passed/40 skipped/1 runtime-binding deselection (before last two tests). All reviewer checkout hash manifests unchanged. Ruff/generators/strict docs pass. No remaining review defect.
-- Next: commit reviewed implementation/status; refresh runtime artifact from that clean commit with dirty=false, then update bound docs/artifact and run final full local suite (no deselections), generators/strict docs. Commit artifact, push PR, verify all six required exact-head CI jobs, merge with merge commit. No F8c implementation yet.
+- Final local integration gate: 2138 passed / 40 skipped under pytest9/-W error, no deselections, in65s. Runtime binding, both generators, strict MkDocs, Ruff and whitespace checks pass. This supersedes the pre-artifact run. All18 data/selection fingerprints match the preceding artifact.
+- Next: commit refreshed evidence/status, push PR, verify all six required exact-head CI jobs, merge with merge commit. No F8c implementation yet.
 
-## Runtime evidence (refresh pending)
+## Runtime evidence
 
-- Current artifact binds F8a clean308dfe1ad30c052c3bcf09567dbe65322934b973, captured2026-09-05T04:30:27.939633+00:00; dirty=false, status[], 74 source hashes, 18 cells/7 samples/all pools1. CSV SHA256e3b4f82b70d0ac7e65ee6ab586aa59dcad7681913029650e1cde655da30399ac.
-- Stable basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json. Runtime binding guard is restored (no source skip). Defer by pytest selection only until refreshed. Run benchmark without concurrent providers/tests from a clean commit; preserve data/selection fingerprint comparisons.
+- Current artifact binds clean F8b dde1f50b2f9aa68539d5bd7c25003cc9cf8e1027, captured2026-09-05T05:49:34.274465+00:00; dirty=false, status[], 74 source hashes, 18 cells/7 samples/all pools1. CSV SHA25662a00e7abc2d6b53ace375158250d24d858a69e4d1d8e8d415a268e93daa84ee.
+- Stable basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json. Runtime binding guard is live and passes. No concurrent tests/providers during benchmark. All18 data/selection fingerprints unchanged; wide/baseline FDR ratio8.0x is descriptive, not a quality or asymptotic claim.
 
 ## Remaining ordered roadmap
 

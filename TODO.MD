@@ -7,7 +7,7 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): the F8a integration run gives **2,118 passed,
+  `catboost` or `category_encoders`): the F8b integration run gives **2,138 passed,
   40 skipped** under warnings-as-errors. All public docstring
   examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
@@ -61,7 +61,7 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `308dfe1ad30c052c3bcf09567dbe65322934b973` with `dirty=false`.
+      `dde1f50b2f9aa68539d5bd7c25003cc9cf8e1027` with `dirty=false`.
 - [x] 0.9.1 integration closeout: pushed, required GitHub CI jobs passed, and
       merged as PR #78 at `3b9ac0a`. PyPI publication did not follow.
 
@@ -94,9 +94,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Merged as PR #82 at `40f8af7` (artifact `0c62a44`, CI test correction
       `449f063`). Codex/Opus review accepted; clean runtime evidence, full
       local gate and all six required GitHub CI jobs passed.
-- [x] F8b opt-in e-value aggregation: Codex/Opus review accepted; validated
-      relevance/ridge and explicit exploratory modes. Clean-source runtime
-      refresh and integration pending.
+- [x] F8b opt-in e-value aggregation, implementation `dde1f50`: Codex/Opus
+      review accepted; validated relevance/ridge and explicit exploratory modes.
+      Clean runtime evidence and full local gate passed; GitHub CI/merge pending.
 - [ ] F8c statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
