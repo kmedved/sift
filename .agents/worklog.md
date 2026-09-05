@@ -19,13 +19,14 @@
 
 ## Current stage: F7 integration
 
-- Branch codex/0.9x-f7-panel-transforms, base 17fe3bf. Grok's F7 implementation and corrections are accepted by Codex and resumed Opus stage 45; no code defect remains from those reviews. Not yet committed or merged.
+- Branch codex/0.9x-f7-panel-transforms, base 17fe3bf. Grok's F7 implementation and corrections are accepted by Codex and resumed Opus stage 45, and committed at 2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6. No code defect remains from those reviews; not yet merged.
 - Public regression filters/wrappers support weighted within='groups' and five-iteration within='two_way', before ranks. Evaluate, gaussian_cv and xfit_objective use train-only means; unseen groups use the training grand mean. Views expose within/between relevance; transform output and omitted-option behavior are unchanged. Classification, prebuilt cache, nested and non-fold auto-k combinations explicitly reject within.
 - Four verified corrections: stable anchored group means (no false large-offset/group-constant signal); datetime/timedelta rejection before conversion; proxy screening uses demeaned y; direct select_k_auto validates the new option/task/context. No absolute constant threshold added. Small signals at 1e-13 still select correctly.
 - Codex: 338 affected passed / 2 skipped; independent weighted-selection/zero-row/raw-transform probe and six group/two-way CV arithmetic folds passed. Opus: 452 passed / 11 skipped and all four targeted repros fixed. Source hashes unchanged during review.
-- Full pre-integration run: 2105 passed / 40 skipped, one glossary-order failure, one artifact-freshness check deferred. Grok stage 55 fixed only the glossary ordering; its seven tests pass. Ruff, generators and strict MkDocs passed. Final full run follows artifact refresh.
+- Final full integration run after artifact refresh: 2107 passed / 40 skipped under -W error, no deselections. Grok stage 55's glossary-only ordering fix passed its seven tests. Ruff, both generators and strict MkDocs passed.
 - Review synthesis/protocol: /private/tmp/sift_f7_review_findings.md and /private/tmp/sift_f7_review_protocol.md. Codex probe scripts: /private/tmp/sift_f7_codex_probe.py and /private/tmp/sift_f7_cv_probe.py.
-- Next: commit accepted implementation, refresh runtime from that clean commit, update artifact table/source references, full tests/CI, then merge. F8 code has not started; /private/tmp/sift_f8_reference_notes.md records a primary-source lookup for the next stage.
+- Runtime refreshed from clean 2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6, dirty=false and empty status, 74 source hashes, all 18 cells with 7 samples and native pools=1. All selection/data fingerprints match prior evidence. CSV SHA256 e3bd31662ed54efec6e91540477b41e4b8eead5294cbfd60f0d25e0d6a1be545; displayed table and source references updated.
+- Next: artifact/docs commit, push PR, required GitHub CI and merge. F8 code has not started; /private/tmp/sift_f8_reference_notes.md records a primary-source lookup for the next stage.
 
 ## Remaining ordered roadmap
 
