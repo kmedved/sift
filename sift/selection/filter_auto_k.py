@@ -269,6 +269,7 @@ def select_gaussian_evaluate_path(
         target_prior=target_prior,
         warmup_policy=warmup_policy,
         base_features=list(_unused.get("include_names") or ()),
+        within=_unused.get("within"),
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     summary = auto_k_summary(
@@ -687,6 +688,9 @@ def select_gaussian_xfit_objective_path(
         top_m=top_m,
         corr_prune=corr_prune,
         method=method,
+        within=_unused.get("within"),
+        within_X=_unused.get("within_X"),
+        within_y=_unused.get("within_y"),
     )
     selected_count, auto_diag = select_k_xfit_objective(curves, auto_k_config)
     selected_count = min(selected_count, len(path))
@@ -751,6 +755,9 @@ def select_gaussian_cv_path(
         top_m=top_m,
         corr_prune=corr_prune,
         method=method,
+        within=_unused.get("within"),
+        within_X=_unused.get("within_X"),
+        within_y=_unused.get("within_y"),
     )
     selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
     selected_count = min(selected_count, len(path))

@@ -111,6 +111,17 @@ path before pruning too aggressively. With `store_proxies=True`,
 `SelectionView.redundancy_report` and `proxy_clusters` expose those
 near-duplicates from the stored copula block without retaining `X`.
 
+Regression filters also accept `within="groups"` or `within="two_way"`. Those
+subtract weighted entity means, or alternate entity and time demeaning for a
+fixed five iterations, from `X` and `y` before ranks. Auto-k evaluate,
+Gaussian CV, and xfit-objective fit those means on training rows only; an
+entity unseen in training uses the training grand mean. Demeaning can leave
+no within-entity variation, including when every group is a singleton; the
+call then returns an empty selection or raises. `between_relevance` is an
+entity-mean summary, not row-level evidence, and is not comparable in
+magnitude to `within_relevance`. The selector still returns original column
+identities, and sklearn `transform` still emits the selected raw columns.
+
 ### Binary CEFS+
 
 Binary CEFS+ adapts the CEFS+ idea for Bernoulli-like targets. It uses a

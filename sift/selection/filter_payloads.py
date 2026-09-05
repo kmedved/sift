@@ -29,6 +29,7 @@ from sift.estimators.copula import (
     gaussian_mi_from_corr,
     weighted_corr_with_vector,
     weighted_rank_gauss_1d,
+    weighted_rank_gauss_2d,
 )
 from sift.selection import auto_k as auto_k_module
 from sift.selection.cefsplus import select_cached
@@ -79,6 +80,12 @@ from sift.selection.conditioning import (
 from sift.selection.loops import jmi_select, mrmr_select
 from sift.selection.panel import build_candidate_panel
 from sift.selection.proxies import proxy_frame_from_panel
+from sift.selection.within import (
+    as_float_feature_matrix,
+    fit_transform_within,
+    group_level_design,
+    restore_feature_matrix,
+)
 
 if TYPE_CHECKING:
     from sift.selection.filter_api import FilterContext
@@ -94,6 +101,9 @@ class ClassicPrepared:
     row_idx: np.ndarray
     target_cv_metadata: dict | None = None
     eval_sample_weight: np.ndarray | None = None
+    X_pre_within: np.ndarray | None = None
+    y_pre_within: np.ndarray | None = None
+    groups_sub: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,8 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 selected_idx,
                 relevance,
                 ctx.spec.selector,
+                within_relevance=_within_relevance(ctx, relevance),
+                between_relevance=_between_relevance_classic(ctx, prep),
             )
             diagnostics = {
                 "path_relevance": relevance[np.asarray(selected_idx, dtype=np.int64)].astype(float).tolist(),
@@ -182,7 +194,9 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
         X_eval = X_eval.iloc[prep.row_idx]
         want_result = bool(ctx.request.return_result)
         outcome = select_filter_classic_auto_k(
-            y_arr=prep.y_arr,
+            y_arr=(
+                prep.y_pre_within if prep.y_pre_within is not None else prep.y_arr
+            ),
             eval_X=X_eval,
             feature_names=prep.feature_names,
             path_idx=path_idx,
@@ -190,6 +204,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             eval_groups=ctx.groups[prep.row_idx] if ctx.groups is not None else None,
             eval_time=ctx.time[prep.row_idx] if ctx.time is not None else None,
             sample_weight=prep.eval_sample_weight,
+            within=ctx.within,
             task=ctx.request.task,
             cat_features=_kw(ctx, "cat_features"),
             cat_encoding=_kw(ctx, "cat_encoding"),
@@ -225,6 +240,8 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 composed_idx,
                 relevance,
                 ctx.spec.selector,
+                within_relevance=_within_relevance(ctx, relevance),
+                between_relevance=_between_relevance_classic(ctx, prep),
             )
             diagnostics = {
                 "path_relevance": relevance[composed_idx].astype(float).tolist(),
@@ -254,7 +271,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
 
 def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext"], SelectionPayload]:
     def fixed_gaussian(ctx: "FilterContext") -> SelectionPayload:
-        cache, _, _, target_cv_metadata = _cache_for_gaussian(ctx)
+        cache, _, _, target_cv_metadata, y_sel, X_pre = _cache_for_gaussian(ctx)
         method = method_func(ctx)
         k = int(ctx.k)
         top_m = _default_top_m(_kw(ctx, "top_m"), k)
@@ -263,7 +280,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
         if ctx.request.return_result:
             selected, selected_indices, objective = select_cached(
                 cache,
-                ctx.request.y,
+                y_sel,
                 k,
                 method=method,
                 top_m=top_m,
@@ -278,7 +295,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
         else:
             selected, selected_indices = select_cached(
                 cache,
-                ctx.request.y,
+                y_sel,
                 k,
                 method=method,
                 top_m=top_m,
@@ -303,6 +320,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             k=k,
             top_m=top_m,
             selected_indices=selected_indices,
+            y=y_sel,
         )
         ranking = None
         diagnostics = None
@@ -315,12 +333,16 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 ).astype(float).tolist(),
             }
             if selected_indices is not None:
-                relevance = _gaussian_relevance_for_input(ctx, cache)
+                relevance = _gaussian_relevance_for_input(ctx, cache, y=y_sel)
                 ranking = _path_ranking(
                     ctx.feature_names,
                     selected_indices,
                     relevance,
                     ctx.spec.selector,
+                    within_relevance=_within_relevance(ctx, relevance),
+                    between_relevance=_between_relevance_gaussian(
+                        ctx, cache, X_pre
+                    ),
                 )
             cond = _conditioning_diag(ctx, selected_indices or [])
             if cond is not None:
@@ -351,16 +373,19 @@ def make_auto_gaussian(
         assert ctx.auto_k_config is not None
         if ctx.conditioning is not None and getattr(ctx.conditioning, "active", False):
             require_supported_auto_k(ctx.auto_k_config.k_method)
-        cache, cat_features, effective_weight, target_cv_metadata = _cache_for_gaussian(ctx)
+        cache, cat_features, effective_weight, target_cv_metadata, y_sel, X_pre = (
+            _cache_for_gaussian(ctx)
+        )
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
             logger.info(
                 f"{ctx.spec.display_name} auto-k ({auto_k_mode_label(ctx.auto_k_config)}): "
                 f"building path to {ctx.auto_k_config.max_k} features (top_m={top_m})"
             )
+        eval_y_source = ctx.request.y if ctx.within is not None else y_sel
         eval_X, eval_y, eval_groups, eval_time, eval_weight = prepare_filter_eval_data(
             ctx.request.X,
-            ctx.request.y,
+            eval_y_source,
             cache,
             ctx.groups,
             ctx.time,
@@ -370,7 +395,7 @@ def make_auto_gaussian(
         method = method_func(ctx)
         selected, selected_indices, auto_diag, auto_summary = runner(
             cache=cache,
-            y=ctx.request.y,
+            y=y_sel,
             method=method,
             max_k=int(ctx.auto_k_config.max_k),
             top_m=top_m,
@@ -396,6 +421,9 @@ def make_auto_gaussian(
             exclude=_kw(ctx, "exclude"),
             candidates=_kw(ctx, "candidates"),
             include_names=_include_names(ctx),
+            within=ctx.within,
+            within_X=X_pre,
+            within_y=ctx.request.y,
         )
         selected, selected_indices = _compose_gaussian_auto_selection(
             ctx, selected, selected_indices
@@ -413,6 +441,7 @@ def make_auto_gaussian(
             k=int(ctx.auto_k_config.max_k),
             top_m=top_m,
             selected_indices=selected_indices,
+            y=y_sel,
         )
         ranking = None
         diagnostics = None
@@ -428,12 +457,16 @@ def make_auto_gaussian(
                 summary=auto_summary,
             )
             if selected_indices is not None:
-                relevance = _gaussian_relevance_for_input(ctx, cache)
+                relevance = _gaussian_relevance_for_input(ctx, cache, y=y_sel)
                 ranking = _path_ranking(
                     ctx.feature_names,
                     selected_indices,
                     relevance,
                     ctx.spec.selector,
+                    within_relevance=_within_relevance(ctx, relevance),
+                    between_relevance=_between_relevance_gaussian(
+                        ctx, cache, X_pre
+                    ),
                 )
             cond = _conditioning_diag(ctx, selected_indices or [])
             if cond is not None:
@@ -465,6 +498,7 @@ def _gaussian_proxy_correlations(
     k: int,
     top_m: int,
     selected_indices: list[int] | None,
+    y=None,
 ) -> pd.DataFrame | None:
     if not ctx.request.store_proxies:
         return None
@@ -484,7 +518,7 @@ def _gaussian_proxy_correlations(
     )
     panel = build_candidate_panel(
         cache,
-        ctx.request.y,
+        ctx.request.y if y is None else y,
         k,
         top_m=top_m,
         corr_prune=_kw(ctx, "corr_prune", "auto"),
@@ -947,8 +981,17 @@ def _binary_auto_metadata(auto_k_config) -> dict:
 
 def _cache_for_gaussian(
     ctx: "FilterContext",
-) -> tuple[FeatureCache, list[str] | None, np.ndarray | None, dict | None]:
+) -> tuple[
+    FeatureCache,
+    list[str] | None,
+    np.ndarray | None,
+    dict | None,
+    np.ndarray | object,
+    object,
+]:
     cat_features = _resolve_cat_features(ctx.request.X, _kw(ctx, "cat_features"))
+    y_sel = ctx.request.y
+    X_pre = ctx.request.X
     if ctx.request.cache is not None:
         if (
             _kw(ctx, "cat_encoding", "none") == "target_cv"
@@ -958,7 +1001,14 @@ def _cache_for_gaussian(
                 "cat_encoding='target_cv' cannot be combined with a prebuilt "
                 "Gaussian cache because the cache has no target-encoding provenance"
             )
-        return ctx.request.cache, cat_features, ctx.request.sample_weight, None
+        return (
+            ctx.request.cache,
+            cat_features,
+            ctx.request.sample_weight,
+            None,
+            y_sel,
+            X_pre,
+        )
     X_encoded = _encode_categoricals_for_selector(
         ctx.request.X,
         ctx.request.y,
@@ -975,6 +1025,32 @@ def _cache_for_gaussian(
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
     )
     X_encoded, effective_weight, target_cv_metadata = X_encoded
+    X_pre = X_encoded
+    if ctx.within is not None:
+        X_arr, template = as_float_feature_matrix(X_encoded)
+        y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
+        n_rows = X_arr.shape[0]
+        weights = (
+            np.ones(n_rows, dtype=np.float64)
+            if effective_weight is None
+            else ensure_weights(effective_weight, n_rows, normalize=False)
+        )
+        X_arr, y_arr, _fitted = fit_transform_within(
+            ctx.within,
+            X_arr,
+            y_arr,
+            ctx.groups,
+            ctx.time,
+            weights,
+        )
+        X_encoded = restore_feature_matrix(template, X_arr)
+        y_sel = y_arr
+        positive = weights > 0.0
+        if np.any(positive) and not np.any(np.ptp(X_arr[positive], axis=0) > 0.0):
+            raise ValueError(
+                "within demeaning removed all feature variation; "
+                "no within-entity signal remains"
+            )
     return (
         build_cache(
             X_encoded,
@@ -987,6 +1063,8 @@ def _cache_for_gaussian(
         cat_features,
         effective_weight,
         target_cv_metadata,
+        y_sel,
+        X_pre,
     )
 
 
@@ -1133,6 +1211,28 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         if effective_weight is None
         else np.asarray(w, dtype=np.float64)
     )
+    X_pre_within = None
+    y_pre_within = None
+    groups_sub = None
+    if ctx.within is not None:
+        X_pre_within = np.array(X_arr, dtype=np.float64, copy=True)
+        y_pre_within = np.array(y_arr, dtype=np.float64, copy=True)
+        groups_sub = ctx.groups[row_idx]
+        time_sub = ctx.time[row_idx] if ctx.time is not None else None
+        X_arr, y_arr, _fitted = fit_transform_within(
+            ctx.within,
+            X_arr,
+            y_arr,
+            groups_sub,
+            time_sub,
+            w,
+        )
+        positive = np.asarray(w, dtype=np.float64) > 0.0
+        if np.any(positive) and not np.any(np.ptp(X_arr[positive], axis=0) > 0.0):
+            raise ValueError(
+                "within demeaning removed all feature variation; "
+                "no within-entity signal remains"
+            )
     return ClassicPrepared(
         X_arr,
         y_arr,
@@ -1142,6 +1242,9 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         row_idx,
         target_cv_metadata,
         eval_sample_weight,
+        X_pre_within,
+        y_pre_within,
+        groups_sub,
     )
 
 
@@ -1167,8 +1270,10 @@ def _compute_relevance(
 def _gaussian_relevance_for_input(
     ctx: "FilterContext",
     cache: FeatureCache,
+    *,
+    y=None,
 ) -> np.ndarray:
-    y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
+    y_arr = to_numpy(ctx.request.y if y is None else y, dtype=np.float64).ravel()
     y_cache = y_arr[np.asarray(cache.row_idx, dtype=np.int64)]
     weights = np.asarray(cache.sample_weight, dtype=np.float64)
     zy = weighted_rank_gauss_1d(y_cache, weights)
@@ -1198,11 +1303,75 @@ def _gaussian_relevance_for_input(
     return relevance
 
 
+def _within_relevance(ctx: "FilterContext", relevance: np.ndarray) -> np.ndarray | None:
+    if ctx.within is None:
+        return None
+    return np.asarray(relevance, dtype=np.float64)
+
+
+def _between_relevance_classic(ctx: "FilterContext", prep: ClassicPrepared) -> np.ndarray | None:
+    if ctx.within is None or prep.X_pre_within is None or prep.y_pre_within is None:
+        return None
+    X_g, y_g, w_g = group_level_design(
+        prep.X_pre_within,
+        prep.y_pre_within,
+        prep.groups_sub if prep.groups_sub is not None else ctx.groups[prep.row_idx],
+        prep.w,
+    )
+    return _compute_relevance(
+        X_g,
+        y_g,
+        w_g,
+        ctx.request.task,
+        _kw(ctx, "relevance"),
+    )
+
+
+def _between_relevance_gaussian(
+    ctx: "FilterContext",
+    cache: FeatureCache,
+    X_pre,
+) -> np.ndarray | None:
+    if ctx.within is None:
+        return None
+    X_arr, _template = as_float_feature_matrix(X_pre)
+    y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
+    row_idx = np.asarray(cache.row_idx, dtype=np.int64)
+    weights = np.asarray(cache.sample_weight, dtype=np.float64)
+    X_g, y_g, w_g = group_level_design(
+        X_arr[row_idx],
+        y_arr[row_idx],
+        ctx.groups[row_idx],
+        weights,
+    )
+    zy = weighted_rank_gauss_1d(y_g, w_g)
+    Z_g = weighted_rank_gauss_2d(X_g, w_g, n_jobs=1, rank_backend="serial")
+    rel_valid = gaussian_mi_from_corr(weighted_corr_with_vector(Z_g, zy, w_g))
+    # X_g still has the original feature width; map through cache.valid_cols
+    # only when the pre-within matrix is the full input width.
+    relevance = np.zeros(ctx.n_features_input, dtype=np.float64)
+    rel_arr = np.asarray(rel_valid, dtype=np.float64)
+    if rel_arr.shape[0] == ctx.n_features_input:
+        relevance = rel_arr
+        return relevance
+    valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
+    in_bounds = (valid_cols >= 0) & (valid_cols < relevance.size)
+    if rel_arr.shape[0] == valid_cols.shape[0]:
+        relevance[valid_cols[in_bounds]] = rel_arr[in_bounds]
+        return relevance
+    n = min(rel_arr.shape[0], relevance.size)
+    relevance[:n] = rel_arr[:n]
+    return relevance
+
+
 def _path_ranking(
     feature_names: list[str],
     selected_indices,
     relevance: np.ndarray,
     selector: str,
+    *,
+    within_relevance: np.ndarray | None = None,
+    between_relevance: np.ndarray | None = None,
 ) -> pd.DataFrame:
     relevance_arr = np.asarray(relevance, dtype=np.float64).reshape(-1)
     n_features = len(feature_names)
@@ -1223,16 +1392,25 @@ def _path_ranking(
         np.lexsort((remaining, -finite_relevance[remaining]))
     ]
     order = np.concatenate([selected, remaining])
-    return pd.DataFrame(
-        {
-            "feature": [feature_names[int(i)] for i in order],
-            "rank": np.arange(1, n_features + 1, dtype=np.int64),
-            "selected": selected_mask[order],
-            "selected_index": order,
-            "relevance": relevance_arr[order],
-            "selector": selector,
-        }
-    )
+    data = {
+        "feature": [feature_names[int(i)] for i in order],
+        "rank": np.arange(1, n_features + 1, dtype=np.int64),
+        "selected": selected_mask[order],
+        "selected_index": order,
+        "relevance": relevance_arr[order],
+    }
+    if within_relevance is not None:
+        within_arr = np.asarray(within_relevance, dtype=np.float64).reshape(-1)
+        if within_arr.shape[0] != n_features:
+            raise RuntimeError("within_relevance length must match feature names")
+        data["within_relevance"] = within_arr[order]
+    if between_relevance is not None:
+        between_arr = np.asarray(between_relevance, dtype=np.float64).reshape(-1)
+        if between_arr.shape[0] != n_features:
+            raise RuntimeError("between_relevance length must match feature names")
+        data["between_relevance"] = between_arr[order]
+    data["selector"] = selector
+    return pd.DataFrame(data)
 
 
 def _kw(ctx: "FilterContext", name: str, default=None):

@@ -273,7 +273,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
 
     def get_metadata_routing(self):
         routing = super().get_metadata_routing()
-        if hasattr(self, "k") and self.k != "auto":
+        if hasattr(self, "k") and self.k != "auto" and getattr(self, "within", None) is None:
             unsupported = [
                 name
                 for name in ("groups", "time")
@@ -282,7 +282,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             if unsupported:
                 raise ValueError(
                     f"{self.__class__.__name__} can request groups/time metadata only "
-                    "when k='auto'; fixed-k fitting rejects row context"
+                    "when k='auto' or within is set; fixed-k fitting rejects unused "
+                    "row context"
                 )
         return routing
 
@@ -741,6 +742,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     ):
         if cache is not None:
             raise ValueError("auto_k_mode='nested' does not support prebuilt caches")
+        if getattr(self, "within", None) is not None:
+            raise ValueError(
+                "within is not supported with auto_k_mode='nested'; use "
+                "function-style prefix_only evaluate, gaussian_cv, or "
+                "xfit_objective so demeaning stays fold-local"
+            )
 
         y_arr = np.asarray(y).reshape(-1)
         n_features = len(_feature_names_or_default(X))
@@ -980,6 +987,12 @@ class MRMRSelector(_BaseSelector):
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
         ``k_method="evaluate"``, which refits a train-only path per split.
+    within : {"groups", "two_way"} or None, default=None
+        Panel demeaning applied after encoding and before ranks. ``"groups"``
+        subtracts per-entity weighted means; ``"two_way"`` alternates entity
+        and time demeaning for five iterations. Regression only. Fixed-``k``
+        fits then require ``groups`` (and ``time`` for ``"two_way"``).
+        ``transform`` still returns selected raw columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
@@ -1052,13 +1065,13 @@ class MRMRSelector(_BaseSelector):
     The shared selector-class fit contract is
     ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
     ``auto_k_config`` may also be passed per call and then win over the
-    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
-    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
-    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    constructor. Fixed-``k`` fits reject unused ``groups``/``time`` unless
+    ``within`` is set, while ``k="auto"`` accepts them for split construction,
+    including the DataFrame shorthand ``groups="col"``/``time="col"``
     that moves the column out of the candidate features. Under sklearn >= 1.4
     metadata routing every datum must be requested explicitly with
-    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
-    ``groups``/``time`` request.
+    ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
+    refuses a ``groups``/``time`` request.
 
     Examples
     --------
@@ -1100,6 +1113,7 @@ class MRMRSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        within: str | None = None,
         include=None,
         exclude=None,
         candidates=None,
@@ -1204,6 +1218,12 @@ class JMISelector(_BaseSelector):
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
         ``k_method="evaluate"``, which refits a train-only path per split.
+    within : {"groups", "two_way"} or None, default=None
+        Panel demeaning applied after encoding and before ranks. ``"groups"``
+        subtracts per-entity weighted means; ``"two_way"`` alternates entity
+        and time demeaning for five iterations. Regression only. Fixed-``k``
+        fits then require ``groups`` (and ``time`` for ``"two_way"``).
+        ``transform`` still returns selected raw columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
@@ -1276,13 +1296,13 @@ class JMISelector(_BaseSelector):
     The shared selector-class fit contract is
     ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
     ``auto_k_config`` may also be passed per call and then win over the
-    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
-    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
-    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    constructor. Fixed-``k`` fits reject unused ``groups``/``time`` unless
+    ``within`` is set, while ``k="auto"`` accepts them for split construction,
+    including the DataFrame shorthand ``groups="col"``/``time="col"``
     that moves the column out of the candidate features. Under sklearn >= 1.4
     metadata routing every datum must be requested explicitly with
-    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
-    ``groups``/``time`` request.
+    ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
+    refuses a ``groups``/``time`` request.
 
     Examples
     --------
@@ -1321,6 +1341,7 @@ class JMISelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        within: str | None = None,
         include=None,
         exclude=None,
         candidates=None,
@@ -1426,6 +1447,12 @@ class JMIMSelector(_BaseSelector):
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
         ``k_method="evaluate"``, which refits a train-only path per split.
+    within : {"groups", "two_way"} or None, default=None
+        Panel demeaning applied after encoding and before ranks. ``"groups"``
+        subtracts per-entity weighted means; ``"two_way"`` alternates entity
+        and time demeaning for five iterations. Regression only. Fixed-``k``
+        fits then require ``groups`` (and ``time`` for ``"two_way"``).
+        ``transform`` still returns selected raw columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
@@ -1498,13 +1525,13 @@ class JMIMSelector(_BaseSelector):
     The shared selector-class fit contract is
     ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
     ``auto_k_config`` may also be passed per call and then win over the
-    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
-    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
-    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    constructor. Fixed-``k`` fits reject unused ``groups``/``time`` unless
+    ``within`` is set, while ``k="auto"`` accepts them for split construction,
+    including the DataFrame shorthand ``groups="col"``/``time="col"``
     that moves the column out of the candidate features. Under sklearn >= 1.4
     metadata routing every datum must be requested explicitly with
-    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
-    ``groups``/``time`` request.
+    ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
+    refuses a ``groups``/``time`` request.
 
     Examples
     --------
@@ -1544,6 +1571,7 @@ class JMIMSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        within: str | None = None,
         include=None,
         exclude=None,
         candidates=None,
@@ -1644,6 +1672,12 @@ class CEFSPlusSelector(_BaseSelector):
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
         ``k_method="evaluate"``, which refits a train-only path per split.
+    within : {"groups", "two_way"} or None, default=None
+        Panel demeaning applied after encoding and before ranks. ``"groups"``
+        subtracts per-entity weighted means; ``"two_way"`` alternates entity
+        and time demeaning for five iterations. Regression only. Fixed-``k``
+        fits then require ``groups`` (and ``time`` for ``"two_way"``).
+        ``transform`` still returns selected raw columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
@@ -1717,13 +1751,13 @@ class CEFSPlusSelector(_BaseSelector):
     The shared selector-class fit contract is
     ``fit(X, y, sample_weight=None, groups=None, time=None)``; ``cache`` and
     ``auto_k_config`` may also be passed per call and then win over the
-    constructor. Fixed-``k`` fits reject ``groups``/``time`` by design, since
-    those only define automatic-k evaluation splits, while ``k="auto"`` accepts
-    them, including the DataFrame shorthand ``groups="col"``/``time="col"``
+    constructor. Fixed-``k`` fits reject unused ``groups``/``time`` unless
+    ``within`` is set, while ``k="auto"`` accepts them for split construction,
+    including the DataFrame shorthand ``groups="col"``/``time="col"``
     that moves the column out of the candidate features. Under sklearn >= 1.4
     metadata routing every datum must be requested explicitly with
-    ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
-    ``groups``/``time`` request.
+    ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
+    refuses a ``groups``/``time`` request.
 
     Examples
     --------
@@ -1759,6 +1793,7 @@ class CEFSPlusSelector(_BaseSelector):
         verbose: bool = True,
         cache=None,
         auto_k_config=None,
+        within: str | None = None,
         include=None,
         exclude=None,
         candidates=None,

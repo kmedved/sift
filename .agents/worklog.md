@@ -5,8 +5,8 @@
 - Complete the full owner-approved 0.9.1 and ordered 0.9.x roadmap in TODO.MD and docs/specs/0.9-product-layer.md; the goal is active.
 - Grok 4.6 is primary coder; Codex independently verifies; Claude Opus xhigh reviews concurrently with Codex between stages. Return accepted defects to Grok. The owner approved private SIFT source/diff/test transmission to xAI and Anthropic; the approval blocker is resolved.
 - Resume the exact provider sessions in this Codex task. No PyPI publication. Preserve unrelated edits. Codex owns commits, pushes and merges.
-- Grok session: 6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace / medium, last completed stage 52.
-- Opus session: 72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only / xhigh, last completed stage 43.
+- Grok session: 6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace / medium, last completed stage 55.
+- Opus session: 72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only / xhigh, last completed stage 45.
 - Use the installed grok_run.py and claude_cli_run.py launchers with the same cwd and envelope; do not start fresh.
 
 ## Completed milestones
@@ -14,26 +14,27 @@
 - 0.9.1 generated reference, selector decision tree, data-type matrix, glossary, tutorial, clean runtime evidence and integration are complete.
 - Router/adapter split merged PR #78 at 3b9ac0a.
 - F1 conditioning merged PR #79 at 14bfb5c109b75f9e79ceed85d02562a8520d3af3. Implementation b2a11bd, runtime artifact 682af22. All six required GitHub CI jobs passed; verified live.
+- F2 proxy/redundancy and cluster reports merged PR #80 at 17fe3bfd541202db4d87727fdeed789fb976caa6. Implementation 081ca04, runtime artifact a495f33. All six required CI jobs passed; main fast-forwarded locally.
 - Current development version remains 0.9.1.dev0; v0.9.0 is immutable at 94bae05.
 
-## Current stage: F2 integration
+## Current stage: F7 integration
 
-- Branch codex/0.9x-f2-proxy-reports, base 14bfb5c. F2 implementation is committed at 081ca04552c0d662691a968b64455bea141d2ba8 and accepted by independent Codex plus Opus review; CI/merge pending.
-- Additions: SelectionView.redundancy_report / proxy_clusters; opt-in StabilitySelector(store_proxies=True), actual 16 MiB bool indicator cap, 64 MiB float32 candidate-by-selected proxy cap checked before rank/correlation work, direct p-by-k Gram, no training X retained.
-- Accepted fixes verified: selected-selected cluster edges; truthful memory accounting; stale/absent proxy availability; exact variation and selected constants; positive-weight filtering before proxy imputation; no extra default-path diagnostic matrix.
-- Both original and missing-value zero-weight probes pass. Graph oracle: 0 mismatches / 200. Direct weighted block matches the full oracle exactly after float32 storage.
-- Opus stage 42 found no additional correctness defects; stage 43 accepted the final imputation/memory correction. Optional stale-block wording was not changed: a direct probe confirms refitting at the updated threshold with store_proxies=True restores availability.
-- Verification: final full integration run 2085 passed / 40 skipped under -W error, including runtime source/artifact/table freshness. F2 has 31 tests; 113 affected tests also passed. Opus final affected slice 160 passed / 1 skipped, docs examples 172 passed / 12 skipped. Repo Ruff, both generators and strict MkDocs passed.
-- Runtime evidence refreshed from clean 081ca04552c0d662691a968b64455bea141d2ba8: dirty=false, empty status, 73 source hashes, 18 rows with 7 samples each, native threads all 1, all selection/data fingerprints unchanged. CSV SHA-256 21728e50c161260abc4e17cf82204d390e9363774f225539e505182e55c602d1.
-- Next action: commit the refreshed artifact/docs, push PR, run required GitHub CI and merge. Then F7.
+- Branch codex/0.9x-f7-panel-transforms, base 17fe3bf. Grok's F7 implementation and corrections are accepted by Codex and resumed Opus stage 45, and committed at 2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6. No code defect remains from those reviews; not yet merged.
+- Public regression filters/wrappers support weighted within='groups' and five-iteration within='two_way', before ranks. Evaluate, gaussian_cv and xfit_objective use train-only means; unseen groups use the training grand mean. Views expose within/between relevance; transform output and omitted-option behavior are unchanged. Classification, prebuilt cache, nested and non-fold auto-k combinations explicitly reject within.
+- Four verified corrections: stable anchored group means (no false large-offset/group-constant signal); datetime/timedelta rejection before conversion; proxy screening uses demeaned y; direct select_k_auto validates the new option/task/context. No absolute constant threshold added. Small signals at 1e-13 still select correctly.
+- Codex: 338 affected passed / 2 skipped; independent weighted-selection/zero-row/raw-transform probe and six group/two-way CV arithmetic folds passed. Opus: 452 passed / 11 skipped and all four targeted repros fixed. Source hashes unchanged during review.
+- Final full integration run after artifact refresh: 2107 passed / 40 skipped under -W error, no deselections. Grok stage 55's glossary-only ordering fix passed its seven tests. Ruff, both generators and strict MkDocs passed.
+- Review synthesis/protocol: /private/tmp/sift_f7_review_findings.md and /private/tmp/sift_f7_review_protocol.md. Codex probe scripts: /private/tmp/sift_f7_codex_probe.py and /private/tmp/sift_f7_cv_probe.py.
+- Runtime refreshed from clean 2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6, dirty=false and empty status, 74 source hashes, all 18 cells with 7 samples and native pools=1. All selection/data fingerprints match prior evidence. CSV SHA256 e3bd31662ed54efec6e91540477b41e4b8eead5294cbfd60f0d25e0d6a1be545; displayed table and source references updated.
+- Next: artifact/docs commit, push PR, required GitHub CI and merge. F8 code has not started; /private/tmp/sift_f8_reference_notes.md records a primary-source lookup for the next stage.
 
 ## Remaining ordered roadmap
 
-F7 within/between transforms; F8a knockoff UX, F8b validated e-values, F8c statistic bakeoff; F3 block selection; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector and purged splits; classic-selector caches; unsupervised ordinal/frequency fallbacks. Do not mark the overall goal complete at F2.
+After F7 integration: F8a knockoff UX, F8b validated e-values, F8c statistic bakeoff; F3 block selection; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector and purged splits; classic-selector caches; unsupervised ordinal/frequency fallbacks. Do not mark the overall goal complete at F7.
 
 ## Runtime and tooling
 
 - Test/benchmark Python: /opt/anaconda3/bin/python (3.12.7; NumPy 1.26.4, pandas 2.2.2, sklearn 1.5.1). Set LOKY_MAX_CPU_COUNT=8 and native thread limits to 1 for tests.
-- Docs Python: /private/tmp/sift-docs-venv/bin/python; strict build output /private/tmp/sift-f2-docs.YX4vkk. Base test Python lacks pymdownx.
+- Docs Python: /private/tmp/sift-docs-venv/bin/python; strict build output /private/tmp/sift-f7-review-site. Base test Python lacks pymdownx.
 - Runtime runner: benchmarks/bench_runtime_scaling.py --full --warmup-runs 1 --timing-repeats 7 --output benchmarks/results/runtime_scaling_2026-09-03.csv. Stable basename; source commit and dirty=false must be captured before measurement/artifact writes.
 - Specify --repo kmedved/sift on gh commands because an upstream remote also exists.

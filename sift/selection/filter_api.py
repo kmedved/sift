@@ -75,6 +75,7 @@ from sift.selection.result import (
     build_selector_metadata,
 )
 from sift.selection.conditioning import resolve_conditioning
+from sift.selection.within import TWO_WAY_ITERATIONS, validate_within
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -135,6 +136,7 @@ class FilterRequest:
     time: Optional[np.ndarray] = None
     auto_k_config: Optional[AutoKConfig] = None
     sample_weight: np.ndarray | None = None
+    within: str | None = None
     return_result: bool = False
     store_proxies: bool = False
     selector_kwargs: dict[str, Any] | None = None
@@ -169,6 +171,7 @@ class FilterContext:
     mrmr_backend: str
     rank_backend: str
     conditioning: object | None = None
+    within: str | None = None
 
 
 _COMMON_REQUEST_LOCAL_NAMES = frozenset(
@@ -182,6 +185,7 @@ _COMMON_REQUEST_LOCAL_NAMES = frozenset(
         "time",
         "auto_k_config",
         "sample_weight",
+        "within",
         "callback",
         "return_result",
         "store_proxies",
@@ -294,6 +298,7 @@ def _request_from_public_locals(
         time=metadata.time,
         auto_k_config=values.get("auto_k_config"),
         sample_weight=metadata.sample_weight,
+        within=validate_within(values.get("within")),
         callback=values.get("callback"),
         return_result=bool(values.get("return_result", False)),
         store_proxies=bool(store_proxies),
@@ -307,6 +312,7 @@ def select_mrmr(
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
+    within: Literal["groups", "two_way"] | None = None,
     relevance: RelevanceMethod = "f", estimator: EstimatorMRMR = "classic",
     formula: Formula = "quotient", top_m: Optional[int] = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
@@ -360,13 +366,15 @@ def select_mrmr(
         weights, ``sample_weight``, ``subsample``, and ``random_state`` cannot
         be passed alongside it.
     groups : ndarray of shape (n_samples,), str, or None, default None
-        Group labels defining auto-k validation splits, or the name of a
-        DataFrame column to use as such (the column is then removed from the
-        features).  Only meaningful with ``k="auto"``; a fixed-``k`` call that
+        Group labels for ``within`` demeaning and for auto-k validation
+        splits, or the name of a DataFrame column to use as such (the column
+        is then removed from the features).  Required by ``within="groups"``
+        and ``within="two_way"``.  Without ``within``, a fixed-``k`` call that
         supplies it is rejected rather than silently ignoring it.
     time : ndarray of shape (n_samples,), str, or None, default None
-        Time values ordering auto-k holdout splits, or the name of a DataFrame
-        column, under the same rules as ``groups``.
+        Time values for ``within="two_way"`` and for auto-k holdout splits, or
+        the name of a DataFrame column, under the same rules as ``groups``.
+        Unused ``time`` at fixed ``k`` with ``within="groups"`` is rejected.
     auto_k_config : AutoKConfig or None, default None
         Auto-k policy used when ``k="auto"``.  ``None`` infers
         ``strategy="time_holdout"`` from ``time`` or ``strategy="group_cv"``
@@ -374,13 +382,30 @@ def select_mrmr(
         ``k_method="evaluate"`` with ``estimator="classic"``, and additionally
         ``"auto"``, ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
         ``"stability"`` with ``estimator="gaussian"``; any other method is
-        rejected by name.  Function-style calls stay on
-        ``auto_k_mode="prefix_only"``: one path is built and its prefixes are
-        scored.
+        rejected by name.  ``within`` additionally restricts auto-k to
+        ``"evaluate"``, ``"gaussian_cv"``, and ``"xfit_objective"``.
+        Function-style calls stay on ``auto_k_mode="prefix_only"``: one path
+        is built and its prefixes are scored.
     sample_weight : ndarray of shape (n_samples,) or None, default None
         Finite, non-negative row weights with at least one positive entry.
-        Used for relevance, redundancy, and auto-k validation scoring.  Not
-        supported by ``estimator="ksg"``, and rejected together with ``cache``.
+        Used for relevance, redundancy, ``within`` means, and auto-k
+        validation scoring.  Not supported by ``estimator="ksg"``, and
+        rejected together with ``cache``.
+    within : {"groups", "two_way"} or None, default None
+        Optional panel transform applied *after* encoding and *before* ranks
+        or classic relevance.  ``"groups"`` subtracts per-entity weighted
+        means of ``X`` and ``y``.  ``"two_way"`` alternates entity and time
+        demeaning for ``sift.selection.within.TWO_WAY_ITERATIONS`` (5)
+        iterations.  Regression only; rejected with a prebuilt ``cache``,
+        classification, or auto-k methods that are not fold-backed.
+        Validation/resampling fits the means on training rows only; entities
+        unseen in training fall back to the training grand mean.  Demeaning
+        can remove all variation, including singleton-only groups, yielding
+        an empty selection or a no-within-signal error.  ``between_relevance``
+        summarizes weighted entity means (entity-level support only; degenerate
+        with two or fewer positive-mass entities) and is not on the same
+        scale as ``within_relevance``.  Sklearn ``transform`` still returns
+        the selected raw columns.
     relevance : {"f", "ks", "rf"}, default "f"
         Marginal relevance score for ``estimator="classic"``.  ``"f"`` is the
         F-test and works for both tasks; ``"rf"`` is a random-forest score;
@@ -495,8 +520,11 @@ def select_mrmr(
         positive integer or ``"auto"``; if ``X`` is not 2-D or its row count
         differs from ``y``, ``groups``, ``time``, or ``sample_weight``; if
         ``estimator`` is not ``"classic"`` or ``"gaussian"``; if ``relevance``
-        is invalid for ``task``; if ``groups`` or ``time`` is supplied for a
-        fixed-``k`` call; if ``k="auto"`` has neither split context nor an
+        is invalid for ``task``; if ``groups`` or ``time`` is supplied unused
+        for a fixed-``k`` call; if ``within`` is set with classification, a
+        prebuilt ``cache``, missing ``groups``/``time``, or an auto-k method
+        other than ``evaluate``/``gaussian_cv``/``xfit_objective``; if
+        ``k="auto"`` has neither split context nor an
         ``auto_k_config``, or names a ``k_method`` this route does not
         support; if ``cache`` is combined with a non-Gaussian estimator,
         ``sample_weight``, ``subsample``, or ``random_state``, or does not
@@ -571,6 +599,7 @@ def select_jmi(
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
+    within: Literal["groups", "two_way"] | None = None,
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
@@ -619,24 +648,34 @@ def select_jmi(
         matching ndarray.  ``sample_weight``, ``subsample``, and
         ``random_state`` cannot accompany it.
     groups : ndarray of shape (n_samples,), str, or None, default None
-        Group labels defining auto-k validation splits, or the name of a
-        DataFrame column to use as such (the column is then removed from the
-        features).  Rejected for fixed-``k`` calls.
+        Group labels for ``within`` demeaning and for auto-k validation
+        splits, or the name of a DataFrame column to use as such (the column
+        is then removed from the features).  Required by ``within``.  Without
+        ``within``, rejected for unused fixed-``k`` calls.
     time : ndarray of shape (n_samples,), str, or None, default None
-        Time values ordering auto-k holdout splits, or a DataFrame column
-        name, under the same rules as ``groups``.
+        Time values for ``within="two_way"`` and for auto-k holdout splits, or
+        a DataFrame column name, under the same rules as ``groups``.
     auto_k_config : AutoKConfig or None, default None
         Auto-k policy used when ``k="auto"``.  ``None`` infers the strategy
         from ``time`` or ``groups`` and raises if neither is present.  The
         classic estimators support ``k_method="evaluate"`` only;
         ``estimator="gaussian"`` additionally supports ``"auto"``,
         ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
-        ``"stability"``.  Function-style calls stay on
-        ``auto_k_mode="prefix_only"``.
+        ``"stability"``.  ``within`` additionally restricts auto-k to
+        ``"evaluate"``, ``"gaussian_cv"``, and ``"xfit_objective"``.
+        Function-style calls stay on ``auto_k_mode="prefix_only"``.
     sample_weight : ndarray of shape (n_samples,) or None, default None
         Finite, non-negative row weights with at least one positive entry.
         With ``estimator="binned"`` they weight both the bin edges and the
-        entropy counts.  Rejected by ``estimator="ksg"`` and by ``cache``.
+        entropy counts.  Used for ``within`` means.  Rejected by
+        ``estimator="ksg"`` and by ``cache``.
+    within : {"groups", "two_way"} or None, default None
+        Optional panel transform applied after encoding and before ranks.
+        ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
+        ``"two_way"`` alternates entity and time demeaning for a fixed five
+        iterations.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold scoring fits means on training rows
+        only; unseen entities use the training grand mean.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
         Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
         classification and ``"r2"`` for regression.  ``"binned"`` uses
@@ -733,7 +772,9 @@ def select_jmi(
         regression-only estimator used with ``task="classification"``; if
         ``relevance`` is invalid for ``task``; if ``estimator="ksg"`` is
         combined with ``sample_weight``; if ``groups`` or ``time`` is supplied
-        for a fixed-``k`` call; if ``k="auto"`` lacks split context and an
+        unused for a fixed-``k`` call; if ``within`` is set with
+        classification, a prebuilt ``cache``, missing ``groups``/``time``, or
+        a non-fold auto-k method; if ``k="auto"`` lacks split context and an
         ``auto_k_config``, or names an unsupported ``k_method``; if ``cache``
         is combined with a non-Gaussian estimator, ``sample_weight``,
         ``subsample``, or ``random_state``, or does not match ``X``; if
@@ -799,6 +840,7 @@ def select_jmim(
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
+    within: Literal["groups", "two_way"] | None = None,
     estimator: EstimatorJMI = "auto", relevance: RelevanceMethod = "f",
     top_m: Optional[int] = None, cat_features: Optional[list[str]] = None,
     cat_encoding: CatEncoding = "none",
@@ -845,24 +887,34 @@ def select_jmim(
         matching ndarray.  ``sample_weight``, ``subsample``, and
         ``random_state`` cannot accompany it.
     groups : ndarray of shape (n_samples,), str, or None, default None
-        Group labels defining auto-k validation splits, or the name of a
-        DataFrame column to use as such (the column is then removed from the
-        features).  Rejected for fixed-``k`` calls.
+        Group labels for ``within`` demeaning and for auto-k validation
+        splits, or the name of a DataFrame column to use as such (the column
+        is then removed from the features).  Required by ``within``.  Without
+        ``within``, rejected for unused fixed-``k`` calls.
     time : ndarray of shape (n_samples,), str, or None, default None
-        Time values ordering auto-k holdout splits, or a DataFrame column
-        name, under the same rules as ``groups``.
+        Time values for ``within="two_way"`` and for auto-k holdout splits, or
+        a DataFrame column name, under the same rules as ``groups``.
     auto_k_config : AutoKConfig or None, default None
         Auto-k policy used when ``k="auto"``.  ``None`` infers the strategy
         from ``time`` or ``groups`` and raises if neither is present.  The
         classic estimators support ``k_method="evaluate"`` only;
         ``estimator="gaussian"`` additionally supports ``"auto"``,
         ``"elbow"``, ``"gaussian_cv"``, ``"xfit_objective"`` and
-        ``"stability"``.  Function-style calls stay on
-        ``auto_k_mode="prefix_only"``.
+        ``"stability"``.  ``within`` additionally restricts auto-k to
+        ``"evaluate"``, ``"gaussian_cv"``, and ``"xfit_objective"``.
+        Function-style calls stay on ``auto_k_mode="prefix_only"``.
     sample_weight : ndarray of shape (n_samples,) or None, default None
         Finite, non-negative row weights with at least one positive entry.
         With ``estimator="binned"`` they weight both the bin edges and the
-        entropy counts.  Rejected by ``estimator="ksg"`` and by ``cache``.
+        entropy counts.  Used for ``within`` means.  Rejected by
+        ``estimator="ksg"`` and by ``cache``.
+    within : {"groups", "two_way"} or None, default None
+        Optional panel transform applied after encoding and before ranks.
+        ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
+        ``"two_way"`` alternates entity and time demeaning for a fixed five
+        iterations.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold scoring fits means on training rows
+        only; unseen entities use the training grand mean.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
         Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
         classification and ``"r2"`` for regression.  ``"binned"`` uses
@@ -958,7 +1010,9 @@ def select_jmim(
         regression-only estimator used with ``task="classification"``; if
         ``relevance`` is invalid for ``task``; if ``estimator="ksg"`` is
         combined with ``sample_weight``; if ``groups`` or ``time`` is supplied
-        for a fixed-``k`` call; if ``k="auto"`` lacks split context and an
+        unused for a fixed-``k`` call; if ``within`` is set with
+        classification, a prebuilt ``cache``, missing ``groups``/``time``, or
+        a non-fold auto-k method; if ``k="auto"`` lacks split context and an
         ``auto_k_config``, or names an unsupported ``k_method``; if ``cache``
         is combined with a non-Gaussian estimator, ``sample_weight``,
         ``subsample``, or ``random_state``, or does not match ``X``; if
@@ -1026,6 +1080,7 @@ def select_cefsplus(
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
+    within: Literal["groups", "two_way"] | None = None,
     top_m: Optional[int] = None, corr_prune: float | None = None,
     cat_features: Optional[list[str]] = None, cat_encoding: CatEncoding = "none",
     target_cv_n_splits: int = 5, target_cv_smoothing: Literal["auto"] | float = "auto",
@@ -1072,12 +1127,13 @@ def select_cefsplus(
         ``sample_weight``, ``subsample``, and ``random_state`` cannot be
         passed alongside it.
     groups : ndarray of shape (n_samples,), str, or None, default None
-        Group labels defining auto-k validation splits, or the name of a
-        DataFrame column to use as such (the column is then removed from the
-        features).  Rejected for fixed-``k`` calls.
+        Group labels for ``within`` demeaning and for auto-k validation
+        splits, or the name of a DataFrame column to use as such (the column
+        is then removed from the features).  Required by ``within``.  Without
+        ``within``, rejected for unused fixed-``k`` calls.
     time : ndarray of shape (n_samples,), str, or None, default None
-        Time values ordering auto-k holdout splits, or a DataFrame column
-        name, under the same rules as ``groups``.
+        Time values for ``within="two_way"`` and for auto-k holdout splits, or
+        a DataFrame column name, under the same rules as ``groups``.
     auto_k_config : AutoKConfig or None, default None
         Auto-k policy used when ``k="auto"``.  Leaving it ``None`` selects the
         zero-config router, ``AutoKConfig(k_method="auto")``, which needs no
@@ -1087,13 +1143,23 @@ def select_cefsplus(
         ``"gaussian_cv"``, ``"stability"``, ``"penalized_objective"``,
         ``"k_posterior"``, ``"chi2_stop"``, ``"forward_stop"``,
         ``"changepoint"``, ``"perm_gap"``, ``"knockoff_path"``, and
-        ``"consensus"``.  Function-style calls stay on
-        ``auto_k_mode="prefix_only"``: one path is built and its prefixes are
-        scored.
+        ``"consensus"``.  ``within`` additionally restricts auto-k to
+        ``"evaluate"``, ``"gaussian_cv"``, and ``"xfit_objective"``.
+        Function-style calls stay on ``auto_k_mode="prefix_only"``: one path
+        is built and its prefixes are scored.
     sample_weight : ndarray of shape (n_samples,) or None, default None
         Finite, non-negative row weights with at least one positive entry,
-        used for the copula transform, the correlations, and auto-k scoring.
-        Rejected together with ``cache``, whose weights are already fixed.
+        used for the copula transform, the correlations, ``within`` means,
+        and auto-k scoring.  Rejected together with ``cache``, whose weights
+        are already fixed.
+    within : {"groups", "two_way"} or None, default None
+        Optional panel transform applied after encoding and before the rank
+        transform.  ``"groups"`` subtracts per-entity weighted means of
+        ``X`` and ``y``.  ``"two_way"`` alternates entity and time demeaning
+        for a fixed five iterations.  Rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold scoring fits means on training rows
+        only; unseen entities use the training grand mean.  Sklearn
+        ``transform`` still returns the selected raw columns.
     top_m : int or None, default None
         Candidate screen applied before the greedy loop: only the features
         with the largest absolute copula correlation with ``y`` compete.
@@ -1198,8 +1264,10 @@ def select_cefsplus(
         If ``k`` is not a positive integer or ``"auto"``; if ``X`` is not 2-D
         or its row count differs from ``y``, ``groups``, ``time``, or
         ``sample_weight``; if ``y`` is non-finite; if ``corr_prune`` is
-        outside ``(0, 1]``; if ``groups`` or ``time`` is supplied for a
-        fixed-``k`` call; if ``k="auto"`` names a ``k_method`` this route does
+        outside ``(0, 1]``; if ``groups`` or ``time`` is supplied unused for a
+        fixed-``k`` call; if ``within`` is set with a prebuilt ``cache``,
+        missing ``groups``/``time``, or a non-fold auto-k method; if
+        ``k="auto"`` names a ``k_method`` this route does
         not support; if contextual ``cat_encoding="target_cv"`` is combined
         with ``groups``/``time`` outside ``k_method="evaluate"``; if ``cache``
         is combined with ``sample_weight``, ``subsample``, or
@@ -1554,6 +1622,7 @@ def _select_filter(
     else:
         handler = spec.fixed_handler
 
+    _require_within_support(ctx)
     spec.validate(ctx)
     if request.store_proxies and ctx.estimator != "gaussian":
         raise ValueError(
@@ -1628,6 +1697,7 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         mrmr_backend=mrmr_backend,
         rank_backend="threads" if n_jobs != 1 else "serial",
         conditioning=conditioning,
+        within=request.within,
     )
 
 
@@ -1701,11 +1771,48 @@ def _validate_gaussian_cache_overrides(request: FilterRequest) -> None:
 
 
 def _require_fixed_filter_metadata(ctx: FilterContext) -> None:
-    if ctx.k != "auto" and (ctx.groups is not None or ctx.time is not None):
+    if ctx.k == "auto":
+        return
+    if ctx.within is not None:
+        if ctx.within == "groups" and ctx.time is not None:
+            raise ValueError(
+                "time is only used with within='two_way' or auto-k evaluation; "
+                "omit time for a fixed-k within='groups' call"
+            )
+        return
+    if ctx.groups is not None or ctx.time is not None:
         raise ValueError(
             "groups and time are only meaningful for auto-k evaluation; "
             "use k='auto' or omit them for a fixed-k filter call"
         )
+
+
+_WITHIN_AUTO_K_METHODS = frozenset({"evaluate", "gaussian_cv", "xfit_objective"})
+
+
+def _require_within_support(ctx: FilterContext) -> None:
+    if ctx.within is None:
+        return
+    if ctx.request.task != "regression":
+        raise ValueError("within is only supported for task='regression'")
+    if ctx.request.cache is not None:
+        raise ValueError(
+            "within cannot be combined with a prebuilt cache; demeaning must "
+            "precede the rank transform, so rebuild without cache"
+        )
+    if ctx.groups is None:
+        raise ValueError(f"within={ctx.within!r} requires groups")
+    if ctx.within == "two_way" and ctx.time is None:
+        raise ValueError("within='two_way' requires groups and time")
+    if ctx.k == "auto":
+        assert ctx.auto_k_config is not None
+        method = ctx.auto_k_config.k_method
+        if method not in _WITHIN_AUTO_K_METHODS:
+            raise ValueError(
+                "within is supported only with auto-k methods 'evaluate', "
+                "'gaussian_cv', and 'xfit_objective'; "
+                f"got k_method={method!r}"
+            )
 
 
 def _format_payload(
@@ -1717,6 +1824,10 @@ def _format_payload(
         return payload.selected_features
 
     extra = ctx.spec.metadata_extra(ctx)
+    if ctx.within is not None:
+        extra["within"] = ctx.within
+        if ctx.within == "two_way":
+            extra["within_two_way_iterations"] = TWO_WAY_ITERATIONS
     if ctx.k == "auto":
         assert ctx.auto_k_config is not None
         extra.update(

@@ -66,9 +66,11 @@ missing, inspect the data contract before changing `k` or the selector.
 
 Fixed `k` is an upper bound. Selectors can return fewer features when constant
 features, invalid scores, `top_m`, or pruning remove candidates.
-For fixed-k filter calls, `groups` and `time` are rejected because they only
-define auto-k evaluation splits; use `k="auto"` with a matching strategy or
-omit those arguments. `KnockoffSelector` rejects row `groups` and `time` too.
+For fixed-k filter calls, unused `groups` and `time` are rejected because they
+only define auto-k evaluation splits, unless `within` is set (then `groups`
+demeans entities, and `time` is required for `within="two_way"`). Use
+`k="auto"` with a matching strategy or omit those arguments when you are not
+demeaning. `KnockoffSelector` rejects row `groups` and `time` too.
 Sklearn-style selector classes accept dense arrays and DataFrames; sparse
 matrices are rejected during fit, transform, and inverse transform. The
 observed public behavior for those input kinds, categoricals, datetime

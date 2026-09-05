@@ -15,6 +15,7 @@ from sift.estimators.copula import (
     weighted_corr_with_vector,
     weighted_correlation_matrix,
     weighted_rank_gauss_1d,
+    weighted_rank_gauss_2d,
 )
 from sift.selection.auto_k import (
     AutoKConfig,
@@ -247,6 +248,9 @@ def _fold_score_arrays(
     corr_prune,
     method: str,
     score_kind: str,
+    within: str | None = None,
+    within_X=None,
+    within_y=None,
 ) -> tuple[list[np.ndarray], dict]:
     from sift.selection.knockoff_filter import (
         _reject_duplicate_feature_names,
@@ -272,6 +276,23 @@ def _fold_score_arrays(
     groups_cache = _cache_aligned_metadata(cache, groups, "groups")
     time_cache = _cache_aligned_metadata(cache, time, "time")
     splits = _fold_splits(Z.shape[0], config, groups=groups_cache, time=time_cache)
+    X_fold = None
+    y_fold = None
+    if within is not None:
+        if within_X is None or within_y is None:
+            raise ValueError("within fold scoring requires the encoded pre-rank matrix")
+        from sift.selection.within import as_float_feature_matrix
+
+        X_raw, _template = as_float_feature_matrix(within_X)
+        y_raw = np.asarray(within_y, dtype=np.float64).reshape(-1)
+        row_idx = np.asarray(cache.row_idx, dtype=np.int64)
+        valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
+        if X_raw.shape[0] != int(cache.n_rows_original):
+            raise ValueError("within_X rows must match the cache original row count")
+        if y_raw.shape[0] != int(cache.n_rows_original):
+            raise ValueError("within_y length must match the cache original row count")
+        X_fold = X_raw[row_idx][:, valid_cols]
+        y_fold = y_raw[row_idx]
 
     fold_scores: list[np.ndarray] = []
     fold_limits: list[int] = []
@@ -287,9 +308,30 @@ def _fold_score_arrays(
             fold_n_eff.append(n_eff_val)
             continue
 
+        if within is not None:
+            from sift.selection.within import fit_within_transform
+
+            X_tr, y_tr = X_fold[train_idx], y_fold[train_idx]
+            X_va, y_va = X_fold[val_idx], y_fold[val_idx]
+            g_tr = None if groups_cache is None else groups_cache[train_idx]
+            g_va = None if groups_cache is None else groups_cache[val_idx]
+            t_tr = None if time_cache is None else time_cache[train_idx]
+            t_va = None if time_cache is None else time_cache[val_idx]
+            fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
+            X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
+            X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
+            Z_train = weighted_rank_gauss_2d(X_tr, w_train, n_jobs=1, rank_backend="serial")
+            zy_train = weighted_rank_gauss_1d(y_tr, w_train)
+            Z_val = weighted_rank_gauss_2d(X_va, w_val, n_jobs=1, rank_backend="serial")
+            zy_val = weighted_rank_gauss_1d(y_va, w_val)
+        else:
+            Z_train = Z[train_idx]
+            zy_train = zy[train_idx]
+            Z_val = Z[val_idx]
+            zy_val = zy[val_idx]
         panel = local_corr_panel(
-            Z[train_idx],
-            zy[train_idx],
+            Z_train,
+            zy_train,
             w_train,
             top_m=top_m,
             corr_prune=corr_prune,
@@ -309,7 +351,7 @@ def _fold_score_arrays(
         local_path = local_path[:L]
         R_train = np.ascontiguousarray(panel.R[np.ix_(local_path, local_path)], dtype=np.float64)
         r_train = np.asarray(panel.r[local_path], dtype=np.float64)
-        R_val, r_val = _validation_corr_for_path(Z[val_idx], zy[val_idx], w_val, path)
+        R_val, r_val = _validation_corr_for_path(Z_val, zy_val, w_val, path)
         objective_val = score_path_from_corr(R_val, r_val)
         if score_kind == "xfit_objective":
             scores = _xfit_scores(objective_val, n_eff_val=n_eff_val)
@@ -403,6 +445,9 @@ def xfit_objective_curves(
     top_m: int,
     corr_prune,
     method: str,
+    within: str | None = None,
+    within_X=None,
+    within_y=None,
 ) -> pd.DataFrame:
     """Return a cross-fitted, drift-debiased objective score curve.
 
@@ -440,6 +485,16 @@ def xfit_objective_curves(
         Correlation-pruning threshold forwarded to the fold panel builder.
     method : {'cefsplus', 'mrmr_quot', 'mrmr_diff', 'jmi', 'jmim'}
         Greedy selector used to build each fold-train path.
+    within : {'groups', 'two_way'} or None, default None
+        Fold-local panel demeaning applied to the encoded pre-rank matrix
+        before each fold's rank-Gaussian transform. Means are fit on
+        training rows only.
+    within_X : array-like or None, default None
+        Encoded numeric matrix aligned to the cache's original rows. Required
+        when ``within`` is set.
+    within_y : array-like or None, default None
+        Original target aligned to the cache's original rows. Required when
+        ``within`` is set.
 
     Returns
     -------
@@ -532,6 +587,9 @@ def xfit_objective_curves(
         corr_prune=corr_prune,
         method=method,
         score_kind="xfit_objective",
+        within=within,
+        within_X=within_X,
+        within_y=within_y,
     )
     diag = _curve_from_fold_scores(
         fold_scores,
@@ -554,6 +612,9 @@ def gaussian_cv_curves(
     top_m: int,
     corr_prune,
     method: str,
+    within: str | None = None,
+    within_X=None,
+    within_y=None,
 ) -> pd.DataFrame:
     """Return a closed-form cross-validated Gaussian linear risk curve.
 
@@ -593,6 +654,16 @@ def gaussian_cv_curves(
         Correlation-pruning threshold forwarded to the fold panel builder.
     method : {'cefsplus', 'mrmr_quot', 'mrmr_diff', 'jmi', 'jmim'}
         Greedy selector used to build each fold-train path.
+    within : {'groups', 'two_way'} or None, default None
+        Fold-local panel demeaning applied to the encoded pre-rank matrix
+        before each fold's rank-Gaussian transform. Means are fit on
+        training rows only.
+    within_X : array-like or None, default None
+        Encoded numeric matrix aligned to the cache's original rows. Required
+        when ``within`` is set.
+    within_y : array-like or None, default None
+        Original target aligned to the cache's original rows. Required when
+        ``within`` is set.
 
     Returns
     -------
@@ -685,6 +756,9 @@ def gaussian_cv_curves(
         corr_prune=corr_prune,
         method=method,
         score_kind="gaussian_cv",
+        within=within,
+        within_X=within_X,
+        within_y=within_y,
     )
     diag = _curve_from_fold_scores(
         fold_scores,

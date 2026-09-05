@@ -114,6 +114,7 @@ def select_filter_classic_auto_k(
     sample_weight: Optional[np.ndarray],
     task: Literal["regression", "classification"],
     cat_features: Optional[list[str]], cat_encoding: str,
+    within: str | None = None,
     target_cv_n_splits: int = 5,
     target_cv_smoothing: Literal["auto"] | float = "auto",
     target_prior: float | None = None,
@@ -141,6 +142,7 @@ def select_filter_classic_auto_k(
         target_prior=target_prior,
         warmup_policy=warmup_policy,
         base_features=base_features,
+        within=within,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
     result: tuple = (selected,)
