@@ -456,7 +456,32 @@ def test_retained_bakeoff_artifacts_bind_report_and_historical_sources():
     assert all(len(hashes) == 1 for hashes in data_by_design_seed.values())
 
     recomputed = bakeoff.summarize(provenance["records"])
-    assert recomputed == provenance["summary"]
+    recorded = provenance["summary"]
+    assert set(recomputed) == set(recorded) == {
+        "cells",
+        "paired_ridge_minus_relevance",
+    }
+    for group in ("cells", "paired_ridge_minus_relevance"):
+        left_rows = recomputed[group]
+        right_rows = recorded[group]
+        assert len(left_rows) == len(right_rows)
+        for left, right in zip(left_rows, right_rows):
+            assert set(left) == set(right)
+            for key in left:
+                got, expected = left[key], right[key]
+                if got is None or expected is None:
+                    assert got is expected
+                elif isinstance(got, float) or isinstance(expected, float):
+                    assert got == pytest.approx(expected, rel=1e-14, abs=1e-15)
+                else:
+                    assert got == expected
+    assert 0.08195540221559611 == pytest.approx(
+        0.08195540221559612, rel=1e-14, abs=1e-15
+    )
+    assert 0.012383912195267962 == pytest.approx(
+        0.012383912195267965, rel=1e-14, abs=1e-15
+    )
+    assert 0.08195540221559611 != pytest.approx(0.082, rel=1e-14, abs=1e-15)
     rendered = bakeoff.render_summary_markdown(provenance["summary"], study="full")
     doc = DOC.read_text(encoding="utf-8")
     documented = doc.split(TABLE_START, 1)[1].split(TABLE_END, 1)[0]

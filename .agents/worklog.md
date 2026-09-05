@@ -4,7 +4,7 @@
 
 - Active goal: complete the owner-approved 0.9.1 closeout and ordered 0.9.x roadmap in TODO.MD and docs/specs/0.9-product-layer.md.
 - Grok4.6 is primary coder; Codex independently verifies; Claude Opus xhigh reviews concurrently between stages. Return verified defects to Grok. Relevant private source transmission to xAI/Anthropic is approved.
-- Resume exact sessions: Grok6942c6e1-14da-42e0-8ef2-27e77a0ab942 workspace/medium, completed stage66; Opus72bc11aa-3fc5-4cae-8b5a-9197b89f270c read-only/xhigh, completed stage56. No provider active; caller prompts removed. Installed launchers, same cwd/envelope, no fresh session/turn cap. Redact incidental sc_token output.
+- Resume exact sessions: Grok6942c6e1-14da-42e0-8ef2-27e77a0ab942 workspace/medium, completed stage67; Opus72bc11aa-3fc5-4cae-8b5a-9197b89f270c read-only/xhigh, completed stage57. No provider active; caller prompts removed. Installed launchers, same cwd/envelope, no fresh session/turn cap. Redact incidental sc_token output.
 - Codex owns commits/push/merge. Preserve unrelated changes. No PyPI publication; GitHub Releases/tags remain separate owner actions. Development0.9.1.dev0; v0.9.0 immutable94bae05.
 
 ## Completed milestones
@@ -36,6 +36,8 @@
 - Codex and Opus56 accept artifact/report/binding with no material defect; all3 reviewer checkout hash manifests unchanged. Codex checked480 row metrics/CSV/JSON/summary/source hashes; Opus additionally reproduced120/120 data fingerprints. Review protocol /private/tmp/sift_f8c_review_protocol.md; no more review needed absent new evidence.
 - Final local gate: pytest9/-W error2149 passed/40 skipped in66s; Ruff, generators, strict docs, runtime binding and whitespace pass. Next commit retained artifacts/report, push, verify all6 required jobs on exact PR head and merge. No benchmark rerun or default flip needed. Ordinary desktop background activity is disclosed for descriptive timing.
 - Evidence/report committed0b7473783fd45fd7e1804f7becdbda4611b799d8; PR84 open. Staging exposed Git treating the generated CSV's CRLF record terminators as trailing whitespace. A narrowly scoped .gitattributes rule preserves this artifact's bytes (-text) and recognizes CRLF (whitespace=cr-at-eol); CSV checksum unchanged. Verify CI on the follow-up commit, not the initial PR head.
+- PR84 head `40bec7d` min-pins job 101264954675 failed only `test_retained_bakeoff_artifacts_bind_report_and_historical_sources`: Python 3.10 `statistics.stdev` last-bit SE drift vs retained 3.12 JSON (e.g. `power_se_diff` 0.08195540221559611 vs 0.08195540221559612). Test-only: compare summary groups with exact keys/counts/strings/None and float leaves at rel 1e-14 / abs 1e-15. CSV checksum, source hashes, selection identity, and rendered table stay exact. Artifacts/runner/production frozen.
+- Grok67 test-only correction accepted by concurrent Codex/Opus57 review; manifest unchanged. All11 bakeoff tests pass. Opus stdlib-only3.9 comparison reproduced all10 drifting SE fields (max2ULP), with all142 other float fields identical; material drift is rejected. The same test was the only failure in Python3.10 and min-pins; other4 CI jobs passed. Push correction and verify fresh exact-head CI before merging.
 
 ## Runtime evidence
 
