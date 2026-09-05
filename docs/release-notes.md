@@ -46,6 +46,14 @@
   also report `fdr_control="none"` with matching aggregation validity fields.
   Rankings and normalized views carry the `evalue` column. Omitted aggregation
   is unchanged.
+- Added `benchmarks/bench_knockoff_statistic_bakeoff.py`, a seeded public
+  `select_fdr` comparison of `relevance`, `lsm`, `ridge`, and `cefsplus` on
+  independent, AR(1), block-correlated, and dense-weak designs. The retained
+  full run (commit `ae904b8`, CSV SHA256 `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`)
+  recommends keeping `relevance` for the 1.0 owner decision on that grid:
+  ridge reduced realized FDP but lost power on correlated designs. The 0.9
+  default remains `relevance`. Realized FDP does not upgrade
+  `approximate_plugin` and does not prove sign-flip for LSM or CEFS+.
 
 ### Documentation
 
@@ -865,8 +873,10 @@ changes in 0.9; it is the complete list of what 1.0 may flip.
 
 - Added `statistic="lsm"` (lasso signed-max from a Gram-form LARS path on the
   analytic augmented correlation) and `statistic="ridge"` (analytic ridge
-  coefficient difference). Both are exactly antisymmetric under original/
-  knockoff swaps and keep the same approximate plug-in validity framing. Power
+  coefficient difference). Ridge is antisymmetric under original/knockoff
+  swaps. Correction from the 0.9 review: truncated/tied LSM is not generally
+  swap-antisymmetric; its empirical quality is not a sign-flip proof. The
+  legacy calls keep the approximate plug-in validity label. Power
   relative to the marginal `relevance` default is data-dependent; no universal
   advantage is claimed without a committed quality bakeoff. Options:
   `statistic_options={"max_steps": ...}` for `lsm`,

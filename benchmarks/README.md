@@ -36,6 +36,7 @@ its `--output` JSON, and reports any rows whose `promotion_status` starts with
 | `bench_filters.py` | End-to-end function-style filter selectors with promotion JSON. |
 | `bench_cefsplus.py` | CEFS+ wall time and allocation-sensitive options. |
 | `bench_knockoffs.py` | Gaussian-copula knockoff cache/model/mean/sample/stat/threshold timing, including derandomized draws and a CEFS+ smoke case. |
+| `bench_knockoff_statistic_bakeoff.py` | Seeded public `select_fdr` quality/runtime bakeoff: independent / AR(1) / block / dense-weak × relevance / lsm / ridge / cefsplus, with provenance. Informational; does not change 0.9 defaults. |
 | `bench_stability.py` | Stability-selection split streaming and fit memory. |
 | `bench_catboost.py` | CatBoost split helpers and optional tiny selector smoke cases (skipped without CatBoost). |
 | `auto_k_designs.py` | Shared synthetic DGP registry and support-scoring helpers for auto-k gates. |
@@ -59,6 +60,8 @@ python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
+python benchmarks/bench_knockoff_statistic_bakeoff.py --smoke \
+  --output /tmp/knockoff-statistic-bakeoff-smoke.csv
 python benchmarks/bench_runtime_scaling.py --quick --output /tmp/runtime-scaling.csv
 python benchmarks/bench_auto_k.py --designs D1,D2,D5 --seeds 3 \
   --output /tmp/bench-auto-k.csv

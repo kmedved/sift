@@ -14,6 +14,9 @@ CatBoost workflows.
   pass through diagnostics.
 - Use the [runtime and scaling guide](runtime-scaling.md) for measured costs and
   benchmark provenance.
+- Use the [knockoff statistic bakeoff](knockoff-statistic-bakeoff.md) for the
+  seeded relevance/lsm/ridge/cefsplus quality comparison that informs the 1.0
+  default-statistic decision.
 - Check the [data-type support matrix](data-type-support.md) for ndarray,
   DataFrame, categorical, sparse, datetime, weight, group, and time behavior.
 - Look up SIFT-specific terms in the [glossary](glossary.md).

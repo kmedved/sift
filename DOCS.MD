@@ -17,6 +17,9 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
   and selection guidance.
 - [Runtime and scaling](docs/runtime-scaling.md): reproducible single-thread
   timings, memory context, and provenance.
+- [Knockoff statistic bakeoff](docs/knockoff-statistic-bakeoff.md): seeded
+  public-API comparison of relevance, lsm, ridge, and cefsplus for the 1.0
+  default-statistic decision.
 - [Data-type support](docs/data-type-support.md): observed public behavior for
   numeric, categorical, sparse, datetime/timedelta, ndarray/DataFrame, sample
   weights, groups, and time.
@@ -621,15 +624,20 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff. It remains the compatibility default. No
-  committed quality bakeoff establishes a universal winner among statistics;
-  compare `ridge` or `lsm` when conditional signal is plausible.
+  original feature and its knockoff. It remains the 0.9 compatibility default.
+  The retained [statistic bakeoff](docs/knockoff-statistic-bakeoff.md)
+  recommends keeping `relevance` for the 1.0 owner decision on those four
+  Gaussian designs (ridge reduced realized FDP but lost power on correlated
+  draws). That is not a universal ranking.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
-  target correlations. It is exactly antisymmetric under swaps and needs no
-  tie handling. Its power relative to `relevance` is data-dependent; no
-  committed bakeoff supports a universal advantage. It keeps the same
-  approximate plug-in validity framing.
+  target correlations. Truncated LARS paths and ties are **not** generally
+  swap-antisymmetric; do not treat LSM as a proved sign-flip statistic.
+  Its power relative to `relevance` is data-dependent. It keeps the same
+  approximate plug-in validity framing. The
+  [knockoff statistic bakeoff](docs/knockoff-statistic-bakeoff.md) reports
+  empirical quality/runtime on fixed designs; it does not prove sign-flip
+  or upgrade `approximate_plugin`.
   `statistic_options=
   {"max_steps": ...}` caps the LARS steps (columns that never enter get `W=0`).
 - `statistic="ridge"`: analytic ridge coefficient difference
