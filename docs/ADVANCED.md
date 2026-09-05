@@ -490,6 +490,13 @@ Review these metadata fields:
 | `lambda_min` | Minimum eigenvalue after shrinkage checks |
 | `s_mean` | Average knockoff separation diagnostic |
 | `n_zero_weight_variance_features` | Inactive features under positive-weight support |
+| `min_feasible_q` | Necessary count bound `1/min(m)` over completed draws, not a sufficient discovery condition |
+| `n_tested` | Minimum completed-draw tested count; `0` when `tested_state="not_run"` |
+| `n_tested_per_draw` | Actual post-screening `m` per completed draw |
+| `n_eligible` | Pre-screen discovery-unit count (not a completed tested count) |
+| `tested_state` | `"post_screening"` after completed draws; `"not_run"` when no draw or pair-screen ran |
+| `n_infeasible_draws` | Completed `offset=1` draws with `m·q < 1`; not a claim that the aggregate is empty |
+| `n_discoveries_offset_0` | Reported discovery **features** the same `W` would select at `offset=0` (expanded members; not tested-group count) |
 
 ### Derandomized Knockoffs
 

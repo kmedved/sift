@@ -82,6 +82,16 @@ METADATA_KEYS = {
     "n_feature_groups",
     "group_mode",
     "group_fdr_control",
+    "min_feasible_q",
+    "n_tested",
+    "n_tested_unit",
+    "n_tested_per_draw",
+    "n_eligible",
+    "tested_state",
+    "n_infeasible_draws",
+    "tested_sets_vary",
+    "n_discoveries_offset_0",
+    "n_discoveries_offset_0_per_draw",
 }
 
 
@@ -142,6 +152,7 @@ def test_public_select_fdr_matrix(fdr_data, input_kind, weighted):
     assert set(result.diagnostics_) == {
         "thresholds",
         "selection_sets",
+        "offset_zero_selection_sets",
         "active_valid_positions",
     }
     assert result.diagnostics_["selection_sets"] == [[0, 2]]
@@ -219,8 +230,10 @@ def test_select_fdr_omitted_defaults_match_explicit_current_defaults(fdr_data):
             verbose=False,
         )
 
-    assert [(item.category, str(item.message)) for item in omitted_warnings] == []
-    assert [(item.category, str(item.message)) for item in explicit_warnings] == []
+    omitted_sig = [(item.category, str(item.message)) for item in omitted_warnings]
+    explicit_sig = [(item.category, str(item.message)) for item in explicit_warnings]
+    assert omitted_sig == explicit_sig
+    assert omitted_sig and "m*q < 1" in omitted_sig[0][1]
     assert omitted.selected_features == explicit.selected_features
     assert omitted.selected_indices == explicit.selected_indices
     assert omitted.selector_metadata == explicit.selector_metadata

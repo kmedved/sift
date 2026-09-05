@@ -288,6 +288,16 @@ KNOCKOFF_METADATA_KEYS = {
     "n_feature_groups",
     "group_mode",
     "group_fdr_control",
+    "min_feasible_q",
+    "n_tested",
+    "n_tested_unit",
+    "n_tested_per_draw",
+    "n_eligible",
+    "tested_state",
+    "n_infeasible_draws",
+    "tested_sets_vary",
+    "n_discoveries_offset_0",
+    "n_discoveries_offset_0_per_draw",
 }
 
 

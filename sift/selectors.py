@@ -2397,8 +2397,9 @@ class KnockoffSelector(_BaseSelector):
     UserWarning
         When a legacy supervised ``cat_encoding`` downgrades ``fdr_control`` to
         ``"none"``, when the estimated correlation is shrunk towards
-        ``min_eig``, and when ``feature_groups="auto"`` is advisable because
-        the median decorrelation ``s`` is tiny.
+        ``min_eig``, when ``feature_groups="auto"`` is advisable because
+        the median decorrelation ``s`` is tiny, and when knockoff+
+        (``offset=1``) has one or more completed draws with ``m·q < 1``.
 
     See Also
     --------
@@ -2415,7 +2416,12 @@ class KnockoffSelector(_BaseSelector):
     plug-in validity metadata: ``fdr_control="approximate_plugin"`` under the
     fitted Gaussian-copula feature model, so with estimated correlations,
     shrinkage, weights, derandomization or feature groups the result should be
-    read as an approximate practical knockoff filter.
+    read as an approximate practical knockoff filter. ``min_feasible_q`` is a
+    necessary count bound from completed draws, not a sufficient discovery
+    condition, and an infeasible draw does not imply an empty aggregate.
+    ``tested_state="not_run"`` means no draw or pair-screen ran.
+    ``n_discoveries_offset_0`` counts reported features from the same ``W``.
+    They do not change ``q``, the statistic, or the FDR labels.
 
     Examples
     --------

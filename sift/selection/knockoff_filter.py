@@ -14,6 +14,7 @@ import pandas as pd
 from scipy.linalg import LinAlgError, cho_factor, cho_solve
 from threadpoolctl import threadpool_limits
 
+from sift._deprecate import warn_external
 from sift._logging import logger
 from sift._preprocess import to_numpy
 from sift.estimators.copula import (
@@ -111,9 +112,13 @@ class KnockoffSelectionResult:
         diagnostics ``gamma`` and ``lambda_min``, the power diagnostics
         ``s_mean``, ``s_median`` and ``n_low_power_features``, the raw input
         width ``n_features_input`` with ``dropped_feature_positions`` and
-        ``dropped_feature_reasons``, and the claim fields ``fdr_control``,
-        ``per_draw_fdr_control``, ``q_scope``, ``aggregation``,
-        ``aggregation_fdr_control`` and ``validity_model``.
+        ``dropped_feature_reasons``, feasibility fields ``min_feasible_q``,
+        ``n_tested``, ``n_tested_unit``, ``n_tested_per_draw``,
+        ``n_eligible``, ``tested_state``, ``n_infeasible_draws``,
+        ``tested_sets_vary``, ``n_discoveries_offset_0`` and
+        ``n_discoveries_offset_0_per_draw``, and the claim fields
+        ``fdr_control``, ``per_draw_fdr_control``, ``q_scope``,
+        ``aggregation``, ``aggregation_fdr_control`` and ``validity_model``.
     W : DataFrame
         One row per valid cache feature with columns ``feature``,
         ``selected_index``, ``W`` (the mean statistic over draws),
@@ -173,7 +178,7 @@ class KnockoffSelectionResult:
     >>> sorted(result.selected_features), result.selection_frequency is None
     (['f0', 'f1', 'f2', 'f3', 'f4'], True)
     >>> len(result.W), sorted(result.diagnostics_)
-    (8, ['active_valid_positions', 'selection_sets', 'thresholds'])
+    (8, ['active_valid_positions', 'offset_zero_selection_sets', 'selection_sets', 'thresholds'])
     >>> result.get_feature_ranking().loc[0, ["feature", "rank", "selected"]].tolist()
     ['f4', 1, True]
     """
@@ -359,6 +364,130 @@ def _validate_offset(offset: int) -> int:
     if offset_int not in (0, 1):
         raise ValueError("offset must be 0 or 1")
     return offset_int
+
+
+def _tested_unit_ids(
+    kept_local: np.ndarray,
+    *,
+    active_positions: np.ndarray,
+    active_group_codes: np.ndarray | None,
+) -> tuple[int, ...]:
+    kept = np.asarray(kept_local, dtype=np.int64).reshape(-1)
+    if kept.size == 0:
+        return ()
+    if active_group_codes is None:
+        return tuple(sorted(int(active_positions[int(i)]) for i in kept))
+    return tuple(sorted({int(active_group_codes[int(i)]) for i in kept}))
+
+
+def _offset_zero_local_selection(W: np.ndarray, q: float) -> np.ndarray:
+    W_arr = np.asarray(W, dtype=np.float64).reshape(-1)
+    threshold = knockoff_threshold(W_arr, q, offset=0)
+    if not np.isfinite(threshold):
+        return np.empty(0, dtype=np.int64)
+    return np.flatnonzero(W_arr >= threshold).astype(np.int64)
+
+
+def _count_bound_min_feasible_q(n_tested: int) -> float:
+    return float("inf") if int(n_tested) <= 0 else float(1.0 / int(n_tested))
+
+
+def _draw_knockoff_plus_infeasible(n_tested: int, q: float) -> bool:
+    return bool(int(n_tested) * float(q) < 1.0)
+
+
+def _feasibility_metadata(
+    *,
+    n_tested_per_draw: list[int],
+    n_tested_unit: str,
+    tested_id_sets: list[tuple[int, ...]],
+    n_discoveries_offset_0_per_draw: list[int],
+    n_discoveries_offset_0: int,
+    n_eligible: int,
+    tested_state: str,
+    q: float,
+    offset: int,
+) -> dict[str, Any]:
+    counts = [int(v) for v in n_tested_per_draw]
+    if tested_state != "post_screening":
+        n_tested = 0
+        min_feasible_q = float("inf")
+        n_infeasible_draws = 0
+        infeasible_draws: list[bool] = []
+    else:
+        n_tested = int(min(counts)) if counts else 0
+        min_feasible_q = _count_bound_min_feasible_q(n_tested)
+        infeasible_draws = [
+            _draw_knockoff_plus_infeasible(m, q) if int(offset) == 1 else False
+            for m in counts
+        ]
+        n_infeasible_draws = int(sum(infeasible_draws))
+    return {
+        "min_feasible_q": min_feasible_q,
+        "n_tested": n_tested,
+        "n_tested_unit": n_tested_unit,
+        "n_tested_per_draw": counts,
+        "n_eligible": int(n_eligible),
+        "tested_state": tested_state,
+        "n_infeasible_draws": n_infeasible_draws,
+        "tested_sets_vary": len(set(tested_id_sets)) > 1,
+        "n_discoveries_offset_0": int(n_discoveries_offset_0),
+        "n_discoveries_offset_0_per_draw": [
+            int(v) for v in n_discoveries_offset_0_per_draw
+        ],
+    }
+
+
+def _aggregate_offset_zero_discoveries(
+    per_draw_valid: list[list[int]],
+    *,
+    n_draws: int,
+    eta: float,
+    p_valid: int,
+) -> int:
+    if n_draws <= 1:
+        return int(len(per_draw_valid[0])) if per_draw_valid else 0
+    selected = np.zeros((n_draws, p_valid), dtype=np.float64)
+    for draw_idx, chosen in enumerate(per_draw_valid):
+        if chosen:
+            selected[draw_idx, np.asarray(chosen, dtype=np.int64)] = 1.0
+    return int(np.sum(selected.mean(axis=0) >= float(eta)))
+
+
+def _warn_knockoff_plus_infeasible(metadata: dict[str, Any]) -> None:
+    if str(metadata.get("tested_state")) != "post_screening":
+        return
+    if int(metadata["offset"]) != 1:
+        return
+    n_infeasible = int(metadata.get("n_infeasible_draws", 0))
+    if n_infeasible <= 0:
+        return
+    counts = list(metadata["n_tested_per_draw"])
+    n_draws = len(counts)
+    q = float(metadata["q"])
+    unit = str(metadata["n_tested_unit"])
+    min_q = metadata["min_feasible_q"]
+    min_q_text = "inf" if not np.isfinite(min_q) else f"{float(min_q):.3g}"
+    bound_note = (
+        f"min_feasible_q={min_q_text} is a necessary count-based lower bound "
+        "(1/min m over completed draws), not a sufficient condition for discovery"
+    )
+    if n_draws <= 1:
+        message = (
+            "knockoff+ (offset=1) cannot select any tested unit at "
+            f"q={q:g}: effective m={counts[0] if counts else 0} {unit}(s) so m*q < 1 "
+            f"({bound_note}). m is the post-screening, post-conditioning tested "
+            f"count at the {unit} level, not raw input width."
+        )
+    else:
+        message = (
+            f"knockoff+ (offset=1) cannot select on {n_infeasible} of {n_draws} "
+            f"draws at q={q:g}: those draws have effective m*q < 1. {bound_note} "
+            "and an infeasible draw does not imply the aggregated selection is "
+            f"empty. m is the post-screening tested count at the {unit} level, "
+            "not raw input width."
+        )
+    warn_external(message, UserWarning)
 
 
 def _validate_screen_pairs(screen_pairs: int | None) -> int | None:
@@ -1618,6 +1747,34 @@ def _all_zero_result(
         diagnostics["conditioning"] = cond_record
         metadata = dict(metadata)
         metadata["conditioning"] = cond_record
+    n_draws = int(metadata.get("n_draws", 1))
+    if discovery_valid_mask is not None:
+        eligible_local = np.flatnonzero(np.asarray(discovery_valid_mask, dtype=bool))
+    else:
+        eligible_local = np.arange(len(feature_names), dtype=np.int64)
+    if group_labels is not None and group_codes is not None:
+        eligible_ids = tuple(sorted({int(group_codes[int(i)]) for i in eligible_local}))
+        n_tested_unit = "group"
+    else:
+        eligible_ids = tuple(int(i) for i in eligible_local)
+        n_tested_unit = "feature"
+    metadata = dict(metadata)
+    metadata.update(
+        _feasibility_metadata(
+            n_tested_per_draw=[],
+            n_tested_unit=n_tested_unit,
+            tested_id_sets=[],
+            n_discoveries_offset_0_per_draw=[],
+            n_discoveries_offset_0=0,
+            n_eligible=len(eligible_ids),
+            tested_state="not_run",
+            q=float(metadata.get("q", 0.1)),
+            offset=int(metadata.get("offset", 1)),
+        )
+    )
+    diagnostics["offset_zero_selection_sets"] = []
+    diagnostics["tested_state"] = "not_run"
+    _warn_knockoff_plus_infeasible(metadata)
     return KnockoffSelectionResult(
         selected_features=selected_features,
         selected_indices=selected_indices,
@@ -1807,7 +1964,46 @@ def _select_fdr_cluster_representatives(
     metadata.pop("dropped_feature_positions", None)
     metadata.pop("dropped_feature_reasons", None)
     metadata.update(_input_width_provenance(cache))
+    metadata["n_tested_unit"] = "cluster_representative"
     diagnostics = dict(rep_result.diagnostics_ or {})
+    inner_offset0 = list(diagnostics.get("offset_zero_selection_sets") or [])
+    cluster_of_orig = {
+        int(cache.valid_cols[int(i)]): int(labels[int(i)])
+        for i in range(p_valid)
+    }
+    members_by_cluster: dict[int, list[int]] = {}
+    orig_to_valid = {
+        int(cache.valid_cols[int(i)]): int(i) for i in range(p_valid)
+    }
+    for valid_i in range(p_valid):
+        members_by_cluster.setdefault(int(labels[int(valid_i)]), []).append(
+            int(cache.valid_cols[int(valid_i)])
+        )
+    expanded_offset0: list[list[int]] = []
+    expanded_valid: list[list[int]] = []
+    for origs in inner_offset0:
+        clusters = {
+            cluster_of_orig[int(orig)]
+            for orig in origs
+            if int(orig) in cluster_of_orig
+        }
+        expanded: list[int] = []
+        for cluster_id in sorted(clusters):
+            expanded.extend(members_by_cluster[cluster_id])
+        expanded_offset0.append(expanded)
+        expanded_valid.append(
+            [orig_to_valid[orig] for orig in expanded if orig in orig_to_valid]
+        )
+    metadata["n_discoveries_offset_0_per_draw"] = [
+        len(chosen) for chosen in expanded_offset0
+    ]
+    metadata["n_discoveries_offset_0"] = _aggregate_offset_zero_discoveries(
+        expanded_valid,
+        n_draws=int(metadata.get("n_draws", 1)),
+        eta=float(metadata.get("eta", 0.5)),
+        p_valid=p_valid,
+    )
+    diagnostics["offset_zero_selection_sets"] = expanded_offset0
     diagnostics.update(
         {
             "cluster_labels": labels.astype(int).tolist(),
@@ -2026,9 +2222,12 @@ def select_fdr(
         ``s_method="mvr"`` or ``"me"``, ``feature_groups``, or pruning
         duplicates.  Also when the copula correlation matrix had to be shrunk
         toward the identity to reach ``min_eig``; when a ``"cefsplus"`` run
-        with an explicit ``path_depth`` saturates that cap; and, once per
-        process, when ``y`` holds integer labels with 3-20 distinct values,
-        which look multiclass -- run one-vs-rest targets instead.
+        with an explicit ``path_depth`` saturates that cap; when knockoff+
+        (``offset=1``) has one or more completed draws with effective
+        ``m·q < 1`` (per-draw; an infeasible draw does not imply an empty
+        aggregate); and, once per process, when ``y`` holds integer labels with
+        3-20 distinct values, which look multiclass -- run one-vs-rest targets
+        instead.
 
     See Also
     --------
@@ -2051,10 +2250,26 @@ def select_fdr(
     ``feature_groups`` mode is used, because ``q`` then calibrates each draw
     or each representative rather than the reported set.  Note also that
     knockoff+ is discrete: at level ``q`` with ``offset=1`` at least
-    ``ceil(1 / q)`` features must clear the threshold before the estimated FDP
-    can reach ``q``, so a problem with few true signals can legitimately
-    return nothing at a small ``q``.  Rerunning with new seeds until something
-    is selected destroys the guarantee.
+    ``ceil(1 / q)`` tested units must clear the threshold before the estimated
+    FDP can reach ``q``, so a problem with few true signals can legitimately
+    return nothing at a small ``q``.  Metadata reports ``min_feasible_q`` as
+    ``1/min(m)`` over **completed** draws: a necessary count-based lower bound,
+    not a sufficient condition for discovery.  ``n_tested`` is that minimum
+    post-screening count; ``n_tested_per_draw`` is the truthful per-draw
+    record.  ``n_eligible`` is the pre-screen discovery-unit count.
+    ``tested_state="not_run"`` means no knockoff draw or pair-screen ran
+    (for example a constant target), so ``n_tested`` is 0 and per-draw lists
+    are empty.  ``n_discoveries_offset_0`` counts **reported discovery
+    features** from the same ``W`` at ``offset=0`` (group/cluster members
+    expanded); it is not the number of tested groups.  ``m`` is
+    post-screening and post-conditioning -- group-level when grouped,
+    representative-level under ``feature_groups="auto"`` -- not raw input
+    width.  Included conditioning features are not discoveries.  When
+    ``offset=1`` and a completed draw has ``m·q < 1``, a ``UserWarning`` is
+    emitted for that draw scope; it does not claim the aggregated selection
+    is empty.  The selection, statistic, and FDR labels are otherwise
+    unchanged.  Rerunning with new seeds until something is selected
+    destroys the guarantee.
 
     Examples
     --------
@@ -2390,6 +2605,9 @@ def select_fdr(
     group_W_draws: list[list[float]] = []
     group_thresholds: list[float] = []
     selection_sets_valid: list[list[int]] = []
+    offset_zero_sets_valid: list[list[int]] = []
+    tested_id_sets: list[tuple[int, ...]] = []
+    n_tested_per_draw: list[int] = []
     mean_active = gaussian_knockoff_mean(Z_active, model) if n_draws_int > 1 else None
     active_group_codes = None if group_codes is None else group_codes[active_positions]
     fixed_kept = None
@@ -2425,12 +2643,20 @@ def select_fdr(
         if not np.isfinite(W_active).all():
             raise RuntimeError("Knockoff statistic returned non-finite W values")
         W_draws[draw_idx, active_positions] = W_active
+        tested_ids = _tested_unit_ids(
+            context.kept,
+            active_positions=active_positions,
+            active_group_codes=active_group_codes,
+        )
+        tested_id_sets.append(tested_ids)
+        n_tested_per_draw.append(len(tested_ids))
         if active_group_codes is None or group_labels is None:
             threshold = knockoff_threshold(W_active, q_float, offset=offset_int)
             if np.isfinite(threshold):
                 selected_active = np.where(W_active >= threshold)[0]
             else:
                 selected_active = np.empty(0, dtype=np.int64)
+            selected_active_offset0 = _offset_zero_local_selection(W_active, q_float)
         else:
             group_W = _group_knockoff_statistics(W_active, active_group_codes, len(group_labels))
             threshold = knockoff_threshold(group_W, q_float, offset=offset_int)
@@ -2441,9 +2667,19 @@ def select_fdr(
                 selected_active = np.where(np.isin(active_group_codes, selected_group_codes))[0]
             else:
                 selected_active = np.empty(0, dtype=np.int64)
+            selected_groups_offset0 = _offset_zero_local_selection(group_W, q_float)
+            if selected_groups_offset0.size:
+                selected_active_offset0 = np.where(
+                    np.isin(active_group_codes, selected_groups_offset0)
+                )[0]
+            else:
+                selected_active_offset0 = np.empty(0, dtype=np.int64)
         thresholds.append(threshold)
         selected_valid = active_positions[selected_active]
         selection_sets_valid.append(selected_valid.astype(int).tolist())
+        offset_zero_sets_valid.append(
+            active_positions[selected_active_offset0].astype(int).tolist()
+        )
 
     if stat_spec.name == "cefsplus":
         metadata["path_depth"] = int(
@@ -2460,6 +2696,38 @@ def select_fdr(
                 UserWarning,
                 stacklevel=3,
             )
+
+    n_tested_unit = (
+        "group"
+        if group_labels is not None
+        else "feature"
+    )
+    eligible_ids = _tested_unit_ids(
+        np.arange(active_positions.size, dtype=np.int64),
+        active_positions=active_positions,
+        active_group_codes=active_group_codes,
+    )
+    n_disc_0_per_draw = [len(chosen) for chosen in offset_zero_sets_valid]
+    n_disc_0 = _aggregate_offset_zero_discoveries(
+        offset_zero_sets_valid,
+        n_draws=n_draws_int,
+        eta=eta_float,
+        p_valid=p_valid,
+    )
+    metadata.update(
+        _feasibility_metadata(
+            n_tested_per_draw=n_tested_per_draw,
+            n_tested_unit=n_tested_unit,
+            tested_id_sets=tested_id_sets,
+            n_discoveries_offset_0_per_draw=n_disc_0_per_draw,
+            n_discoveries_offset_0=n_disc_0,
+            n_eligible=len(eligible_ids),
+            tested_state="post_screening",
+            q=q_float,
+            offset=offset_int,
+        )
+    )
+    _warn_knockoff_plus_infeasible(metadata)
 
     mean_W = W_draws.mean(axis=0)
     if n_draws_int == 1:
@@ -2529,6 +2797,10 @@ def select_fdr(
         "selection_sets": [
             [int(resolved_cache.valid_cols[int(i)]) for i in selected_valid]
             for selected_valid in selection_sets_valid
+        ],
+        "offset_zero_selection_sets": [
+            [int(resolved_cache.valid_cols[int(i)]) for i in selected_valid]
+            for selected_valid in offset_zero_sets_valid
         ],
         "active_valid_positions": active_positions.astype(int).tolist(),
     }

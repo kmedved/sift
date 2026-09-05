@@ -143,7 +143,18 @@ when `k` is omitted.
 The knockoff+ threshold (`offset=1`, the SIFT default): a feature enters only
 if its [W](#w-statistic) clears a cutoff that yields either nothing or at
 least about `1/q` discoveries. `offset=0` is knockoff (not knockoff+). Empty
-sets are valid.
+sets are valid. Metadata reports `min_feasible_q = 1/min(m)` over completed
+draws as a necessary count bound, not a sufficient discovery condition.
+`n_tested` is that minimum post-screening count; `n_tested_per_draw` is
+per-draw truth. `n_eligible` is the pre-screen discovery-unit count;
+`tested_state="not_run"` means no draw or pair-screen ran. `m` is
+post-screening and post-conditioning (group-level when grouped), not raw
+`p`. `n_discoveries_offset_0` counts reported discovery **features** from
+the same `W` at `offset=0` (expanded group/cluster members), not tested
+groups. Included conditioning features are not discoveries. A knockoff+
+warning is per infeasible draw (`m·q < 1`); it does not mean the aggregated
+selection is empty. Existing `approximate_plugin` / heuristic FDR labels
+are unchanged.
 
 ## Knockoffs
 
