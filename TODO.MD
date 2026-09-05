@@ -91,9 +91,13 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `d3938e4`; Codex/Opus review accepted, full local suite and all six
       required GitHub CI jobs green).
 - [x] F8a knockoff feasibility and UX metadata, implementation `308dfe1`.
-      Codex/Opus review accepted; clean runtime evidence and full local gate
-      passed. GitHub CI/merge pending.
-- [ ] F8b/F8c validated e-value aggregation and the statistic bakeoff.
+      Merged as PR #82 at `40f8af7` (artifact `0c62a44`, CI test correction
+      `449f063`). Codex/Opus review accepted; clean runtime evidence, full
+      local gate and all six required GitHub CI jobs passed.
+- [x] F8b opt-in e-value aggregation: Codex/Opus review accepted; validated
+      relevance/ridge and explicit exploratory modes. Clean-source runtime
+      refresh and integration pending.
+- [ ] F8c statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.

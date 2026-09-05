@@ -63,6 +63,15 @@ CEFS+ uses a logistic score-test increment. Contrast pairwise
 [redundancy](#redundancy) in classic mRMR. See the
 [algorithm guide](ALGORITHMS.md).
 
+## E-value
+
+A nonnegative score whose *aggregate* null expectation is bounded, used here
+to derandomize knockoffs (Ren and Barber). SIFT's knockoff e-values satisfy
+`∑_{j ∈ H0} E[e_j] ≤ m` on the common tested universe of size `m`; they are
+not necessarily unit-expectation e-values for each null. Averaging across
+draws and e-BH at `q` is opt-in via `aggregation="evalues"`. See
+[approximate plugin](#approximate-plugin) and [knockoff plus](#knockoff-plus).
+
 ## False discovery proportion
 
 The realized fraction of selected features that are null on one run. FDR

@@ -142,7 +142,8 @@ The 0.7.0 implementation:
 2. Fits a second-order Gaussian-copula knockoff sampler.
 3. Samples knockoff copies in cache space.
 4. Computes antisymmetric feature statistics `W`.
-5. Applies the knockoff+ threshold, or aggregates multiple draws by frequency.
+5. Applies the knockoff+ threshold, or aggregates multiple draws by frequency
+   or, if requested, by averaged knockoff e-values and e-BH.
 
 Knockoff+ is discrete: metadata `min_feasible_q` is `1/min(m)` over completed
 draws, a necessary count bound rather than a sufficient discovery condition.
@@ -171,6 +172,28 @@ and `validity_model="gaussian_copula_plugin"` because the feature model is
 estimated from the same data and can be shrunk for numerical stability. Exact
 finite-sample Model-X FDR requires the fitted feature model to be the true
 feature distribution and the statistic to obey the swap-antisymmetry contract.
+
+Opt-in `aggregation="evalues"` follows Ren and Barber (arXiv:2205.15461): each
+draw contributes `e_j = m · 1{W_j ≥ T_q} / (1 + #{W ≤ −T_q})` with `m = |T|`
+the size of the common tested universe, not the number of nonzero e-values.
+Averaging preserves the aggregate null bound `∑_{j ∈ H0} E[e_j] ≤ m`; e-BH at
+`q` then controls FDR at the same plug-in level as a single knockoff+ draw.
+SIFT does not claim that each null's e-value has unit expectation. Validated
+ungrouped e-value mode is only `relevance` and `ridge`. `relevance` is
+`W_j = g(r_j) - g(r̃_j)` for Gaussian MI `g`, so swapping feature `j` with its
+knockoff swaps the two correlations and negates `W_j` with no path or
+stopping rule. `ridge` solves `β = (G + λI)^{-1}[r; r̃]` on the analytic
+original/knockoff Gram; `G` is invariant under swapping pair `j`, which
+permutes the right-hand side and therefore swaps `β_j` with `β_{j+m}`, so
+`W_j = |β_j| - |β_{j+m}|` flips sign. `lsm` and `cefsplus` remain
+exploratory: truncated LARS entry and adaptive/greedy CEFS+ paths can change
+used depth or break ties in a way that is not a sign flip (including on
+inputs that a swap leaves unchanged). A swap-invariant pair screen
+(`max(|r|, |r̃|)`) that still varies across draws is recorded and zero-padded,
+but that union was not fixed before the statistics, so the run is
+exploratory. Grouped e-values are exploratory until a valid group statistic
+exists. The per-draw threshold uses the same `q` as e-BH (the specification's
+`T_q`); a smaller knockoff level would affect power only.
 
 Use knockoffs when:
 

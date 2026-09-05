@@ -2249,19 +2249,26 @@ class KnockoffSelector(_BaseSelector):
     Parameters
     ----------
     q : float, default=0.1
-        Target FDR level, a finite float in ``(0, 1)``. With ``n_draws > 1``
-        it is a per-draw level, not a guarantee for the aggregated vote.
+        Target FDR level, a finite float in ``(0, 1)``. With the default
+        frequency vote, ``n_draws > 1`` makes this a per-draw level, not a
+        guarantee for the aggregated set. With ``aggregation="evalues"`` it
+        is the e-BH level on averaged knockoff e-values.
     statistic : str, default="relevance"
         Feature-importance statistic behind ``W``. Enabled values are
         ``"relevance"`` (fast default), ``"lsm"`` (lasso signed max),
         ``"ridge"`` (analytic ridge coefficient difference) and ``"cefsplus"``
         (tie-safe greedy CEFS+). Other registry names are reserved and raise.
     n_draws : int, default=1
-        Number of knockoff draws. Above one, features are kept when their
+        Number of knockoff draws. Above one, the default keeps features whose
         selection frequency reaches ``eta``, ``threshold`` becomes ``None``,
-        and the aggregated result reports ``fdr_control="none"``.
+        and the aggregated result reports ``fdr_control="none"``. Opt-in
+        ``aggregation="evalues"`` averages knockoff e-values instead.
     eta : float, default=0.5
-        Selection-frequency cut for derandomized runs, in ``(0, 1]``.
+        Selection-frequency cut for derandomized runs, in ``(0, 1]``. Ignored
+        when ``aggregation="evalues"``.
+    aggregation : {None, "evalues", "selection_frequency"}, default=None
+        How to combine ``n_draws > 1``. ``None`` keeps the legacy frequency
+        vote. ``"evalues"`` requires ``n_draws > 1`` and ``offset=1``.
     offset : {1, 0}, default=1
         ``1`` is the knockoff+ threshold; ``0`` is the less conservative
         modified-knockoff (mFDR-style) threshold.
@@ -2421,7 +2428,14 @@ class KnockoffSelector(_BaseSelector):
     condition, and an infeasible draw does not imply an empty aggregate.
     ``tested_state="not_run"`` means no draw or pair-screen ran.
     ``n_discoveries_offset_0`` counts reported features from the same ``W``.
-    They do not change ``q``, the statistic, or the FDR labels.
+    Opt-in ``aggregation="evalues"`` records the common tested universe and
+    reports ``approximate_plugin`` only for ungrouped ``relevance`` and
+    ``ridge`` with a screening universe fixed before the statistics.
+    ``lsm``, ``cefsplus``, grouped runs, and supervised encodings stay
+    ``fdr_control="none"``. The e-value bound is an aggregate null
+    expectation, not a unit bound per feature.
+    They do not change omitted-option selections, ``q``, the statistic, or
+    the default FDR labels.
 
     Examples
     --------
@@ -2447,6 +2461,7 @@ class KnockoffSelector(_BaseSelector):
         statistic: str = "relevance",
         n_draws: int = 1,
         eta: float = 0.5,
+        aggregation: str | None = None,
         offset: int = 1,
         s_method: str = "equi",
         min_eig: float = 1e-3,
@@ -2670,6 +2685,9 @@ class KnockoffSelector(_BaseSelector):
             UserWarning,
             stacklevel=3,
         )
+        return self._apply_supervised_encoding_fdr_downgrade(result)
+
+    def _apply_supervised_encoding_fdr_downgrade(self, result):
         metadata = dict(result.selector_metadata)
         metadata.update(
             {
@@ -2680,7 +2698,34 @@ class KnockoffSelector(_BaseSelector):
                 "validity_note": _KNOCKOFF_SUPERVISED_ENCODING_NOTE,
             }
         )
-        return replace(result, selector_metadata=metadata)
+        updates = {"selector_metadata": metadata}
+        if (
+            metadata.get("aggregation") in {"evalues", "evalues_then_cluster_expansion"}
+            or "evalue_validated" in metadata
+        ):
+            metadata["aggregation_fdr_control"] = "none"
+            metadata["evalue_validated"] = False
+            reasons = list(metadata.get("evalue_exploratory_reasons") or [])
+            if "supervised_categorical_encoding" not in reasons:
+                reasons.append("supervised_categorical_encoding")
+            metadata["evalue_exploratory_reasons"] = reasons
+            metadata["exploratory"] = True
+            for key in (
+                "representative_fdr_control",
+                "representative_per_draw_fdr_control",
+            ):
+                if key in metadata:
+                    metadata[key] = "none"
+            updates["selector_metadata"] = metadata
+            diagnostics = result.diagnostics_
+            nested = None if diagnostics is None else diagnostics.get("representative_result")
+            if nested is not None:
+                diagnostics = dict(diagnostics)
+                diagnostics["representative_result"] = (
+                    self._apply_supervised_encoding_fdr_downgrade(nested)
+                )
+                updates["diagnostics_"] = diagnostics
+        return replace(result, **updates)
 
 
 __all__ = [
