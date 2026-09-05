@@ -381,8 +381,17 @@ def test_knockoff_fdr_claims_stay_honest_under_categorical_encoding():
     assert "cat_encoding" not in inspect.signature(select_fdr).parameters
 
     legacy = KnockoffSelector(q=0.2, cat_encoding="loo_logit", verbose=False)
-    with pytest.warns(UserWarning, match="no FDR claim applies"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         legacy.fit(X, y)
+    assert all(issubclass(item.category, UserWarning) for item in caught)
+    messages = [str(item.message) for item in caught]
+    assert any("no FDR claim applies" in message for message in messages)
+    assert any("m*q < 1" in message for message in messages)
+    assert all(
+        "no FDR claim applies" in message or "m*q < 1" in message
+        for message in messages
+    )
     assert legacy.result_.selector_metadata["fdr_control"] == "none"
     assert "validity_note" in legacy.result_.selector_metadata
 
