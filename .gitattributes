@@ -1,0 +1,2 @@
+# Preserve the retained CSV's original bytes and recognize its CRLF record endings.
+benchmarks/results/knockoff_statistic_bakeoff.csv -text whitespace=cr-at-eol

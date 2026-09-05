@@ -35,6 +35,7 @@
 - Runtime scaling evidence unchanged and still valid. Grok66 docs/binding only; no runner or production edits.
 - Codex and Opus56 accept artifact/report/binding with no material defect; all3 reviewer checkout hash manifests unchanged. Codex checked480 row metrics/CSV/JSON/summary/source hashes; Opus additionally reproduced120/120 data fingerprints. Review protocol /private/tmp/sift_f8c_review_protocol.md; no more review needed absent new evidence.
 - Final local gate: pytest9/-W error2149 passed/40 skipped in66s; Ruff, generators, strict docs, runtime binding and whitespace pass. Next commit retained artifacts/report, push, verify all6 required jobs on exact PR head and merge. No benchmark rerun or default flip needed. Ordinary desktop background activity is disclosed for descriptive timing.
+- Evidence/report committed0b7473783fd45fd7e1804f7becdbda4611b799d8; PR84 open. Staging exposed Git treating the generated CSV's CRLF record terminators as trailing whitespace. A narrowly scoped .gitattributes rule preserves this artifact's bytes (-text) and recognizes CRLF (whitespace=cr-at-eol); CSV checksum unchanged. Verify CI on the follow-up commit, not the initial PR head.
 
 ## Runtime evidence
 
