@@ -18,14 +18,14 @@
 
 ## Current stage: F2 integration
 
-- Branch codex/0.9x-f2-proxy-reports, base 14bfb5c. F2 is implemented and accepted by independent Codex plus Opus review; not yet committed or merged.
+- Branch codex/0.9x-f2-proxy-reports, base 14bfb5c. F2 implementation is committed at 081ca04552c0d662691a968b64455bea141d2ba8 and accepted by independent Codex plus Opus review; CI/merge pending.
 - Additions: SelectionView.redundancy_report / proxy_clusters; opt-in StabilitySelector(store_proxies=True), actual 16 MiB bool indicator cap, 64 MiB float32 candidate-by-selected proxy cap checked before rank/correlation work, direct p-by-k Gram, no training X retained.
 - Accepted fixes verified: selected-selected cluster edges; truthful memory accounting; stale/absent proxy availability; exact variation and selected constants; positive-weight filtering before proxy imputation; no extra default-path diagnostic matrix.
 - Both original and missing-value zero-weight probes pass. Graph oracle: 0 mismatches / 200. Direct weighted block matches the full oracle exactly after float32 storage.
 - Opus stage 42 found no additional correctness defects; stage 43 accepted the final imputation/memory correction. Optional stale-block wording was not changed: a direct probe confirms refitting at the updated threshold with store_proxies=True restores availability.
-- Verification: preceding full integration run 2083 passed / 40 skipped / 1 deferred runtime freshness test; final correction 31 F2 tests and 113 affected tests passed under -W error. Opus final affected slice 160 passed / 1 skipped, docs examples 172 passed / 12 skipped. Repo Ruff, both generators and strict MkDocs passed.
-- Runtime source hashes are stale until the next clean implementation commit and benchmark refresh. Do not claim current runtime provenance is fresh before that step.
-- Next action: commit implementation, run the full 18-cell runtime benchmark from the clean commit, update artifact/table/source references, run the complete suite including the freshness test, commit artifact, push PR, run required CI and merge. Then F7.
+- Verification: final full integration run 2085 passed / 40 skipped under -W error, including runtime source/artifact/table freshness. F2 has 31 tests; 113 affected tests also passed. Opus final affected slice 160 passed / 1 skipped, docs examples 172 passed / 12 skipped. Repo Ruff, both generators and strict MkDocs passed.
+- Runtime evidence refreshed from clean 081ca04552c0d662691a968b64455bea141d2ba8: dirty=false, empty status, 73 source hashes, 18 rows with 7 samples each, native threads all 1, all selection/data fingerprints unchanged. CSV SHA-256 21728e50c161260abc4e17cf82204d390e9363774f225539e505182e55c602d1.
+- Next action: commit the refreshed artifact/docs, push PR, run required GitHub CI and merge. Then F7.
 
 ## Remaining ordered roadmap
 
