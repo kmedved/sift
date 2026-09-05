@@ -26,6 +26,15 @@
   frequencies on `StabilitySelector(store_proxies=True)` resamples.
   `store_proxies` remains opt-in and default-false; omitted calls are
   unchanged. Cluster frequency is nullable when no resample payload exists.
+- Added regression-filter `within="groups"` and `within="two_way"` panel
+  transforms, with weighted entity means and five alternating entity/time
+  demeaning iterations before ranks. Supported auto-k scoring fits means on
+  training folds only, with training-grand-mean fallback for unseen entities.
+  Result views expose within/between relevance; raw transform output and
+  calls omitting `within` are unchanged. Prebuilt caches, classification,
+  nested mode and non-fold auto-k methods reject the new option explicitly.
+  Stable anchored means preserve group-constant large-offset data and genuine
+  small signals; removing all feature variation raises a clear error.
 
 ### Documentation
 

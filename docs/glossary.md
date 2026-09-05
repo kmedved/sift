@@ -28,9 +28,18 @@ per-draw target; the aggregated vote has no FDR guarantee and reports
 Asking SIFT to choose how many features to keep from an already-built
 [feature path](#feature-path), via `k="auto"` and `AutoKConfig`. Auto-k
 changes the stopping rule, not the underlying selector's objective. Fixed-k
-function filters reject [row metadata](#row-metadata) `groups` and `time`;
-on auto-k those arguments define split construction, not merely how large
-the splits are.
+function filters reject unused [row metadata](#row-metadata) `groups` and
+`time` unless [`within`](#within) is set; on auto-k those arguments define
+split construction, and with `within` they also fit fold-local demeaning.
+
+## Between relevance
+
+Entity-level association between a feature and the target after collapsing
+rows to weighted group means. Exposed as `between_relevance` on filter
+ranking tables when [`within`](#within) is set. It has only the observed
+entity-level support, not independent row-level evidence; with two or fewer
+positive-mass entities the summary is degenerate. Its magnitude need not be
+comparable to `within_relevance`. Contrast [within](#within).
 
 ## Boruta
 
@@ -307,3 +316,16 @@ numeric features if they belong in X.
 The antisymmetric knockoff score `W_j = f(Z_j, Z_j')` used to threshold
 discoveries. Large positive W favors the original over its knockoff. SIFT's
 default statistic is `relevance`; that default is not an exact-FDR upgrade.
+
+## Within
+
+Optional regression-filter panel transform (`within="groups"` or
+`"two_way"`). Weighted entity means, and for two-way a fixed five-iteration
+alternation with time means, are subtracted from `X` and `y` before ranks.
+Validation folds fit those means on training rows only; unseen entities fall
+back to the training grand mean. Demeaning can remove all variation,
+including singleton-only groups, and then the selection is empty or the
+call raises that no within-entity signal remains. Ranking tables then
+include `within_relevance` (the selector relevance on the demeaned data)
+and [`between_relevance`](#between-relevance). Sklearn `transform` still
+returns selected raw columns.

@@ -175,6 +175,50 @@ selector = StabilitySelector(
 selector.fit(X, y, groups=entity_ids)
 ```
 
+### Within and between panel transforms
+
+Regression filters accept `within="groups"` or `within="two_way"` so ranks see
+within-entity (and optionally within-time) variation. Weighted entity means
+are subtracted from `X` and `y` before ranks; `two_way` alternates entity and
+time demeaning for a fixed five iterations. Sklearn `transform` still returns
+the selected raw columns. Auto-k evaluate, Gaussian CV, and xfit-objective
+fit those means on training rows only; an entity unseen in training falls
+back to the training grand mean.
+
+```python
+import numpy as np
+import pandas as pd
+
+from sift import select_mrmr
+
+rng = np.random.default_rng(0)
+n_groups, n_time = 20, 10
+groups = np.repeat(np.arange(n_groups), n_time)
+n = n_groups * n_time
+X = pd.DataFrame(rng.normal(size=(n, 6)), columns=[f"x{i}" for i in range(6)])
+entity = 1.5 * rng.normal(size=n_groups)[groups]
+X["x0"] = X["x0"] + entity
+y = entity + 0.8 * X["x1"] + rng.normal(scale=0.2, size=n)
+select_mrmr(
+    X,
+    y,
+    k=2,
+    task="regression",
+    groups=groups,
+    within="groups",
+    verbose=False,
+)
+```
+
+A `return_result=True` ranking then includes `within_relevance` and
+`between_relevance`. `between_relevance` summarizes weighted entity means:
+it has only entity-level support, is degenerate with two or fewer
+positive-mass entities, and is not on the same scale as `within_relevance`.
+Demeaning can remove all variation, including singleton-only groups; the
+result is then an empty selection or a no-within-signal error. Prebuilt
+caches, classification, datetime/timedelta columns, and non-fold auto-k
+methods are rejected rather than silently ignored.
+
 When both `groups` and `time` are supplied, stability selection uses grouped
 block bootstrap.
 

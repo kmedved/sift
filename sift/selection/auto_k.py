@@ -16,8 +16,10 @@ from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     TargetCVEncoder,
     ensure_weights,
+    reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
 )
+from sift.selection.within import require_within_context
 from sift.selection.auto_k_config import (
     AutoKConfig as AutoKConfig,
     _NONNEGATIVE_INT_FIELDS as _NONNEGATIVE_INT_FIELDS,
@@ -188,6 +190,7 @@ def _evaluate_prefix_split(
     groups: Optional[np.ndarray],
     time: Optional[np.ndarray],
     encoding_weight_arr: Optional[np.ndarray],
+    within: str | None = None,
 ) -> dict:
     """Evaluate all k values for one train/validation split."""
     Xtr_df = X_path_df.iloc[train_idx]
@@ -266,6 +269,25 @@ def _evaluate_prefix_split(
             Xtr_df = enc.fit_transform(Xtr_df, ytr)
             Xva_df = enc.transform(Xva_df)
 
+    if within is not None:
+        from sift.selection.within import (
+            as_float_feature_matrix,
+            fit_within_transform,
+            restore_feature_matrix,
+        )
+
+        Xtr_num, tr_template = as_float_feature_matrix(Xtr_df)
+        Xva_num, va_template = as_float_feature_matrix(Xva_df)
+        g_tr = None if groups is None else groups[train_idx]
+        g_va = None if groups is None else groups[val_idx]
+        t_tr = None if time is None else time[train_idx]
+        t_va = None if time is None else time[val_idx]
+        fitted = fit_within_transform(within, Xtr_num, ytr, g_tr, t_tr, wtr)
+        Xtr_num, ytr = fitted.transform(Xtr_num, ytr, g_tr, t_tr)
+        Xva_num, yva = fitted.transform(Xva_num, yva, g_va, t_va)
+        Xtr_df = restore_feature_matrix(tr_template, Xtr_num)
+        Xva_df = restore_feature_matrix(va_template, Xva_num)
+
     return evaluate_numeric_prefixes(
         Xtr_df,
         Xva_df,
@@ -307,6 +329,7 @@ def select_k_auto(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     base_features: Optional[List] = None,
+    within: str | None = None,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path.
 
@@ -380,6 +403,11 @@ def select_k_auto(
         entries: the fitted columns are ``base_features + feature_path[:k]``.
         ``min_k``/``max_k`` and the returned ``best_k`` stay in that
         additional-discovery unit. When omitted, behavior is unchanged.
+    within : {'groups', 'two_way'} or None, default None
+        Fold-local panel demeaning applied after encoding and before the
+        prefix proxy model. Regression only. Means are fit on training rows
+        only; unseen entities fall back to the training grand mean.
+        Datetime/timedelta path columns are rejected before conversion.
 
     Returns
     -------
@@ -403,7 +431,9 @@ def select_k_auto(
         If ``config.k_method`` is not ``'evaluate'``, if ``X`` has duplicate
         column labels, if ``strategy='time_holdout'`` without ``time`` or
         ``strategy='group_cv'`` without ``groups``, if fewer than two groups
-        are available, or if ``strategy`` is unknown.
+        are available, if ``strategy`` is unknown, or if ``within`` is set
+        with a non-regression ``task``, missing ``groups``/``time``, or
+        datetime/timedelta features.
     NotImplementedError
         If ``config.auto_k_mode='nested'``; function-style selectors are
         prefix-only.
@@ -478,6 +508,12 @@ def select_k_auto(
             "Use select_k_elbow(...) or a selector path that explicitly supports "
             "objective-path auto-k."
         )
+    resolved_within = require_within_context(
+        within,
+        task=task,
+        groups=groups,
+        time=time,
+    )
 
     base_valid: List = []
     base_seen: set = set()
@@ -526,6 +562,8 @@ def select_k_auto(
     k_grid_eval = [int(k) + n_base for k in k_grid]
 
     X_path_df = X[base_valid + valid_features]
+    if resolved_within is not None:
+        reject_datetime_like_features(X_path_df)
 
     metric = resolve_metric(config.metric, task)
     eval_kwargs = {
@@ -549,6 +587,7 @@ def select_k_auto(
         "groups": groups,
         "time": time,
         "encoding_weight_arr": encoding_weight_arr,
+        "within": within,
     }
 
     if config.strategy == "time_holdout":

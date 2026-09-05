@@ -84,10 +84,12 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Merged as PR #79 at `14bfb5c` (implementation `b2a11bd`, artifact
       `682af22`; required GitHub CI green).
 - [x] F2 proxy/redundancy and cluster reports.
-      Codex and Opus review accepted on `codex/0.9x-f2-proxy-reports`
-      (implementation `081ca04`). Clean runtime refresh and the full local gate
-      passed; GitHub CI and merge remain before F7.
+      Merged as PR #80 at `17fe3bf` (implementation `081ca04`, artifact
+      `a495f33`; all six required GitHub CI jobs green).
 - [ ] F7 panel within/between transforms.
+      Implementation and numerical corrections accepted by Codex and resumed
+      Opus review on `codex/0.9x-f7-panel-transforms`. Clean runtime refresh,
+      final full suite, GitHub CI and merge remain the integration gate.
 - [ ] F8a knockoff feasibility and UX metadata; F8b/F8c validated e-value
       aggregation and the statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).

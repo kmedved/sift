@@ -51,6 +51,11 @@ def _normalize_filter_table(
         relevance = pd.to_numeric(ranking["relevance"], errors="coerce")
         if relevance.notna().any():
             table["relevance"] = relevance
+    for column in ("within_relevance", "between_relevance"):
+        if column in ranking:
+            values = pd.to_numeric(ranking[column], errors="coerce")
+            if values.notna().any():
+                table[column] = values
 
     if "selected_index" in table:
         known_positions = table["selected_index"].dropna().astype(int)
