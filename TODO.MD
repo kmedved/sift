@@ -96,7 +96,8 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       local gate and all six required GitHub CI jobs passed.
 - [x] F8b opt-in e-value aggregation, implementation `dde1f50`: Codex/Opus
       review accepted; validated relevance/ridge and explicit exploratory modes.
-      Clean runtime evidence and full local gate passed; GitHub CI/merge pending.
+      Merged as PR #83 at `f70a3da` (artifact `2a05c66`); clean runtime
+      evidence, full local gate and all six required GitHub CI jobs passed.
 - [ ] F8c statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.

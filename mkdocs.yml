@@ -10,6 +10,7 @@ nav:
   - Home: index.md
   - Choosing a Selector: choosing-a-selector.md
   - Runtime and Scaling: runtime-scaling.md
+  - Knockoff statistic bakeoff: knockoff-statistic-bakeoff.md
   - Data-Type Support: data-type-support.md
   - Glossary: glossary.md
   - API Reference: reference/index.md

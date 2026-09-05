@@ -158,8 +158,15 @@ aggregate. Included conditioning features are not tested units.
 
 The default statistic is `statistic="relevance"`, a fast marginal
 Gaussian-information difference between each original feature and its knockoff.
+`statistic="ridge"` is the analytic coefficient-difference statistic.
+`statistic="lsm"` is the lasso signed-max path statistic.
 `statistic="cefsplus"` enables a tie-safe greedy statistic that is slower but
-redundancy-aware.
+redundancy-aware. The 0.9 default stays `relevance`. Whether 1.0 should flip
+to `ridge` is an owner decision from the committed
+[statistic bakeoff](knockoff-statistic-bakeoff.md), not from uncommitted
+scratch timings. That study reports realized FDP and power; it does not
+upgrade `approximate_plugin`, and it does not treat LSM or CEFS+ rows as a
+sign-flip proof.
 
 `s_method` controls the diagonal knockoff construction:
 

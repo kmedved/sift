@@ -83,7 +83,9 @@ For exact signatures, accepted values, and return types, use the
 [generated API reference](reference/index.md). For mathematical details, see
 the [algorithm guide](ALGORITHMS.md); for a worked first path, continue with the
 [tutorial](user-guide.md) and [advanced workflows](ADVANCED.md). Consult the
-[runtime and scaling guide](runtime-scaling.md) for measured cost context, and
+[runtime and scaling guide](runtime-scaling.md) for measured cost context, the
+[knockoff statistic bakeoff](knockoff-statistic-bakeoff.md) for the seeded
+relevance/ridge quality record, and
 the [data-type support matrix](data-type-support.md) for ndarray vs DataFrame,
 categoricals, sparse input, datetime columns, sample weights, and group/time
 metadata. The [glossary](glossary.md) defines path, k, q, and related contracts.

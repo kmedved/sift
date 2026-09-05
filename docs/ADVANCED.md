@@ -521,6 +521,11 @@ result = select_fdr(
 )
 ```
 
+The 0.9 default statistic remains `relevance`. The seeded public-API
+comparison that informs a possible 1.0 `ridge` default lives in the
+[knockoff statistic bakeoff](knockoff-statistic-bakeoff.md). That study is
+not a validity upgrade.
+
 For `n_draws > 1`, SIFT samples multiple knockoff draws and selects features
 whose selection frequency is at least `eta`. This improves run-to-run stability
 but remains part of the approximate plug-in contract and reports

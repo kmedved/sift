@@ -98,6 +98,7 @@ def test_glossary_is_linked_from_canonical_guides() -> None:
         "docs/results.md",
         "docs/troubleshooting.md",
         "docs/runtime-scaling.md",
+        "docs/knockoff-statistic-bakeoff.md",
     ):
         text = (ROOT / relpath).read_text(encoding="utf-8")
         assert "glossary.md" in text, relpath

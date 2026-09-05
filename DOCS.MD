@@ -17,6 +17,9 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
   and selection guidance.
 - [Runtime and scaling](docs/runtime-scaling.md): reproducible single-thread
   timings, memory context, and provenance.
+- [Knockoff statistic bakeoff](docs/knockoff-statistic-bakeoff.md): seeded
+  public-API comparison of relevance, lsm, ridge, and cefsplus for the 1.0
+  default-statistic decision.
 - [Data-type support](docs/data-type-support.md): observed public behavior for
   numeric, categorical, sparse, datetime/timedelta, ndarray/DataFrame, sample
   weights, groups, and time.
@@ -626,10 +629,13 @@ Important options:
   compare `ridge` or `lsm` when conditional signal is plausible.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
-  target correlations. It is exactly antisymmetric under swaps and needs no
-  tie handling. Its power relative to `relevance` is data-dependent; no
-  committed bakeoff supports a universal advantage. It keeps the same
-  approximate plug-in validity framing.
+  target correlations. Truncated LARS paths and ties are **not** generally
+  swap-antisymmetric; do not treat LSM as a proved sign-flip statistic.
+  Its power relative to `relevance` is data-dependent. It keeps the same
+  approximate plug-in validity framing. The
+  [knockoff statistic bakeoff](docs/knockoff-statistic-bakeoff.md) reports
+  empirical quality/runtime on fixed designs; it does not prove sign-flip
+  or upgrade `approximate_plugin`.
   `statistic_options=
   {"max_steps": ...}` caps the LARS steps (columns that never enter get `W=0`).
 - `statistic="ridge"`: analytic ridge coefficient difference

@@ -257,6 +257,8 @@ python benchmarks/bench_jmi.py --quick --output /tmp/bench-jmi.json
 python benchmarks/bench_permutation.py --quick --output /tmp/bench-permutation.json
 python benchmarks/bench_cefsplus.py --quick --output /tmp/bench-cefsplus.json
 python benchmarks/bench_knockoffs.py --quick --output /tmp/bench-knockoffs.json
+python benchmarks/bench_knockoff_statistic_bakeoff.py --smoke \
+  --output /tmp/knockoff-statistic-bakeoff-smoke.csv
 python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 ```
 
