@@ -26,6 +26,10 @@ from sift.selection.knockoff_filter import (
 from sift.selectors import KnockoffSelector
 
 
+def _expect_infeasible_knockoff_plus():
+    return pytest.warns(UserWarning, match=r"knockoff\+ \(offset=1\).*m\*q < 1")
+
+
 def _signal_frame(n: int = 90, p: int = 8, seed: int = 0):
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n, p))
@@ -344,13 +348,14 @@ def test_select_fdr_validates_statistic_options_by_statistic():
         select_fdr(X, y, statistic="relevance", statistic_options={"min_gain_ratio": 0.0}, verbose=False)
     assert "_statistic_name" not in str(exc.value)
 
-    result = select_fdr(
-        X,
-        y,
-        statistic="cefsplus",
-        statistic_options={"path_depth": 3, "min_gain_ratio": 0.0},
-        verbose=False,
-    )
+    with _expect_infeasible_knockoff_plus():
+        result = select_fdr(
+            X,
+            y,
+            statistic="cefsplus",
+            statistic_options={"path_depth": 3, "min_gain_ratio": 0.0},
+            verbose=False,
+        )
     assert result.selector_metadata["path_depth"] == 3
 
 
@@ -410,6 +415,9 @@ def test_select_fdr_feature_groups_zero_target_keeps_group_column():
     )
 
     assert result.W["feature_group"].tolist() == groups
+    assert result.selector_metadata["tested_state"] == "not_run"
+    assert result.selector_metadata["n_tested"] == 0
+    assert result.selector_metadata["n_eligible"] == 2
     assert result.selector_metadata["feature_groups"] is True
     assert result.selector_metadata["group_fdr_control"] == "none"
     assert result.selector_metadata["per_draw_fdr_control"] == "none"
@@ -445,11 +453,13 @@ def test_select_fdr_feature_groups_accept_original_or_valid_lengths_only():
     assert cache.valid_cols.tolist() == [0, 1, 2]
 
     original_groups = ["a", "b", "c", "dropped1", "dropped2"]
-    original = select_fdr(cache=cache, y=y, feature_groups=original_groups, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        original = select_fdr(cache=cache, y=y, feature_groups=original_groups, verbose=False)
     assert original.W["feature_group"].tolist() == ["a", "b", "c"]
 
     valid_groups = ["valid_a", "valid_b", "valid_c"]
-    valid = select_fdr(cache=cache, y=y, feature_groups=valid_groups, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        valid = select_fdr(cache=cache, y=y, feature_groups=valid_groups, verbose=False)
     assert valid.W["feature_group"].tolist() == valid_groups
 
     for bad in (["a", "b", "c", "d"], ["a", "b", "c", "d", "e", "f"], ["a", "b"]):
@@ -472,8 +482,10 @@ def test_select_fdr_positional_pandas_y_and_cache_default_subsample():
     cache = build_cache(X, compute_Rxx=True, random_state=0)
     y_series = pd.Series(y, index=np.arange(10_000, 10_000 + len(y)))
 
-    series_result = select_fdr(cache=cache, y=y_series, random_state=11, verbose=False)
-    array_result = select_fdr(cache=cache, y=y, random_state=11, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        series_result = select_fdr(cache=cache, y=y_series, random_state=11, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        array_result = select_fdr(cache=cache, y=y, random_state=11, verbose=False)
 
     pd.testing.assert_frame_equal(series_result.W, array_result.W)
     assert series_result.selected_features == array_result.selected_features
@@ -483,7 +495,8 @@ def test_select_fdr_rejects_explicit_subsample_with_cache_even_when_default_valu
     X, y = _signal_frame(n=70, p=6, seed=35)
     cache = build_cache(X, compute_Rxx=True, random_state=0)
 
-    select_fdr(cache=cache, y=y, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        select_fdr(cache=cache, y=y, verbose=False)
     with pytest.raises(ValueError, match="subsample"):
         select_fdr(cache=cache, y=y, subsample=50_000, verbose=False)
     with pytest.raises(ValueError, match="subsample"):
@@ -527,7 +540,8 @@ def test_select_fdr_weighted_inactive_column_and_local_rxx():
         feature_names_are_synthetic=False,
     )
 
-    result = select_fdr(cache=cache, y=np.array([0.0, 1.0, 0.0, 1.0]), verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        result = select_fdr(cache=cache, y=np.array([0.0, 1.0, 0.0, 1.0]), verbose=False)
 
     row = result.W.loc[result.W["feature"] == "zero_weight_only"].iloc[0]
     assert row["W"] == pytest.approx(0.0)
@@ -566,7 +580,8 @@ def test_select_fdr_validates_only_active_rxx_submatrix():
         feature_names_are_synthetic=False,
     )
 
-    result = select_fdr(cache=cache, y=np.array([0.0, 1.0, 0.0, 1.0]), verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        result = select_fdr(cache=cache, y=np.array([0.0, 1.0, 0.0, 1.0]), verbose=False)
 
     assert result.selector_metadata["n_zero_weight_variance_features"] == 1
     assert result.W.loc[result.W["feature"] == "zero_weight_only", "W"].iloc[0] == pytest.approx(0.0)
@@ -648,6 +663,9 @@ def test_select_fdr_derandomized_frequencies_and_zero_target():
 
     result = select_fdr(X, y, n_draws=3, eta=0.75, random_state=0, verbose=False)
 
+    assert result.selector_metadata["tested_state"] == "not_run"
+    assert result.selector_metadata["n_tested"] == 0
+    assert result.selector_metadata["n_tested_per_draw"] == []
     assert result.threshold is None
     assert result.selection_frequency is not None
     assert result.selection_frequency.eq(0.0).all()
@@ -1015,9 +1033,11 @@ def test_lsm_and_ridge_options_are_validated():
         select_fdr(X, y, statistic="lsm", statistic_options={"max_steps": 0}, verbose=False)
     with pytest.raises(ValueError, match="ridge_lambda"):
         select_fdr(X, y, statistic="ridge", statistic_options={"ridge_lambda": 0.0}, verbose=False)
-    out = select_fdr(X, y, statistic="ridge", statistic_options={"ridge_lambda": 0.25}, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        out = select_fdr(X, y, statistic="ridge", statistic_options={"ridge_lambda": 0.25}, verbose=False)
     assert out.selector_metadata["statistic"] == "ridge"
-    out = select_fdr(X, y, statistic="lsm", statistic_options={"max_steps": 4}, verbose=False)
+    with _expect_infeasible_knockoff_plus():
+        out = select_fdr(X, y, statistic="lsm", statistic_options={"max_steps": 4}, verbose=False)
     assert out.selector_metadata["statistic"] == "lsm"
 
 

@@ -28,6 +28,10 @@ from sift import (
 )
 from sift.selection.auto_k import AutoKConfig
 from sift.selection.cefsplus_binary_common import binary_refit_loglik_gains
+
+
+def _expect_infeasible_knockoff_plus():
+    return pytest.warns(UserWarning, match=r"knockoff\+ \(offset=1\).*m\*q < 1")
 from sift.selection.loops import _mrmr_loop_blas, _mrmr_loop_processes, mrmr_select
 
 
@@ -382,16 +386,17 @@ def test_select_fdr_conditions_on_include_and_as_result():
     assert bool(a.W.loc[a.W["feature"] == "inc_signal", "selected"].iloc[0])
     view = as_result(a, input_features=list(X.columns))
     assert "inc_signal" in view.features
-    multi = select_fdr(
-        X,
-        y,
-        include=["inc_noise"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-        n_draws=2,
-        candidates=["f0", "f1", "f2", "f3"],
-    )
+    with _expect_infeasible_knockoff_plus():
+        multi = select_fdr(
+            X,
+            y,
+            include=["inc_noise"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+            n_draws=2,
+            candidates=["f0", "f1", "f2", "f3"],
+        )
     as_result(multi, input_features=list(X.columns))
     freq = float(multi.W.loc[multi.W["feature"] == "inc_noise", "selection_frequency"].iloc[0])
     assert freq == 1.0
@@ -408,38 +413,42 @@ def test_select_fdr_constant_target_and_data_derived_metadata():
         include_provenance="prespecified",
         verbose=False,
     )
+    assert result.selector_metadata["tested_state"] == "not_run"
     assert result.selected_features == ["a"]
     assert "conditioning" in result.diagnostics_
     assert result.W.loc[result.W["feature"] == "a", "selected"].iloc[0]
-    derived = select_fdr(
-        X,
-        rng.normal(size=80),
-        include=["a"],
-        include_provenance="data_derived",
-        verbose=False,
-        q=0.2,
-        n_draws=2,
-    )
+    with _expect_infeasible_knockoff_plus():
+        derived = select_fdr(
+            X,
+            rng.normal(size=80),
+            include=["a"],
+            include_provenance="data_derived",
+            verbose=False,
+            q=0.2,
+            n_draws=2,
+        )
     assert derived.selector_metadata["fdr_control"] == "none"
     assert derived.selector_metadata["exploratory"] is True
     assert derived.selector_metadata["aggregation_preserves_per_draw_fdr"] is False
-    cand_only = select_fdr(
-        X,
-        rng.normal(size=80) + X["b"],
-        candidates=["b", "c"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-    )
+    with _expect_infeasible_knockoff_plus():
+        cand_only = select_fdr(
+            X,
+            rng.normal(size=80) + X["b"],
+            candidates=["b", "c"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+        )
     assert set(cand_only.selected_features) <= {"b", "c"}
-    excl = select_fdr(
-        X,
-        rng.normal(size=80) + X["b"],
-        exclude=["b"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-    )
+    with _expect_infeasible_knockoff_plus():
+        excl = select_fdr(
+            X,
+            rng.normal(size=80) + X["b"],
+            exclude=["b"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+        )
     assert "b" not in excl.selected_features
 
 
@@ -610,16 +619,17 @@ def test_fdr_dropped_provenance_not_false_zero_variance():
     rng = np.random.default_rng(11)
     X = pd.DataFrame(rng.normal(size=(120, 6)), columns=list("abcdef"))
     y = 1.5 * X["b"] + 0.2 * rng.normal(size=120)
-    result = select_fdr(
-        X,
-        y,
-        include=["a"],
-        exclude=["e"],
-        candidates=["b", "c", "d"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-    )
+    with _expect_infeasible_knockoff_plus():
+        result = select_fdr(
+            X,
+            y,
+            include=["a"],
+            exclude=["e"],
+            candidates=["b", "c", "d"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+        )
     meta = result.selector_metadata
     assert meta["n_zero_weight_variance_features"] == 0
     reasons = meta.get("dropped_feature_reasons", [])
@@ -635,16 +645,17 @@ def test_fdr_residual_zero_uses_truthful_reason():
     X = pd.DataFrame(rng.normal(size=(120, 4)), columns=list("abcd"))
     X["copy_a"] = X["a"]
     y = 1.5 * X["b"] + 0.2 * rng.normal(size=120)
-    result = select_fdr(
-        X,
-        y,
-        include=["a"],
-        candidates=["b", "c", "d", "copy_a"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-        subsample=None,
-    )
+    with _expect_infeasible_knockoff_plus():
+        result = select_fdr(
+            X,
+            y,
+            include=["a"],
+            candidates=["b", "c", "d", "copy_a"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+            subsample=None,
+        )
     meta = result.selector_metadata
     assert meta["n_zero_weight_variance_features"] == 0
     reasons = meta.get("dropped_feature_reasons", [])
@@ -666,6 +677,7 @@ def test_fdr_constant_target_discovery_roles():
         include_provenance="prespecified",
         verbose=False,
     )
+    assert result.selector_metadata["tested_state"] == "not_run"
     roles = dict(zip(result.W["feature"].tolist(), result.W["role"].tolist()))
     assert roles["a"] == "include"
     assert roles["b"] == "discovery"
@@ -691,6 +703,8 @@ def test_fdr_constant_target_residual_zero_not_discovery():
             subsample=None,
         )
         meta = result.selector_metadata
+        assert meta["tested_state"] == "not_run"
+        assert meta["n_tested"] == 0
         copy_pos = list(X.columns).index("copy_a")
         positions = meta.get("dropped_feature_positions", [])
         reasons = meta.get("dropped_feature_reasons", [])
@@ -728,16 +742,17 @@ def test_fdr_singular_include_rejected_ordinary_correlation_kept():
     X2 = pd.DataFrame(rng.normal(size=(150, 4)), columns=list("abcd"))
     y2 = X2["b"] + 0.2 * rng.normal(size=150)
     X2["corr"] = 0.55 * X2["a"] + 0.45 * rng.normal(size=150)
-    kept = select_fdr(
-        X2,
-        y2,
-        include=["a", "corr"],
-        candidates=["b", "c", "d"],
-        include_provenance="prespecified",
-        verbose=False,
-        q=0.2,
-        subsample=None,
-    )
+    with _expect_infeasible_knockoff_plus():
+        kept = select_fdr(
+            X2,
+            y2,
+            include=["a", "corr"],
+            candidates=["b", "c", "d"],
+            include_provenance="prespecified",
+            verbose=False,
+            q=0.2,
+            subsample=None,
+        )
     assert kept.selected_features[0] in {"a", "corr"}
     X3 = pd.DataFrame(rng.normal(size=(200, 4)), columns=list("abcd"))
     y3 = X3["b"] + 0.2 * rng.normal(size=200)

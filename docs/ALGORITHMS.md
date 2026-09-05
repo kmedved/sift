@@ -144,6 +144,17 @@ The 0.7.0 implementation:
 4. Computes antisymmetric feature statistics `W`.
 5. Applies the knockoff+ threshold, or aggregates multiple draws by frequency.
 
+Knockoff+ is discrete: metadata `min_feasible_q` is `1/min(m)` over completed
+draws, a necessary count bound rather than a sufficient discovery condition.
+`n_tested_per_draw` is the truthful post-screening count; `n_eligible` is the
+pre-screen unit count and is not a completed tested draw. Early returns such
+as a constant target set `tested_state="not_run"` instead of inventing
+screened counts. `n_discoveries_offset_0` counts reported discovery features
+at `offset=0` from the same `W`, which for grouped runs is the expanded
+feature list, not the tested-group count. A warning is emitted for
+`offset=1` draws with `m·q < 1`; an infeasible draw does not imply an empty
+aggregate. Included conditioning features are not tested units.
+
 The default statistic is `statistic="relevance"`, a fast marginal
 Gaussian-information difference between each original feature and its knockoff.
 `statistic="cefsplus"` enables a tie-safe greedy statistic that is slower but

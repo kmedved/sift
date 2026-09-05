@@ -1574,9 +1574,17 @@ def test_knockoff_without_supervised_encoding_keeps_its_fdr_claim():
     X, y = _knockoff_categorical_data()
     numeric = X.drop(columns=["team"])
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         selector = sift.KnockoffSelector(q=0.2, verbose=False).fit(numeric, y)
+
+    user_warnings = [item for item in caught if issubclass(item.category, UserWarning)]
+    assert user_warnings
+    assert all("m*q < 1" in str(item.message) for item in user_warnings)
+    assert not any(
+        "no FDR claim" in str(item.message) or "Model-X" in str(item.message)
+        for item in user_warnings
+    )
 
     metadata = selector.result_.selector_metadata
     assert metadata["fdr_control"] == "approximate_plugin"
