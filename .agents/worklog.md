@@ -4,7 +4,7 @@
 
 - Active goal: complete the owner-approved 0.9.1 closeout and ordered 0.9.x roadmap in TODO.MD and docs/specs/0.9-product-layer.md.
 - Grok4.6 is primary coder; Codex independently verifies; Claude Opus xhigh reviews concurrently between stages. Return verified defects to Grok. Relevant private source transmission to xAI/Anthropic is approved.
-- Resume exact sessions: Grok6942c6e1-14da-42e0-8ef2-27e77a0ab942 workspace/medium, completed stage65; Opus72bc11aa-3fc5-4cae-8b5a-9197b89f270c read-only/xhigh, completed stage55. No provider active; caller prompts removed. Installed launchers, same cwd/envelope, no fresh session/turn cap. Redact incidental sc_token output.
+- Resume exact sessions: Grok6942c6e1-14da-42e0-8ef2-27e77a0ab942 workspace/medium, completed stage66; Opus72bc11aa-3fc5-4cae-8b5a-9197b89f270c read-only/xhigh, completed stage56. No provider active; caller prompts removed. Installed launchers, same cwd/envelope, no fresh session/turn cap. Redact incidental sc_token output.
 - Codex owns commits/push/merge. Preserve unrelated changes. No PyPI publication; GitHub Releases/tags remain separate owner actions. Development0.9.1.dev0; v0.9.0 immutable94bae05.
 
 ## Completed milestones
@@ -28,13 +28,13 @@
 - Final local integration gate: 2138 passed / 40 skipped under pytest9/-W error, no deselections, in65s. Runtime binding, both generators, strict MkDocs, Ruff and whitespace checks pass. This supersedes the pre-artifact run. All18 data/selection fingerprints match the preceding artifact.
 - Completed commit/push, exact-head CI verification and merge. No further F8b review or runtime refresh needed without new evidence.
 
-## Current stage: F8c accepted implementation, retained run next
+## Current stage: F8c accepted, integration next
 
-- Branch `codex/0.9x-f8c-statistic-bakeoff`, base `f70a3da`. Grok64/65 wrote the public-API bakeoff and fixed all5 review findings. Codex and resumed Opus54/55 independently accept; checkout hashes unchanged through both reviews. Protocol/findings: /private/tmp/sift_f8c_review_protocol.md and /private/tmp/sift_f8c_codex_findings.md. No production statistic/default change.
-- Fixed study: independent/AR1/block/dense-weak × relevance/lsm/ridge/cefsplus, n800/p40, seeds0–29, q0.1/offset1/equi/one draw, unchanged statistic options; one warmup + one timed call. Paired data and actual knockoff draws verified. Descriptive FDP/power/cost and SEs, not a validity proof; retain F8b LSM/CEFS+ caveats.
-- Evidence fixes: immutable pre-run source/environment, end-source/commit guard,75 source hashes, persisted selected indices/timing samples/effective pools, phase-aware warnings including failures, strict finite JSON. Historical/current LSM wording corrected. No retained full artifact yet.
-- Verification: full pytest9/-W error2148 passed/40 skipped in65s; Ruff, both generators, strict MkDocs, existing runtime binding and whitespace pass. Optional redundant guard tests deferred; independent live probes pass.
-- Next: commit implementation; run `benchmarks/bench_knockoff_statistic_bakeoff.py --full --output benchmarks/results/knockoff_statistic_bakeoff.csv` from clean commit without concurrent providers/tests. Then retained artifact/report binding and scoped1.0 recommendation, full CI and merge. Existing runtime_scaling evidence is unchanged and valid.
+- Implementation committed `ae904b8af02037eb66cd649384c4665dba17049d`. Codex retained full run captured `2026-09-05T06:32:30.226365+00:00`, dirty=false, 75 source hashes. Artifacts `benchmarks/results/knockoff_statistic_bakeoff.csv` and `.provenance.json` treated as immutable. CSV SHA256 `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`. 480 cells, zero failures/warnings, pools=1.
+- Report table filled from `render_summary_markdown`. Recommendation for the 1.0 owner decision: retain `relevance`. Paired ridge-minus-relevance power +0.0083 / −0.1167 / −0.5444 / +0.010; ridge lowers FDP but loses power on correlated designs. Relevance FDP means ~0.0073/0.0103/0.0606/0.0215, all sampled below q=0.1, not a formal FDR certificate. Scratch AR(1) 0.39 vs 0.90 is a different unretained design. No 0.9 default change. Next: F3 blocks after Codex push/CI/merge.
+- Runtime scaling evidence unchanged and still valid. Grok66 docs/binding only; no runner or production edits.
+- Codex and Opus56 accept artifact/report/binding with no material defect; all3 reviewer checkout hash manifests unchanged. Codex checked480 row metrics/CSV/JSON/summary/source hashes; Opus additionally reproduced120/120 data fingerprints. Review protocol /private/tmp/sift_f8c_review_protocol.md; no more review needed absent new evidence.
+- Final local gate: pytest9/-W error2149 passed/40 skipped in66s; Ruff, generators, strict docs, runtime binding and whitespace pass. Next commit retained artifacts/report, push, verify all6 required jobs on exact PR head and merge. No benchmark rerun or default flip needed. Ordinary desktop background activity is disclosed for descriptive timing.
 
 ## Runtime evidence
 
@@ -43,7 +43,7 @@
 
 ## Remaining ordered roadmap
 
-F8c statistic bakeoff; F3 blocks; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector/purged splits; classic caches; unsupervised ordinal/frequency fallbacks. Keep overall goal active at intermediate milestones.
+F8c integration; F3 blocks; E4 one-hot blocks; F9 leakage-safe compare; manifests; F4 Stabilized; F5 multi-target CEFS+; F6 ModelSelector/purged splits; classic caches; unsupervised ordinal/frequency fallbacks. Keep overall goal active at intermediate milestones.
 
 ## Tooling
 

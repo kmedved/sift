@@ -48,11 +48,12 @@
   is unchanged.
 - Added `benchmarks/bench_knockoff_statistic_bakeoff.py`, a seeded public
   `select_fdr` comparison of `relevance`, `lsm`, `ridge`, and `cefsplus` on
-  independent, AR(1), block-correlated, and dense-weak designs. The 0.9
-  default remains `relevance`. Committed full-run numbers and any 1.0
-  recommendation wait for a clean-source retained `--full` run. Realized FDP
-  on these designs does not upgrade `approximate_plugin` and does not prove
-  sign-flip for LSM or CEFS+.
+  independent, AR(1), block-correlated, and dense-weak designs. The retained
+  full run (commit `ae904b8`, CSV SHA256 `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`)
+  recommends keeping `relevance` for the 1.0 owner decision on that grid:
+  ridge reduced realized FDP but lost power on correlated designs. The 0.9
+  default remains `relevance`. Realized FDP does not upgrade
+  `approximate_plugin` and does not prove sign-flip for LSM or CEFS+.
 
 ### Documentation
 

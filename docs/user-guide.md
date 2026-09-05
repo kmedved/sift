@@ -446,8 +446,11 @@ Read the guarantee metadata literally:
   features; deduplicate near-copies before building the cache when power matters.
 
 `statistic="relevance"` is the fastest compatibility default for marginal
-signals. Relative power is data-dependent, and no committed quality bakeoff
-establishes a universal winner. `statistic="cefsplus"` enables a tie-safe greedy
+signals and remains the 0.9 default. The retained
+[statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
+`relevance` for the 1.0 owner decision on its four Gaussian designs: ridge
+cut realized FDP but lost substantial power on AR(1) and block-correlated
+draws. That is scoped evidence, not a universal winner. `statistic="cefsplus"` enables a tie-safe greedy
 CEFS+ statistic with pair-coupled screening and objective-gain W magnitudes. It
 can recover redundant signal families that a marginal statistic treats as a
 single effect, but it is still slower at large `screen_pairs`/`path_depth`, so

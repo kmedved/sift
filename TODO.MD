@@ -98,7 +98,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       review accepted; validated relevance/ridge and explicit exploratory modes.
       Merged as PR #83 at `f70a3da` (artifact `2a05c66`); clean runtime
       evidence, full local gate and all six required GitHub CI jobs passed.
-- [ ] F8c statistic bakeoff.
+- [x] F8c statistic bakeoff, implementation `ae904b8`, retained CSV SHA256
+      `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`.
+      Codex/Opus accepted the runner; evidence recorded. Integration pending.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.

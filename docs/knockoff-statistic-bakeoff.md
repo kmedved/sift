@@ -31,10 +31,17 @@ the same `X`, `y`, and `random_state` on each replicate.
 
 | design | covariance | signals | amplitude |
 | --- | --- | --- | --- |
-| `independent` | identity | 12 on the full grid (`p=40`) | 1.8 → 1.1 |
-| `ar1` | AR(1) ρ=0.5 | 12 | 1.8 → 1.1 |
-| `block` | 5×5 blocks, ρ=0.7 | 12 | 1.8 → 1.1 |
-| `dense_weak` | identity | 20 | 0.70 → 0.45 |
+| `independent` | identity | first 12 columns | 1.8 → 1.1 |
+| `ar1` | AR(1) ρ=0.5 | first 12 columns | 1.8 → 1.1 |
+| `block` | 5×5 blocks, ρ=0.7 | first 12 columns | 1.8 → 1.1 |
+| `dense_weak` | identity | first 20 columns | 0.70 → 0.45 |
+
+Noise is i.i.d. Gaussian with SD 1. True coefficients are the first
+`n_signal` entries, all positive and contiguous. That same-sign contiguous
+support is part of this study, not a claim about mixed-sign or suppressor
+designs. `dense_weak` uses weaker amplitudes than the other three; on this
+grid it is **not** an empirically hard detection problem (relevance power
+about 0.99).
 
 Full retained study: `n=800`, `p=40`, 30 data seeds `{0,…,29}`, one warm-up
 call and one timed call per cell, native thread pools limited to 1. Smoke:
@@ -63,7 +70,10 @@ LOKY_MAX_CPU_COUNT=8 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 
   --full --output benchmarks/results/knockoff_statistic_bakeoff.csv
 ```
 
-The CSV is accompanied by `knockoff_statistic_bakeoff.provenance.json`.
+The retained artifacts are
+[`benchmarks/results/knockoff_statistic_bakeoff.csv`](https://github.com/kmedved/sift/blob/main/benchmarks/results/knockoff_statistic_bakeoff.csv)
+and
+[`benchmarks/results/knockoff_statistic_bakeoff.provenance.json`](https://github.com/kmedved/sift/blob/main/benchmarks/results/knockoff_statistic_bakeoff.provenance.json).
 Provenance stores the SHA-256 of the **whole CSV**, plus per-seed selected
 indices, finite timing samples, structured warnings, and effective thread
 pools. It does not invent extra per-row file digests. Source hashes are
@@ -72,19 +82,72 @@ the later presence of the output files.
 
 ## Retained results
 
-The committed full-run numbers are filled after Codex runs the command above
-from a clean source commit. Until then this table is a skeleton, not a 1.0
-recommendation.
+Retained full run from clean implementation commit
+`ae904b8af02037eb66cd649384c4665dba17049d`, captured
+`2026-09-05T06:32:30.226365+00:00`, `dirty=false` and empty status, 75 source
+hashes. CSV SHA256
+`40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`.
+Environment: `/opt/anaconda3/bin/python` 3.12.7, NumPy 1.26.4, pandas 2.2.2,
+scikit-learn 1.5.1, SciPy 1.13.1, numba 0.60.0, threadpoolctl 3.5.0, macOS
+arm64. Native pools recorded as 1. Zero failed cells and zero warnings.
+Codex ran this command with no concurrent tests or reviewers; ordinary
+macOS/remote-desktop background processes were present. Millisecond-scale
+desktop timings are descriptive and are not a performance guarantee.
 
 <!-- knockoff-statistic-bakeoff-table:start -->
-Full retained study not yet written. Run the `--full` command from a clean
-implementation commit, then replace this block with the runner summary.
+Study `full`. Cells are mean ± SE over completed seeds; failed seeds are counted, not converted to empty selections.
+
+| design | statistic | n ok | n failed | n warned | FDP | power | discoveries | runtime s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| independent | `relevance` | 30 | 0 | 0 | 0.007 ± 0.005 | 0.989 ± 0.005 | 11.967 ± 0.102 | 0.002 ± 0.000 |
+| independent | `lsm` | 30 | 0 | 0 | 0.000 ± 0.000 | 1.000 ± 0.000 | 12.000 ± 0.000 | 0.005 ± 0.000 |
+| independent | `ridge` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.997 ± 0.003 | 11.967 ± 0.033 | 0.004 ± 0.000 |
+| independent | `cefsplus` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.244 ± 0.075 | 2.933 ± 0.906 | 0.003 ± 0.000 |
+| ar1 | `relevance` | 30 | 0 | 0 | 0.010 ± 0.005 | 0.997 ± 0.003 | 12.100 ± 0.074 | 0.002 ± 0.000 |
+| ar1 | `lsm` | 30 | 0 | 0 | 0.000 ± 0.000 | 1.000 ± 0.000 | 12.000 ± 0.000 | 0.005 ± 0.000 |
+| ar1 | `ridge` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.881 ± 0.045 | 10.567 ± 0.540 | 0.004 ± 0.000 |
+| ar1 | `cefsplus` | 30 | 0 | 0 | 0.003 ± 0.003 | 0.025 ± 0.025 | 0.333 ± 0.333 | 0.004 ± 0.000 |
+| block | `relevance` | 30 | 0 | 0 | 0.061 ± 0.012 | 0.967 ± 0.011 | 12.433 ± 0.257 | 0.002 ± 0.000 |
+| block | `lsm` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.908 ± 0.046 | 10.900 ± 0.556 | 0.005 ± 0.000 |
+| block | `ridge` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.422 ± 0.084 | 5.067 ± 1.010 | 0.004 ± 0.000 |
+| block | `cefsplus` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.004 ± 0.000 |
+| dense_weak | `relevance` | 30 | 0 | 0 | 0.022 ± 0.007 | 0.987 ± 0.006 | 20.200 ± 0.206 | 0.002 ± 0.000 |
+| dense_weak | `lsm` | 30 | 0 | 0 | 0.000 ± 0.000 | 1.000 ± 0.000 | 20.000 ± 0.000 | 0.005 ± 0.000 |
+| dense_weak | `ridge` | 30 | 0 | 0 | 0.002 ± 0.002 | 0.997 ± 0.002 | 19.967 ± 0.058 | 0.004 ± 0.000 |
+| dense_weak | `cefsplus` | 30 | 0 | 0 | 0.000 ± 0.000 | 0.900 ± 0.037 | 18.000 ± 0.733 | 0.005 ± 0.000 |
+
+Paired `ridge - relevance` on shared seeds:
+
+| design | n paired | power diff | FDP diff | runtime s diff |
+| --- | ---: | ---: | ---: | ---: |
+| independent | 30 | 0.008 ± 0.005 | -0.007 ± 0.005 | 0.002 ± 0.000 |
+| ar1 | 30 | -0.117 ± 0.045 | -0.010 ± 0.005 | 0.002 ± 0.000 |
+| block | 30 | -0.544 ± 0.082 | -0.061 ± 0.012 | 0.002 ± 0.000 |
+| dense_weak | 30 | 0.010 ± 0.007 | -0.020 ± 0.006 | 0.001 ± 0.000 |
 <!-- knockoff-statistic-bakeoff-table:end -->
 
-A 1.0 recommendation, when issued, will be scoped to these four Gaussian
-designs, `q=0.1`, `offset=1`, `s_method="equi"`, `n_draws=1`, and will not
-claim universal dominance. The uncommitted review-time AR(1) contrast (power
-0.39 vs 0.90) remains a hypothesis until the retained run.
+**Recommendation for the 1.0 owner decision, on this evidence:** retain
+`statistic="relevance"`. Paired ridge-minus-relevance power is +0.0083
+(independent), −0.1167 (AR(1)), −0.5444 (block), +0.010 (dense-weak). Ridge
+reduces realized FDP but materially loses power on the correlated designs and
+costs more here. Relevance FDP means are about 0.0073 / 0.0103 / 0.0606 /
+0.0215, all sampled below `q=0.1`. That is an empirical calibration check on
+these Gaussian draws, not a formal FDR certificate and not an upgrade of
+`approximate_plugin`.
+
+This does **not** claim universal dominance, suppressor or mixed-sign
+support, or `p ≫ n` coverage. Standard errors describe Monte Carlo sampling
+variability of this fixed study; they are not a significance test. Adaptive
+CEFS+ and tied/truncated LSM still have no general sign-flip proof; their
+rows are quality/runtime measurements only. The 0.9 default remains
+`relevance`; any 1.0 change stays an owner decision.
+
+LSM has strong measured quality here, but its missing general sign-flip
+guarantee prevents recommending it as a validity-preserving default replacement.
+
+The earlier uncommitted AR(1) contrast (power 0.39 vs 0.90) used a different
+unretained design. This run does not reproduce or generalize that claim, and
+it is not a universal disproof of ridge.
 
 ## What this study does not do
 

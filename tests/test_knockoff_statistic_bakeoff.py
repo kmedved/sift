@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import inspect
 import json
+import subprocess
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,6 +16,15 @@ import pytest
 
 from benchmarks import bench_knockoff_statistic_bakeoff as bakeoff
 from sift import select_fdr
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RESULT_CSV = REPO_ROOT / "benchmarks/results/knockoff_statistic_bakeoff.csv"
+RESULT_PROVENANCE = REPO_ROOT / "benchmarks/results/knockoff_statistic_bakeoff.provenance.json"
+DOC = REPO_ROOT / "docs/knockoff-statistic-bakeoff.md"
+TABLE_START = "<!-- knockoff-statistic-bakeoff-table:start -->\n"
+TABLE_END = "\n<!-- knockoff-statistic-bakeoff-table:end -->"
+RETAINED_COMMIT = "ae904b8af02037eb66cd649384c4665dba17049d"
+RETAINED_CSV_SHA256 = "40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf"
 
 
 def test_paired_designs_share_data_across_statistics():
@@ -337,3 +350,118 @@ def test_main_captures_source_before_run_and_write(monkeypatch, tmp_path):
     assert payload["records"][0]["selected_indices"] == [0]
     assert payload["records"][0]["runtime_samples_s"] == [0.01]
     assert payload["artifact"]["sha256"] == bakeoff._sha256_file(output)
+
+
+def _git_blob_sha256(commit: str, relative: str) -> str:
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{relative}"],
+        cwd=REPO_ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        pytest.fail(
+            f"cannot read {relative} at provenance commit {commit}"
+        )
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
+def test_retained_bakeoff_artifacts_bind_report_and_historical_sources():
+    if not RESULT_CSV.is_file() or not RESULT_PROVENANCE.is_file():
+        pytest.fail(
+            "retained F8c artifacts are missing: "
+            "benchmarks/results/knockoff_statistic_bakeoff.csv and "
+            ".provenance.json"
+        )
+    provenance = json.loads(RESULT_PROVENANCE.read_text(encoding="utf-8"))
+    commit = str(provenance["git"]["commit"])
+    have_commit = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    if not have_commit:
+        pytest.skip(
+            f"provenance commit {commit[:12]} is not available in this checkout "
+            "(shallow clone or archive); CI runs this verification on a "
+            "full-history checkout"
+        )
+
+    csv_sha = hashlib.sha256(RESULT_CSV.read_bytes()).hexdigest()
+    assert csv_sha == RETAINED_CSV_SHA256
+    assert provenance["artifact"]["sha256"] == csv_sha
+    assert provenance["schema"] == bakeoff.PROVENANCE_SCHEMA
+    assert provenance["study"] == "full"
+    assert provenance["git"]["dirty"] is False
+    assert provenance["git"]["status_porcelain"] == []
+    assert commit == RETAINED_COMMIT
+    assert provenance["environment"]["captured_at_utc"] == (
+        "2026-09-05T06:32:30.226365+00:00"
+    )
+    assert len(provenance["git"]["source_sha256"]) == 75
+    for relative, expected_hash in provenance["git"]["source_sha256"].items():
+        assert _git_blob_sha256(commit, relative) == expected_hash
+
+    with RESULT_CSV.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == bakeoff.CSV_COLUMNS
+        csv_rows = list(reader)
+    assert len(csv_rows) == 480
+    assert len(provenance["records"]) == 480
+    expected_cells = {
+        (design, statistic, seed)
+        for design in bakeoff.DESIGNS
+        for statistic in bakeoff.STATISTICS
+        for seed in range(30)
+    }
+    assert {
+        (row["design"], row["statistic"], int(row["seed"])) for row in csv_rows
+    } == expected_cells
+
+    json_by_key = {
+        (row["design"], row["statistic"], int(row["seed"])): row
+        for row in provenance["records"]
+    }
+    data_by_design_seed = {}
+    for csv_row in csv_rows:
+        key = (csv_row["design"], csv_row["statistic"], int(csv_row["seed"]))
+        rec = json_by_key[key]
+        assert rec["status"] == "ok"
+        assert csv_row["status"] == "ok"
+        assert csv_row["data_sha256"] == rec["data_sha256"]
+        assert csv_row["selection_sha256"] == rec["selection_sha256"]
+        assert rec["selected_indices"] is not None
+        assert bakeoff._selection_fingerprint(rec["selected_indices"]) == rec[
+            "selection_sha256"
+        ]
+        fdp, power, n_disc = bakeoff._fdp_power(
+            rec["selected_indices"],
+            set(range(int(rec["n_signal"]))),
+        )
+        assert n_disc == int(rec["n_discoveries"]) == int(csv_row["n_discoveries"])
+        assert fdp == pytest.approx(float(rec["fdp"]))
+        assert power == pytest.approx(float(rec["power"]))
+        assert fdp == pytest.approx(float(csv_row["fdp"]))
+        assert power == pytest.approx(float(csv_row["power"]))
+        samples = rec["runtime_samples_s"]
+        assert samples
+        assert all(isinstance(value, (int, float)) and value > 0 for value in samples)
+        assert rec["runtime_s"] == pytest.approx(float(csv_row["runtime_s"]))
+        assert rec["effective_num_threads"] == [1]
+        pair = (csv_row["design"], int(csv_row["seed"]))
+        data_by_design_seed.setdefault(pair, set()).add(csv_row["data_sha256"])
+    assert all(len(hashes) == 1 for hashes in data_by_design_seed.values())
+
+    recomputed = bakeoff.summarize(provenance["records"])
+    assert recomputed == provenance["summary"]
+    rendered = bakeoff.render_summary_markdown(provenance["summary"], study="full")
+    doc = DOC.read_text(encoding="utf-8")
+    documented = doc.split(TABLE_START, 1)[1].split(TABLE_END, 1)[0]
+    assert documented == rendered.rstrip("\n")
+    assert RETAINED_CSV_SHA256 in doc
+    assert RETAINED_COMMIT in doc
+    assert "benchmarks/results/knockoff_statistic_bakeoff.csv" in doc
+    assert "knockoff_statistic_bakeoff.provenance.json" in doc

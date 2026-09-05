@@ -624,9 +624,11 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff. It remains the compatibility default. No
-  committed quality bakeoff establishes a universal winner among statistics;
-  compare `ridge` or `lsm` when conditional signal is plausible.
+  original feature and its knockoff. It remains the 0.9 compatibility default.
+  The retained [statistic bakeoff](docs/knockoff-statistic-bakeoff.md)
+  recommends keeping `relevance` for the 1.0 owner decision on those four
+  Gaussian designs (ridge reduced realized FDP but lost power on correlated
+  draws). That is not a universal ranking.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
   target correlations. Truncated LARS paths and ties are **not** generally
