@@ -254,5 +254,6 @@ def test_store_proxies_defaults_are_additive():
         sift.select_jmim,
         sift.select_cefsplus,
         sift.select_cefsplus_binary,
+        sift.StabilitySelector,
     ):
         assert inspect.signature(function).parameters["store_proxies"].default is False

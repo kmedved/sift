@@ -7,8 +7,8 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): `python -m pytest -q` gives **1,982 passed,
-  40 skipped**. The matrix-stage count was 1,973 / 40. All public docstring
+  `catboost` or `category_encoders`): the F2 integration run gives **2,085 passed,
+  40 skipped** under warnings-as-errors. All public docstring
   examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
@@ -61,7 +61,7 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `b2a11bdf0d6131ba2714207378619e79a7ea833b` with `dirty=false`.
+      `081ca04552c0d662691a968b64455bea141d2ba8` with `dirty=false`.
 - [x] 0.9.1 integration closeout: pushed, required GitHub CI jobs passed, and
       merged as PR #78 at `3b9ac0a`. PyPI publication did not follow.
 
@@ -81,10 +81,12 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       and `selection/auto_k.py`. Merged as PR #78 at `3b9ac0a` (implementation
       commit `fa74d63`).
 - [x] F1 conditioning sets (`include=`, `exclude=`, `candidates=`).
-      Review-accepted on `codex/0.9x-f1-conditioning` (base merge `3b9ac0a` /
-      PR #78). Implementation commit `b2a11bdf0d6131ba2714207378619e79a7ea833b`.
-      Artifact commit has not landed yet.
-- [ ] F2 proxy/redundancy and cluster reports.
+      Merged as PR #79 at `14bfb5c` (implementation `b2a11bd`, artifact
+      `682af22`; required GitHub CI green).
+- [x] F2 proxy/redundancy and cluster reports.
+      Codex and Opus review accepted on `codex/0.9x-f2-proxy-reports`
+      (implementation `081ca04`). Clean runtime refresh and the full local gate
+      passed; GitHub CI and merge remain before F7.
 - [ ] F7 panel within/between transforms.
 - [ ] F8a knockoff feasibility and UX metadata; F8b/F8c validated e-value
       aggregation and the statistic bakeoff.

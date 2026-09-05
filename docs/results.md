@@ -270,3 +270,18 @@ absolute-correlation threshold. When raw labels repeat, use
 The proxy block is deliberately omitted from `to_dict()`; its presence, byte
 count, and candidate count are recorded in metadata. Without the explicit
 option, both proxy accessors raise with guidance to rerun selection.
+
+`view.redundancy_report(r_min=0.8)` lists every qualifying edge across the
+selected set, with raw positions next to labels so duplicate names stay
+identifiable. `view.proxy_clusters(r_min=0.8)` groups selected features with
+their qualifying stand-ins by connected components on that same block: a
+candidate correlated with two selected anchors joins those anchors, and a
+selected feature with no stand-ins is a singleton cluster. Signed
+correlations are kept in the edge report; clustering uses absolute
+correlation. Strictly monotone transforms of columns keep rank-Gaussian
+clusters; a strictly decreasing transform of one column flips that edge's
+signed correlation. Fitted `StabilitySelector(..., store_proxies=True)` views also
+fill `cluster_frequency` as the fraction of completed resamples in which any
+cluster member was selected. The `cluster_frequency` column is always
+present; without a resample payload its values are nullable rather than
+invented numbers. Resample indicators are omitted from `to_dict()`.

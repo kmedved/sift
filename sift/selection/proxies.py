@@ -10,6 +10,7 @@ import pandas as pd
 
 
 MAX_PROXY_CORRELATION_BYTES = 64 * 1024**2
+MAX_RESAMPLE_SELECTION_BYTES = 16 * 1024**2
 
 
 def _positions(values: Iterable[object], *, label: str) -> list[int]:
@@ -62,6 +63,52 @@ def _numeric_correlations(values: np.ndarray, *, label: str) -> np.ndarray:
     if np.any(np.abs(array) > 1.0 + 1e-6):
         raise ValueError(f"{label} values must be correlations in [-1, 1]")
     return np.clip(array, -1.0, 1.0)
+
+
+def weighted_correlation_columns(
+    Z: np.ndarray,
+    w: np.ndarray,
+    column_locals: Iterable[int],
+    *,
+    batch_size: int = 50_000,
+) -> np.ndarray:
+    """Weighted correlations of every column of ``Z`` with a selected subset.
+
+    Computes only the ``p × k`` block. Self-correlations of selected columns
+    are forced to 1.0 after clipping off-diagonals to ``±0.999999``, matching
+    ``weighted_correlation_matrix``.
+    """
+    from threadpoolctl import threadpool_limits
+
+    Z64 = np.ascontiguousarray(Z, dtype=np.float64)
+    w64 = np.asarray(w, dtype=np.float64).ravel()
+    cols = np.asarray(list(column_locals), dtype=np.int64)
+    if Z64.ndim != 2:
+        raise ValueError("Z must be 2-d")
+    n, p = Z64.shape
+    if w64.shape[0] != n:
+        raise ValueError("w length must match Z rows")
+    k = int(cols.size)
+    if k == 0:
+        return np.zeros((p, 0), dtype=np.float64)
+    if np.any((cols < 0) | (cols >= p)):
+        raise ValueError("column_locals must be valid Z column positions")
+    w_sum = float(w64.sum())
+    if w_sum <= 0.0:
+        raise ValueError("Weights must sum to > 0")
+    sqrt_w = np.sqrt(w64)
+    gram = np.zeros((p, k), dtype=np.float64)
+    batch_size = max(1, int(batch_size))
+    with threadpool_limits(limits=1):
+        for start in range(0, n, batch_size):
+            stop = min(n, start + batch_size)
+            zw = Z64[start:stop] * sqrt_w[start:stop, None]
+            gram += zw.T @ zw[:, cols]
+    gram /= w_sum
+    np.clip(gram, -0.999999, 0.999999, out=gram)
+    for j, local in enumerate(cols.tolist()):
+        gram[int(local), j] = 1.0
+    return gram
 
 
 def proxy_frame_from_panel(
@@ -132,6 +179,231 @@ def normalize_proxy_frame(
         columns=pd.Index(selected, name="selected_index"),
     )
     return normalized, storage_bytes
+
+
+def validate_r_min(r_min: object) -> float:
+    """Reject bools and non-finite values; require ``r_min`` in ``[0, 1]``."""
+    if isinstance(r_min, (bool, np.bool_)) or not isinstance(
+        r_min,
+        (Real, np.integer, np.floating),
+    ):
+        raise ValueError("r_min must be a finite number between 0 and 1")
+    threshold = float(r_min)
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("r_min must be a finite number between 0 and 1")
+    return threshold
+
+
+def normalize_resample_selections(
+    values: np.ndarray | None,
+    *,
+    n_features: int | None,
+) -> tuple[np.ndarray | None, int]:
+    """Validate and copy a completed-resample selection indicator matrix."""
+    if values is None:
+        return None, 0
+    if n_features is None:
+        raise ValueError("resample selections require a known raw feature width")
+    n_features = int(n_features)
+    if n_features < 0:
+        raise ValueError("n_raw_features must be a non-negative integer or None")
+    array = np.asarray(values)
+    if array.ndim != 2:
+        raise ValueError("resample selections must be a 2-d indicator matrix")
+    n_resamples, n_cols = array.shape
+    if n_cols != n_features:
+        raise ValueError(
+            "resample selections must have one column per raw feature"
+        )
+    if n_resamples < 1:
+        raise ValueError("resample selections must contain at least one completed resample")
+    if array.dtype == np.bool_ or array.dtype == bool:
+        indicators = np.ascontiguousarray(array.astype(bool, copy=True))
+    else:
+        if array.dtype.kind not in {"i", "u", "b"}:
+            raise ValueError("resample selections must be boolean or integer 0/1 indicators")
+        unique = np.unique(array)
+        if unique.size > 2 or np.any((unique != 0) & (unique != 1)):
+            raise ValueError("resample selections must be boolean or integer 0/1 indicators")
+        indicators = np.ascontiguousarray(array.astype(bool, copy=True))
+    storage_bytes = int(indicators.nbytes)
+    if storage_bytes > MAX_RESAMPLE_SELECTION_BYTES:
+        limit_mib = MAX_RESAMPLE_SELECTION_BYTES / 1024**2
+        requested_mib = storage_bytes / 1024**2
+        raise ValueError(
+            "store_proxies=True would retain "
+            f"{requested_mib:.2f} MiB of resample selection indicators, "
+            f"exceeding the {limit_mib:.0f} MiB limit"
+        )
+    return indicators, storage_bytes
+
+
+def redundancy_report_frame(
+    block: pd.DataFrame,
+    *,
+    selected_indices: list[int],
+    raw_features: list[object] | None,
+    r_min: float,
+) -> pd.DataFrame:
+    """Every qualifying unselected-candidate ↔ selected-feature edge."""
+    columns = {
+        "selected_feature": pd.Series(dtype=object),
+        "selected_index": pd.Series(dtype="int64"),
+        "feature": pd.Series(dtype=object),
+        "candidate_index": pd.Series(dtype="int64"),
+        "correlation": pd.Series(dtype="float64"),
+    }
+    if not selected_indices:
+        return pd.DataFrame(columns)
+    selected_set = set(int(i) for i in selected_indices)
+    selected_labels = _labels_for(selected_indices, raw_features)
+    records: list[tuple[int, float, int, int, object, object, float]] = []
+    for path_rank, selected_pos in enumerate(selected_indices):
+        if selected_pos not in block.columns:
+            continue
+        values = block[selected_pos]
+        for candidate_pos, correlation in zip(
+            np.asarray(values.index, dtype=np.int64),
+            values.to_numpy(dtype=np.float64),
+        ):
+            candidate_pos = int(candidate_pos)
+            if candidate_pos in selected_set:
+                continue
+            if abs(float(correlation)) < r_min:
+                continue
+            records.append(
+                (
+                    path_rank,
+                    -abs(float(correlation)),
+                    candidate_pos,
+                    int(selected_pos),
+                    selected_labels[path_rank],
+                    _label_at(candidate_pos, raw_features),
+                    float(correlation),
+                )
+            )
+    records.sort()
+    return pd.DataFrame(
+        {
+            "selected_feature": [item[4] for item in records],
+            "selected_index": [item[3] for item in records],
+            "feature": [item[5] for item in records],
+            "candidate_index": [item[2] for item in records],
+            "correlation": [item[6] for item in records],
+        }
+    )
+
+
+def proxy_cluster_frame(
+    block: pd.DataFrame,
+    *,
+    selected_indices: list[int],
+    raw_features: list[object] | None,
+    r_min: float,
+    resample_selections: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Selected-anchored connected components of qualifying proxy edges."""
+    columns = {
+        "cluster_id": pd.Series(dtype="int64"),
+        "feature": pd.Series(dtype=object),
+        "selected_index": pd.Series(dtype="int64"),
+        "selected": pd.Series(dtype=bool),
+        "cluster_frequency": pd.Series(dtype="Float64"),
+    }
+    if not selected_indices:
+        return pd.DataFrame(columns)
+    parent: dict[int, int] = {}
+
+    def find(node: int) -> int:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    selected_set = set(int(i) for i in selected_indices)
+    for selected_pos in selected_indices:
+        parent.setdefault(int(selected_pos), int(selected_pos))
+        if selected_pos not in block.columns:
+            continue
+        values = block[selected_pos]
+        for candidate_pos, correlation in zip(
+            np.asarray(values.index, dtype=np.int64),
+            values.to_numpy(dtype=np.float64),
+        ):
+            candidate_pos = int(candidate_pos)
+            if candidate_pos == int(selected_pos):
+                continue
+            if abs(float(correlation)) < r_min:
+                continue
+            union(int(selected_pos), candidate_pos)
+
+    root_to_id: dict[int, int] = {}
+    members: dict[int, list[int]] = {}
+    for selected_pos in selected_indices:
+        root = find(int(selected_pos))
+        if root not in root_to_id:
+            root_to_id[root] = len(root_to_id)
+            members[root] = []
+        members[root].append(int(selected_pos))
+    for node in parent:
+        if node in selected_set:
+            continue
+        root = find(node)
+        if root in members:
+            members[root].append(int(node))
+
+    cluster_freq: dict[int, float] | None = None
+    if resample_selections is not None:
+        n_resamples = int(resample_selections.shape[0])
+        cluster_freq = {}
+        for root, cluster_id in root_to_id.items():
+            positions = np.asarray(members[root], dtype=np.int64)
+            hit = np.any(resample_selections[:, positions], axis=1)
+            cluster_freq[cluster_id] = float(np.count_nonzero(hit) / n_resamples)
+
+    rows: list[dict[str, object]] = []
+    emitted: set[int] = set()
+    for selected_pos in selected_indices:
+        root = find(int(selected_pos))
+        cluster_id = root_to_id[root]
+        if cluster_id in emitted:
+            continue
+        emitted.add(cluster_id)
+        cluster_members = members[root]
+        selected_members = [pos for pos in selected_indices if pos in cluster_members]
+        candidate_members = sorted(
+            pos for pos in cluster_members if pos not in selected_set
+        )
+        freq: object = pd.NA if cluster_freq is None else cluster_freq[cluster_id]
+        for pos in selected_members + candidate_members:
+            rows.append(
+                {
+                    "cluster_id": cluster_id,
+                    "feature": _label_at(pos, raw_features),
+                    "selected_index": int(pos),
+                    "selected": pos in selected_set,
+                    "cluster_frequency": freq,
+                }
+            )
+    frame = pd.DataFrame(rows, columns=list(columns))
+    frame["cluster_frequency"] = frame["cluster_frequency"].astype("Float64")
+    return frame
+
+
+def _labels_for(positions: list[int], raw_features: list[object] | None) -> list[object]:
+    return [_label_at(position, raw_features) for position in positions]
+
+
+def _label_at(position: int, raw_features: list[object] | None) -> object:
+    if raw_features is None:
+        return int(position)
+    return raw_features[int(position)]
 
 
 __all__: list[str] = []

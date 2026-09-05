@@ -237,6 +237,24 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
             selector._sklearn_output_config
         )
 
+    proxy_correlations = getattr(selector, "_proxy_correlations", None)
+    proxy_usable = False
+    if proxy_correlations is not None:
+        stored_columns = [int(column) for column in proxy_correlations.columns.tolist()]
+        if stored_columns == view_indices:
+            proxy_correlations = proxy_correlations.copy()
+            proxy_usable = True
+        elif set(view_indices).issubset(stored_columns):
+            proxy_correlations = proxy_correlations.loc[:, view_indices].copy()
+            proxy_usable = True
+        else:
+            proxy_correlations = None
+    resample_selections = None
+    if proxy_usable:
+        stored_resamples = getattr(selector, "_resample_selections_", None)
+        if stored_resamples is not None:
+            resample_selections = np.asarray(stored_resamples, dtype=bool).copy()
+
     coefs_available = hasattr(selector, "coef_bootstrap_")
     completed_bootstraps = None
     coef_shape = None
@@ -275,6 +293,7 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         "selection_frequency_source": "completed_bootstrap_fraction",
         "n_bootstrap_requested": n_bootstrap_requested,
         "coefs_available": coefs_available,
+        "store_proxies": bool(getattr(selector, "store_proxies", False)),
     }
     diagnostics = {
         "fit_context": {
@@ -299,4 +318,6 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         metadata=metadata,
         diagnostics=diagnostics,
         transformer=transform_selector.transform,
+        proxy_correlations=proxy_correlations,
+        resample_selections=resample_selections,
     )
