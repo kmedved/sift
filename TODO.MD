@@ -7,7 +7,7 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): the F7 integration run gives **2,107 passed,
+  `catboost` or `category_encoders`): the F8a integration run gives **2,118 passed,
   40 skipped** under warnings-as-errors. All public docstring
   examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
@@ -61,7 +61,7 @@ both are done. The rest of §G-docs in `docs/specs/0.9-product-layer.md` moves t
 - [x] A glossary.
 - [x] Convert `docs/user-guide.md` into the promised tutorial.
 - [x] Refresh `runtime_scaling_2026-09-03` from clean implementation commit
-      `2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6` with `dirty=false`.
+      `308dfe1ad30c052c3bcf09567dbe65322934b973` with `dirty=false`.
 - [x] 0.9.1 integration closeout: pushed, required GitHub CI jobs passed, and
       merged as PR #78 at `3b9ac0a`. PyPI publication did not follow.
 
@@ -90,8 +90,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Merged as PR #81 at `76e4d51` (implementation `2d04754`, artifact
       `d3938e4`; Codex/Opus review accepted, full local suite and all six
       required GitHub CI jobs green).
-- [x] F8a knockoff feasibility and UX metadata implemented and accepted by
-      Codex/Opus review; clean runtime refresh and CI/merge pending.
+- [x] F8a knockoff feasibility and UX metadata, implementation `308dfe1`.
+      Codex/Opus review accepted; clean runtime evidence and full local gate
+      passed. GitHub CI/merge pending.
 - [ ] F8b/F8c validated e-value aggregation and the statistic bakeoff.
 - [ ] F3 block/group-aware selection (`k` counts blocks).
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.

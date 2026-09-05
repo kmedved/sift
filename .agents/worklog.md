@@ -19,18 +19,18 @@
 
 ## Current stage: F8a accepted, integration pending
 
-- Branch codex/0.9x-f8a-knockoff-ux, base 76e4d51. Grok56 implementation and Grok57 corrections are accepted by Codex and Opus47; uncommitted. F8b/F8c not started.
+- Branch codex/0.9x-f8a-knockoff-ux, base 76e4d51. Grok56 implementation and Grok57 corrections are accepted by Codex and Opus47, committed at 308dfe1ad30c052c3bcf09567dbe65322934b973. Refreshed artifact/status edits are uncommitted. F8b/F8c not started.
 - New diagnostics distinguish actual post-screening tested units from pre-screen eligibility, grouped/representative units from reported feature counts, and not-run early returns. Offset-0 counterfactual reuses the same W without extra draws. Selections, defaults and existing FDR labels remain unchanged.
 - Four accepted corrections: per-draw warnings no longer claim aggregate impossibility when group counts vary; constant-target returns no longer invent completed screened counts; encoding C4 expects only the new feasibility warning; warn_external attributes warnings to the caller.
 - Codex: 120 affected tests passed under -W error; direct zero-target and cluster counterfactual probes passed. Ruff, both generators and strict MkDocs passed. Opus47: 431 passed / 10 skipped and 12 HEAD/current A/B configurations with unchanged selections/shared W/existing metadata. Review hashes unchanged. No remaining review defect.
 - Review synthesis/protocol: /private/tmp/sift_f8a_review_findings.md and /private/tmp/sift_f8a_review_protocol.md. Probe: /private/tmp/sift_f8a_codex_probe.py. Frozen initial packet: /private/tmp/sift-f8a-review/.
-- Earlier pre-artifact full run: 2113 passed / 40 skipped / 1 failed (encoding C4 warning expectation, now fixed) / 1 deselected (runtime binding deferred). Do not report that as a completed full gate.
-- Next: commit reviewed implementation and status docs, run runtime benchmark from that clean commit without concurrent test/reviewer workloads, update bound artifact/table/provenance references, run final full suite without deselections, commit artifact, push PR, verify six required CI jobs, merge.
+- Final full integration run after artifact refresh: 2118 passed / 40 skipped under -W error in 65s, no deselections. This supersedes the earlier pre-artifact run's fixed C4 warning failure and deferred runtime-binding test.
+- Next: commit artifact/status, push PR, verify all six required GitHub CI jobs at the exact PR head, merge, then F8b. No further code review round is needed absent a new defect.
 
 ## Runtime evidence
 
-- Current artifact still binds F7 clean implementation 2d047549ec7bdd1fb9f4fdd303b07251b84b5eb6, dirty=false, 74 source hashes, 18 cells / 7 samples / native pools=1; CSV SHA256 e3bd31662ed54efec6e91540477b41e4b8eead5294cbfd60f0d25e0d6a1be545. Must refresh for F8a before final full gate.
-- Stable artifact basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json. Run --full --warmup-runs 1 --timing-repeats 7 from clean implementation commit; update docs/runtime-scaling.md and commit/hash references. Compare all 18 data/selection fingerprints against the previous artifact.
+- Current artifact binds clean F8a implementation 308dfe1ad30c052c3bcf09567dbe65322934b973, captured 2026-09-05T04:30:27.939633+00:00, dirty=false and empty status, 74 source hashes, 18 cells / 7 samples / all native pools=1. All data/selection fingerprints match the prior evidence. CSV SHA256 e3b4f82b70d0ac7e65ee6ab586aa59dcad7681913029650e1cde655da30399ac.
+- Stable basename benchmarks/results/runtime_scaling_2026-09-03.csv and .provenance.json; bound displayed table/commit/hash references updated. Measured wide/baseline FDR ratio 8.1x is descriptive, not a power or asymptotic complexity claim.
 
 ## Remaining ordered roadmap
 
