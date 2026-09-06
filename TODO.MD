@@ -155,8 +155,11 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `build_classic_cache` accepted by Codex and resumed Opus reviews,
       including duplicate/NaN-name guards. Numeric feature-side reuse only;
       targets, relevance and numerical loops remain fresh/unchanged.
-      Exact cached/uncached selection and result parity verified. Clean-source
-      runtime evidence, full integration gates and merge remain pending.
+      Exact cached/uncached selection and result parity verified. Clean code
+      `8f44999` has refreshed `dirty=false` runtime evidence with 18/18 unchanged
+      data/selection fingerprints. Full local gate: 2386 passed / 40 skipped,
+      warnings as errors, no exclusions; static/matrix/strict docs pass.
+      Exact-head CI and merge remain pending.
 - [ ] Leakage-free unsupervised `ordinal`/`frequency` categorical fallbacks.
 
 ## Closed history
