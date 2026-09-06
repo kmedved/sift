@@ -110,7 +110,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       required CI jobs passed on the exact head; local gate 2200 passed / 40 skipped.
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
       Implementation and Codex/Opus review accepted on
-      `codex/0.9x-e4-onehot-blocks`; clean-source benchmark/CI/merge pending.
+      `codex/0.9x-e4-onehot-blocks`; clean implementation `826e10b` and bound
+      runtime refresh complete. Local gate 2221 passed / 40 skipped, no
+      exclusions; CI/merge pending.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
