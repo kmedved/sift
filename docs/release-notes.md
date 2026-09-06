@@ -16,7 +16,7 @@
   vs used rows, typed column hash, opt-in caller data hash, retained cache
   provenance, known new-run configuration/seeds, compare selector/estimator/
   splitter snapshots and fold fingerprints). Codex/Opus review is accepted;
-  clean-source runtime refresh and integration gates are pending. The
+  clean-source runtime refresh is complete; GitHub CI and merge are pending. The
   previous 58-name surface is unchanged except for the
   additive `compare` and `CompareResult` exports.
 - Added additive `cat_encoding="onehot"` on filter function APIs and sklearn

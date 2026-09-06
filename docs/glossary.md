@@ -64,19 +64,6 @@ frequency overlap. `mode="in_sample_path"` is a labelled in-sample prefix
 diagnostic, not the default leakage-safe protocol. Empty selected sets stay
 empty and score an intercept-only predictor.
 
-## reproducibility manifest
-
-`result.reproducibility_()` / `SelectionView.reproducibility_()` /
-`CompareResult.reproducibility_()` export a schema-`"1"` JSON payload:
-package versions, BLAS identity, git commit bound to the sift package tree,
-original vs used row counts, typed column hash, optional caller data hash,
-retained cache provenance, known new-run configuration and seeds, instantiated
-compare selector/estimator/splitter snapshots, and compare fold fingerprints.
-Environment is labelled export-time. Effective row counts and cache provenance
-are measured from the run, not inferred from call defaults. Legacy objects may
-be partial; new runs retain settings that were known at execution. Data hashing
-is opt-in and never retains `X`. Integration is pending Codex acceptance.
-
 ## Conditional gain
 
 The extra target information a candidate adds given features already on the
@@ -269,6 +256,19 @@ variance / [conditional gain](#conditional-gain).
 
 Univariate association with the target (F, KS, RF, or Gaussian MI, depending
 on the estimator). High relevance does not imply low [redundancy](#redundancy).
+
+## reproducibility manifest
+
+`result.reproducibility_()` / `SelectionView.reproducibility_()` /
+`CompareResult.reproducibility_()` export a schema-`"1"` JSON payload:
+package versions, BLAS identity, git commit bound to the sift package tree,
+original vs used row counts, typed column hash, optional caller data hash,
+retained cache provenance, known new-run configuration and seeds, instantiated
+compare selector/estimator/splitter snapshots, and compare fold fingerprints.
+Environment is labelled export-time. Effective row counts and cache provenance
+are measured from the run, not inferred from call defaults. Legacy objects may
+be partial; new runs retain settings that were known at execution. Data hashing
+is opt-in and never retains `X`. Codex/Opus review is accepted; GitHub CI and merge are pending.
 
 ## Result view
 
