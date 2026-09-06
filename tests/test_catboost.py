@@ -468,6 +468,27 @@ class TestCatBoostRegression:
         assert len(selected) == 5
         assert 'f0' in selected
 
+    def test_select_preset_keeps_legacy_result_contract(self):
+        np.random.seed(42)
+        n, p = 120, 12
+        X = pd.DataFrame(np.random.randn(n, p), columns=[f"f{i}" for i in range(p)])
+        y = X["f0"] + 0.5 * X["f1"] + np.random.randn(n) * 0.3
+        result = catboost_select(
+            X,
+            y,
+            k=4,
+            n_splits=2,
+            prefilter_k=None,
+            n_estimators=40,
+            algorithm="prediction",
+            verbose=False,
+            random_state=42,
+        )
+        assert type(result) is CatBoostSelectionResult
+        assert len(result.selected_features) == 4
+        assert 4 in result.scores_by_k
+        assert result.best_k == 4
+
     def test_with_prefilter(self):
         np.random.seed(42)
         n, p = 200, 30

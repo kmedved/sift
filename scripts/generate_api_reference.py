@@ -88,6 +88,14 @@ PUBLIC_API_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Smart sampling",
         ("SmartSamplerConfig", "smart_sample", "panel_config", "cross_section_config"),
     ),
+    (
+        "Purged time-series CV",
+        ("PurgedTimeSeriesSplit", "GroupPurgedTimeSeriesSplit"),
+    ),
+    (
+        "Generic model selector",
+        ("ModelSelector",),
+    ),
     ("Permutation importance", ("permutation_importance",)),
     (
         "Boruta",

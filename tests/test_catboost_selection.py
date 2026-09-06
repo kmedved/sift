@@ -1,8 +1,13 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.linear_model import Ridge
 
-from sift import catboost as cb
+from sift import ModelSelector, catboost as cb
+from sift.selection import orchestration as _selection_orchestration
+from sift.selection.orchestration import SelectionBackend
 
 
 @pytest.mark.parametrize("bad_value", ["bad", None, [], 1])
@@ -196,3 +201,209 @@ def test_choose_target_k_requested_k_still_wins_and_ignores_nan_scores():
 def test_choose_target_k_validates_selection_params(tolerance, patience, message):
     with pytest.raises(ValueError, match=message):
         _choose({10: 0.5, 5: 0.3}, hib=False, tolerance=tolerance, patience=patience)
+
+
+def test_catboost_select_native_preset_uses_module_helpers(monkeypatch):
+    """Public preset keeps monkeypatchable catboost.py helper names."""
+    from sift.catboost_common import CatBoostSelectionResult
+
+    monkeypatch.setattr(cb, "CatBoostRegressor", object)
+    calls: list[str] = []
+
+    def fake_evaluate(**kwargs):
+        calls.append("evaluate")
+        assert kwargs["algorithm"] == "prediction"
+        return {1: [0.2, 0.3]}, {1: [["a", "b"], ["a", "c"]]}, ["a", "b"]
+
+    def fake_importance(**kwargs):
+        calls.append("importance")
+        assert kwargs["selected_features"] == ["a"]
+        return pd.Series({"a": 1.0, "b": 0.4})
+
+    def fake_select(*args, **kwargs):
+        calls.append("select")
+        return {1: 0.25}, {1: ["a"]}
+
+    monkeypatch.setattr(cb, "_run_catboost_split_evaluation", fake_evaluate)
+    monkeypatch.setattr(cb, "_compute_final_catboost_importances", fake_importance)
+    monkeypatch.setattr(cb, "_select_features_single_split", fake_select)
+
+    X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+    y = pd.Series(np.arange(5, dtype=float))
+    result = cb.catboost_select(
+        X,
+        y,
+        k=1,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=0,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    assert calls == ["evaluate", "importance"]
+    assert "select" not in calls
+    assert type(result) is CatBoostSelectionResult
+    assert result.selected_features == ["a"]
+    assert result.best_k == 1
+    assert result.metric == "RMSE"
+    assert result.higher_is_better is False
+
+
+def test_catboost_select_monkeypatched_split_helper_is_honored(monkeypatch):
+    from sift.catboost_common import CatBoostSelectionResult
+
+    monkeypatch.setattr(cb, "CatBoostRegressor", object)
+    seen = {"select": 0}
+
+    def fake_select(*args, **kwargs):
+        seen["select"] += 1
+        return {1: 0.4}, {1: ["a"]}
+
+    def fake_importance(**kwargs):
+        return pd.Series({"a": 2.0})
+
+    monkeypatch.setattr(cb, "_select_features_single_split", fake_select)
+    monkeypatch.setattr(cb, "_compute_final_catboost_importances", fake_importance)
+
+    X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+    y = pd.Series(np.arange(5, dtype=float))
+    result = cb.catboost_select(
+        X,
+        y,
+        k=1,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=0,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    assert seen["select"] == 2
+    assert type(result) is CatBoostSelectionResult
+    assert result.selected_features == ["a"]
+    assert result.best_k == 1
+
+
+def _stub_native_catboost(monkeypatch, *, scores=None, paths=None, prefilter=None):
+    monkeypatch.setattr(cb, "CatBoostRegressor", object)
+
+    def fake_evaluate(**kwargs):
+        del kwargs
+        return (
+            scores if scores is not None else {1: [0.2, 0.3]},
+            paths if paths is not None else {1: [["a", "b"], ["a", "c"]]},
+            prefilter if prefilter is not None else ["a", "b"],
+        )
+
+    def fake_importance(**kwargs):
+        names = kwargs["selected_features"]
+        return pd.Series({name: float(i + 1) for i, name in enumerate(names)})
+
+    monkeypatch.setattr(cb, "_run_catboost_split_evaluation", fake_evaluate)
+    monkeypatch.setattr(cb, "_compute_final_catboost_importances", fake_importance)
+
+
+def test_public_routes_use_shared_run_selection(monkeypatch):
+    seen: list[str] = []
+    real = _selection_orchestration.run_selection
+
+    def spy(backend, X, y, **context):
+        seen.append(type(backend).__name__)
+        assert isinstance(backend, SelectionBackend)
+        return real(backend, X, y, **context)
+
+    monkeypatch.setattr(_selection_orchestration, "run_selection", spy)
+    _stub_native_catboost(monkeypatch)
+
+    rng = np.random.default_rng(0)
+    Xg = rng.normal(size=(24, 4))
+    yg = Xg[:, 0] + 0.05 * rng.normal(size=24)
+    ModelSelector(Ridge(), n_features_to_select=2, random_state=0).fit(Xg, yg)
+
+    Xc = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+    yc = pd.Series(np.arange(5, dtype=float))
+    cb.catboost_select(
+        Xc,
+        yc,
+        k=1,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=0,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    assert seen == ["_GenericModelBackend", "_CatBoostNativePreset"]
+    assert issubclass(cb._CatBoostNativePreset, SelectionBackend)
+
+
+def test_catboost_select_count_shortfall_warning_points_to_public_caller(monkeypatch):
+    _stub_native_catboost(
+        monkeypatch,
+        scores={3: [0.4, 0.5]},
+        paths={3: [["a", "b", "c"], ["a", "b", "c"]]},
+        prefilter=["a", "b", "c"],
+    )
+    X = pd.DataFrame(np.arange(15, dtype=float).reshape(5, 3), columns=list("abc"))
+    y = pd.Series(np.arange(5, dtype=float))
+    with pytest.warns(UserWarning, match=r"k=5 exceeds max evaluated") as caught:
+        result = cb.catboost_select(
+            X,
+            y,
+            k=5,
+            algorithm="prediction",
+            prefilter_k=None,
+            n_splits=2,
+            n_estimators=10,
+            random_state=0,
+            verbose=False,
+            train_early_stopping_rounds=3,
+            n_jobs=1,
+        )
+    assert result.best_k == 3
+    assert Path(caught[0].filename) == Path(__file__)
+
+
+def test_catboost_select_unknown_cat_features_warning_points_to_public_caller(
+    monkeypatch,
+):
+    _stub_native_catboost(monkeypatch)
+    X = pd.DataFrame(np.arange(20, dtype=float).reshape(5, 4), columns=list("abcd"))
+    y = pd.Series(np.arange(5, dtype=float))
+    with pytest.warns(UserWarning, match="cat_features not found") as caught:
+        cb.catboost_select(
+            X,
+            y,
+            k=1,
+            algorithm="prediction",
+            cat_features=["missing"],
+            prefilter_k=None,
+            n_splits=2,
+            n_estimators=10,
+            random_state=0,
+            verbose=False,
+            train_early_stopping_rounds=3,
+            n_jobs=1,
+        )
+    assert Path(caught[0].filename) == Path(__file__)
+
+
+def test_choose_target_k_shortfall_warning_points_to_helper_caller():
+    with pytest.warns(UserWarning, match=r"k=5 exceeds max evaluated") as caught:
+        target_k, best_k, *_ = cb._choose_catboost_target_k(
+            {3: [0.4], 1: [0.2]},
+            k_req=5,
+            resolved_hib=False,
+            tolerance=0.0,
+            selection_patience=3,
+            verbose=False,
+        )
+    assert (target_k, best_k) == (3, 1)
+    assert Path(caught[0].filename) == Path(__file__)

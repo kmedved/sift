@@ -48,10 +48,14 @@ def main() -> None:
     leaked = sorted({path.parts[0] for path in paths if path.parts} & forbidden)
     if leaked:
         raise SystemExit(f"wheel leaked repository-only top-level packages: {leaked}")
-    if len(sift.__all__) != 61 or "ImportanceResult" in sift.__all__:
-        raise SystemExit("installed wheel changed the pinned 61-name top-level surface")
+    if len(sift.__all__) != 64 or "ImportanceResult" in sift.__all__:
+        raise SystemExit("installed wheel changed the pinned 64-name top-level surface")
     if "Stabilized" not in sift.__all__:
         raise SystemExit("installed wheel is missing the Stabilized export")
+    if "PurgedTimeSeriesSplit" not in sift.__all__ or "GroupPurgedTimeSeriesSplit" not in sift.__all__:
+        raise SystemExit("installed wheel is missing the purged-split exports")
+    if "ModelSelector" not in sift.__all__:
+        raise SystemExit("installed wheel is missing the ModelSelector export")
     if hasattr(sift, "ImportanceResult"):
         raise SystemExit("ImportanceResult must remain module-only")
     if inspect.signature(sift.select_cached).parameters["return_result"].default is not False:

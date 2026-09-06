@@ -128,16 +128,26 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Full local gate: 2290 passed / 40 skipped, no exclusions; 26 focused
       checks pass after a test-only sklearn 1.3 compatibility correction.
       All six CI jobs passed on `bfe5765`; PR #89 merged at `18cdf40`.
-      F5/F6 and later remain open.
-- [ ] F5 multi-target CEFS+. Implementation on
+      F6 and later remain open.
+- [x] F5 multi-target CEFS+. Implementation on
       `codex/0.9x-multi-target-cefsplus` (joint 2-D `y`, multi-output
       evaluate, `df=q·k` IC after derivation). Codex/Opus accepted after
       verified corrections; 375 focused checks passed / 2 skipped plus
       independent conditional/weighted public probes. Clean implementation
       `c7ea9da` has bound `dirty=false` runtime evidence (18/18 fingerprints
       unchanged). Full local gate: 2303 passed / 40 skipped, no exclusions;
-      strict docs and static checks pass. Exact-head CI/merge pending. No F6 yet.
+      strict docs and static checks pass. All six CI jobs passed on `fe14516`;
+      PR #90 merged at `0ee513b`, with clean-source ancestry preserved.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
+      Split primitives accepted. Generic `ModelSelector.fit` and the CatBoost
+      preset `catboost_select` share the internal `run_selection` backend
+      contract (`_GenericModelBackend` / `_CatBoostNativePreset`) on
+      `codex/0.9x-model-selector`. Codex/Opus accepted the implementation,
+      including the executable support-matrix row and raw-column pipeline
+      importance guard. Latest focused gate: 267 passed / 3 skipped.
+      Clean implementation `22c6638` has refreshed `dirty=false` runtime
+      evidence with 18/18 data and selection fingerprints unchanged.
+      Full local gates and exact-head CI/merge remain pending.
 - [ ] Standardized classic-selector caches, then leakage-free unsupervised
       `ordinal`/`frequency` categorical fallbacks.
 

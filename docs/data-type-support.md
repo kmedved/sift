@@ -8,11 +8,13 @@ entry point. Numeric, sparse, and row-metadata axes use `n=32` rows and
 the datetime/timedelta fixture adds `when` and `elapsed` (`p=6`).
 Iteration, draw, and runtime knobs are reduced so the probes stay cheap;
 algorithm-routing and data-type acceptance/encoding defaults are left in
-place, with two explicit exceptions: stability uses a fixed `alpha=1.0`
-instead of automatic alpha search, and CatBoost uses
+place, with three explicit exceptions: stability uses a fixed `alpha=1.0`
+instead of automatic alpha search, CatBoost uses
 `algorithm="prediction"` with `prefilter_k=None` instead of its SHAP
-and prefilter defaults. Warnings are captured for classification and
-are not copied into the table. The probes never change selector
+and prefilter defaults, and `ModelSelector` is constructed with
+`Ridge()` because the class requires an estimator (a disclosed probe
+baseline, not a library default). Warnings are captured for classification
+and are not copied into the table. The probes never change selector
 mathematics or public defaults to make a cell succeed.
 SIFT-specific terms are defined in the [glossary](glossary.md).
 
@@ -36,6 +38,11 @@ Enabling options used for `cond` cells:
 - categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra)
 - `KnockoffSelector` categorical: `cat_encoding="loo_logit"` (warns; `fdr_control='none'`)
 - groups/time: `k="auto"` with `AutoKConfig(k_method="evaluate")` and the matching split strategy
+- `ModelSelector` categorical: width-preserving sklearn `OrdinalEncoder`
+  encoding with permutation importance on raw input columns
+  (estimator-dependent; not a library encoding default)
+- `ModelSelector` groups/time: searched `n_features_to_select` grid with the
+  default reusable group/time CV
 
 CatBoost cells publish the known post-install contract in every
 environment: `no` for ndarray, sparse, and datetime/timedelta; `dep`
@@ -67,6 +74,7 @@ tests pin those post-install outcomes and do not rewrite the page.
 | `stability_regression` | yes | yes | no | no | no | yes | yes | yes |
 | `stability_classif` | yes | yes | no | no | no | yes | yes | yes |
 | `Stabilized` | yes | yes | no | no | no | yes | no | no |
+| `ModelSelector` | yes | yes | cond | no | no | yes | cond | cond |
 | `permutation_importance` | yes | yes | yes | no | yes | yes | yes | yes |
 | `smart_sample` | no | yes | no | no | yes | no | yes | yes |
 | `catboost_select` | no | dep | dep | no | no | dep | dep | dep |
@@ -189,6 +197,11 @@ copied onto this page.
 | `Stabilized` | datetime/timedelta | rejected | datetime/timedelta feature columns are rejected; convert them to numeric features explicitly |
 | `Stabilized` | groups | rejected | `groups` is consumed by resample='blocks' (which needs both groups and time) or forwarded to bases that accept row context; unused row metadata is rejected |
 | `Stabilized` | time | rejected | `time` is consumed by resample='blocks' (which needs both groups and time) or forwarded to bases that accept row context; unused row metadata is rejected |
+| `ModelSelector` | categorical | conditional | the disclosed Ridge baseline cannot consume string columns; a width-preserving sklearn OrdinalEncoder pipeline with `importance='permutation'` completes. Categorical handling is estimator-dependent and is not a ModelSelector encoding default |
+| `ModelSelector` | sparse | rejected | sparse input is rejected; pass a dense NumPy array or pandas DataFrame |
+| `ModelSelector` | datetime/timedelta | rejected | datetime/timedelta feature columns are rejected; convert them to numeric features explicitly |
+| `ModelSelector` | groups | conditional | an explicit integer `n_features_to_select` rejects unused `groups` metadata; a searched count grid with the default reusable `groups` CV is accepted |
+| `ModelSelector` | time | conditional | an explicit integer `n_features_to_select` rejects unused `time` metadata; a searched count grid with the default reusable `time` CV is accepted |
 | `permutation_importance` | categorical | supported | `permutation_importance` forwards X to the fitted model; with a dtype-tolerant fitted estimator the public call completes. Support is model-dependent |
 | `permutation_importance` | sparse | rejected | sparse matrices are rejected independently of the fitted model; X must be a 2D dense array or pandas DataFrame |
 | `permutation_importance` | datetime/timedelta | supported | `permutation_importance` forwards X to the fitted model; with a dtype-tolerant fitted estimator the public call completes. Support is model-dependent |
@@ -242,7 +255,9 @@ copied onto this page.
   Boruta entry points (including `BorutaSelector`) additionally require
   `allow_full_data_target_encoding=True` for those legacy supervised
   modes; sklearn filter selector classes and `KnockoffSelector` do not.
-  That extra path is not a matrix column.
+  That extra path is not a matrix column. `ModelSelector` has no
+  categorical encoding default; the `cond` cell is a disclosed Ridge
+  pipeline, not a universal string rejection.
 - **sparse.** SciPy CSR input. Function and class routes are probed on
   the same CSR axis. Low-level rejection messages differ; this matrix
   normalizes them to one user-facing status and note.
@@ -253,7 +268,9 @@ copied onto this page.
 - **groups / time.** Row metadata arrays (or, for `smart_sample`, config
   column names). A datetime `time=` array is metadata, not a feature.
   Fixed-k filter functions and classes reject this context; automatic-k
-  evaluate splits accept it.
+  evaluate splits accept it. `ModelSelector` with an explicit integer
+  count rejects unused `groups`/`time`; a searched count grid uses the
+  default reusable group/time CV.
 
 ## Coverage limits
 
@@ -263,6 +280,11 @@ copied onto this page.
   so categorical and datetime cells exercise SIFT rather than a numeric
   model's `fit`. Support remains model-dependent. Sparse input is rejected
   by SIFT independently of that estimator.
+- `ModelSelector` is probed with `Ridge()` as a disclosed constructor
+  baseline. Sparse and datetime/timedelta feature columns are rejected by
+  SIFT. Categorical `cond` uses a width-preserving sklearn encoding
+  pipeline plus permutation importance; that is not a claim about every
+  estimator and not a native CatBoost path.
 - `select_cached` is probed as `build_cache` plus `select_cached`. Weights
   are passed to `build_cache`. Axes that are not arguments of
   `select_cached` fail at the public call.
@@ -283,8 +305,8 @@ copied onto this page.
   scope. `select_cached` is intentionally probed as `build_cache` plus
   `select_cached`.
 - Multiclass helpers, Polars frames, sparse *output*, one-hot encoding,
-  metadata-alias axes, and later 0.9.x F-workstream APIs (F6+) are out of
-  scope. A 2-D numeric `y` (`n×q`, `q≥2`) is not a matrix column: joint
+  and metadata-alias axes are out of scope. A 2-D numeric `y`
+  (`n×q`, `q≥2`) is not a matrix column: joint
   multi-target CEFS+ is supported on `select_cefsplus`, `CEFSPlusSelector`,
   `select_cached(method="cefsplus")`, and `evaluate_feature_path`. Other
   selectors reject it. Reusing one `FeatureCache` across separate 1-D `y`

@@ -61,8 +61,13 @@ flowchart TD
   frequency contract around any cloneable selector; `aggregation="evalues"` is
   the already-validated KnockoffSelector full-data derandomization path, not a
   bootstrap average of e-values.
+- `ModelSelector` wraps a cloned sklearn estimator for RFE, forward, or
+  stability selection. Use it when importance should come from that estimator
+  and, if needed, from purged group/time folds or opt-in nested scoring.
+  Outer-validation scores are not the curve that chooses `k`.
 - `catboost_select` is appropriate when selection should follow the nonlinear
   behavior of a CatBoost model and the optional dependency is acceptable.
+  It is not a `ModelSelector` wrapper.
 - `permutation_importance` ranks columns for an already-fitted estimator on the
   data supplied to it. Use held-out data when the ranking should describe
   out-of-sample behavior.
