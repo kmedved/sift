@@ -105,7 +105,8 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
 - [ ] F3 block/group-aware selection (`k` counts blocks). Fixed-k Gaussian/
       classic, block-aware auto-k, and binary log-loss joint blocks
       (`evaluate`/`elbow`/`penalized_objective`/`auto`) are implemented.
-      Closeout (independent review, clean commit, runtime refresh) remains.
+      Codex/Opus review accepted; clean implementation `2586a2c` and refreshed
+      runtime evidence recorded. Full integration CI and merge remain.
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
