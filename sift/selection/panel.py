@@ -35,6 +35,10 @@ class CandidatePanel:
     n_eff_kish: float
     n_eff_sum: float
     names: list[str] | None
+    C: np.ndarray | None = None
+    Ryy: np.ndarray | None = None
+    n_targets: int = 1
+    target_condition: float | None = None
 
 
 def resolve_corr_prune(method: GaussianMethod, corr_prune: CorrPrune) -> float | None:
@@ -189,6 +193,10 @@ def _panel_from_corr(
     protect: np.ndarray | None = None,
     pool: np.ndarray | None = None,
     block_members: list[np.ndarray] | None = None,
+    C_all: np.ndarray | None = None,
+    Ryy: np.ndarray | None = None,
+    n_targets: int = 1,
+    target_condition: float | None = None,
 ) -> CandidatePanel:
     p_valid = int(len(r))
     protect_arr = (
@@ -299,6 +307,14 @@ def _panel_from_corr(
     if names_all is not None:
         names = [names_all[int(i)] for i in original_arr]
 
+    C_cand = None
+    if C_all is not None and cand.size:
+        C_cand = np.ascontiguousarray(
+            np.asarray(C_all, dtype=np.float64)[cand],
+            dtype=np.float64,
+        )
+    elif C_all is not None:
+        C_cand = np.empty((0, int(np.asarray(C_all).shape[1])), dtype=np.float64)
     return CandidatePanel(
         cand=np.asarray(cand, dtype=np.int64),
         original=np.asarray(original_arr, dtype=np.int64),
@@ -309,6 +325,10 @@ def _panel_from_corr(
         n_eff_kish=kish,
         n_eff_sum=weight_sum,
         names=names,
+        C=C_cand,
+        Ryy=None if Ryy is None else np.ascontiguousarray(Ryy, dtype=np.float64),
+        n_targets=int(n_targets),
+        target_condition=target_condition,
     )
 
 
@@ -326,21 +346,82 @@ def build_candidate_panel(
     block_members: list[np.ndarray] | None = None,
 ) -> CandidatePanel:
     """Build the screened/pruned candidate panel used by cache selectors."""
-    if zy is None:
-        y_arr = np.asarray(y).ravel()
-        if y_arr.shape[0] != cache.n_rows_original:
-            raise ValueError(
-                f"y has {y_arr.shape[0]} rows but cache was built from "
-                f"{cache.n_rows_original} rows"
-            )
-        ys = y_arr[np.asarray(cache.row_idx)]
-        zy_arr = weighted_rank_gauss_1d(ys, cache.sample_weight)
-    else:
-        zy_arr = np.asarray(zy, dtype=np.float64).ravel()
-        if zy_arr.shape[0] != cache.Z.shape[0]:
-            raise ValueError("zy length must match cache rows")
+    from sift.estimators.copula import weighted_correlation_matrix, weighted_rank_gauss_2d
+    from sift.selection.cefsplus_multi import (
+        as_regression_targets,
+        multiple_correlation,
+        reject_degenerate_multi_targets,
+        reject_ill_conditioned_targets,
+        shrunk_target_covariance,
+    )
 
-    r = weighted_corr_with_vector(cache.Z, zy_arr, cache.sample_weight)
+    C_all = None
+    Ryy = None
+    n_targets = 1
+    target_condition = None
+    if zy is None:
+        y_mat, n_targets = as_regression_targets(y, int(cache.n_rows_original))
+        ys = y_mat[np.asarray(cache.row_idx)]
+        if n_targets == 1:
+            zy_arr = weighted_rank_gauss_1d(np.asarray(ys).reshape(-1), cache.sample_weight)
+            r = weighted_corr_with_vector(cache.Z, zy_arr, cache.sample_weight)
+        else:
+            zy_mat = weighted_rank_gauss_2d(np.asarray(ys, dtype=np.float64), cache.sample_weight)
+            reject_degenerate_multi_targets(zy_mat, cache.sample_weight)
+            Ryy = np.asarray(
+                weighted_correlation_matrix(zy_mat, cache.sample_weight, backend="blas"),
+                dtype=np.float64,
+            )
+            target_condition = reject_ill_conditioned_targets(
+                np.asarray(Ryy, dtype=np.float64)
+            )
+            sigma = shrunk_target_covariance(Ryy)
+            C_all = np.column_stack(
+                [
+                    np.asarray(
+                        weighted_corr_with_vector(cache.Z, zy_mat[:, j], cache.sample_weight),
+                        dtype=np.float64,
+                    )
+                    for j in range(n_targets)
+                ]
+            )
+            r = multiple_correlation(C_all, sigma, shrink=1e-6, eps=1e-12)
+    else:
+        zy_arr = np.asarray(zy, dtype=np.float64)
+        if zy_arr.ndim == 1:
+            if zy_arr.shape[0] != cache.Z.shape[0]:
+                raise ValueError("zy length must match cache rows")
+            r = weighted_corr_with_vector(cache.Z, zy_arr, cache.sample_weight)
+        elif zy_arr.ndim == 2 and zy_arr.shape[1] == 1:
+            zy_arr = zy_arr.reshape(-1)
+            if zy_arr.shape[0] != cache.Z.shape[0]:
+                raise ValueError("zy length must match cache rows")
+            r = weighted_corr_with_vector(cache.Z, zy_arr, cache.sample_weight)
+        elif zy_arr.ndim == 2:
+            if zy_arr.shape[0] != cache.Z.shape[0]:
+                raise ValueError("zy length must match cache rows")
+            n_targets = int(zy_arr.shape[1])
+            reject_degenerate_multi_targets(zy_arr, cache.sample_weight)
+            Ryy = np.asarray(
+                weighted_correlation_matrix(zy_arr, cache.sample_weight, backend="blas"),
+                dtype=np.float64,
+            )
+            target_condition = reject_ill_conditioned_targets(
+                np.asarray(Ryy, dtype=np.float64)
+            )
+            sigma = shrunk_target_covariance(Ryy)
+            C_all = np.column_stack(
+                [
+                    np.asarray(
+                        weighted_corr_with_vector(cache.Z, zy_arr[:, j], cache.sample_weight),
+                        dtype=np.float64,
+                    )
+                    for j in range(n_targets)
+                ]
+            )
+            r = multiple_correlation(C_all, sigma, shrink=1e-6, eps=1e-12)
+        else:
+            raise ValueError("zy must be one- or two-dimensional")
     p_valid = int(len(r))
     if top_m is None:
         top_m = max(5 * int(k), 250)
@@ -362,6 +443,10 @@ def build_candidate_panel(
         protect=protect_valid,
         pool=pool_valid,
         block_members=block_members,
+        C_all=C_all,
+        Ryy=Ryy,
+        n_targets=n_targets,
+        target_condition=target_condition,
     )
 
 
@@ -381,7 +466,13 @@ def local_corr_panel(
     """Build a candidate panel from fold/bootstrap-local correlations."""
     w_arr = np.asarray(w, dtype=np.float64).ravel()
     Z_arr = np.asarray(Z)
-    zy_arr = np.asarray(zy, dtype=np.float64).ravel()
+    zy_arr = np.asarray(zy, dtype=np.float64)
+    if zy_arr.ndim == 2 and int(zy_arr.shape[1]) > 1:
+        raise ValueError(
+            "local fold correlations do not support 2-D y; joint multi-target "
+            "CEFS+ is not available for gaussian_cv/xfit_objective"
+        )
+    zy_arr = zy_arr.reshape(-1)
     if Z_arr.ndim != 2:
         raise ValueError("Z must be 2D")
     if Z_arr.shape[0] != zy_arr.shape[0] or Z_arr.shape[0] != w_arr.shape[0]:

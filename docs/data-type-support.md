@@ -283,6 +283,11 @@ copied onto this page.
   scope. `select_cached` is intentionally probed as `build_cache` plus
   `select_cached`.
 - Multiclass helpers, Polars frames, sparse *output*, one-hot encoding,
-  metadata-alias axes, and the 0.9.x F-workstream APIs are out of scope.
+  metadata-alias axes, and later 0.9.x F-workstream APIs (F6+) are out of
+  scope. A 2-D numeric `y` (`n×q`, `q≥2`) is not a matrix column: joint
+  multi-target CEFS+ is supported on `select_cefsplus`, `CEFSPlusSelector`,
+  `select_cached(method="cefsplus")`, and `evaluate_feature_path`. Other
+  selectors reject it. Reusing one `FeatureCache` across separate 1-D `y`
+  calls is not joint multi-output support.
 - Complex dtypes, duplicate column labels, and empty `feature_names`
   remain the sklearn-contract tests' job.

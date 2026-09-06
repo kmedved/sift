@@ -65,6 +65,51 @@ def resolve_metric(metric: object, task: str) -> object:
     return metric
 
 
+def _as_ridge_alpha(alpha) -> float | np.ndarray:
+    """Return a Ridge-compatible alpha from RidgeCV (scalar or per-target)."""
+    arr = np.asarray(alpha, dtype=np.float64)
+    if arr.size == 1:
+        return float(arr.reshape(-1)[0])
+    return arr
+
+
+def weighted_regression_score(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    metric: str,
+    *,
+    sample_weight: np.ndarray | None = None,
+) -> float:
+    """Row-weighted RMSE/MAE; 2-D ``y`` averages targets after the row reduction.
+
+    For ``q=1`` this is the historical scalar formula. For ``q>=2`` each
+    target is scored with the same row weights, then the ``q`` values are
+    averaged with equal target weight. RMSE is the square root of the mean
+    of those per-target MSEs (Frobenius), not the mean of per-target RMSEs.
+    """
+    if metric not in {"rmse", "mae"}:
+        raise ValueError("scoring must be 'rmse' or 'mae'")
+    true = np.asarray(y_true, dtype=np.float64)
+    pred = np.asarray(y_pred, dtype=np.float64)
+    if true.ndim == 1:
+        true = true.reshape(-1, 1)
+    if pred.ndim == 1:
+        pred = pred.reshape(-1, 1)
+    if true.shape != pred.shape:
+        raise ValueError(
+            "y_true and y_pred must have the same shape for regression scoring"
+        )
+    if metric == "rmse":
+        err = (true - pred) ** 2
+    else:
+        err = np.abs(true - pred)
+    per_target = np.average(err, axis=0, weights=sample_weight)
+    reduced = float(np.mean(per_target))
+    if metric == "rmse":
+        return float(np.sqrt(reduced))
+    return reduced
+
+
 def compute_metric(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -74,10 +119,10 @@ def compute_metric(
     sample_weight: np.ndarray | None = None,
 ) -> float:
     """Compute error metric (lower is better)."""
-    if metric == "rmse":
-        return float(np.sqrt(np.average((y_true - y_pred) ** 2, weights=sample_weight)))
-    if metric == "mae":
-        return float(np.average(np.abs(y_true - y_pred), weights=sample_weight))
+    if metric in {"rmse", "mae"}:
+        return weighted_regression_score(
+            y_true, y_pred, metric, sample_weight=sample_weight
+        )
     if metric == "error":
         return float(np.average(y_true != y_pred, weights=sample_weight))
     if metric == "logloss":
@@ -260,7 +305,7 @@ def evaluate_numeric_prefixes(
                 y_train,
                 sample_weight=w_train,
             )
-        full_path_alpha = float(ridgecv.alpha_)
+        full_path_alpha = _as_ridge_alpha(ridgecv.alpha_)
 
     for k in k_grid:
         if k > Xtr_s.shape[1]:
@@ -279,7 +324,7 @@ def evaluate_numeric_prefixes(
                             y_train,
                             sample_weight=w_train,
                         )
-                    alpha = float(ridgecv.alpha_)
+                    alpha = _as_ridge_alpha(ridgecv.alpha_)
                 else:
                     alpha = full_path_alpha
                 model = Ridge(alpha=alpha)

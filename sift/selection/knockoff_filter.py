@@ -2670,6 +2670,12 @@ def select_fdr(
 
     if y is None:
         raise ValueError("y is required")
+    y_probe = np.asarray(y)
+    if y_probe.ndim == 2 and int(y_probe.shape[1]) > 1:
+        raise ValueError(
+            "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+            "and select_cached(method='cefsplus')"
+        )
     # Preserve target ordering before the rank transform. Large offsets can
     # collapse a genuinely varying float64 target to one float32 value.
     y_arr = to_numpy(y, dtype=np.float64).ravel()

@@ -82,10 +82,25 @@ GaussianAutoKResult = tuple[list[str], list[int], pd.DataFrame, dict]
 
 def _run_gaussian_routed_path(routed_config: AutoKConfig, **kwargs) -> GaussianAutoKResult:
     from sift.selection.conditioning import omitted_conditioning, require_supported_auto_k
+    from sift.selection.cefsplus_multi import (
+        as_regression_targets,
+        reject_unsupported_multi_target_context,
+    )
 
     method = routed_config.k_method
     kwargs = dict(kwargs)
     kwargs["auto_k_config"] = routed_config
+    y = kwargs.get("y")
+    cache = kwargs.get("cache")
+    if y is not None and cache is not None:
+        n_rows = int(getattr(cache, "n_rows_original", np.asarray(y).shape[0]))
+        _y_arr, n_y = as_regression_targets(y, n_rows)
+        reject_unsupported_multi_target_context(
+            n_targets=n_y,
+            method=str(kwargs.get("method", "cefsplus")),
+            k_method=method,
+            routed=True,
+        )
     if not omitted_conditioning(
         kwargs.get("include"), kwargs.get("exclude"), kwargs.get("candidates")
     ):
@@ -422,6 +437,10 @@ def select_gaussian_penalized_path(
     n_candidates = _discovery_n_candidates(cache, _unused)
     df_path = None
     ic_dimension = "k"
+    from sift.selection.cefsplus_multi import as_regression_targets, multivariate_ic_df
+
+    n_rows = int(getattr(cache, "n_rows_original", np.asarray(y).shape[0]))
+    _y_arr, n_targets = as_regression_targets(y, n_rows)
     if _unused.get("feature_blocks") is not None:
         from sift.selection.blocks import (
             eligible_discovery_block_count,
@@ -458,6 +477,12 @@ def select_gaussian_penalized_path(
                 blocks, valid_cols=cache.valid_cols, resolved=resolved
             )
             n_candidates = max(int(n_candidates), n_steps, 1)
+    if n_targets >= 2:
+        ic_dimension = "df"
+        if df_path is None:
+            df_path = multivariate_ic_df(np.arange(1, n_steps + 1, dtype=np.int64), n_targets)
+        else:
+            df_path = multivariate_ic_df(df_path, n_targets)
     selected_count, auto_diag = _select_penalized_count(
         objective,
         auto_k_config,
@@ -486,6 +511,11 @@ def select_gaussian_penalized_path(
             "objective_penalty": auto_k_config.objective_penalty,
             "objective_scale": "gaussian_2mi",
             "proxy_only_objective": True,
+            **(
+                {"n_targets": int(n_targets), "ic_df_rule": "q_k"}
+                if n_targets >= 2
+                else {}
+            ),
         },
     )
     path, path_indices = _slice_auto_prefix(path, path_indices, selected_count, widths)

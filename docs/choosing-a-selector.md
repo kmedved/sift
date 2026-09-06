@@ -42,7 +42,9 @@ flowchart TD
   `select_jmim` replaces JMI's aggregate with a minimum and is therefore the
   more conservative of the two.
 - `select_cefsplus` is a Gaussian-copula conditional-information path for
-  continuous regression targets. `select_cefsplus_binary` uses a logistic
+  continuous regression targets. A 2-D `y` (`n×q`, `q≥2`) is joint
+  multi-target CEFS+; other filters reject it rather than flattening.
+  `select_cefsplus_binary` uses a logistic
   score-test path by default. Its `loss="brier"` option delegates to
   `select_cefsplus` with a 0/1 floating-point target and exposes the Gaussian
   selector's options; it is not a second binary score-test path.

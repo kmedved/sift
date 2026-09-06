@@ -397,8 +397,11 @@ def select_k_auto(
     X : DataFrame
         Feature matrix. Must be a pandas DataFrame with unique column labels,
         because ``feature_path`` entries are resolved by name.
-    y : ndarray of shape (n_samples,)
-        Target, raveled before use.
+    y : ndarray of shape (n_samples,) or (n_samples, n_targets)
+        Target. Classification keeps 1-D labels (including strings). A 2-D
+        array is regression-only multi-output ridge with the same row
+        weights on every target; multi-output classification is rejected.
+        Supervised ``cat_encoding`` and ``within`` are rejected for ``q>=2``.
     feature_path : list of str
         Ordered feature names. Entries missing from ``X.columns`` are dropped;
         the path is truncated to the effective ``max_k``.
@@ -600,14 +603,26 @@ def select_k_auto(
             f"Duplicate labels: {sample}{suffix}"
         )
 
-    y_arr = np.asarray(y).ravel()
+    from sift.selection.cefsplus_multi import (
+        as_selector_targets,
+        reject_unsupported_multi_target_context,
+    )
+
+    n_rows = int(len(X))
+    y_arr, n_targets = as_selector_targets(y, n_rows, task=task)
+    reject_unsupported_multi_target_context(
+        n_targets=n_targets,
+        within=within,
+        cat_encoding=cat_encoding,
+        k_method=config.k_method if n_targets >= 2 else None,
+    )
     sample_weight_supplied = sample_weight is not None
     encoding_weight_arr = (
-        ensure_weights(sample_weight, len(y_arr), normalize=False)
+        ensure_weights(sample_weight, n_rows, normalize=False)
         if sample_weight_supplied
         else None
     )
-    w_arr = ensure_weights(sample_weight, len(y_arr), normalize=True)
+    w_arr = ensure_weights(sample_weight, n_rows, normalize=True)
     valid_features = [f for f in feature_path if f in X.columns and f not in base_seen]
     if not valid_features and n_base == 0:
         return 0, [], pd.DataFrame()

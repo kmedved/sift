@@ -376,6 +376,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             metadata_extra=_combine_metadata_extra(
                 target_cv_metadata,
                 _cache_run_extra(cache, prebuilt=ctx.request.cache is not None),
+                _multi_target_run_extra(cache, y_sel),
             ),
         )
 
@@ -507,6 +508,7 @@ def make_auto_gaussian(
         metadata_extra.update(
             _cache_run_extra(cache, prebuilt=ctx.request.cache is not None)
         )
+        metadata_extra.update(_multi_target_run_extra(cache, y_sel))
         return SelectionPayload(
             selected_features=selected_features,
             selected_indices=selected_indices,
@@ -748,6 +750,7 @@ def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
 
 def validate_standard(ctx: "FilterContext") -> None:
     check_regression_only(ctx.request.task, ctx.estimator)
+    _reject_multi_target_unless_cefsplus(ctx)
     if ctx.request.cache is not None and ctx.estimator != "gaussian":
         raise ValueError("cache is supported only with estimator='gaussian'")
     if ctx.estimator == "gaussian":
@@ -763,21 +766,46 @@ def validate_ksg_no_weight(ctx: "FilterContext") -> None:
         raise ValueError("estimator='ksg' does not support sample_weight")
 
 
+def _reject_multi_target_unless_cefsplus(ctx: "FilterContext") -> None:
+    arr = np.asarray(ctx.request.y)
+    if arr.ndim >= 2 and int(arr.shape[1]) > 1 and ctx.spec.selector != "cefsplus":
+        raise ValueError(
+            "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+            "and select_cached(method='cefsplus'); "
+            f"got selector={ctx.spec.selector!r}"
+        )
+
+
 def validate_cefsplus(ctx: "FilterContext") -> None:
     if ctx.request.cache is not None and ctx.request.sample_weight is not None:
         raise ValueError(
             "sample_weight is already fixed by the supplied cache; "
             "pass weights to build_cache instead"
         )
-    y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
-    if len(y_arr) != ctx.n_rows:
-        raise ValueError(f"X has {ctx.n_rows} rows but y has {len(y_arr)}")
-    if not np.isfinite(y_arr).all():
+    from sift.selection.cefsplus_multi import (
+        as_regression_targets,
+        reject_unsupported_multi_target_context,
+    )
+
+    y_arr, n_y = as_regression_targets(ctx.request.y, int(ctx.n_rows))
+    if not np.isfinite(np.asarray(y_arr, dtype=np.float64)).all():
         raise ValueError("Non-finite values in y are not allowed for regression.")
-    if ctx.spec.selector == "cefsplus":
+    if n_y >= 2:
+        k_method = None
+        if ctx.k == "auto" and ctx.auto_k_config is not None:
+            k_method = ctx.auto_k_config.k_method
+        reject_unsupported_multi_target_context(
+            n_targets=n_y,
+            selector=ctx.spec.selector,
+            method="cefsplus" if ctx.spec.selector == "cefsplus" else ctx.spec.selector,
+            within=ctx.within,
+            cat_encoding=_kw(ctx, "cat_encoding", "none"),
+            k_method=k_method,
+        )
+    if ctx.spec.selector == "cefsplus" and n_y == 1:
         # select_cefsplus has no task parameter, so unlike the task-aware
         # selectors nothing else flags a labels-shaped target here.
-        _warn_if_multiclass_labels_as_regression_target(y_arr)
+        _warn_if_multiclass_labels_as_regression_target(np.asarray(y_arr).reshape(-1))
 
 
 def _warn_if_multiclass_labels_as_regression_target(y_arr: np.ndarray) -> None:
@@ -1049,6 +1077,18 @@ def _combine_metadata_extra(*parts) -> dict | None:
         if part:
             extra.update(part)
     return extra or None
+
+
+def _multi_target_run_extra(cache: FeatureCache, y) -> dict:
+    arr = np.asarray(y)
+    if arr.ndim < 2 or int(arr.shape[1]) < 2:
+        return {}
+    from sift.selection.cefsplus_multi import copula_target_condition, result_target_metadata
+
+    n_targets, cond = copula_target_condition(cache, y)
+    if n_targets < 2:
+        return {}
+    return result_target_metadata(n_targets, target_condition=cond)
 
 
 def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
@@ -1378,13 +1418,43 @@ def _gaussian_relevance_for_input(
     *,
     y=None,
 ) -> np.ndarray:
-    y_arr = to_numpy(ctx.request.y if y is None else y, dtype=np.float64).ravel()
+    from sift.estimators.copula import weighted_correlation_matrix, weighted_rank_gauss_2d
+    from sift.selection.cefsplus_multi import (
+        as_regression_targets,
+        multiple_correlation,
+        shrunk_target_covariance,
+    )
+
+    y_arr, n_y = as_regression_targets(
+        ctx.request.y if y is None else y, int(cache.n_rows_original)
+    )
     y_cache = y_arr[np.asarray(cache.row_idx, dtype=np.int64)]
     weights = np.asarray(cache.sample_weight, dtype=np.float64)
-    zy = weighted_rank_gauss_1d(y_cache, weights)
-    rel_valid = gaussian_mi_from_corr(
-        weighted_corr_with_vector(cache.Z, zy, weights)
-    )
+    if n_y == 1:
+        zy = weighted_rank_gauss_1d(np.asarray(y_cache).reshape(-1), weights)
+        rel_valid = gaussian_mi_from_corr(
+            weighted_corr_with_vector(cache.Z, zy, weights)
+        )
+    else:
+        zy_mat = weighted_rank_gauss_2d(np.asarray(y_cache, dtype=np.float64), weights)
+        Ryy = np.asarray(
+            weighted_correlation_matrix(zy_mat, weights, backend="blas"),
+            dtype=np.float64,
+        )
+        C_all = np.column_stack(
+            [
+                np.asarray(
+                    weighted_corr_with_vector(cache.Z, zy_mat[:, j], weights),
+                    dtype=np.float64,
+                )
+                for j in range(n_y)
+            ]
+        )
+        rel_valid = gaussian_mi_from_corr(
+            multiple_correlation(
+                C_all, shrunk_target_covariance(Ryy), shrink=1e-6, eps=1e-12
+            )
+        )
     relevance = np.zeros(ctx.n_features_input, dtype=np.float64)
     valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
     rel_valid_arr = np.asarray(rel_valid, dtype=np.float64)

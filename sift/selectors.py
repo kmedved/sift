@@ -1930,13 +1930,15 @@ class CEFSPlusSelector(_BaseSelector):
     the log-determinant conditional-information gain it adds to the features
     already chosen, which makes it fast on wide numeric matrices and willing to
     keep suppressor variables that a pairwise-redundancy filter would drop.
-    Use it as the default wide-data filter, and reach for ``k="auto"`` when the
-    feature count itself should be measured rather than guessed. ``fit`` learns
-    the path and records the selection; ``transform`` returns the selected
-    columns in the fitted container kind, ``set_output(transform="pandas")`` is
-    honored like any sklearn transformer, and ``inverse_transform`` restores a
-    dense full-width matrix with unselected columns zero-filled. Sparse input
-    is rejected in ``fit``, ``transform`` and ``inverse_transform``.
+    A 2-D ``y`` with ``q>=2`` columns is joint multi-target CEFS+ on the same
+    path; ``(n, 1)`` stays on the 1-D loop. Use it as the default wide-data
+    filter, and reach for ``k="auto"`` when the feature count itself should be
+    measured rather than guessed. ``fit`` learns the path and records the
+    selection; ``transform`` returns the selected columns in the fitted
+    container kind, ``set_output(transform="pandas")`` is honored like any
+    sklearn transformer, and ``inverse_transform`` restores a dense full-width
+    matrix with unselected columns zero-filled. Sparse input is rejected in
+    ``fit``, ``transform`` and ``inverse_transform``.
 
     ``k`` is an upper bound rather than a promise: constant-column filtering,
     relevance screening, correlation pruning and non-positive objective checks
@@ -2155,6 +2157,19 @@ class CEFSPlusSelector(_BaseSelector):
         output_order: str = "legacy",
     ):
         self._init_selector(select_cefsplus, locals())
+
+    def _more_tags(self):
+        parent = getattr(super(), "_more_tags", None)
+        return selector_tags(
+            {} if parent is None else parent(),
+            multioutput=True,
+        )
+
+    def __sklearn_tags__(self):
+        parent_tags = getattr(super(), "__sklearn_tags__", None)
+        if parent_tags is None:
+            return self._more_tags()
+        return selector_tags(parent_tags(), multioutput=True)
 
     def _routes_no_config_auto_k(self) -> bool:
         return True

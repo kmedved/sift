@@ -121,6 +121,7 @@ def selector_tags(
     *,
     non_deterministic: bool = False,
     binary_only: bool = False,
+    multioutput: bool = False,
 ) -> Any:
     """Set selector tags across sklearn's legacy and object tag APIs."""
     if isinstance(tags, dict):
@@ -131,12 +132,16 @@ def selector_tags(
             updated["non_deterministic"] = True
         if binary_only:
             updated["binary_only"] = True
+        if multioutput:
+            updated["multioutput"] = True
         return updated
 
     tags.input_tags.allow_nan = True
     tags.target_tags.required = True
     if non_deterministic:
         tags.non_deterministic = True
+    if multioutput:
+        tags.target_tags.multi_output = True
     # ``binary_only`` deliberately has no object-tag counterpart here.  sklearn
     # 1.6 replaced the flat ``binary_only`` key with
     # ``Tags.classifier_tags.multi_class = False``, and ``classifier_tags`` is

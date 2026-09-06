@@ -89,9 +89,9 @@ def prepare_filter_eval_data(
         X_df = X
     else:
         X_df = pd.DataFrame(X, columns=columns)
-    y_arr = np.asarray(y).ravel()
-    if len(y_arr) != len(X_df):
-        raise ValueError(f"X has {len(X_df)} rows but y has {len(y_arr)}")
+    from sift.selection.cefsplus_multi import as_regression_targets
+
+    y_arr, _n_y = as_regression_targets(y, int(len(X_df)))
     if getattr(cache, "n_rows_original", len(X_df)) != len(X_df):
         raise ValueError(
             f"cache was built with {cache.n_rows_original} rows but X has {len(X_df)} rows"

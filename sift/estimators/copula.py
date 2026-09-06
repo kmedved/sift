@@ -16,12 +16,16 @@ RankBackend = Literal["serial", "threads", "processes"]
 
 @dataclass
 class FeatureCache:
-    """Cached feature data for multi-target selection.
+    """Cached feature-side copula transform.
 
     Holds the weighted rank-Gaussian (copula) transform of a feature matrix
     together with the row/column bookkeeping needed to map results back to the
     caller's original matrix.  Build one with ``build_cache`` and reuse it
-    across many targets: the expensive per-column rank transform (and, when
+    across many *separate* 1-D targets, or pass a 2-D ``y`` to
+    ``sift.select_cached(..., method="cefsplus")`` for joint multi-output
+    CEFS+. Reusing one cache across separate single-target calls is not
+    itself joint multi-output support: each 1-D call still selects for that
+    target alone.  The expensive per-column rank transform (and, when
     requested, the ``p x p`` correlation matrix) is paid once, after which
     ``sift.select_cached``, ``sift.select_fdr`` and the Gaussian filter
     routes only need a fresh ``y``.  Instances are plain mutable dataclasses
@@ -74,7 +78,7 @@ class FeatureCache:
     See Also
     --------
     build_cache : Build a cache from a feature matrix.
-    sift.select_cached : Select features from a cache for one target.
+    sift.select_cached : Select features from a cache for one or jointly several targets.
     sift.select_fdr : Knockoff selection that accepts a prebuilt cache.
     sift.sample_knockoffs : Draw one Gaussian knockoff copy of a cache.
 
@@ -126,18 +130,21 @@ def build_cache(
     n_jobs: int = 1,
     rank_backend: RankBackend = "serial",
 ) -> FeatureCache:
-    """Build feature cache for multi-target selection.
+    """Build a feature-side copula cache.
 
     Applies the weighted rank-Gaussian (copula) transform column by column and
     packages the result, together with the retained row and column positions,
-    as a ``FeatureCache``.  Reach for this when several targets share one
-    feature matrix: the transform (and optionally the ``p x p`` correlation
-    matrix) is computed once here, and ``sift.select_cached``,
-    ``sift.select_fdr`` and the Gaussian filter routes then reuse it for
-    each ``y``.  By default it subsamples to 50,000 positive-weight rows with
-    seed 0, skips the correlation matrix, drops only exactly-constant columns,
-    and returns the cache; nothing about the target is involved, so one cache
-    is valid for every target measured on the same rows.
+    as a ``FeatureCache``.  Reach for this when several 1-D targets share one
+    feature matrix, or when a later ``select_cached`` call will pass a 2-D
+    ``y`` for joint CEFS+: the transform (and optionally the ``p x p``
+    correlation matrix) is computed once here, and ``sift.select_cached``,
+    ``sift.select_fdr`` and the Gaussian filter routes then reuse it.
+    Reusing the cache across separate 1-D ``y`` calls is not joint
+    multi-output selection.  By default it subsamples to 50,000
+    positive-weight rows with seed 0, skips the correlation matrix, drops
+    only exactly-constant columns, and returns the cache; nothing about the
+    target is involved, so one cache is valid for every target measured on
+    the same rows.
 
     Parameters
     ----------

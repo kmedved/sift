@@ -154,7 +154,13 @@ def compute_objective_for_path(
 
     path_valid_pos = np.asarray(path_valid_pos, dtype=np.int64)
 
-    y_arr = np.asarray(y).ravel()
+    y_arr = np.asarray(y)
+    if y_arr.ndim == 2 and int(y_arr.shape[1]) > 1:
+        raise ValueError(
+            "compute_objective_for_path is 1-D only; joint multi-target "
+            "CEFS+ uses the native path objective"
+        )
+    y_arr = y_arr.reshape(-1)
     if y_arr.shape[0] != cache.n_rows_original:
         raise ValueError(
             f"y has {y_arr.shape[0]} rows but cache was built from "

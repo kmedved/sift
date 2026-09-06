@@ -1198,9 +1198,19 @@ def select_cefsplus(
         unlabelled array yields the positional names ``"x0", "x1", ...``.
         Non-numeric columns need ``cat_features``/``cat_encoding`` or
         pre-encoding.
-    y : Series or ndarray of shape (n_samples,)
+    y : Series or ndarray of shape (n_samples,) or (n_samples, n_targets)
         Numeric regression target.  Must be finite; there is no ``task``
-        argument, so labels-shaped targets are only warned about, not encoded.
+        argument, so labels-shaped 1-D targets are only warned about, not
+        encoded. A 2-D array with ``q>=2`` columns is joint multi-target
+        CEFS+: greedy gain is the Gaussian residual log-det of ``Y``, with
+        the same off-diagonal shrink and Cholesky-plus-ridge guard as the
+        feature Gram. Targets whose shrunk correlation has condition number
+        above ``1e6`` are rejected (drop or combine them). A ``(n, 1)``
+        column follows the 1-D path bit-identically. ``within``, supervised
+        ``cat_encoding``, and auto-k methods other than ``evaluate``,
+        ``elbow``, ``penalized_objective``, and measured ``k="auto"`` (EBIC)
+        are rejected for ``q>=2``. The penalized-objective default uses
+        likelihood df ``q·k`` (search multiplicity remains ``k``).
     k : int or "auto", default 75
         Number of features to select, treated as an *upper bound*.  ``"auto"``
         hands the count to the auto-k machinery -- see ``auto_k_config``.
