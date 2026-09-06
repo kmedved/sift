@@ -124,7 +124,8 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       All six CI jobs passed on `bb651a2`; PR #88 merged at `c29e99e`.
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
       Codex/Opus accepted the implementation on `codex/0.9x-stabilized`.
-      Clean-source runtime refresh and integration gates are next. Not merged.
+      Clean implementation `7cc4f66` has refreshed `dirty=false` runtime evidence.
+      Full local gate: 2290 passed / 40 skipped, no exclusions. CI/merge pending.
       F5/F6 and later remain open.
 - [ ] F5 multi-target CEFS+.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
