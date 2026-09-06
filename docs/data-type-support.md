@@ -66,6 +66,7 @@ tests pin those post-install outcomes and do not rewrite the page.
 | `StabilitySelector` | yes | yes | no | no | no | yes | yes | yes |
 | `stability_regression` | yes | yes | no | no | no | yes | yes | yes |
 | `stability_classif` | yes | yes | no | no | no | yes | yes | yes |
+| `Stabilized` | yes | yes | no | no | no | yes | no | no |
 | `permutation_importance` | yes | yes | yes | no | yes | yes | yes | yes |
 | `smart_sample` | no | yes | no | no | yes | no | yes | yes |
 | `catboost_select` | no | dep | dep | no | no | dep | dep | dep |
@@ -183,6 +184,11 @@ copied onto this page.
 | `stability_classif` | datetime/timedelta | rejected | datetime/timedelta feature columns are rejected; convert them to numeric features explicitly |
 | `stability_classif` | groups | supported | `groups` is accepted on the seeded baseline call |
 | `stability_classif` | time | supported | `time` is accepted on the seeded baseline call |
+| `Stabilized` | categorical | rejected | string/category columns are not accepted as numeric features |
+| `Stabilized` | sparse | rejected | sparse input is rejected; pass a dense NumPy array or pandas DataFrame |
+| `Stabilized` | datetime/timedelta | rejected | datetime/timedelta feature columns are rejected; convert them to numeric features explicitly |
+| `Stabilized` | groups | rejected | `groups` is consumed by resample='blocks' (which needs both groups and time) or forwarded to bases that accept row context; unused row metadata is rejected |
+| `Stabilized` | time | rejected | `time` is consumed by resample='blocks' (which needs both groups and time) or forwarded to bases that accept row context; unused row metadata is rejected |
 | `permutation_importance` | categorical | supported | `permutation_importance` forwards X to the fitted model; with a dtype-tolerant fitted estimator the public call completes. Support is model-dependent |
 | `permutation_importance` | sparse | rejected | sparse matrices are rejected independently of the fitted model; X must be a 2D dense array or pandas DataFrame |
 | `permutation_importance` | datetime/timedelta | supported | `permutation_importance` forwards X to the fitted model; with a dtype-tolerant fitted estimator the public call completes. Support is model-dependent |

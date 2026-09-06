@@ -117,12 +117,16 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       refresh `69410cb`. PR #87 merged at `7314355` after all six required
       CI jobs passed on the exact head. Full local gate 2243 passed / 40 skipped,
       no exclusions; focused fixture-compatibility tests also pass.
-- [ ] Reproducibility manifests (`result.reproducibility_`).
+- [x] Reproducibility manifests (`result.reproducibility_`).
       Codex/Opus review accepted; clean implementation `c322671` and bound
       runtime refresh complete. Full local run: 2261 passed / 40 skipped,
       with its sole glossary-order failure now fixed and targeted checks green.
-      GitHub CI and merge pending.
+      All six CI jobs passed on `bb651a2`; PR #88 merged at `c29e99e`.
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
+      Codex/Opus accepted the implementation on `codex/0.9x-stabilized`.
+      Clean implementation `7cc4f66` has refreshed `dirty=false` runtime evidence.
+      Full local gate: 2290 passed / 40 skipped, no exclusions. CI/merge pending.
+      F5/F6 and later remain open.
 - [ ] F5 multi-target CEFS+.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
 - [ ] Standardized classic-selector caches, then leakage-free unsupervised

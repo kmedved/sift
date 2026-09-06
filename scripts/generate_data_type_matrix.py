@@ -509,6 +509,28 @@ def call_stability(
     fn(payload.X, y, k=K, **common, **fit_kwargs)
 
 
+def call_stabilized(payload: Payload, **_mode) -> None:
+    from sift import CEFSPlusSelector, Stabilized
+
+    inner = CEFSPlusSelector(k=K, verbose=False, subsample=None, random_state=SEED)
+    estimator = Stabilized(
+        inner,
+        n_resamples=2,
+        resample="half",
+        threshold=0.0,
+        random_state=SEED,
+        verbose=False,
+    )
+    kwargs = {}
+    if payload.sample_weight is not None:
+        kwargs["sample_weight"] = payload.sample_weight
+    if payload.groups is not None:
+        kwargs["groups"] = payload.groups
+    if payload.time is not None:
+        kwargs["time"] = payload.time
+    estimator.fit(payload.X, payload.y, **kwargs)
+
+
 def call_permutation(payload: Payload) -> None:
     from sift import permutation_importance
 
@@ -770,6 +792,7 @@ def entries() -> tuple[Entry, ...]:
             False,
             lambda payload, **mode: call_stability(payload, kind="classif", **mode),
         ),
+        Entry("Stabilized", None, False, False, call_stabilized),
         Entry("permutation_importance", None, False, False, call_permutation),
         Entry("smart_sample", None, False, False, call_smart_sample),
         Entry(
@@ -935,6 +958,7 @@ def _stable_note(
             "StabilitySelector",
             "stability_regression",
             "stability_classif",
+            "Stabilized",
             "smart_sample",
         }:
             return "string/category columns are not accepted as numeric features"
@@ -953,6 +977,12 @@ def _stable_note(
             return (
                 "`select_cached` has no groups or time argument; row context is "
                 "not part of the cache-backed selector"
+            )
+        if entry.name == "Stabilized":
+            return (
+                f"`{axis}` is consumed by resample='blocks' (which needs both "
+                "groups and time) or forwarded to bases that accept row context; "
+                "unused row metadata is rejected"
             )
         return f"`{axis}` is rejected on the seeded baseline call"
     if axis == "numeric_ndarray":

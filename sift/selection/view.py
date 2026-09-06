@@ -1446,7 +1446,8 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
         A ``sift.selection.result.FilterSelectionResult``,
         ``sift.KnockoffSelectionResult``, ``BorutaResult``,
         ``FeaturePathEvaluationResult``, ``ImportanceResult``,
-        ``CatBoostSelectionResult``, or a fitted ``StabilitySelector``.  An
+        ``CatBoostSelectionResult``, a fitted ``StabilitySelector``, or a
+        fitted ``Stabilized`` selector.  An
         existing ``SelectionView`` is returned unchanged.  Subclasses of
         the result types are not accepted: dispatch is by exact type so an
         adapter cannot silently mis-read an extended object.
@@ -1555,6 +1556,16 @@ def as_result(obj: Any, input_features: Any = None) -> SelectionView:
             from sift.selection.view_stability import _as_stability_selector
 
             return _as_stability_selector(obj, input_features)
+    if (
+        obj_type.__module__ == "sift.selection.stabilized"
+        and obj_type.__qualname__ == "Stabilized"
+    ):
+        from sift.selection.stabilized import Stabilized
+
+        if obj_type is Stabilized:
+            from sift.selection.view_stabilized import _as_stabilized_selector
+
+            return _as_stabilized_selector(obj, input_features)
     if (
         obj_type.__module__ == "sift.catboost_common"
         and obj_type.__qualname__ == "CatBoostSelectionResult"

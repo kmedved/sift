@@ -55,6 +55,7 @@ from sift.selection.auto_k_xfit import (
 from sift.selection.compare import CompareResult, compare
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 from sift.selection.result import FilterSelectionResult
+from sift.selection.stabilized import Stabilized
 from sift.selection.view import SelectionView, as_result
 from sift.stability import StabilitySelector, stability_classif, stability_regression
 
@@ -129,4 +130,5 @@ __all__ = [
     "as_result",
     "compare",
     "CompareResult",
+    "Stabilized",
 ]

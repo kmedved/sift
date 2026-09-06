@@ -268,7 +268,7 @@ compare selector/estimator/splitter snapshots, and compare fold fingerprints.
 Environment is labelled export-time. Effective row counts and cache provenance
 are measured from the run, not inferred from call defaults. Legacy objects may
 be partial; new runs retain settings that were known at execution. Data hashing
-is opt-in and never retains `X`. Codex/Opus review is accepted; GitHub CI and merge are pending.
+is opt-in and never retains `X`. Codex/Opus review is accepted; PR #88 is merged.
 
 ## Result view
 
@@ -329,7 +329,8 @@ and not knockoff FDR.
 
 Repeated sparse linear fits on resamples; keep features above a frequency
 threshold. SIFT's implementation is a practical heuristic. It is not
-`select_fdr`.
+`select_fdr`. `Stabilized` generalizes the frequency contract to any cloneable
+selector; it does not change `StabilitySelector` in 0.9.
 
 ## Stopping rule
 

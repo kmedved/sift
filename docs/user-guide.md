@@ -387,6 +387,15 @@ With DataFrames, `groups="column"` and `time="column"` extract and exclude the
 metadata columns; direct arrays remain positional. With automatic alpha, groups
 alone can choose GroupKFold and time alone TimeSeriesSplit; with fixed alpha
 they are validated but do not change iid bootstrap.
+
+To threshold any cloneable selector, wrap it in `Stabilized` instead of
+switching to the Lasso-only `StabilitySelector`. Row metadata still arrives at
+`fit`, not in the constructor. `resample="half"` is without replacement;
+`resample="bootstrap"` is with replacement; `resample="blocks"` needs both
+`groups` and `time`. Frequency voting is not FDR control. For a
+`KnockoffSelector` base, `aggregation="evalues"` reuses that class's native
+full-data e-value path and does not average e-values across bootstrap datasets.
+
 `penalty` is an alias for `alpha`, and both may be supplied only when equal.
 Both spellings are permanent: neither is deprecated and neither warns.
 Threshold tuning accepts sklearn scorer objects as well as scorer names.
@@ -415,6 +424,29 @@ keeps the existing integer positions and `view.features` supplies names.
 The fitted selector itself supports dense `inverse_transform`; the frozen
 `SelectionView` intentionally does not retain the fitted preprocessing state
 needed for inversion.
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.feature_selection import SelectKBest, f_regression
+
+from sift import Stabilized
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+
+stabilized = Stabilized(
+    SelectKBest(f_regression, k=3),
+    n_resamples=12,
+    resample="half",
+    threshold=0.6,
+    random_state=0,
+    verbose=False,
+)
+stabilized.fit(X, y)
+stable_any_selector = stabilized.selected_features_
+```
 
 ### When you need a q-calibrated trusted set
 

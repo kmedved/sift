@@ -594,6 +594,7 @@ def test_filter_result_dispatch_loads_only_its_adapter_sibling(monkeypatch):
             "sift.selection.view_importance",
             "sift.selection.view_boruta",
             "sift.selection.view_stability",
+            "sift.selection.view_stabilized",
             "sift.selection.view_path",
             "sift.selection.view_knockoff",
         }:
@@ -625,6 +626,7 @@ def test_public_view_symbols_keep_their_module() -> None:
                 "assert 'sift.selection.view_importance' not in sys.modules\n"
                 "assert 'sift.selection.view_boruta' not in sys.modules\n"
                 "assert 'sift.selection.view_stability' not in sys.modules\n"
+                "assert 'sift.selection.view_stabilized' not in sys.modules\n"
                 "assert 'sift.selection.view_path' not in sys.modules\n"
                 "assert 'sift.selection.view_knockoff' not in sys.modules\n"
                 "assert 'sift.selection.view_filter' not in sys.modules"
@@ -638,6 +640,7 @@ def test_public_view_symbols_keep_their_module() -> None:
                 "assert 'sift.selection.view_importance' not in sys.modules\n"
                 "assert 'sift.selection.view_boruta' not in sys.modules\n"
                 "assert 'sift.selection.view_stability' not in sys.modules\n"
+                "assert 'sift.selection.view_stabilized' not in sys.modules\n"
                 "assert 'sift.selection.view_path' not in sys.modules\n"
                 "assert 'sift.selection.view_knockoff' not in sys.modules\n"
                 "assert 'sift.selection.view_filter' not in sys.modules"

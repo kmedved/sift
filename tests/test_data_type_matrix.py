@@ -33,6 +33,7 @@ REQUIRED_ENTRIES = (
     "StabilitySelector",
     "stability_regression",
     "stability_classif",
+    "Stabilized",
     "permutation_importance",
     "smart_sample",
     "catboost_select",

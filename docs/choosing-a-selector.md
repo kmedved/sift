@@ -53,8 +53,12 @@ flowchart TD
 - Boruta asks which features repeatedly beat randomized shadows. It is an
   all-relevant heuristic, so it may retain redundant members of one signal
   family. `select_boruta_shap` changes the importance backend, not that contract.
-- `StabilitySelector` thresholds selection frequency over resamples. Use it for
-  robustness diagnostics, not as a substitute for knockoff FDR control.
+- `StabilitySelector` thresholds selection frequency over Lasso or logistic
+  resamples. Use it for robustness diagnostics, not as a substitute for knockoff
+  FDR control. `Stabilized(selector)` is the generic wrapper for the same
+  frequency contract around any cloneable selector; `aggregation="evalues"` is
+  the already-validated KnockoffSelector full-data derandomization path, not a
+  bootstrap average of e-values.
 - `catboost_select` is appropriate when selection should follow the nonlinear
   behavior of a CatBoost model and the optional dependency is acceptable.
 - `permutation_importance` ranks columns for an already-fitted estimator on the

@@ -4,6 +4,19 @@
 
 ### Features
 
+- Added additive `Stabilized(selector)` to threshold selection frequency of any
+  cloneable sklearn-style selector or SIFT wrapper (`n_resamples=30`,
+  `resample="half"|"bootstrap"|"blocks"`, `threshold=0.6`, `random_state=0`).
+  Half draws without replacement; bootstrap draws with replacement; blocks use
+  the existing group/time block-bootstrap helper and require both `groups` and
+  `time` at fit time. Row metadata is never a constructor array. Frequencies
+  are float64 over the raw fitted width. `aggregation="evalues"` reuses
+  native full-data `KnockoffSelector` e-value derandomization and rejects
+  resample/threshold overrides; it does not average e-values across bootstrap
+  datasets or claim FDR for ordinary frequency voting. Opt-in F2 proxy storage
+  and an additive `SelectionView` / reproducibility manifest are included.
+  `StabilitySelector` and KnockoffSelector defaults are unchanged. The public
+  surface grows from 60 names to 61. Not a 1.0 preset rewrite.
 - Added additive `sift.compare` for leakage-safe selector comparison. Factories
   refit inside each training fold; a fresh downstream estimator is scored on
   the untouched fold. Results include score distributions, explicit-unit mean
@@ -16,7 +29,7 @@
   vs used rows, typed column hash, opt-in caller data hash, retained cache
   provenance, known new-run configuration/seeds, compare selector/estimator/
   splitter snapshots and fold fingerprints). Codex/Opus review is accepted;
-  clean-source runtime refresh is complete; GitHub CI and merge are pending. The
+  clean-source runtime refresh is complete; PR #88 merged after all six required CI jobs passed. The
   previous 58-name surface is unchanged except for the
   additive `compare` and `CompareResult` exports.
 - Added additive `cat_encoding="onehot"` on filter function APIs and sklearn

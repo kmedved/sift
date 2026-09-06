@@ -47,6 +47,15 @@ _CONFIGURED_KEYS = (
     "task",
     "within",
     "auto_k_config",
+    "n_resamples",
+    "resample",
+    "threshold",
+    "sample_frac",
+    "store_proxies",
+    "output_order",
+    "block_size",
+    "block_method",
+    "base_selector",
 )
 _EFFECTIVE_KEYS = (
     "k",
@@ -65,6 +74,10 @@ _EFFECTIVE_KEYS = (
     "path_depth",
     "subsample",
     "top_m",
+    "n_resamples",
+    "resample",
+    "threshold",
+    "aggregation",
 )
 _COMPARE_PROTOCOL_KEYS = (
     "mode",

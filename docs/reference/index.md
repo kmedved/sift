@@ -91,6 +91,7 @@ python scripts/generate_api_reference.py
 - [`sift.StabilitySelector`](stabilityselector.md)
 - [`sift.stability_regression`](stability_regression.md)
 - [`sift.stability_classif`](stability_classif.md)
+- [`sift.Stabilized`](stabilized.md)
 
 ## Smart sampling
 
