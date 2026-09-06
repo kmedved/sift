@@ -249,9 +249,9 @@ importable from `sift` itself, warning-free, throughout 0.9.
 | q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` |
 | Automatic `k` | `k="auto"` for measured CEFS+ auto-routing, `AutoKConfig` and its presets, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` |
 | Result objects and views | `as_result`, `SelectionView`, `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult` |
-| Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `BorutaSelector`, `StabilitySelector` |
+| Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `BorutaSelector`, `StabilitySelector`, `Stabilized` |
 | Cache-backed Gaussian paths | `build_cache`, `select_cached`, `FeatureCache` |
-| Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif` |
+| Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif`, `Stabilized` |
 | Model-based importance | `permutation_importance`, `BorutaSelector`, `select_boruta`, `select_boruta_shap`, CatBoost helpers |
 | Diagnostics | `set_verbosity`, `evaluate_feature_path`, `sift.experimental` |
 

@@ -163,12 +163,13 @@ from sift import (
     as_result,
     compare,
     CompareResult,
+    Stabilized,
 )
 ```
 
-The 0.9 surface currently contains 60 top-level exports: the 55 legacy names,
-`set_verbosity`, `SelectionView`, `as_result`, and the additive `compare` /
-`CompareResult` pair.
+The 0.9 surface currently contains 61 top-level exports: the 55 legacy names,
+`set_verbosity`, `SelectionView`, `as_result`, the additive `compare` /
+`CompareResult` pair, and `Stabilized`.
 
 ## Logging
 
@@ -439,7 +440,8 @@ The additive A2d result view supports `FilterSelectionResult`,
 `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, and
 `CatBoostSelectionResult` without replacing any class. It also supports the
 opt-in `ImportanceResult` from `permutation_importance`; a fitted
-`StabilitySelector` exposes the same view through `selector.result_view_`:
+`StabilitySelector` or `Stabilized` exposes the same view through
+`selector.result_view_`:
 
 <!-- sift-doc: continues -->
 ```python
@@ -1624,6 +1626,36 @@ Diagnostics:
 info = selector.get_feature_info()
 best_threshold, threshold_scores = selector.tune_threshold(X, y)
 selector.set_threshold(best_threshold)
+```
+
+`Stabilized(selector)` is the generic frequency wrapper around any cloneable
+sklearn-style selector or SIFT wrapper. It does not replace `StabilitySelector`.
+`resample="half"` draws without replacement, `resample="bootstrap"` draws with
+replacement, and `resample="blocks"` needs both `groups` and `time` at fit
+time. `aggregation="evalues"` is valid only for `KnockoffSelector` and reuses
+that class's native full-data e-value path; it is not a bootstrap average of
+e-values and does not create a new FDR claim for frequency voting.
+
+```python
+import pandas as pd
+from sklearn.datasets import make_regression
+from sklearn.feature_selection import SelectKBest, f_regression
+from sift import Stabilized
+
+X_arr, y = make_regression(n_samples=80, n_features=8, n_informative=3, random_state=0)
+X = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(8)])
+stabilized = Stabilized(
+    SelectKBest(f_regression, k=3),
+    n_resamples=8,
+    resample="half",
+    threshold=0.6,
+    random_state=0,
+    verbose=False,
+)
+stabilized.fit(X, y)
+stabilized.selected_features_
+stabilized.selection_frequencies_[:3]
+view = stabilized.result_view_
 ```
 
 Plotting helpers need `matplotlib`, which is not a SIFT dependency:

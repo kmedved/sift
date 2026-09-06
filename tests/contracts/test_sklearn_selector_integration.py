@@ -476,16 +476,23 @@ def test_allow_nan_tag_matches_fit_behavior(selector, target_kind):
 
 def test_metadata_request_setters_expose_only_supported_fit_metadata():
     row_metadata = {"sample_weight", "groups", "time"}
-    for selector_cls in (
-        sift.MRMRSelector,
-        sift.JMISelector,
-        sift.JMIMSelector,
-        sift.CEFSPlusSelector,
-        sift.CEFSPlusBinarySelector,
-        sift.BorutaSelector,
-        sift.StabilitySelector,
-    ):
-        parameters = set(inspect.signature(selector_cls().set_fit_request).parameters) - {
+    estimators = [
+        cls()
+        for cls in (
+            sift.MRMRSelector,
+            sift.JMISelector,
+            sift.JMIMSelector,
+            sift.CEFSPlusSelector,
+            sift.CEFSPlusBinarySelector,
+            sift.BorutaSelector,
+            sift.StabilitySelector,
+        )
+    ]
+    estimators.append(
+        sift.Stabilized(sift.CEFSPlusSelector(k=1, verbose=False), verbose=False)
+    )
+    for estimator in estimators:
+        parameters = set(inspect.signature(estimator.set_fit_request).parameters) - {
             "self"
         }
         assert parameters == row_metadata
@@ -508,6 +515,14 @@ def test_invalid_configured_metadata_requests_fail_before_fit():
         ).set_fit_request(sample_weight=True)
         with pytest.raises(ValueError, match="use_smart_sampler=True"):
             smart.get_metadata_routing()
+
+        frequency = sift.Stabilized(
+            sift.CEFSPlusSelector(k=1, verbose=False),
+            resample="half",
+            verbose=False,
+        ).set_fit_request(groups=True)
+        with pytest.raises(ValueError, match="resample='blocks'"):
+            frequency.get_metadata_routing()
 
 
 @pytest.mark.skipif(

@@ -82,7 +82,7 @@ PUBLIC_API_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Selector comparison", ("compare", "CompareResult")),
     (
         "Stability selection",
-        ("StabilitySelector", "stability_regression", "stability_classif"),
+        ("StabilitySelector", "stability_regression", "stability_classif", "Stabilized"),
     ),
     (
         "Smart sampling",

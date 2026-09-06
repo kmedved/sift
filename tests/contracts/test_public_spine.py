@@ -73,6 +73,7 @@ EXPECTED_ALL = [
     "as_result",
     "compare",
     "CompareResult",
+    "Stabilized",
 ]
 
 
@@ -90,8 +91,9 @@ def test_version_and_ordered_public_exports():
         "as_result",
         "compare",
         "CompareResult",
+        "Stabilized",
     ]
-    assert len(sift.__all__) == 60
+    assert len(sift.__all__) == 61
 
 
 @pytest.mark.parametrize("name", EXPECTED_ALL)
@@ -118,6 +120,17 @@ def test_high_risk_function_defaults():
     assert stability_defaults["random_state"].default is None
     assert stability_defaults["verbose"].default is True
     assert stability_defaults["penalty"].default is None
+
+    stabilized_defaults = inspect.signature(sift.Stabilized).parameters
+    assert stabilized_defaults["n_resamples"].default == 30
+    assert stabilized_defaults["resample"].default == "half"
+    assert stabilized_defaults["threshold"].default == 0.6
+    assert stabilized_defaults["sample_frac"].default is None
+    assert stabilized_defaults["aggregation"].default is None
+    assert stabilized_defaults["random_state"].default == 0
+    assert stabilized_defaults["store_proxies"].default is False
+    assert stabilized_defaults["n_jobs"].default == 1
+    assert stabilized_defaults["verbose"].default is True
 
     defaults = {field.name: field.default for field in fields(sift.AutoKConfig)}
     assert {
