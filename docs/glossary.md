@@ -102,8 +102,11 @@ and Boruta hits are not FDR control.
 matrix, optional copula correlations, retained rows/weights, and name
 provenance. `select_cached` and Gaussian routes reuse it. Weights belong on
 `build_cache`; call-time `sample_weight` on `select_cached` is rejected.
-Categorical and datetime feature columns are not cached; encode or convert
-them first.
+`ClassicFeatureCache` from `build_classic_cache` is a separate numeric
+feature-side snapshot (imputed float64 `X`, rows, normalized and raw MI
+weights) for classic mRMR and non-Gaussian JMI/JMIM `cache=`. It is not a
+copula cache and is not accepted by `select_cached`. Categorical and
+datetime feature columns are not cached; encode or convert them first.
 
 ## Feature path
 

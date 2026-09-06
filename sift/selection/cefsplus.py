@@ -1450,6 +1450,13 @@ def _select_cached_impl(
     k = validate_k(k, allow_auto=False)
     if not isinstance(compose_include, (bool, np.bool_)):
         raise ValueError("compose_include must be a boolean")
+    from sift.estimators.classic_cache import is_classic_cache
+
+    if is_classic_cache(cache):
+        raise TypeError(
+            "select_cached requires a Gaussian FeatureCache from sift.build_cache; "
+            "pass a ClassicFeatureCache to select_mrmr, select_jmi, or select_jmim"
+        )
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
     from sift.selection.cefsplus_multi import as_regression_targets

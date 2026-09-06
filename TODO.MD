@@ -128,7 +128,7 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Full local gate: 2290 passed / 40 skipped, no exclusions; 26 focused
       checks pass after a test-only sklearn 1.3 compatibility correction.
       All six CI jobs passed on `bfe5765`; PR #89 merged at `18cdf40`.
-      F6 and later remain open.
+      Classic caches and unsupervised categorical fallbacks remain open.
 - [x] F5 multi-target CEFS+. Implementation on
       `codex/0.9x-multi-target-cefsplus` (joint 2-D `y`, multi-output
       evaluate, `df=q·k` IC after derivation). Codex/Opus accepted after
@@ -138,7 +138,7 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       unchanged). Full local gate: 2303 passed / 40 skipped, no exclusions;
       strict docs and static checks pass. All six CI jobs passed on `fe14516`;
       PR #90 merged at `0ee513b`, with clean-source ancestry preserved.
-- [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
+- [x] F6 generic `ModelSelector` with purged/embargoed time-series splits.
       Split primitives accepted. Generic `ModelSelector.fit` and the CatBoost
       preset `catboost_select` share the internal `run_selection` backend
       contract (`_GenericModelBackend` / `_CatBoostNativePreset`) on
@@ -147,9 +147,20 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       importance guard. Latest focused gate: 267 passed / 3 skipped.
       Clean implementation `22c6638` has refreshed `dirty=false` runtime
       evidence with 18/18 data and selection fingerprints unchanged.
-      Full local gates and exact-head CI/merge remain pending.
-- [ ] Standardized classic-selector caches, then leakage-free unsupervised
-      `ordinal`/`frequency` categorical fallbacks.
+      Full local gate: 2372 passed / 40 skipped, warnings as errors and no
+      exclusions; static, support-matrix and strict docs checks pass.
+      All six required CI jobs passed on `e9cbf1d`; PR #91 merged at
+      `323da27`, with tested-tree equality and clean-source ancestry verified.
+- [ ] Standardized classic-selector caches. `ClassicFeatureCache` /
+      `build_classic_cache` accepted by Codex and resumed Opus reviews,
+      including duplicate/NaN-name guards. Numeric feature-side reuse only;
+      targets, relevance and numerical loops remain fresh/unchanged.
+      Exact cached/uncached selection and result parity verified. Clean code
+      `8f44999` has refreshed `dirty=false` runtime evidence with 18/18 unchanged
+      data/selection fingerprints. Full local gate: 2386 passed / 40 skipped,
+      warnings as errors, no exclusions; static/matrix/strict docs pass.
+      Exact-head CI and merge remain pending.
+- [ ] Leakage-free unsupervised `ordinal`/`frequency` categorical fallbacks.
 
 ## Closed history
 

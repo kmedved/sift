@@ -167,13 +167,15 @@ from sift import (
     PurgedTimeSeriesSplit,
     GroupPurgedTimeSeriesSplit,
     ModelSelector,
+    ClassicFeatureCache,
+    build_classic_cache,
 )
 ```
 
-The 0.9 surface currently contains 64 top-level exports: the 55 legacy names,
+The 0.9 surface currently contains 66 top-level exports: the 55 legacy names,
 `set_verbosity`, `SelectionView`, `as_result`, the additive `compare` /
-`CompareResult` pair, `Stabilized`, the purged time-series splitters, and
-`ModelSelector`.
+`CompareResult` pair, `Stabilized`, the purged time-series splitters,
+`ModelSelector`, and the classic numeric cache pair.
 
 ## Logging
 
