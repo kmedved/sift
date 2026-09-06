@@ -34,6 +34,7 @@ REQUIRED_ENTRIES = (
     "stability_regression",
     "stability_classif",
     "Stabilized",
+    "ModelSelector",
     "permutation_importance",
     "smart_sample",
     "catboost_select",
@@ -358,3 +359,40 @@ def test_shap_dependency_does_not_match_importance_substring(matrix_mod) -> None
 
 def test_stable_extra_notes_cover_only_boruta_shap(matrix_mod) -> None:
     assert set(matrix_mod.STABLE_EXTRA_NOTES) == {"select_boruta_shap"}
+
+
+def test_model_selector_covers_all_axes_with_disclosed_ridge(
+    matrix_mod, published_cells
+) -> None:
+    grid = {(cell.entry, cell.axis): cell for cell in published_cells}
+    ridge = grid[("ModelSelector", "numeric_ndarray")]
+    frame = grid[("ModelSelector", "numeric_dataframe")]
+    weights = grid[("ModelSelector", "sample_weight")]
+    categorical = grid[("ModelSelector", "categorical")]
+    sparse = grid[("ModelSelector", "sparse")]
+    temporal = grid[("ModelSelector", "datetime_timedelta")]
+    groups = grid[("ModelSelector", "groups")]
+    time = grid[("ModelSelector", "time")]
+    assert ridge.status == matrix_mod.SUPPORTED
+    assert frame.status == matrix_mod.SUPPORTED
+    assert weights.status == matrix_mod.SUPPORTED
+    assert "Ridge" in matrix_mod.render_page(published_cells)
+    assert categorical.status == matrix_mod.CONDITIONAL
+    assert "Ridge" in categorical.note
+    assert "OrdinalEncoder" in categorical.note
+    assert "permutation" in categorical.note
+    assert "estimator-dependent" in categorical.note
+    assert "not a ModelSelector encoding default" in categorical.note
+    assert categorical.enabled is not None and categorical.enabled.ok
+    assert not categorical.default.ok
+    assert sparse.status == matrix_mod.REJECTED
+    assert temporal.status == matrix_mod.REJECTED
+    assert "convert them to numeric features explicitly" in temporal.note
+    assert groups.status == matrix_mod.CONDITIONAL
+    assert time.status == matrix_mod.CONDITIONAL
+    assert "unused" in groups.note and "searched count grid" in groups.note
+    assert "unused" in time.note and "searched count grid" in time.note
+    assert groups.enabled is not None and groups.enabled.ok
+    assert time.enabled is not None and time.enabled.ok
+    assert not groups.default.ok
+    assert not time.default.ok

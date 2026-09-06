@@ -74,6 +74,9 @@ EXPECTED_ALL = [
     "compare",
     "CompareResult",
     "Stabilized",
+    "PurgedTimeSeriesSplit",
+    "GroupPurgedTimeSeriesSplit",
+    "ModelSelector",
 ]
 
 
@@ -92,8 +95,11 @@ def test_version_and_ordered_public_exports():
         "compare",
         "CompareResult",
         "Stabilized",
+        "PurgedTimeSeriesSplit",
+        "GroupPurgedTimeSeriesSplit",
+        "ModelSelector",
     ]
-    assert len(sift.__all__) == 61
+    assert len(sift.__all__) == 64
 
 
 @pytest.mark.parametrize("name", EXPECTED_ALL)

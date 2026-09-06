@@ -100,6 +100,15 @@ python scripts/generate_api_reference.py
 - [`sift.panel_config`](panel_config.md)
 - [`sift.cross_section_config`](cross_section_config.md)
 
+## Purged time-series CV
+
+- [`sift.PurgedTimeSeriesSplit`](purgedtimeseriessplit.md)
+- [`sift.GroupPurgedTimeSeriesSplit`](grouppurgedtimeseriessplit.md)
+
+## Generic model selector
+
+- [`sift.ModelSelector`](modelselector.md)
+
 ## Permutation importance
 
 - [`sift.permutation_importance`](permutation_importance.md)

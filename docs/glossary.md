@@ -201,6 +201,15 @@ in-library; `loo` / `target` / `james_stein` additionally need
 `category_encoders`. `KnockoffSelector` rejects `target_cv`; its
 `loo_logit` path warns and sets `fdr_control="none"`.
 
+## Model selector
+
+`ModelSelector` is an additive sklearn selector around a cloned downstream
+estimator. It offers RFE, forward, and stability paths, uses the purged
+splitters when `groups`/`time` are supplied, and can opt into genuinely
+nested scoring. Outer-validation scores are independent evidence, not the
+inner curve that chooses `k`. `catboost_select` remains the CatBoost preset
+and is not this class.
+
 ## Model-X
 
 Candès–Fan–Janson–Lv knockoffs: valid if knockoffs are generated from the
@@ -231,6 +240,16 @@ Score drop when a column is shuffled, averaged over repeats, for an already
 fitted model. SIFT adds group/time-aware shuffle schemes. It ranks; it does
 not select a cutoff. Support for string or datetime columns is
 model-dependent.
+
+## Purged time-series split
+
+`PurgedTimeSeriesSplit` / `GroupPurgedTimeSeriesSplit`: additive sklearn
+cross-validators that cut on distinct timestamps, purge closed information-
+interval overlap with validation, and optionally embargo a past-side
+duration. They are not sklearn `TimeSeriesSplit(gap=)` row skipping.
+`mode="forward"` is chronological; `mode="purged_kfold"` is opt-in
+bidirectional. Time is passed on each `split` call, not stored for later
+reuse. See the F6 contract in the campaign spec.
 
 ## q
 

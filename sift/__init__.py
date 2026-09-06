@@ -54,6 +54,8 @@ from sift.selection.auto_k_xfit import (
 )
 from sift.selection.compare import CompareResult, compare
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
+from sift.selection.model_selector import ModelSelector
+from sift.selection.purged_cv import GroupPurgedTimeSeriesSplit, PurgedTimeSeriesSplit
 from sift.selection.result import FilterSelectionResult
 from sift.selection.stabilized import Stabilized
 from sift.selection.view import SelectionView, as_result
@@ -131,4 +133,7 @@ __all__ = [
     "compare",
     "CompareResult",
     "Stabilized",
+    "PurgedTimeSeriesSplit",
+    "GroupPurgedTimeSeriesSplit",
+    "ModelSelector",
 ]

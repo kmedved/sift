@@ -3,14 +3,17 @@
 The matrix is not a wishlist. Every cell is the outcome of calling a public
 selector entry point on a tiny fixture: supported, rejected, conditional, or
 dependency-gated. Conditional cells retry a documented enabling option
-(``cat_encoding="target_cv"``, KnockoffSelector ``loo_logit``, or ``k="auto"``
-with evaluate splits). Probes keep data-type acceptance and encoding defaults
-intact, but they fix ``alpha=1.0`` for stability (skipping automatic alpha
-search) and CatBoost ``algorithm="prediction"`` with ``prefilter_k=None``
-(skipping the expensive SHAP/prefilter defaults). Published rejected-cell
-notes are stable public-contract descriptions; raw exception text is kept
-only on the attempt for diagnostics. The generator does not change selector
-mathematics or public defaults.
+(``cat_encoding="target_cv"``, KnockoffSelector ``loo_logit``, ``k="auto"``
+with evaluate splits, ``ModelSelector`` searched count grids, or a
+width-preserving sklearn encoding pipeline). Probes keep data-type
+acceptance and encoding defaults intact, but they fix ``alpha=1.0`` for
+stability (skipping automatic alpha search), CatBoost
+``algorithm="prediction"`` with ``prefilter_k=None`` (skipping the expensive
+SHAP/prefilter defaults), and ``ModelSelector(Ridge())`` because that class
+requires an estimator (a disclosed probe baseline, not a library default).
+Published rejected-cell notes are stable public-contract descriptions; raw
+exception text is kept only on the attempt for diagnostics. The generator
+does not change selector mathematics or public defaults.
 """
 
 from __future__ import annotations
@@ -509,6 +512,67 @@ def call_stability(
     fn(payload.X, y, k=K, **common, **fit_kwargs)
 
 
+def _width_preserving_ordinal_ridge():
+    """Encode non-numeric columns without expanding width, then Ridge.
+
+    ``make_column_selector`` follows whatever columns the current fit still
+    has, so RFE subsets keep working. Permutation importance ranks the raw
+    input columns. This is a disclosed ``ModelSelector`` probe pipeline, not
+    a SIFT default.
+    """
+    from sklearn.compose import ColumnTransformer, make_column_selector
+    from sklearn.linear_model import Ridge
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import OrdinalEncoder
+
+    encoder = ColumnTransformer(
+        [
+            (
+                "cat",
+                OrdinalEncoder(
+                    handle_unknown="use_encoded_value",
+                    unknown_value=-1,
+                ),
+                make_column_selector(dtype_exclude=np.number),
+            )
+        ],
+        remainder="passthrough",
+        verbose_feature_names_out=False,
+    )
+    return make_pipeline(encoder, Ridge())
+
+
+def call_model_selector(payload: Payload, **mode) -> None:
+    from sklearn.linear_model import Ridge
+    from sift import ModelSelector
+
+    search_counts = bool(mode.get("search_counts"))
+    encode_categorical = bool(mode.get("encode_categorical"))
+    if encode_categorical:
+        if not isinstance(payload.X, pd.DataFrame):
+            raise TypeError("categorical ModelSelector probe requires a DataFrame")
+        estimator = _width_preserving_ordinal_ridge()
+        importance = "permutation"
+    else:
+        estimator = Ridge()
+        importance = "auto"
+    selector = ModelSelector(
+        estimator,
+        n_features_to_select=[1, K] if search_counts else K,
+        importance=importance,
+        random_state=SEED,
+        verbose=False,
+    )
+    kwargs = {}
+    if payload.sample_weight is not None:
+        kwargs["sample_weight"] = payload.sample_weight
+    if payload.groups is not None:
+        kwargs["groups"] = payload.groups
+    if payload.time is not None:
+        kwargs["time"] = payload.time
+    selector.fit(payload.X, payload.y, **kwargs)
+
+
 def call_stabilized(payload: Payload, **_mode) -> None:
     from sift import CEFSPlusSelector, Stabilized
 
@@ -793,6 +857,7 @@ def entries() -> tuple[Entry, ...]:
             lambda payload, **mode: call_stability(payload, kind="classif", **mode),
         ),
         Entry("Stabilized", None, False, False, call_stabilized),
+        Entry("ModelSelector", None, False, False, call_model_selector),
         Entry("permutation_importance", None, False, False, call_permutation),
         Entry("smart_sample", None, False, False, call_smart_sample),
         Entry(
@@ -824,8 +889,12 @@ def _enabled_mode(axis: str, entry: Entry) -> dict | None:
         return {"cat_encoding": "target_cv"}
     if axis == "categorical" and entry.name == "KnockoffSelector":
         return {"cat_encoding": "loo_logit"}
+    if axis == "categorical" and entry.name == "ModelSelector":
+        return {"encode_categorical": True}
     if axis in {"groups", "time"} and entry.supports_auto_k:
         return {"auto": True}
+    if axis in {"groups", "time"} and entry.name == "ModelSelector":
+        return {"search_counts": True}
     return None
 
 
@@ -869,12 +938,25 @@ def _stable_note(
             '`cat_encoding="loo_logit"` completes with a UserWarning and '
             "`fdr_control='none'` because supervised encoding drops the Model-X claim"
         )
+    if status == CONDITIONAL and axis == "categorical" and entry.name == "ModelSelector":
+        return (
+            "the disclosed Ridge baseline cannot consume string columns; a "
+            "width-preserving sklearn OrdinalEncoder pipeline with "
+            "`importance='permutation'` completes. Categorical handling is "
+            "estimator-dependent and is not a ModelSelector encoding default"
+        )
     if status == CONDITIONAL and axis == "categorical":
         return (
             'baseline `cat_encoding="none"` rejects string/category columns; '
             '`cat_encoding="target_cv"` encodes them without extras'
         )
     if status == CONDITIONAL and axis in {"groups", "time"}:
+        if entry.name == "ModelSelector":
+            return (
+                "an explicit integer `n_features_to_select` rejects unused "
+                f"`{axis}` metadata; a searched count grid with the default "
+                f"reusable `{axis}` CV is accepted"
+            )
         return (
             "fixed-k baseline calls reject row context; "
             f'`k="auto"` with evaluate `{axis}` splits is accepted'
@@ -1202,11 +1284,13 @@ def render_page(cells: list[Cell]) -> str:
             "the datetime/timedelta fixture adds `when` and `elapsed` (`p=6`).",
             "Iteration, draw, and runtime knobs are reduced so the probes stay cheap;",
             "algorithm-routing and data-type acceptance/encoding defaults are left in",
-            "place, with two explicit exceptions: stability uses a fixed `alpha=1.0`",
-            "instead of automatic alpha search, and CatBoost uses",
+            "place, with three explicit exceptions: stability uses a fixed `alpha=1.0`",
+            "instead of automatic alpha search, CatBoost uses",
             '`algorithm="prediction"` with `prefilter_k=None` instead of its SHAP',
-            "and prefilter defaults. Warnings are captured for classification and",
-            "are not copied into the table. The probes never change selector",
+            "and prefilter defaults, and `ModelSelector` is constructed with",
+            "`Ridge()` because the class requires an estimator (a disclosed probe",
+            "baseline, not a library default). Warnings are captured for classification",
+            "and are not copied into the table. The probes never change selector",
             "mathematics or public defaults to make a cell succeed.",
             "SIFT-specific terms are defined in the [glossary](glossary.md).",
             "",
@@ -1230,6 +1314,11 @@ def render_page(cells: list[Cell]) -> str:
             '- categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra)',
             '- `KnockoffSelector` categorical: `cat_encoding="loo_logit"` (warns; `fdr_control=\'none\'`)',
             '- groups/time: `k="auto"` with `AutoKConfig(k_method="evaluate")` and the matching split strategy',
+            "- `ModelSelector` categorical: width-preserving sklearn `OrdinalEncoder`",
+            "  encoding with permutation importance on raw input columns",
+            "  (estimator-dependent; not a library encoding default)",
+            "- `ModelSelector` groups/time: searched `n_features_to_select` grid with the",
+            "  default reusable group/time CV",
             "",
             "CatBoost cells publish the known post-install contract in every",
             "environment: `no` for ndarray, sparse, and datetime/timedelta; `dep`",
@@ -1269,7 +1358,9 @@ def render_page(cells: list[Cell]) -> str:
             "  Boruta entry points (including `BorutaSelector`) additionally require",
             "  `allow_full_data_target_encoding=True` for those legacy supervised",
             "  modes; sklearn filter selector classes and `KnockoffSelector` do not.",
-            "  That extra path is not a matrix column.",
+            "  That extra path is not a matrix column. `ModelSelector` has no",
+            "  categorical encoding default; the `cond` cell is a disclosed Ridge",
+            "  pipeline, not a universal string rejection.",
             "- **sparse.** SciPy CSR input. Function and class routes are probed on",
             "  the same CSR axis. Low-level rejection messages differ; this matrix",
             "  normalizes them to one user-facing status and note.",
@@ -1280,7 +1371,9 @@ def render_page(cells: list[Cell]) -> str:
             "- **groups / time.** Row metadata arrays (or, for `smart_sample`, config",
             "  column names). A datetime `time=` array is metadata, not a feature.",
             "  Fixed-k filter functions and classes reject this context; automatic-k",
-            "  evaluate splits accept it.",
+            "  evaluate splits accept it. `ModelSelector` with an explicit integer",
+            "  count rejects unused `groups`/`time`; a searched count grid uses the",
+            "  default reusable group/time CV.",
             "",
             "## Coverage limits",
             "",
@@ -1290,6 +1383,11 @@ def render_page(cells: list[Cell]) -> str:
             "  so categorical and datetime cells exercise SIFT rather than a numeric",
             "  model's `fit`. Support remains model-dependent. Sparse input is rejected",
             "  by SIFT independently of that estimator.",
+            "- `ModelSelector` is probed with `Ridge()` as a disclosed constructor",
+            "  baseline. Sparse and datetime/timedelta feature columns are rejected by",
+            "  SIFT. Categorical `cond` uses a width-preserving sklearn encoding",
+            "  pipeline plus permutation importance; that is not a claim about every",
+            "  estimator and not a native CatBoost path.",
             "- `select_cached` is probed as `build_cache` plus `select_cached`. Weights",
             "  are passed to `build_cache`. Axes that are not arguments of",
             "  `select_cached` fail at the public call.",
@@ -1310,8 +1408,8 @@ def render_page(cells: list[Cell]) -> str:
             "  scope. `select_cached` is intentionally probed as `build_cache` plus",
             "  `select_cached`.",
             "- Multiclass helpers, Polars frames, sparse *output*, one-hot encoding,",
-            "  metadata-alias axes, and later 0.9.x F-workstream APIs (F6+) are out of",
-            "  scope. A 2-D numeric `y` (`n×q`, `q≥2`) is not a matrix column: joint",
+            "  and metadata-alias axes are out of scope. A 2-D numeric `y`",
+            "  (`n×q`, `q≥2`) is not a matrix column: joint",
             "  multi-target CEFS+ is supported on `select_cefsplus`, `CEFSPlusSelector`,",
             "  `select_cached(method=\"cefsplus\")`, and `evaluate_feature_path`. Other",
             "  selectors reject it. Reusing one `FeatureCache` across separate 1-D `y`",

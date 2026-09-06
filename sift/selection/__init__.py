@@ -35,6 +35,11 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.loops import jmi_select, mrmr_select
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
+from sift.selection.model_selector import ModelSelector
+from sift.selection.purged_cv import (
+    GroupPurgedTimeSeriesSplit,
+    PurgedTimeSeriesSplit,
+)
 
 __all__ = [
     "AutoKConfig",
@@ -64,4 +69,7 @@ __all__ = [
     "mrmr_select",
     "FeaturePathEvaluationResult",
     "evaluate_feature_path",
+    "PurgedTimeSeriesSplit",
+    "GroupPurgedTimeSeriesSplit",
+    "ModelSelector",
 ]

@@ -3,7 +3,6 @@
 from collections import defaultdict
 from typing import Any, Dict, List, Literal, Optional
 import inspect
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -34,6 +33,8 @@ from sift.catboost_common import (
     _validate_stability_params,
     _validate_step_function,
 )
+from sift.selection import orchestration as _selection_orchestration
+from sift.selection.orchestration import SelectionBackend
 from sift.catboost_algorithms import (
     _aggregate_feature_lists,
     _bootstrap_indices,
@@ -122,10 +123,9 @@ def _resolve_catboost_feature_types(
     if cat_features is not None:
         missing = [f for f in cat_features if f not in all_features]
         if missing:
-            warnings.warn(
+            warn_external(
                 f"cat_features not found in X (ignoring): {missing[:5]}",
                 UserWarning,
-                stacklevel=3,
             )
         cat_features_final = [f for f in cat_features if f in all_features]
         for f in detected_cat:
@@ -140,13 +140,12 @@ def _resolve_catboost_feature_types(
         cat_set = set(cat_features_final)
         orphan_obj = [c for c in obj_cols if c not in text_set and c not in cat_set]
         if orphan_obj:
-            warnings.warn(
+            warn_external(
                 f"treat_object_as_categorical=False but {len(orphan_obj)} object column(s) "
                 f"are not in text_features or cat_features: {orphan_obj[:5]}. "
                 "Auto-treating them as categorical to avoid CatBoost errors. "
                 "To exclude them, drop from X before calling.",
                 UserWarning,
-                stacklevel=3,
             )
             cat_features_final = list(cat_features_final)
             for c in orphan_obj:
@@ -578,11 +577,10 @@ def _choose_catboost_target_k(
     max_eval_k = max(scores_mean)
     if k_req is not None:
         if k_req > max_eval_k:
-            warnings.warn(
+            warn_external(
                 f"k={k_req} exceeds max evaluated feature count ({max_eval_k}) after "
                 f"prefiltering/fit failures; using k={max_eval_k} instead.",
                 UserWarning,
-                stacklevel=3,
             )
             target_k = max_eval_k
         else:
@@ -687,14 +685,270 @@ def _compute_final_catboost_importances(
             method=importance_method,
         )
     except Exception as exc:
-        warnings.warn(
+        warn_external(
             f"Failed to compute final importances: {exc}",
             UserWarning,
-            stacklevel=3,
         )
         return pd.Series(dtype=float)
 
 
+class _CatBoostNativePreset(SelectionBackend):
+    """Native CatBoost backend on the shared F6 selection runner.
+
+    ``catboost_select`` and ``ModelSelector.fit`` both call
+    ``sift.selection.orchestration.run_selection``. This backend keeps
+    CatBoost SHAP/Pool, fold-local prefilter, fold voting, and explicit-k
+    stability padding. It does not use generic coefficient ranking.
+    """
+
+    def prepare(self, X, y, **options) -> Dict[str, Any]:
+        k_req = options["k"]
+        if CatBoostRegressor is None:
+            raise ImportError(
+                "CatBoost is required for this function. "
+                "Install with: pip install catboost"
+            )
+
+        _validate_choice("task", options["task"], _VALID_TASKS)
+        _validate_choice("algorithm", options["algorithm"], _VALID_ALGORITHMS)
+        _validate_choice(
+            "prefilter_method", options["prefilter_method"], _VALID_PREFILTER_METHODS
+        )
+        _validate_step_function(options["step_function"])
+        _validate_stability_params(
+            options["n_bootstrap"], options["stability_threshold"]
+        )
+        _validate_selection_params(options["tolerance"], options["selection_patience"])
+
+        y = _normalize_catboost_target(y, X.index)
+        n_samples, n_features_orig = X.shape
+        metadata = resolve_row_metadata(
+            X,
+            groups=options["groups"],
+            time=options["time"],
+            sample_weight=options["sample_weight"],
+            group_col=options["group_col"],
+            sample_weight_col=options["sample_weight_col"],
+        )
+        X_work = metadata.X
+        sample_weights = _catboost_row_series(
+            metadata.sample_weight,
+            X.index,
+            argument="sample_weight",
+        )
+        groups = _catboost_row_series(
+            metadata.groups,
+            X.index,
+            argument="groups",
+        )
+        time_values = _catboost_row_series(
+            metadata.time,
+            X.index,
+            argument="time",
+        )
+        X_work, y, sample_weights, groups = _sort_catboost_rows_by_time(
+            X_work,
+            y,
+            sample_weights,
+            groups,
+            time_values,
+        )
+        if options["random_state"] is None:
+            warn_random_state_none("catboost_select")
+        all_features = list(X_work.columns)
+
+        model_params, resolved_metric, resolved_hib = _build_catboost_model_params(
+            task=options["task"],
+            y=y,
+            n_estimators=options["n_estimators"],
+            learning_rate=options["learning_rate"],
+            max_depth=options["max_depth"],
+            eval_metric=options["eval_metric"],
+            loss_function=options["loss_function"],
+            catboost_params=options["catboost_params"],
+            higher_is_better=options["higher_is_better"],
+            random_state=options["random_state"],
+            gpu=options["gpu"],
+            n_jobs=options["n_jobs"],
+        )
+
+        verbose = options["verbose"]
+        if verbose:
+            direction = "up" if resolved_hib else "down"
+            logger.info(
+                f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features"
+            )
+            logger.info(f"  Metric: {resolved_metric} ({direction} better)")
+
+        cat_features_final, text_feat = _resolve_catboost_feature_types(
+            X_work,
+            all_features,
+            cat_features=options["cat_features"],
+            text_features=options["text_features"],
+            treat_object_as_categorical=options["treat_object_as_categorical"],
+            verbose=verbose,
+        )
+        counts = _resolve_catboost_counts(
+            k_req=k_req,
+            feature_counts=options["feature_counts"],
+            n_features=len(all_features),
+            min_features=options["min_features"],
+            step_function=options["step_function"],
+            algorithm=options["algorithm"],
+        )
+
+        if verbose:
+            logger.info(
+                f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}"
+            )
+            logger.info(f"  Algorithm: {options['algorithm']}")
+
+        splits = _build_catboost_splits(
+            X_work=X_work,
+            y=y,
+            groups=groups,
+            cv=options["cv"],
+            use_stability=options["use_stability"],
+            n_samples=n_samples,
+            n_bootstrap=options["n_bootstrap"],
+            task=options["task"],
+            random_state=options["random_state"],
+            n_splits=options["n_splits"],
+            test_size=options["test_size"],
+            verbose=verbose,
+        )
+        return {
+            "k_req": k_req,
+            "X_work": X_work,
+            "y": y,
+            "sample_weights": sample_weights,
+            "all_features": all_features,
+            "counts": counts,
+            "splits": splits,
+            "model_params": model_params,
+            "resolved_metric": resolved_metric,
+            "resolved_hib": resolved_hib,
+            "cat_features_final": cat_features_final,
+            "text_feat": text_feat,
+            "options": options,
+        }
+
+    def evaluate_folds(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+        options = prepared["options"]
+        all_scores, all_features_by_k, prefilter_features_first = (
+            _run_catboost_split_evaluation(
+                X_work=prepared["X_work"],
+                y=prepared["y"],
+                sample_weights=prepared["sample_weights"],
+                splits=prepared["splits"],
+                all_features=prepared["all_features"],
+                counts=prepared["counts"],
+                task=options["task"],
+                model_params=prepared["model_params"],
+                cat_features_final=prepared["cat_features_final"],
+                text_feat=prepared["text_feat"],
+                prefilter_k=options["prefilter_k"],
+                prefilter_method=options["prefilter_method"],
+                random_state=options["random_state"],
+                n_jobs=options["n_jobs"],
+                algorithm=options["algorithm"],
+                resolved_metric=prepared["resolved_metric"],
+                resolved_hib=prepared["resolved_hib"],
+                train_early_stopping_rounds=options["train_early_stopping_rounds"],
+                steps=options["steps"],
+                k_req=prepared["k_req"],
+                verbose=options["verbose"],
+                callback=options["callback"],
+            )
+        )
+        return {
+            "all_scores": all_scores,
+            "all_features_by_k": all_features_by_k,
+            "prefilter_features_first": prefilter_features_first,
+        }
+
+    def choose_count(self, prepared: Dict[str, Any], evaluated: Dict[str, Any]):
+        options = prepared["options"]
+        target_k, best_k, best_score, scores_mean, scores_std = (
+            _choose_catboost_target_k(
+                evaluated["all_scores"],
+                k_req=prepared["k_req"],
+                resolved_hib=prepared["resolved_hib"],
+                tolerance=options["tolerance"],
+                selection_patience=options["selection_patience"],
+                verbose=options["verbose"],
+            )
+        )
+        return {
+            "target_k": target_k,
+            "best_k": best_k,
+            "best_score": best_score,
+            "scores_mean": scores_mean,
+            "scores_std": scores_std,
+        }
+
+    def evaluate(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+        return self.evaluate_folds(prepared)
+
+    def choose(self, prepared: Dict[str, Any], evaluated: Dict[str, Any]):
+        return self.choose_count(prepared, evaluated)
+
+    def finalize(
+        self,
+        prepared: Dict[str, Any],
+        evaluated: Dict[str, Any],
+        chosen: Dict[str, Any],
+    ) -> CatBoostSelectionResult:
+        options = prepared["options"]
+        selected_features, stability_scores = _select_final_catboost_features(
+            target_k=chosen["target_k"],
+            k_req=prepared["k_req"],
+            all_features_by_k=evaluated["all_features_by_k"],
+            all_features=prepared["all_features"],
+            prefilter_features_first=evaluated["prefilter_features_first"],
+            use_stability=options["use_stability"],
+            stability_threshold=options["stability_threshold"],
+        )
+        features_by_k = _aggregate_catboost_features_by_k(
+            evaluated["all_features_by_k"]
+        )
+        feature_importances = _compute_final_catboost_importances(
+            X_work=prepared["X_work"],
+            y=prepared["y"],
+            sample_weights=prepared["sample_weights"],
+            selected_features=selected_features,
+            cat_features_final=prepared["cat_features_final"],
+            text_feat=prepared["text_feat"],
+            task=options["task"],
+            model_params=prepared["model_params"],
+            algorithm=options["algorithm"],
+        )
+
+        if options["verbose"]:
+            score = chosen["scores_mean"].get(
+                chosen["target_k"], chosen["best_score"]
+            )
+            logger.info(
+                f"Selected {len(selected_features)} features "
+                f"(k={chosen['target_k']}, score={score:.4f}; "
+                f"best-scoring k={chosen['best_k']}, "
+                f"score={chosen['best_score']:.4f})"
+            )
+
+        return CatBoostSelectionResult(
+            selected_features=selected_features,
+            best_k=chosen["target_k"],
+            scores_by_k=chosen["scores_mean"],
+            scores_std_by_k=chosen["scores_std"],
+            feature_importances=feature_importances,
+            features_by_k=features_by_k,
+            stability_scores=stability_scores,
+            prefilter_features=evaluated["prefilter_features_first"],
+            metric=prepared["resolved_metric"],
+            higher_is_better=prepared["resolved_hib"],
+            all_scores=dict(evaluated["all_scores"]),
+            selection_patience=options["selection_patience"],
+        )
 
 
 # =============================================================================
@@ -940,6 +1194,7 @@ def catboost_select(
     --------
     catboost_regression : Regression wrapper returning only the feature names.
     catboost_classif : Classification wrapper returning only the names.
+    ModelSelector : Generic sklearn-estimator F6 selector; not this native path.
     sift.select_boruta : All-relevant tree-based alternative.
 
     Notes
@@ -948,9 +1203,14 @@ def catboost_select(
     ``python -m pip install -e ".[catboost]"``. ``sift.catboost_select`` is a
     lazy export, so importing ``sift`` never requires the extra, and this
     function raises ``ImportError`` only when actually called without it.
-    ``best_k`` on the returned result is the count that was selected, which for
-    ``k=None`` is the parsimonious pick and can differ from the raw
-    best-scoring count; read ``scores_by_k`` for the full curve.
+    This is the F6 CatBoost preset: it runs the shared internal
+    ``run_selection`` contract (prepare, evaluate, choose, finalize) with a
+    native SHAP/Pool backend. It is not ``ModelSelector`` ranking and not
+    nested scoring. Reported CV scores stay the historical per-count
+    validation curve. ``best_k`` on the returned
+    result is the count that was selected, which for ``k=None`` is the
+    parsimonious pick and can differ from the raw best-scoring count; read
+    ``scores_by_k`` for the full curve.
 
     Examples
     --------
@@ -980,188 +1240,48 @@ def catboost_select(
             random_state=0,
         )
     """
-    k_req = k
-    if CatBoostRegressor is None:
-        raise ImportError(
-            "CatBoost is required for this function. "
-            "Install with: pip install catboost"
-        )
-
-    _validate_choice("task", task, _VALID_TASKS)
-    _validate_choice("algorithm", algorithm, _VALID_ALGORITHMS)
-    _validate_choice("prefilter_method", prefilter_method, _VALID_PREFILTER_METHODS)
-    _validate_step_function(step_function)
-    _validate_stability_params(n_bootstrap, stability_threshold)
-    _validate_selection_params(tolerance, selection_patience)
-
-    y = _normalize_catboost_target(y, X.index)
-    n_samples, n_features_orig = X.shape
-    metadata = resolve_row_metadata(
+    return _selection_orchestration.run_selection(
+        _CatBoostNativePreset(),
         X,
-        groups=groups,
-        time=time,
-        sample_weight=sample_weight,
+        y,
+        k=k,
+        task=task,
+        min_features=min_features,
+        step_function=step_function,
+        feature_counts=feature_counts,
+        selection_patience=selection_patience,
+        tolerance=tolerance,
+        cv=cv,
+        n_splits=n_splits,
+        test_size=test_size,
         group_col=group_col,
         sample_weight_col=sample_weight_col,
-    )
-    X_work = metadata.X
-    sample_weights = _catboost_row_series(
-        metadata.sample_weight,
-        X.index,
-        argument="sample_weight",
-    )
-    groups = _catboost_row_series(
-        metadata.groups,
-        X.index,
-        argument="groups",
-    )
-    time_values = _catboost_row_series(
-        metadata.time,
-        X.index,
-        argument="time",
-    )
-    X_work, y, sample_weights, groups = _sort_catboost_rows_by_time(
-        X_work,
-        y,
-        sample_weights,
-        groups,
-        time_values,
-    )
-    if random_state is None:
-        warn_random_state_none("catboost_select")
-    all_features = list(X_work.columns)
-
-    model_params, resolved_metric, resolved_hib = _build_catboost_model_params(
-        task=task,
-        y=y,
+        prefilter_k=prefilter_k,
+        prefilter_method=prefilter_method,
+        use_stability=use_stability,
+        n_bootstrap=n_bootstrap,
+        stability_threshold=stability_threshold,
         n_estimators=n_estimators,
         learning_rate=learning_rate,
         max_depth=max_depth,
         eval_metric=eval_metric,
         loss_function=loss_function,
         catboost_params=catboost_params,
-        higher_is_better=higher_is_better,
-        random_state=random_state,
-        gpu=gpu,
-        n_jobs=n_jobs,
-    )
-
-    if verbose:
-        direction = "up" if resolved_hib else "down"
-        logger.info(
-            f"CatBoost feature selection: {n_samples:,} samples x {n_features_orig} features"
-        )
-        logger.info(f"  Metric: {resolved_metric} ({direction} better)")
-
-    cat_features_final, text_feat = _resolve_catboost_feature_types(
-        X_work,
-        all_features,
+        algorithm=algorithm,
+        steps=steps,
         cat_features=cat_features,
         text_features=text_features,
         treat_object_as_categorical=treat_object_as_categorical,
-        verbose=verbose,
-    )
-    counts = _resolve_catboost_counts(
-        k_req=k_req,
-        feature_counts=feature_counts,
-        n_features=len(all_features),
-        min_features=min_features,
-        step_function=step_function,
-        algorithm=algorithm,
-    )
-
-    if verbose:
-        logger.info(f"  k values to try: {counts[:5]}{'...' if len(counts) > 5 else ''}")
-        logger.info(f"  Algorithm: {algorithm}")
-
-    splits = _build_catboost_splits(
-        X_work=X_work,
-        y=y,
-        groups=groups,
-        cv=cv,
-        use_stability=use_stability,
-        n_samples=n_samples,
-        n_bootstrap=n_bootstrap,
-        task=task,
-        random_state=random_state,
-        n_splits=n_splits,
-        test_size=test_size,
-        verbose=verbose,
-    )
-    all_scores, all_features_by_k, prefilter_features_first = _run_catboost_split_evaluation(
-        X_work=X_work,
-        y=y,
-        sample_weights=sample_weights,
-        splits=splits,
-        all_features=all_features,
-        counts=counts,
-        task=task,
-        model_params=model_params,
-        cat_features_final=cat_features_final,
-        text_feat=text_feat,
-        prefilter_k=prefilter_k,
-        prefilter_method=prefilter_method,
-        random_state=random_state,
-        n_jobs=n_jobs,
-        algorithm=algorithm,
-        resolved_metric=resolved_metric,
-        resolved_hib=resolved_hib,
         train_early_stopping_rounds=train_early_stopping_rounds,
-        steps=steps,
-        k_req=k_req,
+        gpu=gpu,
+        n_jobs=n_jobs,
+        higher_is_better=higher_is_better,
+        random_state=random_state,
         verbose=verbose,
         callback=callback,
-    )
-    target_k, best_k, best_score, scores_mean, scores_std = _choose_catboost_target_k(
-        all_scores,
-        k_req=k_req,
-        resolved_hib=resolved_hib,
-        tolerance=tolerance,
-        selection_patience=selection_patience,
-        verbose=verbose,
-    )
-    selected_features, stability_scores = _select_final_catboost_features(
-        target_k=target_k,
-        k_req=k_req,
-        all_features_by_k=all_features_by_k,
-        all_features=all_features,
-        prefilter_features_first=prefilter_features_first,
-        use_stability=use_stability,
-        stability_threshold=stability_threshold,
-    )
-    features_by_k = _aggregate_catboost_features_by_k(all_features_by_k)
-    feature_importances = _compute_final_catboost_importances(
-        X_work=X_work,
-        y=y,
-        sample_weights=sample_weights,
-        selected_features=selected_features,
-        cat_features_final=cat_features_final,
-        text_feat=text_feat,
-        task=task,
-        model_params=model_params,
-        algorithm=algorithm,
-    )
-
-    if verbose:
-        score = scores_mean.get(target_k, best_score)
-        logger.info(
-            f"Selected {len(selected_features)} features (k={target_k}, score={score:.4f}; "
-            f"best-scoring k={best_k}, score={best_score:.4f})"
-        )
-
-    return CatBoostSelectionResult(
-        selected_features=selected_features,
-        best_k=target_k,
-        scores_by_k=scores_mean,
-        scores_std_by_k=scores_std,
-        feature_importances=feature_importances,
-        features_by_k=features_by_k,
-        stability_scores=stability_scores,
-        prefilter_features=prefilter_features_first,
-        metric=resolved_metric,
-        higher_is_better=resolved_hib,
-        all_scores=dict(all_scores),
-        selection_patience=selection_patience,
+        groups=groups,
+        time=time,
+        sample_weight=sample_weight,
     )
 
 

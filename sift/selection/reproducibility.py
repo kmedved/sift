@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -308,16 +309,51 @@ def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
     return {"status": "opaque", "type": type_name}
 
 
+_PURGED_SPLITTER_FIELDS = (
+    "n_splits",
+    "max_train_size",
+    "test_size",
+    "embargo",
+    "mode",
+)
+
+
+def _is_sift_purged_splitter(obj: Any) -> bool:
+    cls = type(obj)
+    return cls.__name__ in {
+        "PurgedTimeSeriesSplit",
+        "GroupPurgedTimeSeriesSplit",
+    } and str(getattr(cls, "__module__", "")).startswith("sift.selection.purged_cv")
+
+
+def _sanitize_splitter_param(value: Any) -> Any:
+    if isinstance(value, (np.timedelta64, pd.Timedelta, timedelta)):
+        # Keep a single JSON string so snapshot depth limits do not opaque it.
+        return (
+            "duration:"
+            f"{type(value).__module__}.{type(value).__qualname__}:"
+            f"{pd.Timedelta(value).isoformat()}"
+        )
+    return _sanitize_param(value)
+
+
 def describe_splitter(obj: Any) -> dict[str, Any]:
     """Describe a CV splitter without requiring sklearn estimator params."""
     desc = describe_estimator(obj)
+    type_name = f"{type(obj).__module__}.{type(obj).__qualname__}"
+    params: dict[str, Any] = {}
+    if desc.get("status") == "params":
+        params.update(dict(desc.get("params") or {}))
+    if _is_sift_purged_splitter(obj):
+        for name in _PURGED_SPLITTER_FIELDS:
+            if hasattr(obj, name):
+                params[name] = _sanitize_splitter_param(getattr(obj, name))
+        return {"type": type_name, "status": "params", "params": params}
     if desc.get("status") == "params":
         return desc
-    params: dict[str, Any] = {}
     for name in ("n_splits", "shuffle", "random_state"):
         if hasattr(obj, name):
             params[name] = _sanitize_param(getattr(obj, name))
-    type_name = f"{type(obj).__module__}.{type(obj).__qualname__}"
     if params:
         return {"type": type_name, "status": "params", "params": params}
     return desc
