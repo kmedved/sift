@@ -133,8 +133,10 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `codex/0.9x-multi-target-cefsplus` (joint 2-D `y`, multi-output
       evaluate, `df=q·k` IC after derivation). Codex/Opus accepted after
       verified corrections; 375 focused checks passed / 2 skipped plus
-      independent conditional/weighted public probes. Clean-source runtime,
-      full local gate and exact-head CI/merge remain pending. No F6 yet.
+      independent conditional/weighted public probes. Clean implementation
+      `c7ea9da` has bound `dirty=false` runtime evidence (18/18 fingerprints
+      unchanged). Full local gate: 2303 passed / 40 skipped, no exclusions;
+      strict docs and static checks pass. Exact-head CI/merge pending. No F6 yet.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
 - [ ] Standardized classic-selector caches, then leakage-free unsupervised
       `ordinal`/`frequency` categorical fallbacks.
