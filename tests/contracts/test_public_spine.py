@@ -248,9 +248,13 @@ def test_exact_result_metadata_spine(contract_data):
     assert set(mrmr.selector_metadata) == {
         "selector", "k_requested", "k", "top_m", "n_features", "auto_k",
         "task", "estimator", "formula", "relevance",
+        "n_rows_original", "n_rows_used", "random_state", "subsample",
+        "configured_options",
     }
     assert set(cefsplus.selector_metadata) == {
         "selector", "k_requested", "k", "top_m", "n_features", "auto_k",
+        "n_rows_original", "n_rows_used", "random_state", "subsample",
+        "configured_options",
     }
 
     jmi = sift.select_jmi(
@@ -268,6 +272,8 @@ def test_exact_result_metadata_spine(contract_data):
     expected_jmi = {
         "selector", "k_requested", "k", "top_m", "n_features", "auto_k",
         "task", "estimator", "relevance", "aggregation",
+        "n_rows_original", "n_rows_used", "random_state", "subsample",
+        "configured_options",
     }
     assert set(jmi.selector_metadata) == expected_jmi
     assert set(jmim.selector_metadata) == expected_jmi
@@ -276,6 +282,7 @@ def test_exact_result_metadata_spine(contract_data):
         "loss", "weighted", "class_weight", "class_weight_scope", "ridge",
         "refit_every", "corr_prune", "subsample", "random_state", "cat_encoding",
         "loo_smoothing", "loo_clip_min", "loo_clip_max", "target_mapping",
+        "n_rows_original", "n_rows_used", "configured_options",
     }
 
 

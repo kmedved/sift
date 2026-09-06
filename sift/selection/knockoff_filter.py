@@ -302,6 +302,31 @@ class KnockoffSelectionResult:
 
         return as_result(self, input_features=input_features)
 
+    def reproducibility_(self, *, X=None, hash_data: bool = False, input_features=None):
+        """Return a JSON-safe reproducibility manifest for this result.
+
+        Delegates to ``result_view(...).reproducibility_``. Environment is
+        export-time. Unknown historical facts stay unknown.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray, optional
+            Caller-supplied matrix used only for opt-in hashing or unknown
+            shape. Not retained.
+        hash_data : bool, default False
+            If True, hash ``X``.
+        input_features : sequence or None, default None
+            Forwarded to ``result_view``.
+
+        Returns
+        -------
+        dict
+            Schema ``"1"`` manifest. Safe for ``json.dumps``.
+        """
+        return self.result_view(input_features=input_features).reproducibility_(
+            X=X, hash_data=hash_data
+        )
+
 
 @dataclass(frozen=True)
 class KnockoffStatContext:
@@ -2804,7 +2829,13 @@ def select_fdr(
         "s_median": s_median,
         "n_low_power_features": n_low_s,
         "random_state": int(random_state),
+        "n_rows_original": int(resolved_cache.n_rows_original),
         "n_rows_used": int(resolved_cache.Z.shape[0]),
+        "subsample": (
+            None
+            if cache is not None
+            else (50_000 if subsample is _SUBSAMPLE_DEFAULT else subsample)
+        ),
         "fdr_control": (
             "approximate_plugin"
             if n_draws_int == 1 and not manual_group_heuristic

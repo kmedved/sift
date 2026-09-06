@@ -21,7 +21,12 @@ from sift.scoring import (
     score_with_sklearn_scorer,
     sklearn_scorer_label,
 )
-from sift.selection.view import _json_safe
+from sift.selection.reproducibility import (
+    collapse_fold_snapshots,
+    describe_estimator,
+    describe_splitter,
+)
+from sift.selection.view import _columns_hash, _json_safe
 from sift.selection.path_eval import (
     _accepts_keyword,
     _build_splits,
@@ -132,6 +137,37 @@ def _feature_names(X) -> list[Hashable]:
     if isinstance(X, pd.DataFrame):
         return list(X.columns)
     return [f"x{i}" for i in range(int(np.asarray(X).shape[1]))]
+
+
+def _estimator_event(
+    model_desc: dict[str, Any] | None,
+    *,
+    selector: str,
+    split_id: int,
+    scope: str,
+    prefix_k: int | None = None,
+) -> dict[str, Any]:
+    event = {
+        "selector": selector,
+        "split_id": int(split_id),
+        "scope": scope,
+        "model": model_desc,
+    }
+    if prefix_k is not None:
+        event["prefix_k"] = int(prefix_k)
+    return event
+
+
+def _collapse_estimator_snaps(snaps: list[dict[str, Any]]) -> dict[str, Any]:
+    if not snaps:
+        return {"status": "absent"}
+    models = [item.get("model") for item in snaps]
+    if all(item == models[0] for item in models):
+        collapsed = dict(models[0] or {"status": "absent"})
+        if len(snaps) > 1:
+            collapsed["n_fits"] = len(snaps)
+        return collapsed
+    return {"status": "varies", "by_fit": list(snaps)}
 
 
 def _fresh_selector(factory: SelectorFactory):
@@ -469,7 +505,7 @@ def _score_empty(
     scoring,
     task: Task,
     sample_weight_supplied: bool,
-) -> tuple[float, int]:
+) -> tuple[float, int, dict[str, Any] | None]:
     model = _empty_predictor(task=task)
     X_tr = _empty_design(len(np.asarray(y_tr).reshape(-1)))
     X_va = _empty_design(len(np.asarray(y_va).reshape(-1)))
@@ -485,7 +521,7 @@ def _score_empty(
         scoring,
         sample_weight_supplied=sample_weight_supplied,
     )
-    return score, 0
+    return score, 0, describe_estimator(model)
 
 
 def _score_matrices(
@@ -501,7 +537,7 @@ def _score_matrices(
     scoring,
     sample_weight_supplied: bool,
     task: Task = "regression",
-) -> tuple[float, int]:
+) -> tuple[float, int, dict[str, Any] | None]:
     n_encoded = int(np.asarray(X_tr_sel).shape[1]) if np.asarray(X_tr_sel).ndim == 2 else 1
     if n_encoded == 0:
         return _score_empty(
@@ -514,6 +550,7 @@ def _score_matrices(
             sample_weight_supplied=sample_weight_supplied,
         )
     model = _to_estimator(estimator=estimator, estimator_factory=estimator_factory)
+    description = describe_estimator(model)
     _fit_estimator(
         model,
         _as_2d(X_tr_sel),
@@ -528,7 +565,7 @@ def _score_matrices(
         scoring,
         sample_weight_supplied=sample_weight_supplied,
     )
-    return score, n_encoded
+    return score, n_encoded, description
 
 
 def _cluster_discovery(selector, discovery: Sequence[Hashable], feature_names: Sequence[Hashable]):
@@ -673,7 +710,10 @@ class CompareResult:
     to_dict()
         JSON-serializable snapshot of labels, tables, and fold fingerprints
         using the established SelectionView converters. Not a provenance
-        manifest.
+        manifest; use ``reproducibility_`` for that.
+    reproducibility_(X=None, hash_data=False)
+        JSON-safe provenance manifest. Fold fingerprints are the stored
+        compare-time bookkeeping; environment is export-time.
 
     See Also
     --------
@@ -733,6 +773,32 @@ class CompareResult:
                 "diagnostics": dict(self.diagnostics),
             }
         )
+
+    def reproducibility_(self, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+        """Return a JSON-safe reproducibility manifest for this comparison.
+
+        Per-fold split fingerprints reuse ``fold_bookkeeping``. Instantiated
+        selector, estimator, and splitter snapshots are compare-time.
+        Package versions, BLAS identity, and git commit are labelled
+        export-time. ``X`` is never retained; data hashing is opt-in.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray, optional
+            Caller-supplied matrix used only for opt-in hashing or unknown
+            shape. Not retained.
+        hash_data : bool, default False
+            If True, hash ``X``. Raises if ``X`` is omitted.
+
+        Returns
+        -------
+        dict
+            Schema ``"1"`` payload with compare-time folds and export-time
+            environment. Safe for ``json.dumps``.
+        """
+        from sift.selection.reproducibility import manifest_from_compare
+
+        return manifest_from_compare(self, X=X, hash_data=hash_data)
 
 
 def compare(
@@ -884,6 +950,19 @@ def compare(
     scoring_name = _scoring_label(scoring_obj)
     sample_weight_supplied = sample_weight is not None
     splitter = _resolve_cv(cv, groups=groups, random_state=random_state)
+    split_source = (
+        "caller"
+        if cv is not None
+        and not (isinstance(cv, (int, np.integer)) and not isinstance(cv, (bool, np.bool_)))
+        else "resolved"
+    )
+    split_desc = describe_splitter(splitter)
+    split_desc["source"] = split_source
+    split_desc["uses_compare_random_state"] = bool(
+        split_source == "resolved"
+        and getattr(splitter, "shuffle", False)
+        and getattr(splitter, "random_state", None) is not None
+    )
     splits = _build_splits(
         n,
         splitter,
@@ -929,6 +1008,10 @@ def compare(
             time=time,
             sample_weight=sample_weight,
             sample_weight_supplied=sample_weight_supplied,
+            n_rows=n,
+            random_state=random_state,
+            input_kind="dataframe" if isinstance(X, pd.DataFrame) else "positional",
+            split=split_desc,
         )
     return _compare_cv(
         selectors=selectors,
@@ -948,6 +1031,10 @@ def compare(
         time=time,
         sample_weight=sample_weight,
         sample_weight_supplied=sample_weight_supplied,
+        n_rows=n,
+        random_state=random_state,
+        input_kind="dataframe" if isinstance(X, pd.DataFrame) else "positional",
+        split=split_desc,
     )
 
 
@@ -985,9 +1072,15 @@ def _compare_cv(
     time,
     sample_weight,
     sample_weight_supplied,
+    n_rows,
+    random_state,
+    input_kind,
+    split,
 ) -> CompareResult:
     score_rows: list[dict[str, Any]] = []
     selected_by: dict[str, list[list[Hashable]]] = {name: [] for name in selectors}
+    selector_snaps: dict[str, list[dict[str, Any]]] = {name: [] for name in selectors}
+    estimator_snaps: list[dict[str, Any]] = []
     k_units: set[str] = set()
     for split_id, (train_idx, val_idx) in enumerate(splits):
         train_idx = np.asarray(train_idx, dtype=np.int64)
@@ -1002,6 +1095,7 @@ def _compare_cv(
         t_tr = _slice_1d(time, train_idx)
         for sel_name, factory in selectors.items():
             selector = _fresh_selector(factory)
+            selector_snaps[sel_name].append(describe_estimator(selector))
             fit_kwargs = _fit_kwargs(
                 selector, sample_weight=w_tr, groups=g_tr, time=t_tr
             )
@@ -1010,7 +1104,7 @@ def _compare_cv(
             k_units.add(report["k_unit"])
             selected_by[sel_name].append(list(report["features"]))
             if report["empty"] or int(np.asarray(X_tr_sel).shape[1]) == 0:
-                score, n_encoded = _score_empty(
+                score, n_encoded, est_desc = _score_empty(
                     y_tr=y_tr,
                     y_va=y_va,
                     w_tr=w_tr,
@@ -1021,7 +1115,7 @@ def _compare_cv(
                 )
             else:
                 X_va_sel = _as_selected_matrix(selector.transform(X_va))
-                score, n_encoded = _score_matrices(
+                score, n_encoded, est_desc = _score_matrices(
                     X_tr_sel=X_tr_sel,
                     X_va_sel=X_va_sel,
                     y_tr=y_tr,
@@ -1034,6 +1128,14 @@ def _compare_cv(
                     sample_weight_supplied=sample_weight_supplied,
                     task=task,
                 )
+            estimator_snaps.append(
+                _estimator_event(
+                    est_desc,
+                    selector=sel_name,
+                    split_id=int(split_id),
+                    scope="main",
+                )
+            )
             score_rows.append(
                 {
                     "selector": sel_name,
@@ -1063,6 +1165,17 @@ def _compare_cv(
         selected_by=selected_by,
         prefix_rows=[],
         n_splits=len(splits),
+        n_rows=n_rows,
+        random_state=random_state,
+        input_kind=input_kind,
+        split=split,
+        selectors_config=collapse_fold_snapshots(selector_snaps),
+        estimator_config=_collapse_estimator_snaps(estimator_snaps),
+        configured_estimator=(
+            describe_estimator(estimator)
+            if estimator is not None
+            else {"status": "factory"}
+        ),
     )
 
 
@@ -1085,15 +1198,22 @@ def _compare_in_sample_path(
     time,
     sample_weight,
     sample_weight_supplied,
+    n_rows,
+    random_state,
+    input_kind,
+    split,
 ) -> CompareResult:
     score_rows: list[dict[str, Any]] = []
     prefix_rows: list[dict[str, Any]] = []
     selected_by: dict[str, list[list[Hashable]]] = {name: [] for name in selectors}
+    selector_snaps: dict[str, list[dict[str, Any]]] = {name: [] for name in selectors}
+    estimator_snaps: list[dict[str, Any]] = []
     k_units: set[str] = set()
     fitted: dict[str, Any] = {}
     fitted_reports: dict[str, dict[str, Any]] = {}
     for sel_name, factory in selectors.items():
         selector = _fresh_selector(factory)
+        selector_snaps[sel_name].append(describe_estimator(selector))
         selector.fit(
             X,
             y_arr,
@@ -1119,7 +1239,7 @@ def _compare_in_sample_path(
         for sel_name, selector in fitted.items():
             report = fitted_reports[sel_name]
             if report["empty"]:
-                score, n_encoded = _score_empty(
+                score, n_encoded, est_desc = _score_empty(
                     y_tr=y_tr,
                     y_va=y_va,
                     w_tr=w_tr,
@@ -1144,7 +1264,7 @@ def _compare_in_sample_path(
                 for step, raw_prefix in _raw_prefixes(selector, report, names):
                     col_idx = _encoded_column_index(selector, raw_prefix, encoded_names)
                     prefixes.append((step, col_idx))
-                score, n_encoded = _score_matrices(
+                score, n_encoded, est_desc = _score_matrices(
                     X_tr_sel=X_tr_full,
                     X_va_sel=X_va_full,
                     y_tr=y_tr,
@@ -1157,6 +1277,14 @@ def _compare_in_sample_path(
                     sample_weight_supplied=sample_weight_supplied,
                     task=task,
                 )
+            estimator_snaps.append(
+                _estimator_event(
+                    est_desc,
+                    selector=sel_name,
+                    split_id=int(split_id),
+                    scope="main",
+                )
+            )
             score_rows.append(
                 {
                     "selector": sel_name,
@@ -1175,7 +1303,7 @@ def _compare_in_sample_path(
             )
             for prefix_k, col_idx in prefixes:
                 if col_idx.size == 0:
-                    p_score, p_encoded = _score_empty(
+                    p_score, p_encoded, p_est = _score_empty(
                         y_tr=y_tr,
                         y_va=y_va,
                         w_tr=w_tr,
@@ -1185,7 +1313,7 @@ def _compare_in_sample_path(
                         sample_weight_supplied=sample_weight_supplied,
                     )
                 else:
-                    p_score, p_encoded = _score_matrices(
+                    p_score, p_encoded, p_est = _score_matrices(
                         X_tr_sel=_slice_columns(X_tr_full, col_idx),
                         X_va_sel=_slice_columns(X_va_full, col_idx),
                         y_tr=y_tr,
@@ -1198,6 +1326,15 @@ def _compare_in_sample_path(
                         sample_weight_supplied=sample_weight_supplied,
                         task=task,
                     )
+                estimator_snaps.append(
+                    _estimator_event(
+                        p_est,
+                        selector=sel_name,
+                        split_id=int(split_id),
+                        scope="prefix",
+                        prefix_k=int(prefix_k),
+                    )
+                )
                 prefix_rows.append(
                     {
                         "selector": sel_name,
@@ -1223,6 +1360,17 @@ def _compare_in_sample_path(
         selected_by=selected_by,
         prefix_rows=prefix_rows,
         n_splits=len(splits),
+        n_rows=n_rows,
+        random_state=random_state,
+        input_kind=input_kind,
+        split=split,
+        selectors_config=collapse_fold_snapshots(selector_snaps),
+        estimator_config=_collapse_estimator_snaps(estimator_snaps),
+        configured_estimator=(
+            describe_estimator(estimator)
+            if estimator is not None
+            else {"status": "factory"}
+        ),
     )
 
 
@@ -1244,6 +1392,13 @@ def _assemble_result(
     selected_by,
     prefix_rows,
     n_splits,
+    n_rows=None,
+    random_state=None,
+    input_kind="unknown",
+    split=None,
+    selectors_config=None,
+    estimator_config=None,
+    configured_estimator=None,
 ) -> CompareResult:
     scores = _frame(score_rows, SCORE_COLUMNS)
     summary_rows = []
@@ -1318,6 +1473,15 @@ def _assemble_result(
         "selection_identity": "raw_features",
         "n_splits": int(n_splits),
         "empty_selection": "intercept_only",
+        "n_rows": None if n_rows is None else int(n_rows),
+        "n_features": int(len(names)),
+        "raw_columns_hash": _columns_hash(names),
+        "input_kind": input_kind,
+        "compare_random_state": random_state,
+        "split": split,
+        "selectors": selectors_config,
+        "estimator": estimator_config,
+        "configured_estimator": configured_estimator,
     }
     return CompareResult(
         mode=mode,

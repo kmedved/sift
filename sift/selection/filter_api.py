@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, replace
 from functools import wraps
+from collections.abc import Mapping
 from typing import Any, Callable, Literal, Optional, Union
 
 import numpy as np
@@ -2210,6 +2211,27 @@ def _format_payload(
         return payload.selected_features
 
     extra = ctx.spec.metadata_extra(ctx)
+    kwargs = ctx.selector_kwargs or {}
+    extra.setdefault("n_rows_original", int(ctx.n_rows))
+    prebuilt_cache = ctx.request.cache is not None
+    from sift.selection.reproducibility import snapshot_selector_kwargs
+
+    extra["configured_options"] = snapshot_selector_kwargs(
+        kwargs,
+        unused=("subsample", "random_state") if prebuilt_cache else (),
+    )
+    if not prebuilt_cache:
+        if "random_state" in kwargs:
+            extra.setdefault("random_state", kwargs["random_state"])
+        if "subsample" in kwargs:
+            extra.setdefault("subsample", kwargs["subsample"])
+        diagnostics = payload.diagnostics
+        if isinstance(diagnostics, Mapping):
+            row_idx = diagnostics.get("subsample_row_idx")
+            if row_idx is not None:
+                extra.setdefault(
+                    "n_rows_used", int(len(np.asarray(row_idx).reshape(-1)))
+                )
     if ctx.within is not None:
         extra["within"] = ctx.within
         if ctx.within == "two_way":
@@ -2220,8 +2242,12 @@ def _format_payload(
             {
                 "auto_k_mode": ctx.auto_k_config.auto_k_mode,
                 "k_method": ctx.auto_k_config.k_method,
+                "objective_penalty": ctx.auto_k_config.objective_penalty,
             }
         )
+        from sift.selection.reproducibility import describe_estimator
+
+        extra.setdefault("auto_k_config", describe_estimator(ctx.auto_k_config))
         if ctx.auto_k_config.k_method in {"evaluate", "xfit_objective", "gaussian_cv"}:
             extra.update(
                 {

@@ -693,6 +693,10 @@ compared.in_sample, compared.summary[["selector", "score_mean", "mean_k"]]
 
 `mode="in_sample_path"` is a labelled in-sample prefix diagnostic of a
 full-sample path. Do not read it as fold-local selection.
+`compared.reproducibility_()` exports instantiated selector/estimator/splitter
+snapshots and fold fingerprints plus export-time environment. It does not hash
+`X` unless you pass `hash_data=True`, and an explicit splitter's seed is not
+replaced by `compare(..., random_state=...)`.
 
 ## 10. Checklist and next steps
 
