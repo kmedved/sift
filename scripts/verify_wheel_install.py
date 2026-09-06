@@ -48,8 +48,8 @@ def main() -> None:
     leaked = sorted({path.parts[0] for path in paths if path.parts} & forbidden)
     if leaked:
         raise SystemExit(f"wheel leaked repository-only top-level packages: {leaked}")
-    if len(sift.__all__) != 58 or "ImportanceResult" in sift.__all__:
-        raise SystemExit("installed wheel changed the pinned 58-name top-level surface")
+    if len(sift.__all__) != 60 or "ImportanceResult" in sift.__all__:
+        raise SystemExit("installed wheel changed the pinned 60-name top-level surface")
     if hasattr(sift, "ImportanceResult"):
         raise SystemExit("ImportanceResult must remain module-only")
     if inspect.signature(sift.select_cached).parameters["return_result"].default is not False:

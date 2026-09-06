@@ -161,11 +161,14 @@ from sift import (
     set_verbosity,
     SelectionView,
     as_result,
+    compare,
+    CompareResult,
 )
 ```
 
-The 0.9 surface currently contains 58 top-level exports: the 55 legacy names,
-`set_verbosity`, `SelectionView`, and `as_result`.
+The 0.9 surface currently contains 60 top-level exports: the 55 legacy names,
+`set_verbosity`, `SelectionView`, `as_result`, and the additive `compare` /
+`CompareResult` pair.
 
 ## Logging
 
@@ -1276,7 +1279,8 @@ The staged helper is the same object as the top-level
 Accessing one of the 16 names through `sift.experimental` emits a
 `FutureWarning` because those helpers may change before 1.0. Their existing
 top-level imports remain available and warning-free throughout 0.9;
-`sift.__all__` remains the same ordered 58-name surface. The option-group types
+`sift.__all__` remains the ordered public surface (60 names after F9's additive
+`compare` / `CompareResult`). The option-group types
 remain module-scoped and are not added to either top-level export list.
 
 ### Explicit feature-path evaluation
@@ -1324,6 +1328,37 @@ negated into the result's historical lower-is-better score convention. A
 weighted evaluation requires a scorer whose score function accepts
 `sample_weight`; incompatible scorers raise instead of producing an all-infinite
 curve.
+
+### Leakage-safe selector comparison
+
+Use `compare` to refit selector factories inside each training fold and score a
+fresh downstream estimator on the untouched fold. Empty selected sets remain
+empty and use an intercept-only predictor. `mode="in_sample_path"` is a labelled
+in-sample prefix diagnostic of a full-sample path.
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import KFold
+from sift import CEFSPlusSelector, KnockoffSelector, compare
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(120, 8)), columns=[f"x{i}" for i in range(8)])
+y = 2.0 * X["x0"] + rng.normal(scale=0.2, size=len(X))
+compared = compare(
+    {
+        "cefs": lambda: CEFSPlusSelector(k=3, verbose=False),
+        "fdr": lambda: KnockoffSelector(q=0.2, random_state=0, verbose=False),
+    },
+    X,
+    y.to_numpy(),
+    estimator=Ridge(),
+    cv=KFold(n_splits=3, shuffle=True, random_state=0),
+)
+compared.in_sample
+compared.summary[["selector", "score_mean", "mean_k"]]
+```
 
 ## Gaussian Feature Cache
 

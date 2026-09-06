@@ -108,12 +108,13 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Codex/Opus review accepted; clean implementation `2586a2c` and refreshed
       runtime evidence `9f91781`. PR #85 merged at `e9a4464` after all six
       required CI jobs passed on the exact head; local gate 2200 passed / 40 skipped.
-- [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
-      Implementation and Codex/Opus review accepted on
-      `codex/0.9x-e4-onehot-blocks`; clean implementation `826e10b` and bound
-      runtime refresh complete. Local gate 2221 passed / 40 skipped, no
-      exclusions; CI/merge pending.
+- [x] E4 one-hot encoding on atomic blocks. Codex/Opus accepted; clean
+      implementation `826e10b` and bound runtime refresh `1a99aad`.
+      PR #86 merged at `c5e1d51` after all six CI jobs passed on the exact
+      head. Local gate 2221 passed / 40 skipped, no exclusions.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
+      Codex/Opus review accepted on `codex/0.9x-f9-compare`; clean-source
+      runtime refresh, full local gate, CI and merge pending.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
 - [ ] F5 multi-target CEFS+.

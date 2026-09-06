@@ -61,6 +61,12 @@ chi-square stops, posterior, stability, knockoff-path, consensus) raise.
 | binary log-loss CEFS+ `auto`/`evaluate`/`elbow`/`penalized_objective` | supported: joint logistic block score; EBIC uses logistic model rank + `log C(B,k)` |
 | binary log-loss calibrated stops, Gaussian CV/xfit | rejected; `loss="brier"` delegates to Gaussian CEFS+ blocks |
 
+`sift.compare` is not a selector. Default `mode="cv"` refits factories inside
+training folds and scores a downstream estimator on the held-out fold. Mean
+`k` keeps an explicit unit (`raw_features` or `additional_blocks`). Empty
+knockoff sets are valid and do not add columns. `mode="in_sample_path"` scores
+prefixes of a full-sample path and labels every output in-sample.
+
 Use mRMR when:
 
 - you need a quick baseline;

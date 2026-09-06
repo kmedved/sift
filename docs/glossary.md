@@ -55,6 +55,15 @@ function-style convenience for the same SHAP backend as
 compatible estimator plus the `shap` extra); it is not the same return or
 API object as the fitted selector class.
 
+## compare
+
+`sift.compare` refits selector factories inside training folds and scores a
+fresh downstream estimator on the untouched fold. It reports score
+distributions, mean `k` in an explicit unit, and raw-feature selection
+frequency overlap. `mode="in_sample_path"` is a labelled in-sample prefix
+diagnostic, not the default leakage-safe protocol. Empty selected sets stay
+empty and score an intercept-only predictor.
+
 ## Conditional gain
 
 The extra target information a candidate adds given features already on the
@@ -126,6 +135,12 @@ construction (`group_cv` and related strategies). On `StabilitySelector`,
 alpha selection is used, groups alone can choose GroupKFold, while with a
 fixed alpha they are validated but do not change the iid bootstrap. On
 permutation they restrict shuffles; on `smart_sample` they are `group_col`.
+
+## In-sample path
+
+`sift.compare(..., mode="in_sample_path")` selects on the full sample, then
+scores prefixes of that path. Every returned table sets `in_sample=True` and
+`mode="in_sample_path"`. It is not fold-local selection.
 
 ## Inclusion weights
 

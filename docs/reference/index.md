@@ -81,6 +81,11 @@ python scripts/generate_api_reference.py
 - [`sift.SelectionView`](selectionview.md)
 - [`sift.as_result`](as_result.md)
 
+## Selector comparison
+
+- [`sift.compare`](compare.md)
+- [`sift.CompareResult`](compareresult.md)
+
 ## Stability selection
 
 - [`sift.StabilitySelector`](stabilityselector.md)

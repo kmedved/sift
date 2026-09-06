@@ -514,6 +514,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             "_row_metadata_columns_",
             "_encoded_selected_names_",
             "_encoded_prefix_widths_",
+            "selector_metadata_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -717,6 +718,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             return_result=True,
             **call_params,
         )
+        if hasattr(result, "selector_metadata"):
+            self.selector_metadata_ = dict(result.selector_metadata or {})
         if hasattr(result, "selected_indices"):
             selected_features = list(result.selected_features)
             selected_indices = result.selected_indices
@@ -2559,6 +2562,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
             return_result=True,
             **call_params,
         )
+        if hasattr(result, "selector_metadata"):
+            self.selector_metadata_ = dict(result.selector_metadata or {})
         selected_features = list(result.selected_features)
         selected_indices = result.selected_indices
         if selected_indices is None:
@@ -3089,6 +3094,7 @@ class KnockoffSelector(_BaseSelector):
         self.selected_features_ = list(result.selected_features)
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         self.result_ = result
+        self.selector_metadata_ = dict(getattr(result, "selector_metadata", None) or {})
         if capture_training_output:
             self._fit_transform_output_ = _selected_training_output(
                 X_fit,
