@@ -7,8 +7,9 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
 - Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): the F8b integration run gives **2,138 passed,
-  40 skipped** under warnings-as-errors. All public docstring
+  `catboost` or `category_encoders`): the final encoding integration run gives
+  **2,409 passed, 40 skipped** under warnings-as-errors, with no exclusions.
+  All public docstring
   examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
@@ -160,13 +161,16 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       warnings as errors, no exclusions; static/matrix/strict docs pass.
       All six required CI jobs passed on `fbd0ea0`; PR #92 merged at
       `47977b3`, with tested-tree equality and clean-source ancestry verified.
-- [ ] Leakage-free unsupervised `ordinal`/`frequency` categorical fallbacks.
+- [x] Leakage-free unsupervised `ordinal`/`frequency` categorical fallbacks.
       Implementation accepted on `codex/0.9x-unsupervised-encoding` after
       Grok coding and independent Codex/resumed Opus reviews. Target-blind
       maps preserve training weights, fold-local scoring, and numeric
-      inference/training output. Focused gates and public value/curve
-      regressions pass. Clean runtime evidence, full integration gates and
-      merge are the remaining closeout work for this final approved stage.
+      inference/training output. Clean implementation `3c6f9d1` has refreshed
+      `dirty=false` runtime evidence (18/18 data and selection fingerprints
+      unchanged). Full local gate: 2409 passed / 40 skipped, warnings as
+      errors and no exclusions; Ruff/API66/matrix/strict docs pass.
+      The branch PR's six required checks and merge history are the
+      authoritative remote integration record. No PyPI publication follows.
 
 ## Closed history
 

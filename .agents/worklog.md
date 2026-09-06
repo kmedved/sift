@@ -2,7 +2,7 @@
 
 ## Objective and constraints
 
-Complete the approved 0.9.1 closeout and ordered 0.9.x roadmap. Every implementation is now accepted; the final ordinal/frequency stage still needs integration and merge before the active unbudgeted goal is complete.
+Approved 0.9.1 closeout and ordered 0.9.x roadmap: all implementation and local verification complete. Remote completion is proved by the exact-head six required CI checks and merge history of the final codex/0.9x-unsupervised-encoding PR, not by this local record alone. Keep the unbudgeted goal active until that remote proof is verified.
 
 - Grok4.6 primary coder, native6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace/medium. Codex independently verifies and owns Git/CI. Opus native72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only/xhigh, reviews concurrently with Codex between stages. Resume exact sessions, no caps/fresh sessions. If Opus quota fails, Codex works directly; no quota failure through97.
 - Source transmission approved for this task; exclude secrets/unrelated repos. Use exact python3 ~/.codex/skills/grok/scripts/grok_run.py and claude-cli/scripts/claude_cli_run.py launchers. Never sandbox_permissions. Prompts in /private/tmp mode600; delete after terminal. Redact sc_token. Poll exact handles; observation timeout is not termination. No concurrent checkout writes during provider ownership; freeze review source.
@@ -42,18 +42,18 @@ Branch codex/0.9x-unsupervised-encoding from47977b36b378e4f43f656e192b9aa7b9bb9e
 - Explicit scoped limits remain: resampled stability/knockoff_path/consensus, prebuilt caches without encoding provenance, Boruta test-importance. No added APIs on ModelSelector/nativeCatBoost/select_fdr; no FDR upgrade.
 - Codex94 found5bugs despite Opus94 no findings. Codex95 found double encoding/docstring gaps; Codex96 found override applicability. All reproduced and returned to same Grok, now closed. Reports /private/tmp/sift_unsup_codex94_findings.md through _codex96_findings.md and _opus94_report.md through _opus97_report.md.
 - Final Codex97:190focused tests-Werror,4TargetCV default/None/array override cases with exact full-curve equality,13deferred/binary fold-map/weight checks. Codex96:271focused tests10skip,8fixed/nondeferred training-value checks; original within/block repros repaired. Opus97:204tests plus explicit frequency-map inheritance probe. No extra review needed absent new evidence.
-- Ruff/API66/matrix/diff checks pass; strict MkDocs passed in1.47s. Full suite deliberately waits for clean-source runtime refresh, not a waived binding test.
+- Clean implementation3c6f9d1b3777211be86832c1b7e6f58b466faeaf committed. Refreshed runtime binding is accepted; full local suite2409passed40skipped-Werror/noexclusions73.60s, Ruff/API66/matrix/diff and strictMkDocs1.62s pass. No source change after the clean implementation commit. Frozen quality artifact unchanged.
 
-## Integration next
+## Integration record and remote gate
 
-1. Finish strict docs, commit accepted implementation and tracker updates.
-2. Refresh runtime from that clean commit with no heavy concurrent work. Verify dirty=false/status[],18cases x7samples, all pools1, current source hashes, exact CSV binding and18unchanged data/selection fingerprints.
-3. Update runtime page/table/SHA and benchmarks README; run full pytest-Werror/no exclusions, Ruff/API66/matrix/strict docs. Commit evidence.
-4. Push/PR; all6required CI on exact head; merge --merge --match-head-commit; mainff, merged-tree equality and clean-source ancestry. Final original-goal audit then update_goal complete. No PyPI.
+1. Implementation complete and committed as3c6f9d1; all coding/review sessions terminal, no pending code corrections.
+2. Runtime refreshed from that clean source: dirty=false/status[],18cases x7samples, all pools1,86current source hashes, exact CSV binding and18unchanged data/selection fingerprints. No overlapping provider/test/otherbenchmark observed; ordinary desktop activity present. No claim of an idle host or latency guarantee.
+3. Runtime page/table/SHA and benchmarks README updated; full local and static/doc gates passed. Evidence is committed separately from its measured source to preserve provenance.
+4. Required remote gate: the final branch PR must pass all6required CI on its exact head, merge with --merge (not squash), and preserve tested-tree equality and clean-source ancestry after mainff. This external gate is authoritative for remote status. Final goal completion additionally checks all original requirements against current source/tests/artifacts/merged PRs. No PyPI.
 
 ## Retained evidence and commands
 
-Runtime (about to be refreshed): clean source8f4499985ccdc56fb205d11cc5d8a17c041b32f2, capture2026-09-06T14:01:21.110628UTC/generated14:01:50.027707UTC, dirtyfalse/status[],85hashes,18cases/7samples/pools1. benchmarks/results/runtime_scaling_2026-09-03.csv/.provenance.json, CSVshae2b2e139b913b44cfd89df458be767ddb127e9381ebea004018844d2619b604a, docsratio8.0. Previous18fingerprints unchanged.
+Runtime: clean source3c6f9d1b3777211be86832c1b7e6f58b466faeaf, capture2026-09-06T15:25:53.740754UTC/generated15:26:23.186724UTC, dirtyfalse/status[],86hashes,18cases/7samples/pools1. benchmarks/results/runtime_scaling_2026-09-03.csv/.provenance.json, CSVsha7f0c09743415337baf55eabe2be6a019ad26a4ce956e3fd3c0561dd344de5785, docsratio8.1. Previous18fingerprints unchanged.
 
 Frozen F8c quality MUST NOT refresh: clean sourceae904b8af02037eb66cd649384c4665dba17049d, capture2026-09-05T06:32:30.226365UTC, dirtyfalse/status[],75hashes/480records/pools1. knockoff_statistic_bakeoff.csv/.provenance.json, CSVsha40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf. Preserve CRLF/historical binding and existing FDR/default caveats. Hash/source ancestry reverified.
 
