@@ -663,7 +663,38 @@ without applying an arbitrary selection threshold. Rank on held-out rows when
 the question is out-of-sample behavior of that fitted model, not a new SIFT
 filter path.
 
-## 9. Checklist and next steps
+## 9. Compare selectors without scoring a full-sample subset
+
+`sift.compare` refits each selector factory inside the training fold and
+scores a fresh estimator on the held-out fold. Pass `groups` for splitters
+that need them; fixed-`k` selectors and `KnockoffSelector` do not receive
+those metadata. Empty knockoff sets stay empty.
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import GroupKFold
+from sift import CEFSPlusSelector, KnockoffSelector, compare
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame(rng.normal(size=(200, 12)), columns=[f"x{i}" for i in range(12)])
+y = 2.0 * X["x0"] - 1.5 * X["x1"] + X["x2"] + rng.normal(scale=0.3, size=len(X))
+groups = np.repeat(np.arange(5), 40)
+compared = compare(
+    {
+        "cefs": lambda: CEFSPlusSelector(k=3, verbose=False),
+        "fdr": lambda: KnockoffSelector(q=0.2, random_state=0, verbose=False),
+    },
+    X, y, estimator=Ridge(), cv=GroupKFold(n_splits=5), groups=groups,
+)
+compared.in_sample, compared.summary[["selector", "score_mean", "mean_k"]]
+```
+
+`mode="in_sample_path"` is a labelled in-sample prefix diagnostic of a
+full-sample path. Do not read it as fold-local selection.
+
+## 10. Checklist and next steps
 
 Before leaving this page:
 
@@ -677,6 +708,8 @@ Before leaving this page:
    and `view.diagnostics` before changing the selector.
 6. Stability frequencies and knockoff q were added only when those are the
    questions, not as a default second opinion.
+7. Selector comparisons used `sift.compare` in `mode="cv"` rather than
+   scoring a subset chosen on all of `y`.
 
 Then read the canonical pages instead of enlarging this walkthrough:
 

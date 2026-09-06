@@ -4,6 +4,15 @@
 
 ### Features
 
+- Added additive `sift.compare` for leakage-safe selector comparison. Factories
+  refit inside each training fold; a fresh downstream estimator is scored on
+  the untouched fold. Results include score distributions, explicit-unit mean
+  `k`, and raw-feature selection-frequency overlap. `mode="in_sample_path"`
+  is a labelled in-sample prefix diagnostic. Empty selected sets score an
+  intercept-only predictor. `groups`/`time` are forwarded only to selectors
+  that accept them. Reproducibility manifests remain a later stage; fold
+  index fingerprints are retained for them. The previous 58-name surface is
+  unchanged except for the additive `compare` and `CompareResult` exports.
 - Added additive `cat_encoding="onehot"` on filter function APIs and sklearn
   filter wrappers. Each raw categorical becomes `{column}__{level}` dummies
   selected as one F3 block. Default `onehot_max_levels=32` (positive-weight

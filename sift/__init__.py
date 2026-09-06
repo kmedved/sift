@@ -52,6 +52,7 @@ from sift.selection.auto_k_xfit import (
     select_k_xfit_objective,
     xfit_objective_curves,
 )
+from sift.selection.compare import CompareResult, compare
 from sift.selection.path_eval import FeaturePathEvaluationResult, evaluate_feature_path
 from sift.selection.result import FilterSelectionResult
 from sift.selection.view import SelectionView, as_result
@@ -126,4 +127,6 @@ __all__ = [
     "set_verbosity",
     "SelectionView",
     "as_result",
+    "compare",
+    "CompareResult",
 ]

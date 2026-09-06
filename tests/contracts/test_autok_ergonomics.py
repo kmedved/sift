@@ -398,7 +398,7 @@ def test_experimental_namespace_warns_without_changing_top_level_surface():
     assert len(caught) == len(EXPERIMENTAL_NAMES)
     assert all(warning.category is FutureWarning for warning in caught)
     assert sift.__all__ == original_all
-    assert len(sift.__all__) == 58
+    assert len(sift.__all__) == 60
     assert "experimental" not in sift.__all__
     assert not hasattr(sift, "AutoKCVOptions")
 
