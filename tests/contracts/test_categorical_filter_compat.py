@@ -86,6 +86,9 @@ BINARY_METADATA_KEYS = {
     "loo_clip_min",
     "loo_clip_max",
     "target_mapping",
+    "n_rows_original",
+    "n_rows_used",
+    "configured_options",
 }
 
 

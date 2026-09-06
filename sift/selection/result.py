@@ -92,6 +92,32 @@ class FilterSelectionResult:
 
         return as_result(self, input_features=input_features)
 
+    def reproducibility_(self, *, X=None, hash_data: bool = False, input_features=None):
+        """Return a JSON-safe reproducibility manifest for this result.
+
+        Delegates to ``result_view(...).reproducibility_``. Environment is
+        export-time. Unknown historical facts stay unknown.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray, optional
+            Caller-supplied matrix used only for opt-in hashing or unknown
+            shape. Not retained.
+        hash_data : bool, default False
+            If True, hash ``X``.
+        input_features : sequence or None, default None
+            Forwarded to ``result_view`` when this result cannot prove its
+            raw column identity.
+
+        Returns
+        -------
+        dict
+            Schema ``"1"`` manifest. Safe for ``json.dumps``.
+        """
+        return self.result_view(input_features=input_features).reproducibility_(
+            X=X, hash_data=hash_data
+        )
+
 
 def build_selector_metadata(
     selector: str,

@@ -112,11 +112,14 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       implementation `826e10b` and bound runtime refresh `1a99aad`.
       PR #86 merged at `c5e1d51` after all six CI jobs passed on the exact
       head. Local gate 2221 passed / 40 skipped, no exclusions.
-- [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
+- [x] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
       Codex/Opus accepted, clean implementation `6ecbe63`; bound runtime
-      refresh complete. Full local gate 2243 passed / 40 skipped, no exclusions;
-      focused fixture-compatibility tests also pass. CI and merge pending.
+      refresh `69410cb`. PR #87 merged at `7314355` after all six required
+      CI jobs passed on the exact head. Full local gate 2243 passed / 40 skipped,
+      no exclusions; focused fixture-compatibility tests also pass.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
+      Codex/Opus review accepted on `codex/0.9x-reproducibility-manifests`;
+      clean-source runtime refresh, full gate, CI, and merge pending.
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
 - [ ] F5 multi-target CEFS+.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.

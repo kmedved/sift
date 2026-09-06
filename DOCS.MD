@@ -1360,6 +1360,20 @@ compared.in_sample
 compared.summary[["selector", "score_mean", "mean_k"]]
 ```
 
+`result.reproducibility_()`, `SelectionView.reproducibility_()`, and
+`CompareResult.reproducibility_()` export a JSON-safe provenance manifest.
+Package versions, BLAS identity, and git commit (looked up from the sift
+package tree) are labelled export-time. New runs retain known configuration
+and seeds, original vs used row counts measured from the cache or subsample,
+requested non-data selector options separately from resolved metadata,
+routed/knockoff settings including AutoKConfig, and compare's instantiated
+selector, estimator (including empty Dummy fallback), and splitter snapshots.
+Prebuilt FeatureCache parameters are compact provenance, not copied arrays.
+Caller
+`X` is validated against known original rows and ordered typed columns when
+those facts exist; data hashing is opt-in and never stores `X`. Legacy
+manually constructed results stay explicitly partial.
+
 ## Gaussian Feature Cache
 
 Use `build_cache` when selecting against many targets or comparing several

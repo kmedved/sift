@@ -1745,6 +1745,7 @@ def _select_cached_impl(
             "corr_prune": corr_prune,
             "n_rows_original": int(cache.n_rows_original),
             "n_rows_cached": int(len(cache.row_idx)),
+            "feature_names_are_synthetic": bool(cache.feature_names_are_synthetic),
         }
         diagnostics = {
             "objective": np.asarray(objective, dtype=np.float64).copy(),

@@ -89,6 +89,13 @@ COMMON_AUTO_METADATA = {
     "k_method",
     "auto_k_strategy",
     "selection_rule",
+    "objective_penalty",
+    "auto_k_config",
+    "n_rows_original",
+    "n_rows_used",
+    "random_state",
+    "subsample",
+    "configured_options",
 }
 EXPECTED_METADATA_KEYS = {
     "mrmr": COMMON_AUTO_METADATA

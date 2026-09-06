@@ -171,7 +171,9 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             n_features=ctx.n_features_input,
             ranking=ranking,
             diagnostics=diagnostics,
-            metadata_extra=prep.target_cv_metadata,
+            metadata_extra=_combine_metadata_extra(
+                prep.target_cv_metadata, _row_run_extra(ctx, prep.row_idx)
+            ),
         )
 
     return fixed_classic
@@ -273,7 +275,9 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             n_features=len(prep.feature_names),
             ranking=ranking,
             diagnostics=diagnostics,
-            metadata_extra=prep.target_cv_metadata,
+            metadata_extra=_combine_metadata_extra(
+                prep.target_cv_metadata, _row_run_extra(ctx, prep.row_idx)
+            ),
         )
 
     return auto_classic
@@ -369,7 +373,10 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
             ranking=ranking,
             diagnostics=diagnostics,
             proxy_correlations=proxy_correlations,
-            metadata_extra=target_cv_metadata,
+            metadata_extra=_combine_metadata_extra(
+                target_cv_metadata,
+                _cache_run_extra(cache, prebuilt=ctx.request.cache is not None),
+            ),
         )
 
     return fixed_gaussian
@@ -497,6 +504,9 @@ def make_auto_gaussian(
             metadata_extra.update(target_cv_metadata)
         if include_objective_penalty:
             metadata_extra["objective_penalty"] = ctx.auto_k_config.objective_penalty
+        metadata_extra.update(
+            _cache_run_extra(cache, prebuilt=ctx.request.cache is not None)
+        )
         return SelectionPayload(
             selected_features=selected_features,
             selected_indices=selected_indices,
@@ -1011,6 +1021,7 @@ def _binary_payload_from_selection(
         metadata_extra.update(encoding_metadata)
     if options.k_value == "auto" and ctx.auto_k_config is not None:
         metadata_extra.update(_binary_auto_metadata(ctx.auto_k_config))
+    metadata_extra.update(_row_run_extra(ctx, run.row_idx))
     return SelectionPayload(
         selected_features=selection.selected_features,
         selected_indices=selection.selected_original,
@@ -1029,6 +1040,36 @@ def _binary_auto_metadata(auto_k_config) -> dict:
         "binary_objective_mode": auto_k_config.binary_objective_mode
         if is_penalized
         else None,
+    }
+
+
+def _combine_metadata_extra(*parts) -> dict | None:
+    extra: dict = {}
+    for part in parts:
+        if part:
+            extra.update(part)
+    return extra or None
+
+
+def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
+    n_used = int(np.asarray(cache.row_idx).reshape(-1).size)
+    extra = {
+        "n_rows_original": int(cache.n_rows_original),
+        "n_rows_used": n_used,
+    }
+    if prebuilt:
+        extra["n_rows_cached"] = n_used
+        extra["cache_backed"] = True
+        extra["feature_names_are_synthetic"] = bool(
+            getattr(cache, "feature_names_are_synthetic", False)
+        )
+    return extra
+
+
+def _row_run_extra(ctx: "FilterContext", row_idx) -> dict:
+    return {
+        "n_rows_original": int(ctx.n_rows),
+        "n_rows_used": int(np.asarray(row_idx).reshape(-1).size),
     }
 
 

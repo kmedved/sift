@@ -10,9 +10,15 @@
   `k`, and raw-feature selection-frequency overlap. `mode="in_sample_path"`
   is a labelled in-sample prefix diagnostic. Empty selected sets score an
   intercept-only predictor. `groups`/`time` are forwarded only to selectors
-  that accept them. Reproducibility manifests remain a later stage; fold
-  index fingerprints are retained for them. The previous 58-name surface is
-  unchanged except for the additive `compare` and `CompareResult` exports.
+  that accept them. Reproducibility manifests are implemented as
+  `reproducibility_()` on results, `SelectionView`, and `CompareResult`
+  (schema `"1"` JSON: export-time environment/BLAS/package-bound git, original
+  vs used rows, typed column hash, opt-in caller data hash, retained cache
+  provenance, known new-run configuration/seeds, compare selector/estimator/
+  splitter snapshots and fold fingerprints). Codex/Opus review is accepted;
+  clean-source runtime refresh and integration gates are pending. The
+  previous 58-name surface is unchanged except for the
+  additive `compare` and `CompareResult` exports.
 - Added additive `cat_encoding="onehot"` on filter function APIs and sklearn
   filter wrappers. Each raw categorical becomes `{column}__{level}` dummies
   selected as one F3 block. Default `onehot_max_levels=32` (positive-weight

@@ -1277,6 +1277,7 @@ class SelectionView:
         See Also
         --------
         SelectionView.metadata : The metadata copied into the payload.
+        SelectionView.reproducibility_ : Provenance manifest, not this snapshot.
 
         Examples
         --------
@@ -1308,6 +1309,44 @@ class SelectionView:
             "diagnostics": self._diagnostics,
         }
         return _json_safe(payload)
+
+    def reproducibility_(self, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+        """Return a JSON-safe reproducibility manifest for this view.
+
+        Package versions, BLAS identity, and git commit are captured at
+        export time and labelled as such. They are not selection-time
+        context. Shape, typed column hash, cache provenance, effective
+        configuration, and seeds come only from facts this view already
+        retained. The caller's feature matrix is never stored. Data hashing
+        is off unless ``hash_data=True`` and ``X`` is supplied.
+
+        Parameters
+        ----------
+        X : DataFrame or ndarray, optional
+            Caller-supplied matrix used only when hashing data or filling
+            unknown shape at export. Not retained.
+        hash_data : bool, default False
+            If True, hash ``X``. Raises if ``X`` is omitted.
+
+        Returns
+        -------
+        dict
+            Schema ``"1"`` payload with ``environment``, ``input``,
+            ``configuration``, and ``folds``. Safe for ``json.dumps``.
+
+        Raises
+        ------
+        ValueError
+            If ``hash_data=True`` without ``X``, or if ``X`` disagrees with
+            a known feature width.
+
+        See Also
+        --------
+        SelectionView.to_dict : Full result snapshot, not a manifest.
+        """
+        from sift.selection.reproducibility import manifest_from_view
+
+        return manifest_from_view(self, X=X, hash_data=hash_data)
 
     def __repr__(self) -> str:
         metadata = getattr(self, "_metadata", {})
