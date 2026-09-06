@@ -51,6 +51,7 @@ from sift.selection.filter_auto_k_common import (
     _objective_n_eff as _objective_n_eff,
     _print_selected_k as _print_selected_k,
     _require_eval_split_context as _require_eval_split_context,
+    _slice_auto_prefix as _slice_auto_prefix,
     _select_elbow_count as _select_elbow_count,
     _select_penalized_count as _select_penalized_count,
     _select_posterior_count as _select_posterior_count,
@@ -134,6 +135,7 @@ def _run_auto_dense_check(
     time,
     top_m: int,
     corr_prune,
+    feature_blocks=None,
 ) -> None:
     should_run, reason = _auto_dense_check_requested(config, summary, route)
     if not bool(config.auto_dense_check):
@@ -182,6 +184,7 @@ def _run_auto_dense_check(
             top_m=top_m,
             corr_prune=corr_prune,
             method=method,
+            feature_blocks=feature_blocks,
         )
         cv_k, _diag = select_k_gaussian_cv(curves, check_config)
     except Exception as exc:  # pragma: no cover - rare defensive diagnostics path
@@ -223,6 +226,35 @@ def _run_auto_dense_check(
         )
 
 
+def _feature_blocks_are_identity(feature_blocks, cache) -> bool:
+    if feature_blocks is None or cache is None:
+        return feature_blocks is None
+    from sift.selection.blocks import resolve_feature_blocks
+    from sift.selection.conditioning import named_feature_space
+
+    cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+        f"x{i}"
+        for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+    ]
+    named = named_feature_space(
+        cache.feature_names,
+        synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+        or cache.feature_names is None,
+    )
+    blocks = resolve_feature_blocks(feature_blocks, feature_names=cache_names, named=named)
+    return blocks is None or blocks.all_singletons()
+
+
+def _reject_unsupported_block_auto_k(auto_k_config: AutoKConfig, unused: dict, cache=None) -> None:
+    if unused.get("feature_blocks") is None:
+        return
+    if _feature_blocks_are_identity(unused.get("feature_blocks"), cache):
+        return
+    from sift.selection.blocks import require_block_auto_k
+
+    require_block_auto_k(auto_k_config.k_method)
+
+
 def select_gaussian_evaluate_path(
     *, cache, y: np.ndarray, method: str, max_k: int, top_m: int,
     auto_k_config: AutoKConfig, eval_X: pd.DataFrame, eval_y: np.ndarray,
@@ -252,7 +284,9 @@ def select_gaussian_evaluate_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
+    prefix_sizes = getattr(path, "prefix_widths", None)
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
         eval_y,
@@ -270,13 +304,15 @@ def select_gaussian_evaluate_path(
         warmup_policy=warmup_policy,
         base_features=list(_unused.get("include_names") or ()),
         within=_unused.get("within"),
+        prefix_sizes=prefix_sizes,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
+    path_steps = len(prefix_sizes) if prefix_sizes else len(path)
     summary = auto_k_summary(
         auto_k_config,
-        selected_k=len(selected),
-        path_length=len(path),
-        effective_max_k=_effective_max_k(auto_k_config, len(path)),
+        selected_k=int(best_k),
+        path_length=path_steps,
+        effective_max_k=_effective_max_k(auto_k_config, path_steps),
         diagnostics=auto_diag,
         extra={"proxy_only_objective": False},
     )
@@ -291,6 +327,7 @@ def select_gaussian_elbow_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -304,18 +341,22 @@ def select_gaussian_elbow_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
-    selected_count, auto_diag = _select_elbow_count(objective, auto_k_config, len(path))
+    widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
+    n_steps = len(np.asarray(objective).ravel()) if objective is not None else len(widths)
+    selected_count, auto_diag = _select_elbow_count(objective, auto_k_config, n_steps)
     _print_selected_k("Elbow", selected_count, verbose)
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
-        path_length=len(path),
-        effective_max_k=_effective_max_k(auto_k_config, len(path)),
+        path_length=n_steps,
+        effective_max_k=_effective_max_k(auto_k_config, n_steps),
         diagnostics=auto_diag,
         extra={"proxy_only_objective": True},
     )
-    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+    path, path_indices = _slice_auto_prefix(path, path_indices, selected_count, widths)
+    return path, path_indices, auto_diag, summary
 
 
 def select_gaussian_penalized_path(
@@ -324,6 +365,7 @@ def select_gaussian_penalized_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -337,22 +379,66 @@ def select_gaussian_penalized_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
+    widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
+    n_steps = len(np.asarray(objective).ravel()) if objective is not None else len(widths)
+    n_candidates = _discovery_n_candidates(cache, _unused)
+    df_path = None
+    ic_dimension = "k"
+    if _unused.get("feature_blocks") is not None:
+        from sift.selection.blocks import (
+            eligible_discovery_block_count,
+            gaussian_copula_prefix_df,
+            resolve_feature_blocks,
+        )
+        from sift.selection.conditioning import named_feature_space, resolve_conditioning
+
+        include = _unused.get("include")
+        exclude = _unused.get("exclude")
+        candidates = _unused.get("candidates")
+        cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+            f"x{i}"
+            for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+        ]
+        named = named_feature_space(
+            cache.feature_names,
+            synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+            or cache.feature_names is None,
+        )
+        blocks = resolve_feature_blocks(
+            _unused.get("feature_blocks"), feature_names=cache_names, named=named
+        )
+        resolved = resolve_conditioning(
+            include, exclude, candidates, feature_names=cache_names, named=named, k=max_k
+        )
+        if blocks is not None and not blocks.all_singletons():
+            ic_dimension = "df"
+            include_idx = resolved.include if resolved is not None else ()
+            df_path = gaussian_copula_prefix_df(
+                cache, path_indices, widths, include_indices=include_idx
+            )
+            n_candidates = eligible_discovery_block_count(
+                blocks, valid_cols=cache.valid_cols, resolved=resolved
+            )
+            n_candidates = max(int(n_candidates), n_steps, 1)
     selected_count, auto_diag = _select_penalized_count(
         objective,
         auto_k_config,
         objective_scale="n_eff",
         n_samples=len(cache.sample_weight),
         sample_weight=cache.sample_weight,
-        n_candidates=_discovery_n_candidates(cache, _unused),
-        path_length=len(path),
+        n_candidates=n_candidates,
+        path_length=n_steps,
+        df_path=df_path,
+        ic_dimension=ic_dimension,
     )
     _print_selected_k("Penalized objective", selected_count, verbose)
-    effective_max_k = _effective_max_k(auto_k_config, len(path))
+    effective_max_k = _effective_max_k(auto_k_config, n_steps)
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
-        path_length=len(path),
+        path_length=n_steps,
         effective_max_k=effective_max_k,
         effective_min_k=_zero_capable_effective_min_k(
             auto_k_config,
@@ -366,7 +452,8 @@ def select_gaussian_penalized_path(
             "proxy_only_objective": True,
         },
     )
-    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+    path, path_indices = _slice_auto_prefix(path, path_indices, selected_count, widths)
+    return path, path_indices, auto_diag, summary
 
 
 def select_gaussian_posterior_path(
@@ -375,6 +462,7 @@ def select_gaussian_posterior_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -388,6 +476,7 @@ def select_gaussian_posterior_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     selected_count, auto_diag = _select_posterior_count(
         objective,
@@ -429,6 +518,7 @@ def select_gaussian_chi2_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -442,6 +532,7 @@ def select_gaussian_chi2_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -488,6 +579,7 @@ def select_gaussian_forward_stop_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -501,6 +593,7 @@ def select_gaussian_forward_stop_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     p_candidates, panel_eigs = _gain_test_candidate_inputs(
@@ -547,6 +640,7 @@ def select_gaussian_changepoint_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, objective = _cached_filter_path(
         cache,
         y,
@@ -560,6 +654,7 @@ def select_gaussian_changepoint_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     n_eff, n_eff_source = _objective_n_eff(auto_k_config, cache.sample_weight, len(cache.sample_weight))
     selected_count, auto_diag = select_k_changepoint(
@@ -606,6 +701,7 @@ def select_gaussian_perm_gap_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     del groups, time
     path, path_indices, objective = _cached_filter_path(
         cache,
@@ -620,6 +716,7 @@ def select_gaussian_perm_gap_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     nulls = null_objective_paths(
         cache,
@@ -665,6 +762,7 @@ def select_gaussian_xfit_objective_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, _objective = _cached_filter_path(
         cache,
         y,
@@ -678,6 +776,7 @@ def select_gaussian_xfit_objective_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     curves = xfit_objective_curves(
         cache,
@@ -691,9 +790,14 @@ def select_gaussian_xfit_objective_path(
         within=_unused.get("within"),
         within_X=_unused.get("within_X"),
         within_y=_unused.get("within_y"),
+        feature_blocks=_unused.get("feature_blocks"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     selected_count, auto_diag = select_k_xfit_objective(curves, auto_k_config)
-    selected_count = min(selected_count, len(path))
+    widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
+    selected_count = min(selected_count, len(widths))
     _print_selected_k("Cross-fit objective", selected_count, verbose)
     effective_max_k = int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else 0
     stopped_by = None
@@ -712,7 +816,7 @@ def select_gaussian_xfit_objective_path(
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
-        path_length=len(path),
+        path_length=len(widths),
         effective_max_k=effective_max_k,
         effective_min_k=_zero_capable_effective_min_k(
             auto_k_config,
@@ -722,7 +826,8 @@ def select_gaussian_xfit_objective_path(
         diagnostics=auto_diag,
         extra=extra,
     )
-    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+    path, path_indices = _slice_auto_prefix(path, path_indices, selected_count, widths)
+    return path, path_indices, auto_diag, summary
 
 
 def select_gaussian_cv_path(
@@ -732,6 +837,7 @@ def select_gaussian_cv_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, _objective = _cached_filter_path(
         cache,
         y,
@@ -745,6 +851,7 @@ def select_gaussian_cv_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     curves = gaussian_cv_curves(
         cache,
@@ -758,9 +865,14 @@ def select_gaussian_cv_path(
         within=_unused.get("within"),
         within_X=_unused.get("within_X"),
         within_y=_unused.get("within_y"),
+        feature_blocks=_unused.get("feature_blocks"),
+        include=_unused.get("include"),
+        exclude=_unused.get("exclude"),
+        candidates=_unused.get("candidates"),
     )
     selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
-    selected_count = min(selected_count, len(path))
+    widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
+    selected_count = min(selected_count, len(widths))
     stopped_by = None
     if auto_diag is not None:
         stopped_by = auto_diag.attrs.get("stopped_by")
@@ -768,12 +880,12 @@ def select_gaussian_cv_path(
         stopped_by = curves.attrs.get("stopped_by")
     _print_selected_k("Gaussian CV", selected_count, verbose)
     effective_max_k = (
-        int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else len(path)
+        int(auto_diag["k"].max()) if auto_diag is not None and not auto_diag.empty else len(widths)
     )
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
-        path_length=len(path),
+        path_length=len(widths),
         effective_max_k=effective_max_k,
         diagnostics=auto_diag,
         extra={
@@ -785,7 +897,8 @@ def select_gaussian_cv_path(
             "stopped_by": stopped_by,
         },
     )
-    return path[:selected_count], path_indices[:selected_count], auto_diag, summary
+    path, path_indices = _slice_auto_prefix(path, path_indices, selected_count, widths)
+    return path, path_indices, auto_diag, summary
 
 
 def select_gaussian_knockoff_path(
@@ -794,6 +907,7 @@ def select_gaussian_knockoff_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     del method
     selected_valid, selected_count, auto_diag = select_k_knockoff_path(
         cache,
@@ -821,6 +935,7 @@ def select_gaussian_knockoff_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
         )
         selected_count = min(selected_count, len(path))
         selected = path[:selected_count]
@@ -884,6 +999,7 @@ def select_gaussian_stability_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     path, path_indices, _objective = _cached_filter_path(
         cache,
         y,
@@ -897,6 +1013,7 @@ def select_gaussian_stability_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     boot = bootstrap_paths(
         cache,
@@ -968,6 +1085,21 @@ def select_gaussian_auto_path(
         raise ValueError("select_gaussian_auto_path requires AutoKConfig(k_method='auto')")
     facts = _auto_route_facts(cache, method=method, groups=groups, time=time)
     routed_config, reason = _auto_route_config(auto_k_config, facts)
+    if kwargs.get("feature_blocks") is not None and not _feature_blocks_are_identity(
+        kwargs.get("feature_blocks"), cache
+    ):
+        from sift.selection.blocks import SUPPORTED_BLOCK_AUTO_K
+
+        if routed_config.k_method not in SUPPORTED_BLOCK_AUTO_K:
+            routed_config = _strip_router_only_fields(
+                replace(
+                    auto_k_config,
+                    k_method="penalized_objective",
+                    objective_penalty="ebic",
+                    min_k=0,
+                )
+            )
+            reason = f"{reason}_blocks_fallback_ebic"
     route = {
         "chosen": routed_config.k_method,
         "reason": reason,
@@ -1099,6 +1231,7 @@ def select_gaussian_auto_path(
             time=time,
             top_m=top_m,
             corr_prune=corr_prune,
+            feature_blocks=runner_kwargs.get("feature_blocks"),
         )
     summary["auto_routing"] = route
     return selected, selected_indices, auto_diag, summary
@@ -1299,6 +1432,7 @@ def select_gaussian_consensus_path(
     verbose: bool = True,
     **_unused,
 ) -> GaussianAutoKResult:
+    _reject_unsupported_block_auto_k(auto_k_config, _unused, cache)
     auto_k_module.validate_auto_k_config(auto_k_config)
     path, path_indices, objective = _cached_filter_path(
         cache,
@@ -1313,6 +1447,7 @@ def select_gaussian_consensus_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        feature_blocks=_unused.get("feature_blocks"),
     )
     rows = []
     for name in auto_k_config.consensus_methods:

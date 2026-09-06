@@ -37,6 +37,27 @@ or random-forest relevance, with Pearson-style redundancy. The Gaussian
 estimator uses rank-Gaussian correlation and the Gaussian mutual-information
 proxy, which is fast for regression.
 
+Filter `feature_blocks` (explicit dict or `"auto"` from the `{block}__{level}`
+prefix) makes those scores atomic: relevance is the max over members, redundancy
+and JMI/JMIM scores use the same configured estimators, and a selected block
+expands to every raw member. Gaussian CEFS+ uses the joint residual log-det of
+the block, not a representative column. `k` counts additional blocks.
+Auto-k `evaluate`, `elbow`, `penalized_objective`, `gaussian_cv`,
+`xfit_objective`, and `k_method="auto"` operate on additional-block prefixes
+and expand to raw columns. EBIC uses copula-rank model dimension plus
+`2 γ log C(B, k)` block-search multiplicity; the RIC block adaptation is
+`2 df log(B)`. Neither is a new FDR/calibration claim. BIC/AIC-style
+penalties use the same copula rank, not raw width or constant padding.
+Calibrated column-step rules (`perm_gap`,
+chi-square stops, posterior, stability, knockoff-path, consensus) raise.
+
+| `k_method` | `feature_blocks` |
+| --- | --- |
+| `auto`, `evaluate`, `elbow`, `penalized_objective`, `gaussian_cv`, `xfit_objective` | supported: additional-block prefixes, raw-column expansion |
+| `perm_gap`, `chi2_stop`, `forward_stop`, `changepoint`, `k_posterior`/`posterior`, `stability`, `knockoff_path`, `consensus` | rejected: column-step null, df, or FDR has no justified block form |
+| binary log-loss CEFS+ `auto`/`evaluate`/`elbow`/`penalized_objective` | supported: joint logistic block score; EBIC uses logistic model rank + `log C(B,k)` |
+| binary log-loss calibrated stops, Gaussian CV/xfit | rejected; `loss="brier"` delegates to Gaussian CEFS+ blocks |
+
 Use mRMR when:
 
 - you need a quick baseline;

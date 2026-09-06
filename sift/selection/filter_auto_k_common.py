@@ -83,6 +83,19 @@ def _require_eval_split_context(
         raise ValueError("auto-k evaluate with strategy='group_cv' requires groups parameter")
 
 
+def _slice_auto_prefix(path, path_indices, selected_steps: int, prefix_widths) -> tuple[list, list]:
+    """Slice a raw cached path by additional-block (or column) steps."""
+    from sift.selection.blocks import slice_prefix_by_steps
+
+    widths = tuple(prefix_widths) if prefix_widths is not None else tuple(
+        range(1, len(path) + 1)
+    )
+    return (
+        slice_prefix_by_steps(path, selected_steps, widths),
+        slice_prefix_by_steps(path_indices, selected_steps, widths),
+    )
+
+
 def _print_selected_k(label: str, selected_count: int, verbose: bool) -> None:
     if verbose:
         logger.info(f"  {label} selected k={selected_count}")
@@ -114,6 +127,8 @@ def _select_penalized_count(
     sample_weight: Optional[np.ndarray],
     n_candidates: int | None,
     path_length: int,
+    df_path: np.ndarray | None = None,
+    ic_dimension: str = "k",
 ) -> tuple[int, pd.DataFrame]:
     best_k, diagnostics = auto_k_module.select_k_penalized_objective(
         objective,
@@ -124,6 +139,8 @@ def _select_penalized_count(
         n_candidates=n_candidates,
         min_k=config.min_k,
         max_k=path_length,
+        df_path=df_path,
+        ic_dimension=ic_dimension,
     )
     return min(best_k, path_length), diagnostics
 

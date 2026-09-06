@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
-from typing import Any as Any, List, Literal, Optional, Tuple
+from typing import Any as Any, List, Literal, Optional, Sequence, Tuple
 import warnings
 
 import numpy as np
@@ -330,6 +330,7 @@ def select_k_auto(
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     base_features: Optional[List] = None,
     within: str | None = None,
+    prefix_sizes: Optional[Sequence[int]] = None,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path.
 
@@ -403,6 +404,14 @@ def select_k_auto(
         entries: the fitted columns are ``base_features + feature_path[:k]``.
         ``min_k``/``max_k`` and the returned ``best_k`` stay in that
         additional-discovery unit. When omitted, behavior is unchanged.
+    prefix_sizes : sequence of int, optional
+        Cumulative raw widths of ``feature_path`` after 1, 2, ... additional
+        blocks. When omitted, each path entry is one step (legacy column
+        prefixes). When provided, ``k``/``min_k``/``max_k``/diagnostics count
+        additional blocks; each evaluated model uses
+        ``base_features + feature_path[:prefix_sizes[k-1]]``. Scores are
+        mapped back to those block steps; do not slice a raw-column path
+        at a block ``k``.
     within : {'groups', 'two_way'} or None, default None
         Fold-local panel demeaning applied after encoding and before the
         prefix proxy model. Regression only. Means are fit on training rows
@@ -412,10 +421,13 @@ def select_k_auto(
     Returns
     -------
     best_k : int
-        Selected prefix length, ``0`` when the path resolves to no usable
-        feature.
+        Selected prefix length in additional-discovery units (columns, or
+        additional blocks when ``prefix_sizes`` is set), ``0`` when the path
+        resolves to no usable feature.
     features : list of str
-        The first ``best_k`` names of the resolved path.
+        The resolved discovery prefix: ``feature_path[:best_k]`` without
+        ``prefix_sizes``, or ``feature_path[:prefix_sizes[best_k-1]]`` when
+        block widths are supplied. ``base_features`` are not included here.
     diagnostics : DataFrame
         One row per evaluated k with ``k``, ``score``, ``score_mean``,
         ``score_std``, ``score_se``, ``n_splits``, ``n_finite``,
@@ -550,16 +562,45 @@ def select_k_auto(
     if not valid_features and n_base == 0:
         return 0, [], pd.DataFrame()
 
-    max_k = min(int(config.max_k), len(valid_features))
+    step_widths: list[int] | None = None
+    if prefix_sizes is not None:
+        step_widths = [int(w) for w in prefix_sizes if int(w) > 0]
+        if not step_widths:
+            if n_base == 0:
+                return 0, [], pd.DataFrame()
+            max_k = 0
+        else:
+            clipped: list[int] = []
+            last = 0
+            for width in step_widths:
+                raw = min(int(width), len(valid_features))
+                if raw <= last:
+                    continue
+                clipped.append(raw)
+                last = raw
+                if last >= len(valid_features):
+                    break
+            step_widths = clipped
+            max_k = min(int(config.max_k), len(step_widths))
+    else:
+        max_k = min(int(config.max_k), len(valid_features))
     if n_base:
         min_k = max(0, min(int(config.min_k), max_k))
     else:
         min_k = max(1, min(int(config.min_k), max_k)) if max_k else 0
         if not valid_features:
             return 0, [], pd.DataFrame()
-    valid_features = valid_features[:max_k]
-    k_grid = build_k_grid(min_k, max_k)
-    k_grid_eval = [int(k) + n_base for k in k_grid]
+    if step_widths is None:
+        valid_features = valid_features[:max_k]
+        k_grid = build_k_grid(min_k, max_k)
+        k_grid_eval = [int(k) + n_base for k in k_grid]
+    else:
+        k_grid = build_k_grid(min_k, max_k)
+        k_grid_eval = [
+            n_base + int(step_widths[int(k) - 1]) if int(k) > 0 else n_base
+            for k in k_grid
+        ]
+    eval_to_step = {int(width): int(step) for step, width in zip(k_grid, k_grid_eval)}
 
     X_path_df = X[base_valid + valid_features]
     if resolved_within is not None:
@@ -600,7 +641,11 @@ def select_k_auto(
             val_idx=val_idx,
             **eval_kwargs,
         )
-        scores = {int(k) - n_base: v for k, v in scores.items()}
+        scores = {
+            eval_to_step[int(width)]: score
+            for width, score in scores.items()
+            if int(width) in eval_to_step
+        }
         split_scores = {k: [score] for k, score in scores.items()}
         diag = build_score_curve_diagnostics(k_grid, split_scores)
 
@@ -622,23 +667,33 @@ def select_k_auto(
                 val_idx=val_idx,
                 **eval_kwargs,
             )
-            for k, score in fold_scores.items():
-                all_scores[int(k) - n_base].append(score)
+            for width, score in fold_scores.items():
+                step = eval_to_step.get(int(width))
+                if step is None:
+                    continue
+                all_scores[step].append(score)
 
         diag = build_score_curve_diagnostics(k_grid, all_scores)
 
     else:
         raise ValueError(f"Unknown strategy: {config.strategy}")
 
+    def _features_for_k(step: int) -> List[str]:
+        if int(step) <= 0:
+            return []
+        if step_widths is None:
+            return valid_features[: int(step)]
+        return valid_features[: int(step_widths[min(int(step), len(step_widths)) - 1])]
+
     if diag.empty:
-        return max_k, valid_features[:max_k], diag
+        return max_k, _features_for_k(max_k), diag
 
     curve_config = with_effective_k_bounds(config, min_k=min_k, max_k=max_k)
     best_k, diag = choose_k_from_score_curve(diag, curve_config, lower_is_better=True)
     if is_sklearn_scorer(metric):
         diag["metric"] = sklearn_scorer_label(metric)
 
-    return best_k, valid_features[:best_k], diag
+    return best_k, _features_for_k(best_k), diag
 
 
 def select_k_penalized_objective(
@@ -652,6 +707,7 @@ def select_k_penalized_objective(
     min_k: Optional[int] = None,
     max_k: Optional[int] = None,
     df_path: Optional[np.ndarray] = None,
+    ic_dimension: Literal["k", "df"] = "k",
 ) -> Tuple[int, pd.DataFrame]:
     """Select k by maximizing a penalized CEFS+ proxy objective path.
 
@@ -702,8 +758,16 @@ def select_k_penalized_objective(
     df_path : ndarray, optional
         Per-step degrees of freedom replacing the default ``df = k``. Must be
         at least as long as the effective ``max_k``. Honored by the
-        ``k``-proportional penalties (BIC, MDL, AIC, HQC, custom); the EBIC
-        and RIC penalties are defined on k itself and ignore it.
+        ``k``-proportional penalties (BIC, MDL, AIC, HQC, custom). EBIC and
+        RIC ignore it unless ``ic_dimension='df'``.
+    ic_dimension : {'k', 'df'}, default 'k'
+        Likelihood dimension for EBIC/RIC. ``'k'`` is the legacy no-block
+        contract (``k log n`` / ``2 k log p``). ``'df'`` uses ``df_path``
+        as model dimension while ``k`` remains the search-multiplicity
+        argument of ``log C(p, k)`` (EBIC) or the selected-step index
+        (diagnostics). Block-aware Gaussian callers pass ``'df'``. The RIC
+        block adaptation is ``2 df log(B)`` with ``B`` the eligible
+        discovery-block count; it is not a new FDR/calibration claim.
 
     Returns
     -------
@@ -755,9 +819,12 @@ def select_k_penalized_objective(
     With ``d`` the degrees of freedom at k, the penalties are ``log(n_eff)*d``
     (BIC, MDL), ``2*d`` (AIC), ``2*log(log(n_eff))*d`` (HQC),
     ``objective_penalty_weight*d`` (custom),
-    ``k*log(n_eff) + 2*gamma*log C(p, k)`` (EBIC), and ``2*k*log(p)`` (RIC),
+    ``d*log(n_eff) + 2*gamma*log C(p, k)`` (EBIC), and ``2*d*log(p)`` (RIC),
     where ``p`` is ``n_candidates`` and ``log C`` is the exact log binomial
-    coefficient. ``ebic_gamma='auto'`` resolves to the Chen-Chen threshold
+    coefficient. Legacy no-block EBIC/RIC keep ``d = k``. Block-aware
+    callers set ``ic_dimension='df'`` so ``d`` is usable copula rank and
+    ``k`` is the additional-block count in ``log C(B, k)``.
+    ``ebic_gamma='auto'`` resolves to the Chen-Chen threshold
     ``min(1, max(0, 1 - log(n_eff)/(2 log p)))``, degrading to plain BIC when
     ``n_eff >= p^2``. ``n_eff_mode='auto'`` selects the Kish size
     ``(sum w)^2 / sum w^2`` for EBIC and RIC and the weight sum otherwise;
@@ -830,11 +897,15 @@ def select_k_penalized_objective(
             df = np.concatenate(([0.0], df_arr[:effective_max_k]))
         else:
             df = df_arr[:effective_max_k]
+    if ic_dimension not in {"k", "df"}:
+        raise ValueError("ic_dimension must be 'k' or 'df'")
+    ic_dim = df if ic_dimension == "df" else None
     penalty, penalty_weight, ebic_gamma, n_candidates_used = _penalty_array(
         config,
         ks,
         n_eff=n_eff,
         n_candidates=n_candidates,
+        dimension=ic_dim,
     )
     if config.objective_penalty not in {"ebic", "ric"}:
         penalty = penalty_weight * df

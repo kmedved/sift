@@ -57,12 +57,28 @@ def prepare_filter_eval_data(
     )
 
 
+class CachedFilterPath(tuple):
+    """Path triple plus additional-block raw prefix widths.
+
+    Unpacks as ``(names, indices, objective)`` so existing callers stay valid.
+    ``prefix_widths[t-1]`` is the raw discovery length after ``t`` additional
+    blocks (or columns when there are no blocks).
+    """
+
+    def __new__(cls, names, indices, objective, prefix_widths):
+        inst = tuple.__new__(cls, (names, indices, objective))
+        inst.prefix_widths = tuple(int(width) for width in prefix_widths)
+        return inst
+
+
 def _cached_filter_path(
     cache, y, k: int, *, method: str, top_m: int, corr_prune,
     want_indices: bool, return_objective: bool, callback=None,
-    include=None, exclude=None, candidates=None,
-) -> tuple[list[str], list[int], np.ndarray | None]:
+    include=None, exclude=None, candidates=None, feature_blocks=None,
+) -> CachedFilterPath:
+    from sift.selection.blocks import discovery_prefix_widths, resolve_feature_blocks
     from sift.selection.cefsplus import _select_cached_impl
+    from sift.selection.conditioning import named_feature_space
 
     result = _select_cached_impl(
         cache,
@@ -78,18 +94,55 @@ def _cached_filter_path(
         include=include,
         exclude=exclude,
         candidates=candidates,
+        feature_blocks=feature_blocks,
         compose_include=False,
     )
     if return_objective and want_indices:
         path, indices, objective = result
-        return path, list(indices), objective
-    if return_objective:
+        indices = list(indices)
+    elif return_objective:
         path, objective = result
-        return path, [], objective
-    if want_indices:
+        indices = []
+    elif want_indices:
         path, indices = result
-        return path, list(indices), None
-    return result, [], None
+        indices = list(indices)
+        objective = None
+    else:
+        path, indices, objective = result, [], None
+    cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+        f"x{i}"
+        for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+    ]
+    named = named_feature_space(
+        cache.feature_names,
+        synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+        or cache.feature_names is None,
+    )
+    blocks = resolve_feature_blocks(
+        feature_blocks, feature_names=cache_names, named=named
+    )
+    widths = discovery_prefix_widths(indices, blocks)
+    if not widths and path:
+        widths = tuple(range(1, len(path) + 1))
+    if (
+        objective is not None
+        and widths
+        and len(np.asarray(objective).ravel()) == len(path)
+        and len(widths) != len(path)
+    ):
+        objective = np.asarray(objective, dtype=np.float64).ravel()[
+            np.asarray(widths, dtype=np.int64) - 1
+        ]
+    path = _PathList(path, widths)
+    return CachedFilterPath(path, indices, objective, widths)
+
+
+class _PathList(list):
+    """Selected-name list carrying additional-block prefix widths."""
+
+    def __init__(self, names, prefix_widths):
+        super().__init__(names)
+        self.prefix_widths = tuple(int(width) for width in prefix_widths)
 
 
 def _cache_uses_synthetic_feature_names(cache) -> bool:
@@ -123,8 +176,16 @@ def select_filter_classic_auto_k(
     return_indices: bool = False,
     return_diagnostics: bool = False,
     base_features: list | None = None,
+    feature_blocks=None,
 ) -> list[str] | tuple:
+    from sift.selection.blocks import discovery_prefix_widths, resolve_feature_blocks
+
     path = [feature_names[i] for i in path_idx]
+    named = bool(getattr(eval_X, "columns", None) is not None)
+    blocks = resolve_feature_blocks(
+        feature_blocks, feature_names=feature_names, named=named
+    )
+    prefix_sizes = discovery_prefix_widths(path_idx, blocks) if blocks is not None else None
     _require_eval_split_context(auto_k_config, eval_groups, eval_time)
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
         eval_X,
@@ -143,17 +204,20 @@ def select_filter_classic_auto_k(
         warmup_policy=warmup_policy,
         base_features=base_features,
         within=within,
+        prefix_sizes=prefix_sizes,
     )
     _print_selected_k("CV/holdout", best_k, verbose)
+    path_steps = len(prefix_sizes) if prefix_sizes is not None else len(path)
     result: tuple = (selected,)
     if return_indices:
-        result += ([int(i) for i in path_idx[: len(selected)]],)
+        raw = len(selected)
+        result += ([int(i) for i in path_idx[:raw]],)
     if return_diagnostics:
         summary = auto_k_summary(
             auto_k_config,
-            selected_k=len(selected),
-            path_length=len(path),
-            effective_max_k=_effective_max_k(auto_k_config, len(path)),
+            selected_k=int(best_k),
+            path_length=path_steps,
+            effective_max_k=_effective_max_k(auto_k_config, path_steps),
             diagnostics=auto_diag,
         )
         result += (auto_diag, summary)

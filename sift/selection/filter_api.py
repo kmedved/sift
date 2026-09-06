@@ -74,6 +74,11 @@ from sift.selection.result import (
     FilterSelectionResult,
     build_selector_metadata,
 )
+from sift.selection.blocks import (
+    block_result_metadata,
+    require_atomic_conditioning,
+    resolve_feature_blocks,
+)
 from sift.selection.conditioning import resolve_conditioning
 from sift.selection.within import TWO_WAY_ITERATIONS, validate_within
 from sift.selection.knockoff_filter import (
@@ -172,6 +177,7 @@ class FilterContext:
     rank_backend: str
     conditioning: object | None = None
     within: str | None = None
+    feature_blocks: object | None = None
 
 
 _COMMON_REQUEST_LOCAL_NAMES = frozenset(
@@ -197,6 +203,7 @@ CONDITIONING_SELECTOR_KWARGS = (
     "exclude",
     "candidates",
 )
+FEATURE_BLOCKS_KWARGS = ("feature_blocks",)
 MRMR_SELECTOR_KWARGS = (
     "relevance",
     "estimator",
@@ -214,7 +221,7 @@ MRMR_SELECTOR_KWARGS = (
     "n_jobs",
     "mrmr_backend",
     "verbose",
-) + CONDITIONING_SELECTOR_KWARGS
+) + CONDITIONING_SELECTOR_KWARGS + FEATURE_BLOCKS_KWARGS
 JMI_SELECTOR_KWARGS = (
     "estimator",
     "relevance",
@@ -229,7 +236,7 @@ JMI_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-) + CONDITIONING_SELECTOR_KWARGS
+) + CONDITIONING_SELECTOR_KWARGS + FEATURE_BLOCKS_KWARGS
 CEFSPLUS_SELECTOR_KWARGS = (
     "top_m",
     "corr_prune",
@@ -243,7 +250,7 @@ CEFSPLUS_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-) + CONDITIONING_SELECTOR_KWARGS
+) + CONDITIONING_SELECTOR_KWARGS + FEATURE_BLOCKS_KWARGS
 CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "loss",
     "top_m",
@@ -264,7 +271,7 @@ CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "subsample",
     "random_state",
     "verbose",
-) + CONDITIONING_SELECTOR_KWARGS
+) + CONDITIONING_SELECTOR_KWARGS + FEATURE_BLOCKS_KWARGS
 
 
 def _request_from_public_locals(
@@ -323,7 +330,7 @@ def select_mrmr(
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
-    include=None, exclude=None, candidates=None,
+    include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Minimum Redundancy Maximum Relevance feature selection.
@@ -498,6 +505,17 @@ def select_mrmr(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks;
+        selected blocks expand to every raw member column. ``k="auto"``
+        counts additional blocks for evaluate, elbow, penalized_objective,
+        gaussian_cv, xfit_objective, and auto routing; calibrated
+        column-step rules raise. Singleton blocks recover the underlying
+        column selector.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``.  Exceptions raised
@@ -609,7 +627,7 @@ def select_jmi(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
-    include=None, exclude=None, candidates=None,
+    include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Joint Mutual Information feature selection.
@@ -750,6 +768,17 @@ def select_jmi(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks;
+        selected blocks expand to every raw member column. ``k="auto"``
+        counts additional blocks for evaluate, elbow, penalized_objective,
+        gaussian_cv, xfit_objective, and auto routing; calibrated
+        column-step rules raise. Singleton blocks recover the underlying
+        column selector.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -850,7 +879,7 @@ def select_jmim(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
-    include=None, exclude=None, candidates=None,
+    include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """JMI Maximization, using the conservative minimum-pair aggregation.
@@ -988,6 +1017,17 @@ def select_jmim(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks;
+        selected blocks expand to every raw member column. ``k="auto"``
+        counts additional blocks for evaluate, elbow, penalized_objective,
+        gaussian_cv, xfit_objective, and auto routing; calibrated
+        column-step rules raise. Singleton blocks recover the underlying
+        column selector.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -1089,7 +1129,7 @@ def select_cefsplus(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
-    include=None, exclude=None, candidates=None,
+    include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """CEFS+ feature selection using log-det Gaussian MI proxy.
@@ -1241,6 +1281,18 @@ def select_cefsplus(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks;
+        selected blocks expand to every raw member column. ``k="auto"``
+        counts additional blocks for evaluate, elbow, penalized_objective,
+        gaussian_cv, xfit_objective, and auto routing; calibrated
+        column-step rules raise. Singleton blocks recover the column
+        CEFS+ selector. Joint block gain is the residual log-det ratio, not
+        a representative column.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed greedy step with a one-based ``step``.  Exceptions raised
@@ -1355,7 +1407,7 @@ def select_cefsplus_binary(
     allow_full_data_target_encoding: bool = False,
     subsample: Optional[int] = None, random_state: int = 0,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
-    include=None, exclude=None, candidates=None,
+    include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
     """Binary CEFS+ using a greedy conditional Bernoulli deviance proxy.
@@ -1432,7 +1484,9 @@ def select_cefsplus_binary(
         Positive step interval at which the selected-feature logistic null is
         refit.  The default refits every step.  Larger values switch to a
         block-Gram accelerator between refits and should be treated as an
-        approximate speed mode, not an equivalent computation.
+        approximate speed mode, not an equivalent computation.  With opt-in
+        ``feature_blocks``, each step is one additional discovery block; the
+        no-block and identity cadence is unchanged.
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
@@ -1505,6 +1559,19 @@ def select_cefsplus_binary(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks;
+        selected blocks expand to every raw member column. ``k="auto"``
+        counts additional blocks for evaluate, elbow, penalized_objective,
+        and auto (EBIC). Joint logistic block scores are used; Gaussian
+        CV/xfit and calibrated column-step rules raise. Singleton blocks
+        recover the scalar log-loss path for selection, scoring, and cadence;
+        identity maps still report block metadata units.
+        ``loss="brier"`` delegates to Gaussian CEFS+ blocks.
     callback : callable or None, default None
         Progress hook ``callback(step, total, info)`` fired after each
         completed path step with a one-based ``step``; exceptions propagate.
@@ -1681,6 +1748,32 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         named=isinstance(request.X, pd.DataFrame),
         k=request.k,
     )
+    feature_blocks = resolve_feature_blocks(
+        selector_kwargs.get("feature_blocks"),
+        feature_names=feature_names,
+        named=isinstance(request.X, pd.DataFrame),
+    )
+    require_atomic_conditioning(
+        conditioning,
+        feature_blocks,
+        feature_names=feature_names,
+    )
+    if (
+        feature_blocks is not None
+        and not feature_blocks.all_singletons()
+        and validate_k(request.k) == "auto"
+    ):
+        from sift.selection.blocks import require_binary_block_auto_k, require_block_auto_k
+
+        method = "auto"
+        if request.auto_k_config is not None:
+            method = str(request.auto_k_config.k_method)
+        elif spec.selector not in {"cefsplus", "cefsplus_binary"}:
+            method = "evaluate"
+        if spec.selector == "cefsplus_binary":
+            require_binary_block_auto_k(method)
+        else:
+            require_block_auto_k(method)
     return FilterContext(
         spec=spec,
         request=request,
@@ -1698,6 +1791,7 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         rank_backend="threads" if n_jobs != 1 else "serial",
         conditioning=conditioning,
         within=request.within,
+        feature_blocks=feature_blocks,
     )
 
 
@@ -1845,6 +1939,18 @@ def _format_payload(
             )
     if payload.metadata_extra:
         extra.update(payload.metadata_extra)
+    if ctx.feature_blocks is not None:
+        include_idx = ()
+        if ctx.conditioning is not None and getattr(ctx.conditioning, "include", None):
+            include_idx = ctx.conditioning.include
+        extra.update(
+            block_result_metadata(
+                ctx.feature_blocks,
+                payload.selected_indices or [],
+                include_idx,
+                n_columns_selected=len(payload.selected_features),
+            )
+        )
     if ctx.conditioning is not None and getattr(ctx.conditioning, "active", False):
         from sift.selection.conditioning import conditioning_record
 
@@ -1999,6 +2105,7 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         include=kw("include"),
         exclude=kw("exclude"),
         candidates=kw("candidates"),
+        feature_blocks=kw("feature_blocks"),
         callback=request.callback,
         return_result=request.return_result,
         store_proxies=request.store_proxies,

@@ -14,6 +14,7 @@ from sift.estimators.copula import (
     weighted_correlation_matrix,
     weighted_rank_gauss_1d,
 )
+from sift.selection.blocks import prune_blocks_by_corr, screen_block_indices
 from sift.selection.objective import objective_from_corr_path
 
 
@@ -123,6 +124,57 @@ def _candidate_order(
     return eligible.astype(np.int64, copy=False)
 
 
+def _block_candidate_order(
+    r: np.ndarray,
+    block_members: list[np.ndarray],
+    *,
+    top_m: int,
+    pool: np.ndarray | None = None,
+    protect: np.ndarray | None = None,
+) -> np.ndarray:
+    """Screen discovery blocks by max |r|; included blocks are added later.
+
+    ``top_m`` is a discovery-block budget. Protected/included members are
+    omitted here so they cannot consume that budget, matching F1 column
+    screening. Whole blocks are kept or dropped together.
+    """
+    p_valid = int(len(r))
+    pool_set = None if pool is None else set(int(i) for i in np.asarray(pool, dtype=np.int64))
+    protect_set = set(int(i) for i in np.asarray(protect, dtype=np.int64)) if protect is not None else set()
+    discovery_blocks: list[np.ndarray] = []
+    for members in block_members:
+        arr = np.asarray(members, dtype=np.int64)
+        if arr.size == 0:
+            continue
+        if np.any(arr < 0) or np.any(arr >= p_valid):
+            raise ValueError("block member positions must be in-range valid columns")
+        if any(int(i) in protect_set for i in arr):
+            continue
+        if pool_set is not None:
+            arr = np.asarray([i for i in arr if int(i) in pool_set], dtype=np.int64)
+            if arr.size == 0:
+                continue
+        discovery_blocks.append(arr)
+    if not discovery_blocks:
+        return np.empty(0, dtype=np.int64)
+    scores = np.abs(np.asarray(r, dtype=np.float64))
+    chosen = screen_block_indices(
+        discovery_blocks,
+        scores,
+        top_m=int(top_m),
+        protect=(),
+    )
+    cols: list[int] = []
+    seen: set[int] = set()
+    for bidx in chosen:
+        for col in discovery_blocks[int(bidx)]:
+            key = int(col)
+            if key not in seen:
+                cols.append(key)
+                seen.add(key)
+    return np.asarray(cols, dtype=np.int64)
+
+
 def _panel_from_corr(
     R_all: np.ndarray | None,
     Z: np.ndarray,
@@ -136,6 +188,7 @@ def _panel_from_corr(
     names_all: list[str] | None,
     protect: np.ndarray | None = None,
     pool: np.ndarray | None = None,
+    block_members: list[np.ndarray] | None = None,
 ) -> CandidatePanel:
     p_valid = int(len(r))
     protect_arr = (
@@ -143,8 +196,20 @@ def _panel_from_corr(
         if protect is None
         else np.asarray(protect, dtype=np.int64)
     )
-    cand = _candidate_order(r, top_m=top_m, pool=pool)
     corr_prune_eff = resolve_corr_prune(method, corr_prune)
+    use_block_screen = block_members is not None and any(
+        len(np.asarray(members)) > 1 for members in block_members
+    )
+    if use_block_screen:
+        cand = _block_candidate_order(
+            r,
+            block_members,
+            top_m=top_m,
+            pool=pool,
+            protect=protect_arr,
+        )
+    else:
+        cand = _candidate_order(r, top_m=top_m, pool=pool)
 
     if cand.size == 0:
         R_cand = np.empty((0, 0), dtype=np.float64)
@@ -160,12 +225,43 @@ def _panel_from_corr(
         )
 
     if corr_prune_eff is not None and cand.size:
-        keep = greedy_corr_prune(
-            np.arange(len(cand), dtype=np.int64),
-            R_cand,
-            np.abs(r[cand]),
-            corr_prune_eff,
-        )
+        if use_block_screen:
+            cand_set = {int(i): pos for pos, i in enumerate(cand)}
+            local_blocks: list[np.ndarray] = []
+            protect_local: list[int] = []
+            protect_set = set(int(i) for i in protect_arr)
+            for members in block_members:
+                local = [cand_set[int(i)] for i in members if int(i) in cand_set]
+                if not local:
+                    continue
+                bidx = len(local_blocks)
+                arr = np.asarray(local, dtype=np.int64)
+                local_blocks.append(arr)
+                if any(int(members[j]) in protect_set for j in range(len(members)) if int(members[j]) in cand_set):
+                    protect_local.append(bidx)
+            keep_blocks = prune_blocks_by_corr(
+                local_blocks,
+                R_cand,
+                np.abs(r[cand]),
+                corr_prune_eff,
+                protect=protect_local,
+            )
+            keep_cols: list[int] = []
+            seen_local: set[int] = set()
+            for bidx in keep_blocks:
+                for col in local_blocks[int(bidx)]:
+                    key = int(col)
+                    if key not in seen_local:
+                        keep_cols.append(key)
+                        seen_local.add(key)
+            keep = np.asarray(keep_cols, dtype=np.int64)
+        else:
+            keep = greedy_corr_prune(
+                np.arange(len(cand), dtype=np.int64),
+                R_cand,
+                np.abs(r[cand]),
+                corr_prune_eff,
+            )
         cand = cand[keep]
         R_cand = np.ascontiguousarray(R_cand[np.ix_(keep, keep)], dtype=np.float64)
 
@@ -227,6 +323,7 @@ def build_candidate_panel(
     zy: np.ndarray | None = None,
     protect_valid: np.ndarray | None = None,
     pool_valid: np.ndarray | None = None,
+    block_members: list[np.ndarray] | None = None,
 ) -> CandidatePanel:
     """Build the screened/pruned candidate panel used by cache selectors."""
     if zy is None:
@@ -248,7 +345,8 @@ def build_candidate_panel(
     if top_m is None:
         top_m = max(5 * int(k), 250)
     top_m_eff = max(int(top_m), int(k))
-    top_m_eff = min(top_m_eff, p_valid)
+    n_units = len(block_members) if block_members is not None else p_valid
+    top_m_eff = min(top_m_eff, n_units)
     names_all = list(cache.feature_names) if cache.feature_names is not None else None
 
     return _panel_from_corr(
@@ -263,6 +361,7 @@ def build_candidate_panel(
         names_all=names_all,
         protect=protect_valid,
         pool=pool_valid,
+        block_members=block_members,
     )
 
 
@@ -276,6 +375,8 @@ def local_corr_panel(
     method: GaussianMethod,
     Rxx: np.ndarray | None = None,
     local_standardize: bool = True,
+    block_members: list[np.ndarray] | None = None,
+    protect: np.ndarray | None = None,
 ) -> CandidatePanel:
     """Build a candidate panel from fold/bootstrap-local correlations."""
     w_arr = np.asarray(w, dtype=np.float64).ravel()
@@ -334,6 +435,21 @@ def local_corr_panel(
             # weighted_corr_with_vector; retain its candidate/tie behavior.
             r = r.astype(np.float32).astype(np.float64)
 
+        if block_members is not None or protect is not None:
+            Z_std = globals()["local_standardize"](Z_arr, w_arr)
+            return _panel_from_corr(
+                None,
+                Z_std,
+                np.asarray(r, dtype=np.float64),
+                w_arr,
+                top_m=top_m,
+                corr_prune=corr_prune,
+                method=method,
+                original=None,
+                names_all=None,
+                block_members=block_members,
+                protect=protect,
+            )
         cand = _candidate_order(r, top_m=top_m)
         if cand.size:
             Z_cand = globals()["local_standardize"](Z_arr, w_arr, columns=cand)
@@ -380,6 +496,8 @@ def local_corr_panel(
         method=method,
         original=None,
         names_all=None,
+        block_members=block_members,
+        protect=protect,
     )
 
 

@@ -23,6 +23,7 @@ from sift.selection.auto_k import (
 )
 from sift.selection.cefsplus_binary import (
     BinaryCEFSPlusPath,
+    _weighted_standardize_dropping_exact_constants,
     fit_logistic_ridge,
     predict_logistic,
     select_binary_logistic_path,
@@ -73,6 +74,8 @@ class BinaryPathRun:
     #: reconstructing a split count from rows the encoder never used.
     encoding_cv: dict | None = None
     include_original: tuple[int, ...] = ()
+    prefix_widths: tuple[int, ...] | None = None
+    n_discovery_candidates: int | None = None
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,7 @@ def build_binary_logloss_path(
     callback: ProgressCallback | None = None,
     include_idx: np.ndarray | None = None,
     candidate_idx: np.ndarray | None = None,
+    feature_blocks=None,
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
@@ -279,7 +283,9 @@ def build_binary_logloss_path(
         callback=callback,
         include_idx=include_idx,
         candidate_idx=candidate_idx,
+        feature_blocks=feature_blocks,
     )
+    prefix_widths = tuple(path.prefix_widths) if path.prefix_widths else None
     return BinaryPathRun(
         path=path,
         feature_names=feature_names,
@@ -291,6 +297,10 @@ def build_binary_logloss_path(
         cat_features=cat_features,
         encoding_cv=encoding_cv,
         include_original=tuple(int(i) for i in (include_idx if include_idx is not None else ())),
+        prefix_widths=prefix_widths,
+        n_discovery_candidates=(
+            int(path.n_discovery_candidates) if prefix_widths is not None else None
+        ),
     )
 
 
@@ -334,12 +344,24 @@ def binary_selection_prefix(
     auto_objective: np.ndarray | None = None,
     auto_summary: dict | None = None,
 ) -> BinarySelection:
+    widths = tuple(getattr(path, "prefix_widths", ()) or ())
+    n_steps = max(int(selected_count), 0)
     if selected_features is None:
-        selected_features = path.selected_features[:selected_count]
+        if widths:
+            raw_n = 0 if n_steps <= 0 else int(widths[min(n_steps, len(widths)) - 1])
+            selected_features = path.selected_features[:raw_n]
+            selected_original = path.selected_original[:raw_n]
+        else:
+            selected_features = path.selected_features[:n_steps]
+            selected_original = path.selected_original[:n_steps]
+    else:
+        raw_n = len(selected_features)
+        selected_original = path.selected_original[:raw_n]
+    n_scores = n_steps if widths else len(selected_original)
     return BinarySelection(
         selected_features=selected_features,
-        selected_original=path.selected_original[:selected_count],
-        selected_scores=path.path_scores[:selected_count],
+        selected_original=selected_original,
+        selected_scores=path.path_scores[:n_scores],
         auto_diag=auto_diag,
         auto_objective=auto_objective,
         auto_summary=auto_summary,
@@ -578,6 +600,7 @@ def binary_refit_loglik_gains(
     *,
     ridge: float,
     include_original: Sequence[int] | None = None,
+    prefix_widths: Sequence[int] | None = None,
 ) -> tuple[np.ndarray, int]:
     """Compute unpenalized weighted log-likelihood gains along a binary path."""
     if not selected_original:
@@ -585,10 +608,16 @@ def binary_refit_loglik_gains(
     base = [int(i) for i in (include_original or ())]
     columns = base + [int(i) for i in selected_original]
     X_selected = np.asarray(X_sub[:, columns], dtype=np.float64)
-    Z_selected, valid_mask, _, _ = weighted_standardize(X_selected, w_sub)
-    gains = np.full(len(selected_original), -np.inf, dtype=np.float64)
+    if prefix_widths:
+        Z_selected, valid_mask, _, _ = _weighted_standardize_dropping_exact_constants(
+            X_selected, w_sub
+        )
+    else:
+        Z_selected, valid_mask, _, _ = weighted_standardize(X_selected, w_sub)
+    n_steps = len(prefix_widths) if prefix_widths else len(selected_original)
+    gains = np.full(n_steps, -np.inf, dtype=np.float64)
     failures = 0
-    if not bool(np.all(valid_mask)):
+    if prefix_widths is None and not bool(np.all(valid_mask)):
         failures += int(np.sum(~valid_mask))
 
     p0 = np.clip(float(np.sum(w_sub * y_sub) / np.sum(w_sub)), 1e-12, 1.0 - 1e-12)
@@ -597,7 +626,7 @@ def binary_refit_loglik_gains(
         w_sub,
         np.full(len(y_sub), p0, dtype=np.float64),
     )
-    n_base = len(base)
+    n_base = int(np.sum(valid_mask[: len(base)])) if len(base) else 0
     beta = None
     if n_base:
         try:
@@ -611,17 +640,35 @@ def binary_refit_loglik_gains(
                 "include features could not be fit in the binary logistic path; "
                 "they cannot initialize exact conditioning"
             )
-    max_prefix = min(Z_selected.shape[1] - n_base, len(selected_original))
-    for t in range(1, max_prefix + 1):
+    if prefix_widths:
+        orig_to_z = {}
+        z_pos = 0
+        for i, keep in enumerate(valid_mask):
+            if keep:
+                orig_to_z[int(columns[i])] = z_pos
+                z_pos += 1
+        step_ends: list[int] = []
+        for width in prefix_widths:
+            raw_prefix = base + [int(i) for i in selected_original[: int(width)]]
+            end = n_base
+            for orig in raw_prefix[len(base):]:
+                if int(orig) in orig_to_z:
+                    end = orig_to_z[int(orig)] + 1
+            step_ends.append(end)
+        loop = list(enumerate(step_ends, start=1))
+    else:
+        max_prefix = min(Z_selected.shape[1] - n_base, len(selected_original))
+        loop = [(t, n_base + t) for t in range(1, max_prefix + 1)]
+    for t, end in loop:
         try:
             beta = fit_logistic_ridge(
-                Z_selected[:, : n_base + t],
+                Z_selected[:, :end],
                 y_sub,
                 w_sub,
                 ridge=ridge,
                 beta_init=beta,
             )
-            p = predict_logistic(Z_selected[:, : n_base + t], beta)
+            p = predict_logistic(Z_selected[:, :end], beta)
             gains[t - 1] = binary_loglik_from_prob(y_sub, w_sub, p) - ll0
         except (np.linalg.LinAlgError, FloatingPointError, ValueError):
             failures += 1

@@ -33,6 +33,17 @@ from sift.selection.cefsplus import (
     _gaussian_mrmr_select,
     cefsplus_loop_with_objective,
 )
+from sift.selection.conditioning import omitted_conditioning
+
+
+def _reject_curve_conditioning(include, exclude, candidates, *, name: str) -> None:
+    if omitted_conditioning(include, exclude, candidates):
+        return
+    raise ValueError(
+        f"{name} does not support include/exclude/candidates; those "
+        "arguments are not applied to fold paths. Omit them. High-level "
+        "selectors reject the same combination."
+    )
 from sift.selection.panel import local_corr_panel, local_standardize, score_path_from_corr
 
 
@@ -105,7 +116,48 @@ def _fold_splits(
     raise ValueError(f"Unknown strategy: {config.strategy!r}")
 
 
-def _select_local_path(panel, method: str, max_k: int) -> np.ndarray:
+def _select_local_path(panel, method: str, max_k: int, block_members=None) -> np.ndarray:
+    if block_members is not None and any(len(np.asarray(m)) > 1 for m in block_members):
+        from sift.selection.cefsplus import (
+            _gaussian_jmi_select_blocks,
+            _gaussian_mrmr_select_blocks,
+            cefsplus_block_loop,
+        )
+
+        cand_set = {int(v): i for i, v in enumerate(panel.cand)}
+        panel_blocks = []
+        for members in block_members:
+            local = [cand_set[int(v)] for v in members if int(v) in cand_set]
+            if local:
+                panel_blocks.append(np.asarray(local, dtype=np.int64))
+        if not panel_blocks:
+            return np.empty(0, dtype=np.int64)
+        k_actual = min(int(max_k), len(panel_blocks))
+        if method == "cefsplus":
+            sel_local, _obj, _picked = cefsplus_block_loop(
+                panel.R, panel.r, k_actual, panel.rel, panel_blocks, want_objective=False
+            )
+            return np.asarray(sel_local, dtype=np.int64)
+        if method in {"mrmr_quot", "mrmr_diff"}:
+            sel_local, _picked = _gaussian_mrmr_select_blocks(
+                panel.R,
+                panel.rel,
+                k_actual,
+                use_quotient=method == "mrmr_quot",
+                block_members=panel_blocks,
+            )
+            return np.asarray(sel_local, dtype=np.int64)
+        if method in {"jmi", "jmim"}:
+            sel_local, _picked = _gaussian_jmi_select_blocks(
+                panel.R,
+                panel.r,
+                panel.rel,
+                k_actual,
+                use_min=method == "jmim",
+                block_members=panel_blocks,
+            )
+            return np.asarray(sel_local, dtype=np.int64)
+        raise ValueError(f"Unknown Gaussian selector method: {method!r}")
     k_actual = min(int(max_k), len(panel.cand))
     if k_actual <= 0:
         return np.empty(0, dtype=np.int64)
@@ -135,6 +187,37 @@ def _select_local_path(panel, method: str, max_k: int) -> np.ndarray:
     raise ValueError(f"Unknown Gaussian selector method: {method!r}")
 
 
+def _local_step_ends(local_path: np.ndarray, panel, block_members) -> list[int]:
+    """End indices (1-based) of each additional block along a local path."""
+    path = np.asarray(local_path, dtype=np.int64)
+    if path.size == 0:
+        return []
+    if block_members is None or all(len(np.asarray(m)) <= 1 for m in block_members):
+        return list(range(1, int(path.size) + 1))
+    owner: dict[int, int] = {}
+    for bidx, members in enumerate(block_members):
+        member_set = {int(v) for v in np.asarray(members, dtype=np.int64)}
+        for loc in member_set:
+            owner[int(loc)] = bidx
+    ends: list[int] = []
+    i = 0
+    n = int(path.size)
+    while i < n:
+        valid = int(panel.cand[int(path[i])])
+        bidx = owner.get(valid)
+        if bidx is None:
+            i += 1
+            ends.append(i)
+            continue
+        member_set = {int(v) for v in np.asarray(block_members[bidx], dtype=np.int64)}
+        take = 0
+        while i + take < n and int(panel.cand[int(path[i + take])]) in member_set:
+            take += 1
+        i += max(take, 1)
+        ends.append(i)
+    return ends
+
+
 def _validation_corr_for_path(
     Z_val: np.ndarray,
     zy_val: np.ndarray,
@@ -154,17 +237,33 @@ def _xfit_scores(
     objective_val: np.ndarray,
     *,
     n_eff_val: float,
+    df_increments: np.ndarray | None = None,
 ) -> np.ndarray:
-    ks = np.arange(1, len(objective_val) + 1, dtype=np.float64)
+    n_steps = len(objective_val)
+    if df_increments is None:
+        df_increments = np.ones(n_steps, dtype=np.float64)
+    df_increments = np.asarray(df_increments, dtype=np.float64).reshape(-1)
+    if df_increments.size != n_steps:
+        df_increments = np.ones(n_steps, dtype=np.float64)
+    cum_df = np.cumsum(np.maximum(df_increments, 0.0))
+    max_d = int(np.floor(cum_df[-1])) if n_steps else 0
+    if max_d <= 0:
+        return np.full(n_steps, np.nan, dtype=np.float64)
+    ks = np.arange(1, max_d + 1, dtype=np.float64)
     nu = n_eff_val - ks - 1.0
-    out = np.full(len(objective_val), np.nan, dtype=np.float64)
+    drift_1d = np.zeros(max_d, dtype=np.float64)
     valid = nu > 0.0
-    if not bool(np.any(valid)):
-        return out
-    drift = digamma((nu[valid] + 1.0) / 2.0) - digamma(nu[valid] / 2.0)
-    drift_cum = np.cumsum(drift)
-    valid_positions = np.flatnonzero(valid)
-    out[valid_positions] = objective_val[valid_positions] - drift_cum
+    if bool(np.any(valid)):
+        drift_1d[valid] = digamma((nu[valid] + 1.0) / 2.0) - digamma(nu[valid] / 2.0)
+    drift_cum_1d = np.cumsum(drift_1d)
+    out = np.full(n_steps, np.nan, dtype=np.float64)
+    for t in range(n_steps):
+        dim = int(np.floor(cum_df[t]))
+        if dim <= 0 or dim > max_d or not np.isfinite(objective_val[t]):
+            continue
+        if nu[dim - 1] <= 0.0:
+            continue
+        out[t] = float(objective_val[t] - drift_cum_1d[dim - 1])
     return out
 
 
@@ -251,6 +350,7 @@ def _fold_score_arrays(
     within: str | None = None,
     within_X=None,
     within_y=None,
+    feature_blocks=None,
 ) -> tuple[list[np.ndarray], dict]:
     from sift.selection.knockoff_filter import (
         _reject_duplicate_feature_names,
@@ -329,6 +429,25 @@ def _fold_score_arrays(
             zy_train = zy[train_idx]
             Z_val = Z[val_idx]
             zy_val = zy[val_idx]
+        block_members = None
+        if feature_blocks is not None:
+            from sift.selection.blocks import map_blocks_to_valid, resolve_feature_blocks
+            from sift.selection.conditioning import named_feature_space
+
+            cache_names = list(cache.feature_names) if cache.feature_names is not None else [
+                f"x{i}"
+                for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
+            ]
+            named = named_feature_space(
+                cache.feature_names,
+                synthetic=bool(getattr(cache, "feature_names_are_synthetic", False))
+                or cache.feature_names is None,
+            )
+            blocks = resolve_feature_blocks(
+                feature_blocks, feature_names=cache_names, named=named
+            )
+            if blocks is not None:
+                _ids, block_members = map_blocks_to_valid(blocks, cache.valid_cols)
         panel = local_corr_panel(
             Z_train,
             zy_train,
@@ -337,8 +456,11 @@ def _fold_score_arrays(
             corr_prune=corr_prune,
             method=method,
             local_standardize=True,
+            block_members=block_members,
         )
-        local_path = _select_local_path(panel, method, min(int(config.max_k), stat_limit))
+        local_path = _select_local_path(
+            panel, method, min(int(config.max_k), stat_limit), block_members=block_members
+        )
         if local_path.size == 0:
             fold_scores.append(np.empty(0, dtype=np.float64))
             fold_limits.append(0)
@@ -346,23 +468,56 @@ def _fold_score_arrays(
             continue
 
         path = np.asarray(panel.cand[local_path], dtype=np.int64)
-        L = min(path.size, int(config.max_k), stat_limit)
+        step_ends = _local_step_ends(local_path, panel, block_members)
+        use_block_rank = block_members is not None and any(
+            len(np.asarray(members)) > 1 for members in block_members
+        )
+        keep: list[int] = []
+        kept_incs: list[float] = []
+        if use_block_rank:
+            from sift.selection.blocks import weighted_copula_design_rank
+
+            prev_rank = 0
+            for end in step_ends:
+                if end > path.size:
+                    continue
+                rnk = weighted_copula_design_rank(Z_train[:, path[:end]], w_train)
+                if rnk > stat_limit:
+                    continue
+                keep.append(int(end))
+                kept_incs.append(float(max(rnk - prev_rank, 0)))
+                prev_rank = rnk
+        else:
+            keep = [end for end in step_ends if end <= min(path.size, stat_limit)]
+            kept_incs = np.diff(np.concatenate(([0], keep))).astype(np.float64).tolist()
+        if not keep:
+            fold_scores.append(np.empty(0, dtype=np.float64))
+            fold_limits.append(0)
+            fold_n_eff.append(n_eff_val)
+            continue
+        L = int(keep[-1])
         path = path[:L]
         local_path = local_path[:L]
         R_train = np.ascontiguousarray(panel.R[np.ix_(local_path, local_path)], dtype=np.float64)
         r_train = np.asarray(panel.r[local_path], dtype=np.float64)
         R_val, r_val = _validation_corr_for_path(Z_val, zy_val, w_val, path)
         objective_val = score_path_from_corr(R_val, r_val)
+        step_idx = np.asarray(keep, dtype=np.int64) - 1
+        objective_steps = np.asarray(objective_val, dtype=np.float64)[step_idx]
+        df_inc = np.asarray(kept_incs, dtype=np.float64)
         if score_kind == "xfit_objective":
-            scores = _xfit_scores(objective_val, n_eff_val=n_eff_val)
+            scores = _xfit_scores(
+                objective_steps, n_eff_val=n_eff_val, df_increments=df_inc
+            )
         else:
-            scores = _gaussian_cv_scores(
+            cv_full = _gaussian_cv_scores(
                 R_train,
                 r_train,
                 R_val,
                 r_val,
                 ridge=float(config.xfit_ridge),
             )
+            scores = np.asarray(cv_full, dtype=np.float64)[step_idx]
         fold_scores.append(scores)
         fold_limits.append(int(len(scores)))
         fold_n_eff.append(n_eff_val)
@@ -448,6 +603,10 @@ def xfit_objective_curves(
     within: str | None = None,
     within_X=None,
     within_y=None,
+    feature_blocks=None,
+    include=None,
+    exclude=None,
+    candidates=None,
 ) -> pd.DataFrame:
     """Return a cross-fitted, drift-debiased objective score curve.
 
@@ -495,6 +654,18 @@ def xfit_objective_curves(
     within_y : array-like or None, default None
         Original target aligned to the cache's original rows. Required when
         ``within`` is set.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. Fold paths and scores use complete block
+        prefixes. Identity maps reuse the column-step path.
+    include : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
+    exclude : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
+    candidates : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
 
     Returns
     -------
@@ -516,7 +687,8 @@ def xfit_objective_curves(
         ``xfit_mode='exact'`` (fold-local cache rebuilding is not available
         from cache-only orchestration); if the requested strategy lacks its
         ``time`` or ``groups`` context, has fewer than two groups or rows, or
-        is unknown; if ``groups``/``time`` match neither row count; or if the
+        is unknown; if ``groups``/``time`` match neither row count; if
+        ``include``/``exclude``/``candidates`` are supplied; or if the
         cache fails its structural contract.
 
     Warns
@@ -536,11 +708,11 @@ def xfit_objective_curves(
     -----
     For fold ``f`` and step ``t`` the debias term is
     ``digamma((nu + 1)/2) - digamma(nu/2)`` with
-    ``nu = n_eff_val - t - 1``, the exact expectation of the null
-    log-gain (about ``1/nu`` for large ``nu``); the fold score is the
-    validation objective minus the cumulative drift. Each fold is capped at
-    ``floor(n_eff_val) - 2`` steps, where ``n_eff_val`` is the Kish size of
-    that fold's validation weights. ``xfit_mode='shared_z'`` keeps the
+    ``nu = n_eff_val - d - 1``. For genuine multi-member blocks ``d`` is the
+    cumulative weighted copula rank of the prefix; no-block and identity
+    maps keep the historical column-step ``d = t``. The fold is capped when
+    that dimension exceeds ``floor(n_eff_val) - 2``, where ``n_eff_val`` is
+    the Kish size of that fold's validation weights. ``xfit_mode='shared_z'`` keeps the
     full-cache marginal ranks and re-standardizes them inside each fold, so
     leakage is limited to the marginal transform having seen every row. Cost
     is ``folds x (panel + greedy + O(K^2) objective)`` with no model fits.
@@ -577,6 +749,9 @@ def xfit_objective_curves(
     """
     if config.k_method != "xfit_objective":
         raise ValueError("xfit_objective_curves requires AutoKConfig(k_method='xfit_objective')")
+    _reject_curve_conditioning(
+        include, exclude, candidates, name="xfit_objective_curves"
+    )
     fold_scores, extra = _fold_score_arrays(
         cache,
         y,
@@ -590,6 +765,7 @@ def xfit_objective_curves(
         within=within,
         within_X=within_X,
         within_y=within_y,
+        feature_blocks=feature_blocks,
     )
     diag = _curve_from_fold_scores(
         fold_scores,
@@ -615,6 +791,10 @@ def gaussian_cv_curves(
     within: str | None = None,
     within_X=None,
     within_y=None,
+    feature_blocks=None,
+    include=None,
+    exclude=None,
+    candidates=None,
 ) -> pd.DataFrame:
     """Return a closed-form cross-validated Gaussian linear risk curve.
 
@@ -664,6 +844,18 @@ def gaussian_cv_curves(
     within_y : array-like or None, default None
         Original target aligned to the cache's original rows. Required when
         ``within`` is set.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. Fold paths and scores use complete block
+        prefixes. Identity maps reuse the column-step path.
+    include : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
+    exclude : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
+    candidates : sequence or None, default None
+        Not supported. Any supplied value, including an empty list, is
+        rejected.
 
     Returns
     -------
@@ -684,8 +876,9 @@ def gaussian_cv_curves(
         If ``config.k_method`` is not ``'gaussian_cv'``; if
         ``xfit_mode='exact'``; if the requested strategy lacks its ``time`` or
         ``groups`` context, has fewer than two groups or rows, or is unknown;
-        if ``groups``/``time`` match neither row count; or if the cache fails
-        its structural contract.
+        if ``groups``/``time`` match neither row count; if
+        ``include``/``exclude``/``candidates`` are supplied; or if the cache
+        fails its structural contract.
 
     Warns
     -----
@@ -710,7 +903,8 @@ def gaussian_cv_curves(
     obtained from one incremental Cholesky of the fold-train matrix, so the
     whole curve costs ``O(K^3/3)`` flops per fold; a singular matrix falls
     back to per-k solves with an inflated ridge. Each fold is capped at
-    ``floor(n_eff_val) - 2`` steps. The proxy is copula-linear, so treat the
+    ``floor(n_eff_val) - 2`` in column steps, or weighted copula rank for
+    genuine multi-member blocks. The proxy is copula-linear, so treat the
     curve as a well-behaved stand-in for, not a measurement of, a nonlinear
     downstream model.
 
@@ -746,6 +940,9 @@ def gaussian_cv_curves(
     """
     if config.k_method != "gaussian_cv":
         raise ValueError("gaussian_cv_curves requires AutoKConfig(k_method='gaussian_cv')")
+    _reject_curve_conditioning(
+        include, exclude, candidates, name="gaussian_cv_curves"
+    )
     fold_scores, extra = _fold_score_arrays(
         cache,
         y,
@@ -759,6 +956,7 @@ def gaussian_cv_curves(
         within=within,
         within_X=within_X,
         within_y=within_y,
+        feature_blocks=feature_blocks,
     )
     diag = _curve_from_fold_scores(
         fold_scores,
