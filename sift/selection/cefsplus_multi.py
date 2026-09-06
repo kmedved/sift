@@ -59,7 +59,9 @@ _EPS = 1e-12
 SUPPORTED_MULTI_TARGET_AUTO_K = frozenset(
     {"auto", "evaluate", "elbow", "penalized_objective"}
 )
-SUPPORTED_MULTI_TARGET_CAT_ENCODING = frozenset({"none", "onehot"})
+SUPPORTED_MULTI_TARGET_CAT_ENCODING = frozenset(
+    {"none", "onehot", "ordinal", "frequency"}
+)
 _MULTI_TARGET_AUTO_K_HELP = (
     "evaluate, elbow, penalized_objective, or k='auto' when the measured "
     "router selects EBIC"
@@ -199,7 +201,8 @@ def reject_unsupported_multi_target_context(
     if encoding not in SUPPORTED_MULTI_TARGET_CAT_ENCODING:
         raise ValueError(
             "2-D y is not supported with supervised cat_encoding="
-            f"{encoding!r}; use 'none' or 'onehot', or encode first"
+            f"{encoding!r}; use 'none', 'onehot', 'ordinal', or "
+            "'frequency', or encode first"
         )
     if k_method is None:
         return

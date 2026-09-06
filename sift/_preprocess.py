@@ -22,6 +22,8 @@ CatEncoding = Literal[
     "james_stein",
     "loo_logit",
     "onehot",
+    "ordinal",
+    "frequency",
 ]
 ONEHOT_MAX_LEVELS_DEFAULT = 32
 ONEHOT_MISSING_TOKEN = "missing"
@@ -597,6 +599,14 @@ def validate_target_cv_encoding_flags(
             "allow_full_data_target_encoding, or choose a legacy supervised "
             "encoding ('target', 'loo', 'james_stein', 'loo_logit') if you "
             "really want full-data fitting."
+        )
+    if cat_encoding in {"ordinal", "frequency"} and bool(
+        allow_full_data_target_encoding
+    ):
+        raise ValueError(
+            f"cat_encoding={cat_encoding!r} cannot be combined with "
+            "allow_full_data_target_encoding=True: this encoding is "
+            "target-independent, so the full-data escape hatch does not apply"
         )
 
 
@@ -1532,6 +1542,11 @@ def encode_categoricals(
     """Apply target encoding to categorical features."""
     if method == "none":
         return X
+    if method in {"ordinal", "frequency"}:
+        from sift._unsupervised_cat import UnsupervisedCatEncoder
+
+        encoder = UnsupervisedCatEncoder(cat_features, method=method)
+        return encoder.fit_transform(X, sample_weight=sample_weight)
     if method == "onehot":
         encoder = OneHotBlockEncoder(
             cat_features,

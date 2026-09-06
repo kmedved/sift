@@ -37,6 +37,12 @@ from sift._preprocess import (
     validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
 )
+from sift._unsupervised_cat import (
+    UNSUPERVISED_CAT_ENCODINGS,
+    UnsupervisedCatEncoder,
+    is_unsupervised_cat_encoding,
+    require_unsupervised_auto_k,
+)
 from sift.api import (
     select_fdr,
     select_cefsplus_binary,
@@ -373,11 +379,13 @@ def _make_category_encoder(
             columns,
             max_levels=validate_onehot_max_levels(onehot_max_levels),
         )
+    if method in UNSUPERVISED_CAT_ENCODINGS:
+        return UnsupervisedCatEncoder(columns, method=method)
     if method not in {"loo", "target", "james_stein"}:
         raise ValueError(
             "cat_encoding must be one of 'none', 'target_cv', 'onehot', "
-            "'target', 'loo', 'james_stein', or 'loo_logit'. "
-            f"Got {method!r}."
+            "'ordinal', 'frequency', 'target', 'loo', 'james_stein', or "
+            f"'loo_logit'. Got {method!r}."
         )
     if importlib.util.find_spec("category_encoders") is None:
         raise ImportError(
@@ -558,6 +566,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         sample_weight=None,
         groups=None,
         time=None,
+        auto_k_config=None,
     ):
         self.categorical_encoder_ = None
         self.categorical_features_ = []
@@ -566,8 +575,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding == "none" or not isinstance(X, pd.DataFrame):
             return X
-        if cat_encoding == "onehot":
-            cfg = getattr(self, "auto_k_config", None)
+        if cat_encoding == "onehot" or is_unsupervised_cat_encoding(cat_encoding):
+            cfg = auto_k_config if auto_k_config is not None else getattr(self, "auto_k_config", None)
             nested = getattr(cfg, "auto_k_mode", None) == "nested" if cfg is not None else False
             method = getattr(cfg, "k_method", None) if cfg is not None else None
             if (
@@ -597,7 +606,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         )
         if sample_weight is not None and not isinstance(
             encoder,
-            (LeaveOneOutLogitEncoder, TargetCVEncoder, OneHotBlockEncoder),
+            (
+                LeaveOneOutLogitEncoder,
+                TargetCVEncoder,
+                OneHotBlockEncoder,
+                UnsupervisedCatEncoder,
+            ),
         ):
             raise ValueError(
                 "sample_weight with selector-class categorical encoding is only "
@@ -623,7 +637,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                     groups=groups,
                     time=time,
                 )
-            elif isinstance(encoder, OneHotBlockEncoder):
+            elif isinstance(encoder, (OneHotBlockEncoder, UnsupervisedCatEncoder)):
                 X_encoded = encoder.fit_transform(X, sample_weight=sample_weight)
             else:
                 X_encoded = encoder.fit_transform(X, y_enc)
@@ -644,6 +658,29 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             )
         with suppress_category_encoder_pandas_warnings():
             return self.categorical_encoder_.transform(X)
+
+    def _restore_deferred_unsupervised_encoder(self, X, sample_weight=None) -> bool:
+        """Fit the train-only 1:1 inference map after deferred auto-k scoring.
+
+        Returns True when this call created the encoder, so ``X_fit`` is still
+        raw and must be encoded for captured training output. Fixed-k and
+        other non-deferred routes already encoded ``X_fit``.
+        """
+        if getattr(self, "categorical_encoder_", None) is not None:
+            return False
+        if not is_unsupervised_cat_encoding(getattr(self, "cat_encoding", "none")):
+            return False
+        if not isinstance(X, pd.DataFrame):
+            return False
+        cols = _categorical_columns(X, getattr(self, "cat_features", None))
+        if not cols:
+            return False
+        enc = UnsupervisedCatEncoder(list(cols), method=self.cat_encoding)
+        enc.fit(X, sample_weight=sample_weight)
+        self.categorical_encoder_ = enc
+        self.categorical_features_ = list(cols)
+        self._categorical_encoding_applied_ = True
+        return True
 
     def _fit_selector(
         self,
@@ -693,6 +730,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             sample_weight=sample_weight,
             groups=encoding_groups,
             time=encoding_time,
+            auto_k_config=auto_k_config,
         )
         effective_sample_weight = sample_weight
         if (
@@ -774,6 +812,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 self._categorical_encoding_applied_ = True
                 self._encoded_selected_names_ = enc.expand_selected(selected_features)
 
+        if self._restore_deferred_unsupervised_encoder(X, sample_weight=sample_weight):
+            X_fit = self.categorical_encoder_.transform(X_fit)
+
         self.feature_names_in_ = feature_names_array(feature_names)
         self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
@@ -837,13 +878,14 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
                 "cache so the selector can fit encoders on the training rows."
             )
-        if (
-            resolved_cache is not None
-            and getattr(self, "cat_encoding", "none") == "onehot"
+        if resolved_cache is not None and (
+            getattr(self, "cat_encoding", "none") == "onehot"
+            or is_unsupervised_cat_encoding(getattr(self, "cat_encoding", "none"))
         ):
+            encoding = getattr(self, "cat_encoding", "none")
             raise ValueError(
-                "cat_encoding='onehot' cannot be combined with a prebuilt cache "
-                "because the cache has no one-hot provenance"
+                f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
+                "because the cache has no encoding provenance"
             )
         if getattr(self, "cat_encoding", "none") == "onehot":
             validate_onehot_max_levels(getattr(self, "onehot_max_levels", 32))
@@ -886,6 +928,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 from sift.selection.blocks import require_onehot_auto_k
 
                 require_onehot_auto_k(effective_auto_k.k_method)
+            if is_unsupervised_cat_encoding(getattr(self, "cat_encoding", "none")):
+                require_unsupervised_auto_k(effective_auto_k.k_method)
             if effective_auto_k.auto_k_mode == "nested":
                 if effective_auto_k.k_method != "evaluate":
                     raise ValueError(
@@ -1235,9 +1279,10 @@ class MRMRSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
-        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
-        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"onehot"``, ``"ordinal"``,
+        ``"frequency"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
+        ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
         training rows receive
         ``fold_encoding - fold_training_prior`` while inference rows receive
@@ -1246,7 +1291,10 @@ class MRMRSelector(_BaseSelector):
         ``"loo"`` and ``"james_stein"`` require the optional
         ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
         leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
+        that also consume explicit ``sample_weight`` and ignore ``y``.
+        Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1488,9 +1536,10 @@ class JMISelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
-        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
-        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"onehot"``, ``"ordinal"``,
+        ``"frequency"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
+        ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
         training rows receive ``fold_encoding - fold_training_prior`` while
         inference rows receive ``full_fit_encoding - full_training_prior``, so
@@ -1498,7 +1547,10 @@ class JMISelector(_BaseSelector):
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
         leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
+        that also consume explicit ``sample_weight`` and ignore ``y``.
+        Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1731,9 +1783,10 @@ class JMIMSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
-        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
-        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"onehot"``, ``"ordinal"``,
+        ``"frequency"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
+        ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
         training rows receive ``fold_encoding - fold_training_prior`` while
         inference rows receive ``full_fit_encoding - full_training_prior``, so
@@ -1741,7 +1794,10 @@ class JMIMSelector(_BaseSelector):
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
         leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
+        that also consume explicit ``sample_weight`` and ignore ``y``.
+        Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1970,9 +2026,10 @@ class CEFSPlusSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
-        One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
-        ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
+        One of ``"none"``, ``"target_cv"``, ``"onehot"``, ``"ordinal"``,
+        ``"frequency"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
+        ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
         training rows receive ``fold_encoding - fold_training_prior`` while
         inference rows receive ``full_fit_encoding - full_training_prior``, so
@@ -1980,7 +2037,10 @@ class CEFSPlusSelector(_BaseSelector):
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
         leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
+        that also consume explicit ``sample_weight`` and ignore ``y``.
+        Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -2236,7 +2296,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit`` against the
         validated 0/1 target. ``"target_cv"`` is the built-in leakage-safe
@@ -2247,7 +2307,10 @@ class CEFSPlusBinarySelector(_BaseSelector):
         ``"loo"`` and ``"james_stein"`` require the optional
         ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
         leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. Any supervised encoding
+        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
+        that also consume explicit ``sample_weight`` and ignore ``y``.
+        Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -2540,6 +2603,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
             sample_weight=sample_weight,
             groups=encoding_groups,
             time=encoding_time,
+            auto_k_config=auto_k_config,
         )
         effective_sample_weight = sample_weight
         if (
@@ -2629,6 +2693,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
                 self.categorical_encoder_ = enc
                 self._categorical_encoding_applied_ = True
                 self._encoded_selected_names_ = enc.expand_selected(selected_features)
+
+        if self._restore_deferred_unsupervised_encoder(X, sample_weight=sample_weight):
+            X_fit = self.categorical_encoder_.transform(X_fit)
 
         self.feature_names_in_ = feature_names_array(feature_names)
         self._fit_feature_names_generated_ = names_generated
@@ -2734,13 +2801,16 @@ class KnockoffSelector(_BaseSelector):
     cat_features : list of str or None, default=None
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
-        One of ``"none"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
-        ``"loo_logit"``. ``"target_cv"`` is rejected outright here.
-        ``"none"`` is the only value that preserves the Model-X FDR claim; the
-        four legacy supervised encodings warn and downgrade the claim as
-        described above. Note that ``sift.select_fdr`` itself has no
-        ``cat_encoding`` parameter: the encoders live in this class.
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}, default="none"
+        One of ``"none"``, ``"ordinal"``, ``"frequency"``, ``"target"``,
+        ``"loo"``, ``"james_stein"`` or ``"loo_logit"``. ``"target_cv"`` and
+        ``"onehot"`` are rejected outright here. ``"ordinal"`` and
+        ``"frequency"`` are target-blind 1:1 maps and do not upgrade the
+        approximate-plugin FDR claim. ``"none"`` is the only value that
+        preserves the Model-X FDR claim; the four legacy supervised encodings
+        warn and downgrade the claim as described above. Note that
+        ``sift.select_fdr`` itself has no ``cat_encoding`` parameter: the
+        encoders live in this class.
     target_cv_n_splits : int, default=5
         Inherited constructor option of the shared preprocessing block. It has
         no effect here, because ``cat_encoding="target_cv"`` is rejected.
@@ -3022,6 +3092,11 @@ class KnockoffSelector(_BaseSelector):
                 "KnockoffSelector supervised categorical encoding does not support "
                 "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
                 "cache so the selector can fit encoders on the training rows."
+            )
+        if resolved_cache is not None and is_unsupervised_cat_encoding(self.cat_encoding):
+            raise ValueError(
+                f"cat_encoding={self.cat_encoding!r} cannot be combined with a "
+                "prebuilt cache because the cache has no encoding provenance"
             )
 
         call_params = dict(self._selector_params())

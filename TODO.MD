@@ -128,7 +128,6 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       Full local gate: 2290 passed / 40 skipped, no exclusions; 26 focused
       checks pass after a test-only sklearn 1.3 compatibility correction.
       All six CI jobs passed on `bfe5765`; PR #89 merged at `18cdf40`.
-      Classic caches and unsupervised categorical fallbacks remain open.
 - [x] F5 multi-target CEFS+. Implementation on
       `codex/0.9x-multi-target-cefsplus` (joint 2-D `y`, multi-output
       evaluate, `df=q·k` IC after derivation). Codex/Opus accepted after
@@ -151,7 +150,7 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       exclusions; static, support-matrix and strict docs checks pass.
       All six required CI jobs passed on `e9cbf1d`; PR #91 merged at
       `323da27`, with tested-tree equality and clean-source ancestry verified.
-- [ ] Standardized classic-selector caches. `ClassicFeatureCache` /
+- [x] Standardized classic-selector caches. `ClassicFeatureCache` /
       `build_classic_cache` accepted by Codex and resumed Opus reviews,
       including duplicate/NaN-name guards. Numeric feature-side reuse only;
       targets, relevance and numerical loops remain fresh/unchanged.
@@ -159,8 +158,15 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `8f44999` has refreshed `dirty=false` runtime evidence with 18/18 unchanged
       data/selection fingerprints. Full local gate: 2386 passed / 40 skipped,
       warnings as errors, no exclusions; static/matrix/strict docs pass.
-      Exact-head CI and merge remain pending.
+      All six required CI jobs passed on `fbd0ea0`; PR #92 merged at
+      `47977b3`, with tested-tree equality and clean-source ancestry verified.
 - [ ] Leakage-free unsupervised `ordinal`/`frequency` categorical fallbacks.
+      Implementation accepted on `codex/0.9x-unsupervised-encoding` after
+      Grok coding and independent Codex/resumed Opus reviews. Target-blind
+      maps preserve training weights, fold-local scoring, and numeric
+      inference/training output. Focused gates and public value/curve
+      regressions pass. Clean runtime evidence, full integration gates and
+      merge are the remaining closeout work for this final approved stage.
 
 ## Closed history
 

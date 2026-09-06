@@ -355,6 +355,11 @@ def _fold_score_arrays(
     onehot_cat_features=None,
     onehot_max_levels=32,
     onehot_raw_blocks=None,
+    unsupervised_encoding=None,
+    unsupervised_raw_X=None,
+    unsupervised_cat_features=None,
+    unsupervised_encoding_weight=None,
+    unsupervised_encoding_weight_explicit=False,
 ) -> tuple[list[np.ndarray], dict]:
     from sift.selection.knockoff_filter import (
         _reject_duplicate_feature_names,
@@ -413,7 +418,64 @@ def _fold_score_arrays(
             fold_n_eff.append(n_eff_val)
             continue
 
-        if onehot_raw_X is not None:
+        if unsupervised_raw_X is not None and unsupervised_encoding in {
+            "ordinal",
+            "frequency",
+        }:
+            from sift._unsupervised_cat import UnsupervisedCatEncoder
+
+            orig_idx = np.asarray(cache.row_idx, dtype=np.int64)
+            orig_train = orig_idx[train_idx]
+            orig_val = orig_idx[val_idx]
+            raw = unsupervised_raw_X
+            if not isinstance(raw, pd.DataFrame):
+                raise TypeError("unsupervised_raw_X must be a pandas DataFrame")
+            cols = list(unsupervised_cat_features or [])
+            if not cols:
+                cols = raw.select_dtypes(
+                    include=["object", "category", "string"]
+                ).columns.tolist()
+            orig_w = np.ones(int(cache.n_rows_original), dtype=np.float64)
+            if unsupervised_encoding_weight_explicit:
+                if unsupervised_encoding_weight is not None:
+                    supplied = np.asarray(unsupervised_encoding_weight, dtype=np.float64).reshape(-1)
+                    if supplied.size == int(cache.n_rows_original):
+                        orig_w = supplied
+                    elif orig_idx.size and supplied.size == orig_idx.size:
+                        orig_w[orig_idx] = supplied
+            elif cache.sample_weight is not None and orig_idx.size:
+                orig_w[orig_idx] = np.asarray(cache.sample_weight, dtype=np.float64)
+            enc = UnsupervisedCatEncoder(cols, method=unsupervised_encoding)
+            enc.fit(raw.iloc[orig_train], sample_weight=orig_w[orig_train])
+            X_tr = np.asarray(enc.transform(raw.iloc[orig_train]), dtype=np.float64)
+            X_va = np.asarray(enc.transform(raw.iloc[orig_val]), dtype=np.float64)
+            y_src = within_y if within_y is not None else y
+            y_orig = np.asarray(y_src, dtype=np.float64).reshape(-1)
+            if y_orig.shape[0] == int(cache.n_rows_original):
+                y_tr = y_orig[orig_train]
+                y_va = y_orig[orig_val]
+            else:
+                y_tr = y_orig[train_idx]
+                y_va = y_orig[val_idx]
+            if within is not None:
+                from sift.selection.within import fit_within_transform
+
+                g_tr = None if groups_cache is None else groups_cache[train_idx]
+                g_va = None if groups_cache is None else groups_cache[val_idx]
+                t_tr = None if time_cache is None else time_cache[train_idx]
+                t_va = None if time_cache is None else time_cache[val_idx]
+                fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
+                X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
+                X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
+            valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
+            if valid_cols.size:
+                X_tr = X_tr[:, valid_cols]
+                X_va = X_va[:, valid_cols]
+            Z_train = weighted_rank_gauss_2d(X_tr, w_train, n_jobs=1, rank_backend="serial")
+            zy_train = weighted_rank_gauss_1d(y_tr, w_train)
+            Z_val = weighted_rank_gauss_2d(X_va, w_val, n_jobs=1, rank_backend="serial")
+            zy_val = weighted_rank_gauss_1d(y_va, w_val)
+        elif onehot_raw_X is not None:
             from sift._preprocess import OneHotBlockEncoder, validate_onehot_max_levels
 
             orig_idx = np.asarray(cache.row_idx, dtype=np.int64)
@@ -677,6 +739,11 @@ def xfit_objective_curves(
     onehot_cat_features=None,
     onehot_max_levels=32,
     onehot_raw_blocks=None,
+    unsupervised_encoding=None,
+    unsupervised_raw_X=None,
+    unsupervised_cat_features=None,
+    unsupervised_encoding_weight=None,
+    unsupervised_encoding_weight_explicit=False,
 ) -> pd.DataFrame:
     """Return a cross-fitted, drift-debiased objective score curve.
 
@@ -745,6 +812,23 @@ def xfit_objective_curves(
         Cap forwarded to the fold-local one-hot encoder.
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
+    unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
+        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
+        training rows only, then optionally applies ``within`` and scores
+        columns aligned to ``cache.valid_cols``.
+    unsupervised_raw_X : DataFrame or None, default None
+        Original categorical frame with ``n_rows_original`` rows. Required
+        when ``unsupervised_encoding`` is set.
+    unsupervised_cat_features : sequence or None, default None
+        Raw categorical columns encoded from ``unsupervised_raw_X``. ``None``
+        auto-detects object, category, and string columns.
+    unsupervised_encoding_weight : ndarray of shape (n_rows_original,) or (n_cached,) or None, default None
+        Encoding weights used only when
+        ``unsupervised_encoding_weight_explicit`` is True. ``None`` then
+        means unweighted fold maps. Ignored when the flag is False.
+    unsupervised_encoding_weight_explicit : bool, default False
+        If True, unsupervised fold maps use
+        ``unsupervised_encoding_weight`` instead of cache sample weights.
 
     Returns
     -------
@@ -847,6 +931,11 @@ def xfit_objective_curves(
         feature_blocks=feature_blocks,
         onehot_raw_X=onehot_raw_X,
         onehot_cat_features=onehot_cat_features,
+        unsupervised_encoding=unsupervised_encoding,
+        unsupervised_raw_X=unsupervised_raw_X,
+        unsupervised_cat_features=unsupervised_cat_features,
+        unsupervised_encoding_weight=unsupervised_encoding_weight,
+        unsupervised_encoding_weight_explicit=unsupervised_encoding_weight_explicit,
         onehot_max_levels=onehot_max_levels,
         onehot_raw_blocks=onehot_raw_blocks,
     )
@@ -882,6 +971,11 @@ def gaussian_cv_curves(
     onehot_cat_features=None,
     onehot_max_levels=32,
     onehot_raw_blocks=None,
+    unsupervised_encoding=None,
+    unsupervised_raw_X=None,
+    unsupervised_cat_features=None,
+    unsupervised_encoding_weight=None,
+    unsupervised_encoding_weight_explicit=False,
 ) -> pd.DataFrame:
     """Return a closed-form cross-validated Gaussian linear risk curve.
 
@@ -952,6 +1046,23 @@ def gaussian_cv_curves(
         Cap forwarded to the fold-local one-hot encoder.
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
+    unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
+        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
+        training rows only, then optionally applies ``within`` and scores
+        columns aligned to ``cache.valid_cols``.
+    unsupervised_raw_X : DataFrame or None, default None
+        Original categorical frame with ``n_rows_original`` rows. Required
+        when ``unsupervised_encoding`` is set.
+    unsupervised_cat_features : sequence or None, default None
+        Raw categorical columns encoded from ``unsupervised_raw_X``. ``None``
+        auto-detects object, category, and string columns.
+    unsupervised_encoding_weight : ndarray of shape (n_rows_original,) or (n_cached,) or None, default None
+        Encoding weights used only when
+        ``unsupervised_encoding_weight_explicit`` is True. ``None`` then
+        means unweighted fold maps. Ignored when the flag is False.
+    unsupervised_encoding_weight_explicit : bool, default False
+        If True, unsupervised fold maps use
+        ``unsupervised_encoding_weight`` instead of cache sample weights.
 
     Returns
     -------
@@ -1055,6 +1166,11 @@ def gaussian_cv_curves(
         feature_blocks=feature_blocks,
         onehot_raw_X=onehot_raw_X,
         onehot_cat_features=onehot_cat_features,
+        unsupervised_encoding=unsupervised_encoding,
+        unsupervised_raw_X=unsupervised_raw_X,
+        unsupervised_cat_features=unsupervised_cat_features,
+        unsupervised_encoding_weight=unsupervised_encoding_weight,
+        unsupervised_encoding_weight_explicit=unsupervised_encoding_weight_explicit,
         onehot_max_levels=onehot_max_levels,
         onehot_raw_blocks=onehot_raw_blocks,
     )

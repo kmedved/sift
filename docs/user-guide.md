@@ -93,6 +93,24 @@ level, and unknown transform values join `other` when that remainder exists
 `evaluate`, Gaussian CV, xfit, and auto routing learn the vocabulary inside
 training folds. Prebuilt caches, `within`, knockoffs, and Boruta raise.
 
+Use `cat_encoding="ordinal"` or `"frequency"` for target-blind 1:1 numeric
+maps (no extra dependency). Ordinal codes are `0..C-1` over identities
+observed in positive-weight training rows, in deterministic identity order
+(declared-but-unobserved pandas levels and `Categorical.ordered` are
+ignored; unknown is `-1`). Frequency is that level's share of positive
+training `sample_weight` mass (unknown is `0`). Missing is a fitted level
+only when it appears in that training mass. Maps ignore `y` and do not
+consume class-weight. Sklearn wrappers keep the train-fit encoder at
+`transform`. Held-out scoring (evaluate / nested / group / time / Gaussian
+CV / xfit) fits maps on training-fold raw `X`. For `k_method="evaluate"`
+with `strategy="time_holdout"`, path and scoring maps use the train
+partition. In-sample auto-k that happens to see a `time` vector (for
+example routed EBIC) still encodes the call's `X`. Prefix-only evaluate
+on non-holdout splits can still rank on a full-data path — use nested
+evaluate when the selected path itself must be holdout-blind. Prebuilt
+caches and resampled auto-k (`stability`, `knockoff_path`, `consensus`)
+raise.
+
 `target_cv` emits **centered category effects**, not raw category means: each
 value is the category estimate minus the training prior that produced it. An
 unknown or unseen category therefore maps to a zero centered effect (the

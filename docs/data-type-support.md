@@ -35,7 +35,7 @@ python scripts/generate_data_type_matrix.py
 
 Enabling options used for `cond` cells:
 
-- categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra)
+- categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra); `ordinal`/`frequency` are also in-library 1:1 maps
 - `KnockoffSelector` categorical: `cat_encoding="loo_logit"` (warns; `fdr_control='none'`)
 - groups/time: `k="auto"` with `AutoKConfig(k_method="evaluate")` and the matching split strategy
 - `ModelSelector` categorical: width-preserving sklearn `OrdinalEncoder`
@@ -249,7 +249,10 @@ copied onto this page.
   `cat_encoding`. `target_cv` is the in-library enabling option used for
   `cond` cells. Filter selectors also accept `cat_encoding="onehot"`
   (atomic `{column}__{level}` blocks; not a matrix enabling option and
-  rejected on knockoffs/Boruta). `loo_logit` is also in-library (binary).
+  rejected on knockoffs/Boruta) and `cat_encoding="ordinal"` /
+  `"frequency"` (target-blind 1:1 maps; KnockoffSelector accepts
+  them without an FDR upgrade; Boruta accepts train-importance only).
+  `loo_logit` is also in-library (binary).
   `loo` / `target` /
   `james_stein` need `.[categorical]`. Function-style filters and all
   Boruta entry points (including `BorutaSelector`) additionally require

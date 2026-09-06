@@ -84,6 +84,8 @@ from sift.selection.auto_k_score import (
 )
 from sift.scoring import is_sklearn_scorer, sklearn_scorer_label
 
+_ENCODING_WEIGHT_INHERIT = object()
+
 
 def choose_k_from_score_curve(
     diagnostics: pd.DataFrame,
@@ -180,6 +182,8 @@ def _evaluate_prefix_split(
         "james_stein",
         "loo_logit",
         "onehot",
+        "ordinal",
+        "frequency",
     ],
     onehot_max_levels: int = 32,
     loo_smoothing: float,
@@ -247,6 +251,16 @@ def _evaluate_prefix_split(
             mapped.append(width)
             onehot_width_back[width] = step
         k_grid = mapped
+    if cat_encoding in {"ordinal", "frequency"} and fold_cat:
+        from sift._unsupervised_cat import UnsupervisedCatEncoder
+
+        enc = UnsupervisedCatEncoder(fold_cat, method=cat_encoding)
+        w_fit = (
+            encoding_weight_arr[train_idx] if encoding_weight_arr is not None else None
+        )
+        enc.fit(Xtr_df, sample_weight=w_fit)
+        Xtr_df = enc.transform(Xtr_df)
+        Xva_df = enc.transform(Xva_df)
     if cat_encoding == "target_cv" and fold_cat:
         enc = TargetCVEncoder(
             fold_cat,
@@ -283,7 +297,7 @@ def _evaluate_prefix_split(
         )
         Xtr_df = enc.fit_transform(Xtr_df, ytr, sample_weight=wtr)
         Xva_df = enc.transform(Xva_df)
-    elif cat_encoding not in {"none", "onehot"} and fold_cat:
+    elif cat_encoding not in {"none", "onehot", "ordinal", "frequency"} and fold_cat:
         if importlib.util.find_spec("category_encoders") is None:
             raise ImportError(
                 "cat_encoding requires category_encoders. Install with: pip install category_encoders"
@@ -364,6 +378,8 @@ def select_k_auto(
         "james_stein",
         "loo_logit",
         "onehot",
+        "ordinal",
+        "frequency",
     ] = "none",
     cat_features: Optional[List[str]] = None,
     sample_weight: Optional[np.ndarray] = None,
@@ -378,6 +394,7 @@ def select_k_auto(
     within: str | None = None,
     prefix_sizes: Optional[Sequence[int]] = None,
     onehot_max_levels: int = 32,
+    encoding_sample_weight: Any = _ENCODING_WEIGHT_INHERIT,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path.
 
@@ -429,6 +446,12 @@ def select_k_auto(
         ``'james_stein'`` require the optional ``category_encoders``
         dependency; ``'loo_logit'`` requires ``task='classification'``.
         ``'onehot'`` is in-library and encodes each fold's training rows only.
+        ``'ordinal'`` and ``'frequency'`` are target-blind 1:1 maps fitted on
+        the fold-train frame (unknown ``-1`` / ``0``). For time-holdout
+        evaluate, the path map is also train-only. Other time-bearing auto-k
+        is not implied. Prefix-only ranking on non-holdout splits may still
+        be built on the full call matrix; use nested evaluate when the
+        selected path itself must be holdout-blind.
     cat_features : list of str, optional
         Columns to treat as categorical. When None, object/category/string
         columns of the fold-train frame are detected automatically.
@@ -465,6 +488,12 @@ def select_k_auto(
         at a block ``k``.
     onehot_max_levels : int, default 32
         Cap on retained dummy levels when ``cat_encoding='onehot'``.
+    encoding_sample_weight : ndarray of shape (n_samples,) or None, optional
+        Explicit row weights for unsupervised ``ordinal`` / ``frequency``
+        maps. Omitted (the default) inherits ``sample_weight`` for encoding.
+        An explicit ``None`` means unweighted encoding even when scoring uses
+        ``sample_weight``. Supervised encoders still inherit
+        ``sample_weight``. Length must match ``X``.
     within : {'groups', 'two_way'} or None, default None
         Fold-local panel demeaning applied after encoding and before the
         prefix proxy model. Regression only. Means are fit on training rows
@@ -617,9 +646,16 @@ def select_k_auto(
         k_method=config.k_method if n_targets >= 2 else None,
     )
     sample_weight_supplied = sample_weight is not None
+    if (
+        cat_encoding in {"ordinal", "frequency"}
+        and encoding_sample_weight is not _ENCODING_WEIGHT_INHERIT
+    ):
+        encoding_source = encoding_sample_weight
+    else:
+        encoding_source = sample_weight
     encoding_weight_arr = (
-        ensure_weights(sample_weight, n_rows, normalize=False)
-        if sample_weight_supplied
+        ensure_weights(encoding_source, n_rows, normalize=False)
+        if encoding_source is not None
         else None
     )
     w_arr = ensure_weights(sample_weight, n_rows, normalize=True)
