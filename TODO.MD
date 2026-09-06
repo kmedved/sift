@@ -145,8 +145,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `codex/0.9x-model-selector`. Codex/Opus accepted the implementation,
       including the executable support-matrix row and raw-column pipeline
       importance guard. Latest focused gate: 267 passed / 3 skipped.
-      Clean-commit runtime refresh, full local gates and exact-head CI/merge
-      remain pending.
+      Clean implementation `22c6638` has refreshed `dirty=false` runtime
+      evidence with 18/18 data and selection fingerprints unchanged.
+      Full local gates and exact-head CI/merge remain pending.
 - [ ] Standardized classic-selector caches, then leakage-free unsupervised
       `ordinal`/`frequency` categorical fallbacks.
 
