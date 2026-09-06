@@ -370,7 +370,13 @@ def binary_selection_prefix(
 
 
 def validate_binary_target(y) -> tuple[np.ndarray, np.ndarray, dict]:
-    raw = np.asarray(y).ravel()
+    raw_nd = np.asarray(y)
+    if raw_nd.ndim == 2 and int(raw_nd.shape[1]) > 1:
+        raise ValueError(
+            "2-D y is not supported for binary CEFS+; use select_cefsplus for "
+            "joint continuous multi-target selection"
+        )
+    raw = raw_nd.ravel()
     if pd.isna(raw).any():
         raise ValueError("Missing values in y are not allowed for binary CEFS+.")
     if raw.size == 0:

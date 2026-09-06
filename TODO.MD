@@ -122,12 +122,19 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       runtime refresh complete. Full local run: 2261 passed / 40 skipped,
       with its sole glossary-order failure now fixed and targeted checks green.
       All six CI jobs passed on `bb651a2`; PR #88 merged at `c29e99e`.
-- [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
+- [x] F4 `Stabilized(selector)` meta-selector, after F8b.
       Codex/Opus accepted the implementation on `codex/0.9x-stabilized`.
       Clean implementation `7cc4f66` has refreshed `dirty=false` runtime evidence.
-      Full local gate: 2290 passed / 40 skipped, no exclusions. CI/merge pending.
+      Full local gate: 2290 passed / 40 skipped, no exclusions; 26 focused
+      checks pass after a test-only sklearn 1.3 compatibility correction.
+      All six CI jobs passed on `bfe5765`; PR #89 merged at `18cdf40`.
       F5/F6 and later remain open.
-- [ ] F5 multi-target CEFS+.
+- [ ] F5 multi-target CEFS+. Implementation on
+      `codex/0.9x-multi-target-cefsplus` (joint 2-D `y`, multi-output
+      evaluate, `df=q·k` IC after derivation). Codex/Opus accepted after
+      verified corrections; 375 focused checks passed / 2 skipped plus
+      independent conditional/weighted public probes. Clean-source runtime,
+      full local gate and exact-head CI/merge remain pending. No F6 yet.
 - [ ] F6 generic `ModelSelector` with purged/embargoed time-series splits.
 - [ ] Standardized classic-selector caches, then leakage-free unsupervised
       `ordinal`/`frequency` categorical fallbacks.

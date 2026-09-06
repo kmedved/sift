@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 
 from sift._metadata import resolve_row_metadata
 from sift._preprocess import best_score_from_dict, ensure_weights
+from sift.selection.auto_k_core import weighted_regression_score
 from sift.scoring import (
     UnsupportedScorerSampleWeightError,
     is_sklearn_scorer,
@@ -288,7 +289,14 @@ def _build_splits(
         # Splitter is expected to provide a .split(X, y, groups=None)-style API.
         data = np.empty((n, 1))
         # Pass the real target so stratified splitters actually stratify.
-        y_split = np.zeros(n) if y is None else np.asarray(y).ravel()
+        if y is None:
+            y_split = np.zeros(n)
+        else:
+            y_split = np.asarray(y)
+            if y_split.ndim == 0:
+                raise ValueError("y must be a one-dimensional or two-dimensional array")
+            if y_split.shape[0] != n:
+                raise ValueError(f"y has {y_split.shape[0]} rows but expected {n}")
         groups_arr = None if groups is None else np.asarray(groups).ravel()
         if groups_arr is not None and groups_arr.shape[0] != n:
             raise ValueError(f"groups has {groups_arr.shape[0]} rows but expected {n}")
@@ -338,10 +346,10 @@ def _compute_metric(
     sample_weight: np.ndarray,
 ) -> float:
     """Compute lower-is-better metric."""
-    if metric == "rmse":
-        return float(np.sqrt(np.average((y_true - y_pred) ** 2, weights=sample_weight)))
-    if metric == "mae":
-        return float(np.average(np.abs(y_true - y_pred), weights=sample_weight))
+    if metric in {"rmse", "mae"}:
+        return weighted_regression_score(
+            y_true, y_pred, metric, sample_weight=sample_weight
+        )
     raise ValueError(
         "scoring must be 'rmse', 'mae', or a callable(y_true, y_pred, sample_weight)"
     )
@@ -426,9 +434,17 @@ def _fit_predict_score(
             )
             score = -signed_score
             return float(score) if np.isfinite(score) else float("inf")
-        y_pred = np.asarray(estimator.predict(X_va), dtype=np.float64).ravel()
-        if y_pred.shape[0] != y_va.shape[0]:
-            raise ValueError("estimator.predict returned wrong number of predictions")
+        y_pred = np.asarray(estimator.predict(X_va), dtype=np.float64)
+        y_va_arr = np.asarray(y_va, dtype=np.float64)
+        if y_va_arr.ndim == 1:
+            y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+            if y_pred.shape[0] != y_va_arr.shape[0]:
+                raise ValueError("estimator.predict returned wrong number of predictions")
+        else:
+            if y_pred.ndim == 1:
+                y_pred = y_pred.reshape(-1, 1)
+            if y_pred.shape != y_va_arr.shape:
+                raise ValueError("estimator.predict returned wrong number of predictions")
 
         if callable(scoring):
             score = float(scoring(y_va, y_pred, w_va))
@@ -471,8 +487,12 @@ def evaluate_feature_path(
     ----------
     X : DataFrame or ndarray
         Feature matrix.
-    y : array-like
-        Regression target.
+    y : array-like of shape (n_samples,) or (n_samples, n_targets)
+        Regression target. A 2-D array is scored as multi-output RMSE/MAE
+        with the same row weights on every target. The default estimator
+        remains ``StandardScaler`` followed by ``LinearRegression``; this
+        helper does not switch to ridge. Auto-k ``evaluate`` /
+        ``select_k_auto`` use ridge on their own route.
     feature_path : sequence of str or int
         Ordered feature names (DataFrame) or positional indices.
     k_grid : sequence of int
@@ -564,10 +584,10 @@ def evaluate_feature_path(
         path_names, path_positions = _resolve_feature_path(X_df, feature_path)
         X_path = X_arr[:, path_positions]
 
-    y_arr = np.asarray(y).ravel()
-    if y_arr.shape[0] != X_path.shape[0]:
-        raise ValueError(f"X has {X_path.shape[0]} rows but y has {y_arr.shape[0]}")
-    if not np.isfinite(y_arr).all():
+    from sift.selection.cefsplus_multi import as_regression_targets
+
+    y_arr, _n_y = as_regression_targets(y, int(X_path.shape[0]))
+    if not np.isfinite(np.asarray(y_arr, dtype=np.float64)).all():
         raise ValueError("y contains non-finite values")
 
     sample_weight_supplied = sample_weight is not None

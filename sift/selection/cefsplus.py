@@ -1211,12 +1211,15 @@ def select_cached(
 
     Runs one greedy Gaussian-copula selection against a target using a
     ``sift.estimators.copula.FeatureCache`` that already holds the
-    rank-Gaussian transform.  This is the entry point for multi-target work:
-    build the cache once with ``sift.build_cache``, then call this per
-    ``y``.  Only the target-dependent work -- the marginal correlations, the
-    candidate panel, and the greedy path -- is repeated.  By default it runs
-    CEFS+, screens to ``max(5 * k, 250)`` candidates, applies no correlation
-    pruning, and returns a plain ``list`` of selected feature names.
+    rank-Gaussian transform of ``X``. Build the cache once with
+    ``sift.build_cache``, then call this per 1-D ``y``, or pass a 2-D
+    ``y`` of shape ``(n, q)`` with ``method="cefsplus"`` for joint
+    multi-output CEFS+. Reusing one cache across separate 1-D calls is not
+    joint multi-output support. Only the target-dependent work -- the
+    marginal correlations, the candidate panel, and the greedy path -- is
+    repeated.  By default it runs CEFS+, screens to ``max(5 * k, 250)``
+    candidates, applies no correlation pruning, and returns a plain
+    ``list`` of selected feature names.
 
     ``corr_prune="auto"`` resolves to no pruning for every method. Pass a float to
     opt into marginal-correlation pruning when duplicate suppression is more
@@ -1230,10 +1233,13 @@ def select_cached(
         Cache built by ``sift.build_cache`` from the feature matrix.  Its
         structural contract is revalidated on every call, and duplicate
         non-synthetic ``feature_names`` are rejected.
-    y : array-like of shape (n_rows_original,)
+    y : array-like of shape (n_rows_original,) or (n_rows_original, n_targets)
         Numeric target aligned to the matrix the cache was built from, before
         any subsampling: the cache indexes it with ``cache.row_idx``.  Must be
         finite; classification labels have to be encoded numerically first.
+        A single column ``(n, 1)`` follows the 1-D path. ``q>=2`` is joint
+        CEFS+ and requires ``method="cefsplus"``. Collinear targets whose
+        copula correlation has condition number above ``1e6`` are rejected.
     k : int
         Upper bound on the number of features to select.  Must be a positive
         integer -- ``k="auto"`` is not supported here.  Fewer than ``k``
@@ -1331,8 +1337,10 @@ def select_cached(
         ``"auto"``; if the cache fails its structural or provenance checks or
         carries duplicate feature names; if ``y`` is non-finite or its length
         differs from ``cache.n_rows_original``; if ``corr_prune`` is outside
-        ``(0, 1]``; if ``method`` is unknown; or if ``return_result=True`` is
-        requested for a cache without ``feature_names``.
+        ``(0, 1]``; if ``method`` is unknown; if a 2-D ``y`` is passed with a
+        method other than ``"cefsplus"`` or with collinear targets; or if
+        ``return_result=True`` is requested for a cache without
+        ``feature_names``.
 
     Warns
     -----
@@ -1363,8 +1371,10 @@ def select_cached(
     caller's thread pool.  The JMI/JMIM and mRMR paths update one row of the
     candidate correlation matrix per step and cost ``O(m * k)``.  Everything
     downstream of the cache is target-dependent only, which is what makes
-    cache reuse across targets cheap; the cached rows, weights and copula
-    transform are fixed and this function never re-derives them.
+    cache reuse across 1-D targets cheap; the cached rows, weights and copula
+    transform are fixed and this function never re-derives them. Joint
+    multi-output CEFS+ uses the same cache and a rank-1 residual update of
+    ``Σ_{Y|S}``.
 
     Examples
     --------
@@ -1442,9 +1452,23 @@ def _select_cached_impl(
         raise ValueError("compose_include must be a boolean")
     _validate_prebuilt_cache_structure(cache)
     _reject_duplicate_feature_names(cache)
-    y_arr = to_numpy(y, dtype=np.float64).ravel()
-    if not np.isfinite(y_arr).all():
+    from sift.selection.cefsplus_multi import as_regression_targets
+
+    y_probe = np.asarray(y)
+    n_y_rows = 1 if y_probe.ndim == 0 else int(y_probe.shape[0])
+    if n_y_rows != int(cache.n_rows_original):
+        raise ValueError(
+            f"y has {n_y_rows} rows but cache was built from "
+            f"{int(cache.n_rows_original)} rows"
+        )
+    y_arr, n_y = as_regression_targets(y, int(cache.n_rows_original))
+    if n_y == 1 and not np.isfinite(np.asarray(y_arr, dtype=np.float64)).all():
         raise ValueError("y contains non-finite values")
+    if n_y >= 2 and method != "cefsplus":
+        raise ValueError(
+            "2-D y is only supported for method='cefsplus'; "
+            f"got method={method!r}"
+        )
     cache_names = list(cache.feature_names) if cache.feature_names is not None else [
         f"x{i}" for i in range(int(np.max(cache.valid_cols)) + 1 if len(cache.valid_cols) else 0)
     ]
@@ -1527,6 +1551,7 @@ def _select_cached_impl(
     use_joint_blocks = False
     panel_blocks: list[np.ndarray] = []
     panel_orig_blocks: list[int] = []
+    multi = panel.C is not None and int(panel.n_targets) >= 2
     if blocks is not None and block_members_valid is not None:
         valid_to_panel = {int(v): i for i, v in enumerate(panel.cand)}
         for orig_b, valid_members in zip(orig_block_ids, block_members_valid):
@@ -1551,8 +1576,24 @@ def _select_cached_impl(
         k_actual = min(k, len(eligible_blocks))
 
     objective = None
+    target_condition = panel.target_condition
     if use_joint_blocks:
-        if method == "cefsplus":
+        if method == "cefsplus" and multi:
+            from sift.selection.cefsplus_multi import cefsplus_block_loop_multi
+
+            sel_local, objective, picked, target_condition = cefsplus_block_loop_multi(
+                R_cand,
+                panel.C,
+                panel.Ryy,
+                k_actual,
+                rel_cand,
+                panel_blocks,
+                forced_blocks=forced_blocks,
+                eligible_blocks=eligible_blocks,
+                want_objective=return_objective or return_result,
+                callback=callback,
+            )
+        elif method == "cefsplus":
             sel_local, objective, picked = cefsplus_block_loop(
                 R_cand,
                 r_cand,
@@ -1595,6 +1636,20 @@ def _select_cached_impl(
         selected_block_labels = [blocks.block_ids[i] for i in discovered_block_ids]
         discovered_original = np.asarray(
             blocks.expand(discovered_block_ids), dtype=np.int64
+        )
+    elif method == "cefsplus" and multi:
+        from sift.selection.cefsplus_multi import cefsplus_multi_loop
+
+        sel_local, objective, target_condition = cefsplus_multi_loop(
+            R_cand,
+            panel.C,
+            panel.Ryy,
+            k_actual,
+            rel_cand,
+            forced=forced_local if use_forced else None,
+            eligible=eligible_local if use_forced else None,
+            want_objective=return_objective or return_result,
+            callback=callback,
         )
     elif method == "cefsplus":
         if use_forced:
@@ -1690,9 +1745,12 @@ def _select_cached_impl(
 
     if return_result:
         if objective is None:
-            objective = _conditional_discovery_objective(
-                R_cand, r_cand, forced_local, sel_local
-            )
+            if multi:
+                objective = np.empty(0, dtype=np.float64)
+            else:
+                objective = _conditional_discovery_objective(
+                    R_cand, r_cand, forced_local, sel_local
+                )
         if cache.feature_names is None:
             raise ValueError(
                 "return_result=True requires cache.feature_names so the normalized "
@@ -1747,6 +1805,15 @@ def _select_cached_impl(
             "n_rows_cached": int(len(cache.row_idx)),
             "feature_names_are_synthetic": bool(cache.feature_names_are_synthetic),
         }
+        if int(panel.n_targets) >= 2:
+            from sift.selection.cefsplus_multi import result_target_metadata
+
+            extra.update(
+                result_target_metadata(
+                    int(panel.n_targets),
+                    target_condition=panel.target_condition,
+                )
+            )
         diagnostics = {
             "objective": np.asarray(objective, dtype=np.float64).copy(),
             "candidate_indices": np.asarray(

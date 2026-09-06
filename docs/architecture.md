@@ -44,6 +44,7 @@ flowchart TD
 | `sift/selection/panel.py` | Candidate-panel extraction and local correlation plumbing shared by CEFS+ auto-k methods. |
 | `sift/selection/auto_k.py`, `auto_k_core.py`, `auto_k_stop.py`, `auto_k_resample.py`, `auto_k_xfit.py`, and `auto_k_knockoff.py` | Generic k-selection mechanics, score curves, objective penalties, calibrated stops, resampling nulls, fold curves, and knockoff-path helpers. |
 | `sift/selection/cefsplus.py` and `cefsplus_binary.py` | Gaussian CEFS+ log-det paths and binary logistic CEFS+ paths. |
+| `sift/selection/cefsplus_multi.py` | Joint 2-D-target CEFS+ residual updates, target-covariance guard, and `q·k` IC df. |
 | `sift/selection/result.py` and `path_eval.py` | Result containers and explicit feature-path evaluation utilities. |
 | `sift/estimators/` | Relevance scores, Gaussian copula transforms, Gaussian knockoff samplers, and joint mutual-information estimators. |
 | `sift/sampling/` | Smart sampling, anchor strategies, and bootstrap split generators. |

@@ -280,6 +280,26 @@ def test_feature_names_in_is_object_ndarray_for_named_and_positional_fits(
     assert restored.feature_names_in_.dtype == object
 
 
+def test_cefsplus_declares_multioutput_across_tag_apis():
+    selector = sift.CEFSPlusSelector(k=2, verbose=False)
+    assert selector._more_tags()["multioutput"] is True
+    assert sift.MRMRSelector()._more_tags().get("multioutput", False) is False
+    assert sift.CEFSPlusBinarySelector()._more_tags().get("multioutput", False) is False
+
+    if SKLEARN_VERSION < (1, 6):
+        from sklearn.utils._tags import _safe_tags
+
+        assert _safe_tags(selector)["multioutput"] is True
+        assert _safe_tags(sift.MRMRSelector()).get("multioutput", False) is False
+    else:
+        from sklearn.utils import get_tags
+
+        tags = get_tags(selector)
+        assert tags.target_tags.multi_output is True
+        assert get_tags(sift.MRMRSelector()).target_tags.multi_output is False
+        assert get_tags(sift.CEFSPlusBinarySelector()).target_tags.multi_output is False
+
+
 def test_cefsplus_binary_declares_binary_only_across_tag_apis():
     """C6: legacy ``binary_only`` tag plus an honest object-tag representation."""
     selector = sift.CEFSPlusBinarySelector(k=2, verbose=False)
