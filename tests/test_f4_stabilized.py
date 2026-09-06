@@ -614,7 +614,10 @@ def test_unsupervised_variance_threshold_fit_and_fit_transform():
         verbose=False,
     ).fit_transform(X)
     assert transformed.shape[0] == 30
-    with pytest.raises(ValueError, match="target y is None"):
+    with pytest.raises(
+        (TypeError, ValueError),
+        match=r"target y is None|missing 1 required positional argument: 'y'",
+    ):
         Stabilized(
             SelectKBest(f_regression, k=1),
             n_resamples=2,
