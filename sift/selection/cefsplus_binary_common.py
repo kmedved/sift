@@ -18,6 +18,11 @@ from sift._preprocess import (
     validate_inputs,
     validate_k,
 )
+from sift._unsupervised_cat import (
+    UnsupervisedCatEncoder,
+    is_unsupervised_cat_encoding,
+    require_unsupervised_auto_k,
+)
 from sift.selection.auto_k import (
     AutoKConfig,
 )
@@ -57,6 +62,7 @@ class BinaryProblem:
     target_mapping: dict
     weights: np.ndarray
     weighted: bool
+    encoding_sample_weight: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -134,10 +140,13 @@ def validate_binary_options(
         "james_stein",
         "loo_logit",
         "onehot",
+        "ordinal",
+        "frequency",
     }:
         raise ValueError(
             "cat_encoding must be one of 'none', 'target_cv', 'onehot', "
-            "'target', 'loo', 'james_stein', or 'loo_logit'."
+            "'ordinal', 'frequency', 'target', 'loo', 'james_stein', or "
+            "'loo_logit'."
         )
 
     try:
@@ -209,6 +218,11 @@ def prepare_binary_problem(
         target_mapping=target_mapping,
         weights=weights,
         weighted=weighted,
+        encoding_sample_weight=(
+            None
+            if sample_weight is None
+            else np.asarray(sample_weight, dtype=np.float64).reshape(-1)
+        ),
     )
 
 
@@ -234,6 +248,25 @@ def build_binary_logloss_path(
 ) -> BinaryPathRun:
     path_k = int(auto_k_config.max_k) if options.k_value == "auto" else int(options.k_value)
     cat_features = resolve_cat_features(X, cat_features)
+    if is_unsupervised_cat_encoding(cat_encoding) and auto_k_config is not None:
+        require_unsupervised_auto_k(auto_k_config.k_method)
+    if is_unsupervised_cat_encoding(cat_encoding):
+        encoding_weight = problem.encoding_sample_weight
+    else:
+        encoding_weight = problem.weights if problem.weighted else None
+    fit_idx = None
+    if (
+        is_unsupervised_cat_encoding(cat_encoding)
+        and auto_k_config is not None
+        and str(auto_k_config.k_method) == "evaluate"
+        and auto_k_config.strategy == "time_holdout"
+        and problem.time is not None
+        and isinstance(X, pd.DataFrame)
+    ):
+        from sift.selection.auto_k_core import time_holdout_split
+
+        fit_idx, _ = time_holdout_split(problem.time, float(auto_k_config.val_frac))
+        fit_idx = np.asarray(fit_idx)
     X_encoded, encoding_weights, encoding_cv = encode_categoricals_for_binary_selector(
         X,
         problem.y01,
@@ -243,7 +276,7 @@ def build_binary_logloss_path(
         loo_smoothing=options.loo_smoothing,
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,
-        sample_weight=problem.weights if problem.weighted else None,
+        sample_weight=encoding_weight,
         groups=problem.groups,
         time=problem.time,
         target_cv_n_splits=target_cv_n_splits,
@@ -251,6 +284,7 @@ def build_binary_logloss_path(
         target_prior=target_prior,
         warmup_policy=warmup_policy,
         return_effective_weights=True,
+        fit_idx=fit_idx,
     )
     # The logistic path works in float64 throughout; skipping the classic
     # float32 round trip keeps large-offset or tiny-scale columns intact.
@@ -526,6 +560,7 @@ def encode_categoricals_for_binary_selector(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     return_effective_weights: bool = False,
+    fit_idx: np.ndarray | None = None,
 ) -> Union[
     pd.DataFrame,
     np.ndarray,
@@ -562,7 +597,18 @@ def encode_categoricals_for_binary_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
-    if cat_encoding == "target_cv":
+    if is_unsupervised_cat_encoding(cat_encoding):
+        encoder = UnsupervisedCatEncoder(present_cat_features, method=cat_encoding)
+        fit_frame = X
+        fit_weight = sample_weight
+        if fit_idx is not None:
+            idx = np.asarray(fit_idx)
+            fit_frame = X.iloc[idx]
+            if fit_weight is not None:
+                fit_weight = np.asarray(fit_weight)[idx]
+        encoder.fit(fit_frame, sample_weight=fit_weight)
+        X_encoded = encoder.transform(X)
+    elif cat_encoding == "target_cv":
         encoder = TargetCVEncoder(
             present_cat_features,
             target_type="binary",

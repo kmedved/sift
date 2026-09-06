@@ -359,6 +359,13 @@ def select_binary_evaluate(
             )
             else None
         ),
+        encoding_sample_weight=(
+            None
+            if problem.encoding_sample_weight is None
+            else np.asarray(problem.encoding_sample_weight)[run.row_idx]
+        )
+        if cat_encoding in {"ordinal", "frequency"}
+        else auto_k_module._ENCODING_WEIGHT_INHERIT,
         loo_smoothing=options.loo_smoothing,
         loo_clip_min=options.loo_clip_min,
         loo_clip_max=options.loo_clip_max,

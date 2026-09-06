@@ -93,6 +93,8 @@ the migration notes, and the deprecation ledger are in the
   normalized result view.
 - `cat_encoding="target_cv"` adds leakage-safe, fold-centered target encoding
   for DataFrames with string columns, with no optional dependency.
+  `cat_encoding="ordinal"` and `"frequency"` are target-blind 1:1 maps on the
+  same surfaces (unknown `-1` / `0`; no extra dependency).
 - Selector classes gain `output_order`, `inverse_transform`, sklearn's
   `feature_names_in_` contract, `set_output(transform="pandas")`, and explicit
   sklearn 1.4+ metadata routing.

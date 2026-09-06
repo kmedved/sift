@@ -341,6 +341,9 @@ def select_gaussian_evaluate_path(
         cat_encoding=eval_cat_encoding,
         onehot_max_levels=eval_max_levels,
         sample_weight=sample_weight,
+        encoding_sample_weight=_unused.get(
+            "encoding_sample_weight", auto_k_module._ENCODING_WEIGHT_INHERIT
+        ),
         target_cv_n_splits=target_cv_n_splits,
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
@@ -864,6 +867,13 @@ def select_gaussian_xfit_objective_path(
         onehot_cat_features=_unused.get("onehot_cat_features"),
         onehot_max_levels=_unused.get("onehot_max_levels", 32),
         onehot_raw_blocks=_unused.get("onehot_raw_blocks"),
+        unsupervised_encoding=_unused.get("unsupervised_encoding"),
+        unsupervised_raw_X=_unused.get("unsupervised_raw_X"),
+        unsupervised_cat_features=_unused.get("unsupervised_cat_features"),
+        unsupervised_encoding_weight=_unused.get("unsupervised_encoding_weight"),
+        unsupervised_encoding_weight_explicit=_unused.get(
+            "unsupervised_encoding_weight_explicit", False
+        ),
     )
     selected_count, auto_diag = select_k_xfit_objective(curves, auto_k_config)
     widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
@@ -943,6 +953,13 @@ def select_gaussian_cv_path(
         onehot_cat_features=_unused.get("onehot_cat_features"),
         onehot_max_levels=_unused.get("onehot_max_levels", 32),
         onehot_raw_blocks=_unused.get("onehot_raw_blocks"),
+        unsupervised_encoding=_unused.get("unsupervised_encoding"),
+        unsupervised_raw_X=_unused.get("unsupervised_raw_X"),
+        unsupervised_cat_features=_unused.get("unsupervised_cat_features"),
+        unsupervised_encoding_weight=_unused.get("unsupervised_encoding_weight"),
+        unsupervised_encoding_weight_explicit=_unused.get(
+            "unsupervised_encoding_weight_explicit", False
+        ),
     )
     selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
     widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))

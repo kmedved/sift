@@ -231,6 +231,17 @@ that remainder exists, otherwise they are all-zero. Missing is a fitted
 level. Selected features/indices/support stay in the caller raw namespace;
 encoded output names match transform width. Not a knockoff FDR claim.
 
+## ordinal / frequency encoding
+
+Target-independent 1:1 maps (`cat_encoding="ordinal"` / `"frequency"`).
+One numeric column per raw categorical. Vocabulary is the identities
+observed in positive-weight training rows (one-hot identity semantics;
+unused pandas levels are ignored). Ordinal codes are `0..C-1` in
+deterministic `repr(identity)` order; unknown is `-1`. Frequency is the
+level's share of positive training mass; unknown is `0`. Missing is a
+fitted level only when observed in that mass. Maps ignore `y`. Not a
+stronger knockoff FDR claim.
+
 ## Out-of-fold
 
 A value computed on rows that were not used to fit the object that produced

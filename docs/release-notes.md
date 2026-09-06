@@ -41,7 +41,15 @@
   transform names match dummy width. Nested `evaluate` and prefix-only
   evaluate/Gaussian CV/xfit/auto learn vocabulary on training folds.
   Caches, `within`, knockoffs, and Boruta raise. `target_cv` and no-encoding
-  paths are unchanged. Ordinal/frequency fallbacks are not in this stage.
+  paths are unchanged.
+- Added additive `cat_encoding="ordinal"` and `"frequency"` on existing
+  `cat_encoding` surfaces (filter functions/wrappers, binary CEFS+, Boruta
+  `importance_data='train'`, `KnockoffSelector`, multi-target CEFS+).
+  Target-blind 1:1 maps; unknown `-1` / `0`; explicit `sample_weight` only
+  (not class-weight). Held-out scoring fits maps on training-fold raw `X`;
+  evaluate/time-holdout path maps use the train partition. Prefix-only ranking may
+  still use a full-data path. Prebuilt caches, resampled auto-k, and Boruta
+  `importance_data='test'` raise. No new public exports. No FDR upgrade.
 - Added additive `feature_blocks=` on the fixed-k filter selectors,
   `select_cached`, the sklearn filter wrappers, and as an alias of knockoff
   `feature_groups`. Explicit dicts map block labels to members; unlisted

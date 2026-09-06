@@ -269,15 +269,18 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         Categorical column names to encode. None auto-detects object,
         category and string DataFrame columns; names absent from X are
         dropped. Only used when cat_encoding is not "none".
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+    cat_encoding : {"none", "target_cv", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}
         Categorical encoding fitted before the Boruta loop. "target_cv" is the
         leakage-safe cross-fitted encoder and is the only supervised value
         accepted without an explicit opt-in; the four legacy encodings fit on
         the full dataset and therefore require
         allow_full_data_target_encoding=True, because tree learners can read a
         row's own target back out of them. Any supervised value is rejected
-        with importance_data="test". sample_weight is consumed only by
-        "target_cv" and "loo_logit".
+        with importance_data="test". ``ordinal`` / ``frequency`` are
+        target-blind 1:1 maps on ``importance_data='train'``; they are
+        rejected with ``importance_data='test'`` because encoding currently
+        runs before the split. sample_weight is consumed by
+        "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5
         Fold count for cat_encoding="target_cv".
     target_cv_smoothing : "auto" or float, default="auto"
@@ -824,13 +827,37 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                         "has no atomic feature-block path. Pre-encode outside "
                         "Boruta or use a filter selector."
                     )
-                if self.importance_data == "test":
+                if self.cat_encoding in {"ordinal", "frequency"}:
+                    if self.importance_data == "test":
+                        raise ValueError(
+                            "BorutaSelector(importance_data='test') does not support "
+                            f"cat_encoding={self.cat_encoding!r}: encoding currently "
+                            "runs on the full matrix before the importance split, so "
+                            "held-out rows would enter the vocabulary or frequency "
+                            "map. Use importance_data='train' or pre-encode on the "
+                            "training partition."
+                        )
+                    from sift._unsupervised_cat import UnsupervisedCatEncoder
+
+                    encoder = UnsupervisedCatEncoder(
+                        cat_features, method=self.cat_encoding
+                    )
+                    X = encoder.fit_transform(X, sample_weight=sample_weight)
+                    self.categorical_encoder_ = encoder
+                    self.categorical_features_ = list(cat_features)
+                    self._categorical_encoding_applied_ = True
+                    feature_names = extract_feature_names(X)
+                elif self.importance_data == "test":
                     raise ValueError(
                         "BorutaSelector(importance_data='test') cannot use supervised "
                         "cat_encoding on the full dataset. Pre-encode categoricals "
                         "leakage-safely or use importance_data='train'."
                     )
-                if (
+                if self.cat_encoding in {"ordinal", "frequency"}:
+                    unsupervised_done = True
+                else:
+                    unsupervised_done = False
+                if not unsupervised_done and (
                     self.cat_encoding != "target_cv"
                     and not self.allow_full_data_target_encoding
                 ):
@@ -843,75 +870,81 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                         "leakage-prone behavior, or set cat_encoding='none' and "
                         "pre-encode categoricals in a leakage-safe (out-of-fold) pipeline."
                     )
-                if self.task == "classification":
-                    y_for_encoder = pd.Series(
-                        np.unique(y, return_inverse=True)[1], index=X.index
-                    )
-                else:
-                    y_for_encoder = y
-                if (
-                    sample_weight is not None
-                    and self.cat_encoding not in {"loo_logit", "target_cv"}
-                ):
-                    raise ValueError(
-                        "sample_weight with Boruta categorical encoding is only "
-                        "supported for cat_encoding='loo_logit'. category_encoders-backed "
-                        "methods ('loo', 'target', 'james_stein') do not consume sample weights."
-                    )
-                if self.cat_encoding == "target_cv":
-                    encoder = TargetCVEncoder(
-                        cat_features,
-                        target_type="binary"
-                        if self.task == "classification"
-                        else "continuous",
-                        smooth=self.target_cv_smoothing,
-                        cv=self.target_cv_n_splits,
-                        target_prior=self.target_prior,
-                        warmup_policy=self.warmup_policy,
-                    )
-                    X = encoder.fit_transform(
-                        X,
-                        y_for_encoder,
-                        sample_weight=sample_weight,
-                        groups=groups,
-                        time=time,
-                    )
-                elif self.cat_encoding == "loo_logit":
-                    encoder = LeaveOneOutLogitEncoder(cat_features)
-                    X = encoder.fit_transform(X, y_for_encoder, sample_weight=sample_weight)
-                else:
-                    import category_encoders as ce
-
-                    encoders = {
-                        "loo": ce.LeaveOneOutEncoder,
-                        "target": ce.TargetEncoder,
-                        "james_stein": ce.JamesSteinEncoder,
-                    }
-                    if self.cat_encoding not in encoders:
+                if not unsupervised_done:
+                    if self.task == "classification":
+                        y_for_encoder = pd.Series(
+                            np.unique(y, return_inverse=True)[1], index=X.index
+                        )
+                    else:
+                        y_for_encoder = y
+                    if (
+                        sample_weight is not None
+                        and self.cat_encoding not in {"loo_logit", "target_cv"}
+                    ):
                         raise ValueError(
-                            "cat_encoding must be one of 'none', 'target_cv', "
-                            "'target', 'loo', 'james_stein', or 'loo_logit'. "
-                            f"Got {self.cat_encoding!r}."
+                            "sample_weight with Boruta categorical encoding is only "
+                            "supported for cat_encoding='loo_logit'. category_encoders-backed "
+                            "methods ('loo', 'target', 'james_stein') do not consume sample weights."
                         )
-                    Encoder = encoders[self.cat_encoding]
-                    try:
-                        encoder = Encoder(
-                            cols=cat_features,
-                            handle_missing="return_nan",
-                            handle_unknown="value",
+                    if self.cat_encoding == "target_cv":
+                        encoder = TargetCVEncoder(
+                            cat_features,
+                            target_type="binary"
+                            if self.task == "classification"
+                            else "continuous",
+                            smooth=self.target_cv_smoothing,
+                            cv=self.target_cv_n_splits,
+                            target_prior=self.target_prior,
+                            warmup_policy=self.warmup_policy,
                         )
-                    except TypeError:
-                        encoder = Encoder(cols=cat_features, handle_missing="return_nan")
-                    with suppress_category_encoder_pandas_warnings():
-                        X = encoder.fit_transform(X, y_for_encoder)
-                self.categorical_encoder_ = encoder
-                if hasattr(encoder, "encoding_cv_"):
-                    self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
-                self.categorical_features_ = list(cat_features)
-                self._categorical_encoding_applied_ = True
-                feature_names = extract_feature_names(X)
-                if getattr(self, "_capture_target_cv_training_output_", False):
-                    self._target_cv_training_output_ = X.copy()
+                        X = encoder.fit_transform(
+                            X,
+                            y_for_encoder,
+                            sample_weight=sample_weight,
+                            groups=groups,
+                            time=time,
+                        )
+                    elif self.cat_encoding == "loo_logit":
+                        encoder = LeaveOneOutLogitEncoder(cat_features)
+                        X = encoder.fit_transform(
+                            X, y_for_encoder, sample_weight=sample_weight
+                        )
+                    else:
+                        import category_encoders as ce
+
+                        encoders = {
+                            "loo": ce.LeaveOneOutEncoder,
+                            "target": ce.TargetEncoder,
+                            "james_stein": ce.JamesSteinEncoder,
+                        }
+                        if self.cat_encoding not in encoders:
+                            raise ValueError(
+                                "cat_encoding must be one of 'none', 'target_cv', "
+                                "'ordinal', 'frequency', 'target', 'loo', "
+                                "'james_stein', or 'loo_logit'. "
+                                f"Got {self.cat_encoding!r}."
+                            )
+                        Encoder = encoders[self.cat_encoding]
+                        try:
+                            encoder = Encoder(
+                                cols=cat_features,
+                                handle_missing="return_nan",
+                                handle_unknown="value",
+                            )
+                        except TypeError:
+                            encoder = Encoder(
+                                cols=cat_features, handle_missing="return_nan"
+                            )
+                        with suppress_category_encoder_pandas_warnings():
+                            X = encoder.fit_transform(X, y_for_encoder)
+                    self.categorical_encoder_ = encoder
+                    if hasattr(encoder, "encoding_cv_"):
+                        self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
+                    self.categorical_features_ = list(cat_features)
+                    self._categorical_encoding_applied_ = True
+                    feature_names = extract_feature_names(X)
+                    if getattr(self, "_capture_target_cv_training_output_", False):
+                        self._target_cv_training_output_ = X.copy()
 
             non_numeric = X.select_dtypes(
                 include=["object", "category", "string"]
@@ -1348,15 +1381,17 @@ def select_boruta(
         Categorical column names to encode; requires a DataFrame ``X``. None
         auto-detects object, category and string columns, and names absent
         from ``X`` are dropped.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+    cat_encoding : {"none", "target_cv", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}
         Categorical encoding fitted before the Boruta loop, default "none".
         "target_cv" is the leakage-safe cross-fitted encoder and is the only
         supervised value accepted without an explicit opt-in; the four legacy
         encodings fit on the full dataset and therefore require
         ``allow_full_data_target_encoding=True``, because tree learners can
         read a row's own target back out of them. Any supervised value is
-        rejected with ``importance_data="test"``, and ``sample_weight`` is
-        consumed only by "target_cv" and "loo_logit".
+        rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
+        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        rejected with ``importance_data='test'``. ``sample_weight`` is
+        consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5
         Fold count for ``cat_encoding="target_cv"``.
     target_cv_smoothing : "auto" or float, default="auto"
@@ -1581,14 +1616,16 @@ def select_boruta_shap(
         Categorical column names to encode; requires a DataFrame ``X``. None
         auto-detects object, category and string columns, and names absent
         from ``X`` are dropped.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", "loo_logit"}
+    cat_encoding : {"none", "target_cv", "ordinal", "frequency", "target", "loo", "james_stein", "loo_logit"}
         Categorical encoding fitted before the Boruta loop, default "none".
         "target_cv" is the leakage-safe cross-fitted encoder and is the only
         supervised value accepted without an explicit opt-in; the four legacy
         encodings fit on the full dataset and therefore require
         ``allow_full_data_target_encoding=True``. Any supervised value is
-        rejected with ``importance_data="test"``, and ``sample_weight`` is
-        consumed only by "target_cv" and "loo_logit".
+        rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
+        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        rejected with ``importance_data='test'``. ``sample_weight`` is
+        consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5
         Fold count for ``cat_encoding="target_cv"``.
     target_cv_smoothing : "auto" or float, default="auto"

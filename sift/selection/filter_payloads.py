@@ -25,6 +25,11 @@ from sift._preprocess import (
     validate_inputs,
     validate_target,
 )
+from sift._unsupervised_cat import (
+    UnsupervisedCatEncoder,
+    is_unsupervised_cat_encoding,
+    require_unsupervised_auto_k,
+)
 from sift.estimators import relevance as rel_est
 from sift.estimators.classic_cache import is_classic_cache
 from sift.estimators.copula import (
@@ -420,6 +425,23 @@ def make_auto_gaussian(
             feature_names=ctx.feature_names,
         )
         method = method_func(ctx)
+        encoding_eval_weight = auto_k_module._ENCODING_WEIGHT_INHERIT
+        encoding_orig_weight = None
+        encoding_weight_explicit = bool(
+            getattr(ctx.request, "encoding_weight_explicit", False)
+            and is_unsupervised_cat_encoding(_kw(ctx, "cat_encoding"))
+        )
+        if encoding_weight_explicit:
+            encoding_orig_weight = ctx.request.encoding_sample_weight
+            if encoding_orig_weight is None:
+                encoding_eval_weight = None
+            else:
+                encoding_orig_weight = np.asarray(encoding_orig_weight, dtype=np.float64)
+                row_idx = np.asarray(cache.row_idx, dtype=np.int64)
+                if row_idx.size and row_idx.size < encoding_orig_weight.size:
+                    encoding_eval_weight = encoding_orig_weight[row_idx]
+                else:
+                    encoding_eval_weight = encoding_orig_weight
         selected, selected_indices, auto_diag, auto_summary = runner(
             cache=cache,
             y=y_sel,
@@ -458,6 +480,24 @@ def make_auto_gaussian(
             onehot_raw_blocks=getattr(ctx, "raw_feature_blocks", None),
             onehot_encoder=getattr(ctx, "onehot_encoder", None),
             onehot_include_names=_raw_onehot_include_names(ctx),
+            unsupervised_encoding=(
+                _kw(ctx, "cat_encoding")
+                if is_unsupervised_cat_encoding(_kw(ctx, "cat_encoding"))
+                else None
+            ),
+            unsupervised_raw_X=(
+                ctx.request.X
+                if is_unsupervised_cat_encoding(_kw(ctx, "cat_encoding"))
+                else None
+            ),
+            unsupervised_cat_features=(
+                list(cat_features or ())
+                if is_unsupervised_cat_encoding(_kw(ctx, "cat_encoding"))
+                else None
+            ),
+            encoding_sample_weight=encoding_eval_weight,
+            unsupervised_encoding_weight=encoding_orig_weight,
+            unsupervised_encoding_weight_explicit=encoding_weight_explicit,
         )
         selected, selected_indices = _compose_gaussian_auto_selection(
             ctx, selected, selected_indices
@@ -1163,7 +1203,8 @@ def _cache_for_gaussian(
     X_pre = ctx.request.X
     if ctx.request.cache is not None:
         if (
-            _kw(ctx, "cat_encoding", "none") in {"target_cv", "onehot"}
+            _kw(ctx, "cat_encoding", "none")
+            in {"target_cv", "onehot", "ordinal", "frequency"}
             and cat_features
         ):
             raise ValueError(
@@ -1179,13 +1220,15 @@ def _cache_for_gaussian(
             y_sel,
             X_pre,
         )
+    encoding = _kw(ctx, "cat_encoding")
+    _reject_unsupported_unsupervised_auto_k(ctx, encoding)
     X_encoded = _encode_categoricals_for_selector(
         ctx.request.X,
         ctx.request.y,
         cat_features,
-        _kw(ctx, "cat_encoding"),
+        encoding,
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
-        sample_weight=ctx.request.sample_weight,
+        sample_weight=_unsupervised_encoding_weight(ctx, ctx.request.sample_weight),
         task=ctx.request.task,
         groups=ctx.groups,
         time=ctx.time,
@@ -1194,8 +1237,13 @@ def _cache_for_gaussian(
         target_prior=_kw(ctx, "target_prior"),
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
+        fit_idx=_unsupervised_path_fit_idx(ctx, encoding),
     )
     X_encoded, effective_weight, target_cv_metadata = X_encoded
+    if is_unsupervised_cat_encoding(encoding) and getattr(
+        ctx.request, "encoding_weight_explicit", False
+    ):
+        effective_weight = ctx.request.sample_weight
     X_pre = X_encoded
     if ctx.within is not None:
         X_arr, template = as_float_feature_matrix(X_encoded)
@@ -1264,6 +1312,41 @@ def _resolve_cat_features(
         return X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
     return cat_features
 
+
+def _reject_unsupported_unsupervised_auto_k(ctx: "FilterContext", encoding: str | None) -> None:
+    if not is_unsupervised_cat_encoding(encoding):
+        return
+    if ctx.k == "auto" and ctx.auto_k_config is not None:
+        require_unsupervised_auto_k(ctx.auto_k_config.k_method)
+
+
+def _unsupervised_encoding_weight(ctx: "FilterContext", default):
+    if is_unsupervised_cat_encoding(_kw(ctx, "cat_encoding")) and getattr(
+        ctx.request, "encoding_weight_explicit", False
+    ):
+        return ctx.request.encoding_sample_weight
+    return default
+
+
+def _unsupervised_path_fit_idx(ctx: "FilterContext", encoding: str | None):
+    """Train-partition row index for time-holdout path maps; else None."""
+    if not is_unsupervised_cat_encoding(encoding):
+        return None
+    cfg = ctx.auto_k_config
+    if (
+        ctx.k == "auto"
+        and cfg is not None
+        and str(cfg.k_method) == "evaluate"
+        and cfg.strategy == "time_holdout"
+        and ctx.time is not None
+        and isinstance(ctx.request.X, pd.DataFrame)
+    ):
+        from sift.selection.auto_k_core import time_holdout_split
+
+        train_idx, _val_idx = time_holdout_split(ctx.time, float(cfg.val_frac))
+        return np.asarray(train_idx)
+    return None
+
 _SUPERVISED_CAT_ENCODINGS = frozenset({"target", "loo", "james_stein", "loo_logit"})
 
 
@@ -1280,6 +1363,7 @@ def _encode_categoricals_for_selector(
     target_prior: float | None = None,
     warmup_policy: str = "zero_weight",
     onehot_max_levels: int = 32,
+    fit_idx: np.ndarray | None = None,
 ) -> tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None, dict | None]:
     if not cat_features or cat_encoding == "none":
         return X, sample_weight, None
@@ -1300,6 +1384,17 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
+    if is_unsupervised_cat_encoding(cat_encoding):
+        encoder = UnsupervisedCatEncoder(present_cat_features, method=cat_encoding)
+        fit_frame = X
+        fit_weight = sample_weight
+        if fit_idx is not None:
+            idx = np.asarray(fit_idx)
+            fit_frame = X.iloc[idx]
+            if fit_weight is not None:
+                fit_weight = np.asarray(fit_weight)[idx]
+        encoder.fit(fit_frame, sample_weight=fit_weight)
+        return encoder.transform(X), sample_weight, None
     if cat_encoding == "onehot":
         encoder = OneHotBlockEncoder(
             present_cat_features,
@@ -1381,13 +1476,15 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         cat_features = ctx.request.X.select_dtypes(
             include=["object", "category", "string"]
         ).columns.tolist()
+    encoding = _kw(ctx, "cat_encoding")
+    _reject_unsupported_unsupervised_auto_k(ctx, encoding)
     X_encoded = _encode_categoricals_for_selector(
         ctx.request.X,
         ctx.request.y,
         cat_features,
-        _kw(ctx, "cat_encoding"),
+        encoding,
         allow_full_data_target_encoding=_kw(ctx, "allow_full_data_target_encoding"),
-        sample_weight=ctx.request.sample_weight,
+        sample_weight=_unsupervised_encoding_weight(ctx, ctx.request.sample_weight),
         task=ctx.request.task,
         groups=ctx.groups,
         time=ctx.time,
@@ -1396,8 +1493,13 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         target_prior=_kw(ctx, "target_prior"),
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
         onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
+        fit_idx=_unsupervised_path_fit_idx(ctx, encoding),
     )
     X_encoded, effective_weight, target_cv_metadata = X_encoded
+    if is_unsupervised_cat_encoding(encoding) and getattr(
+        ctx.request, "encoding_weight_explicit", False
+    ):
+        effective_weight = ctx.request.sample_weight
     X_arr, y_arr, feature_names = validate_inputs(
         X_encoded,
         ctx.request.y,

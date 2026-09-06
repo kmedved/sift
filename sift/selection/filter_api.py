@@ -154,6 +154,8 @@ class FilterRequest:
     store_proxies: bool = False
     selector_kwargs: dict[str, Any] | None = None
     callback: ProgressCallback | None = None
+    encoding_sample_weight: np.ndarray | None = None
+    encoding_weight_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -310,7 +312,8 @@ def _request_from_public_locals(
         values.get("cat_encoding", "none"),
         values.get("allow_full_data_target_encoding", False),
     )
-    if values.get("cat_encoding", "none") == "onehot":
+    encoding = values.get("cat_encoding", "none")
+    if encoding == "onehot":
         validate_onehot_max_levels(values.get("onehot_max_levels", 32))
         if bool(values.get("allow_full_data_target_encoding", False)):
             raise ValueError(
@@ -318,6 +321,14 @@ def _request_from_public_locals(
                 "allow_full_data_target_encoding=True: one-hot encoding is "
                 "target-independent, so the full-data escape hatch does not apply"
             )
+    elif encoding in {"ordinal", "frequency"} and bool(
+        values.get("allow_full_data_target_encoding", False)
+    ):
+        raise ValueError(
+            f"cat_encoding={encoding!r} cannot be combined with "
+            "allow_full_data_target_encoding=True: this encoding is "
+            "target-independent, so the full-data escape hatch does not apply"
+        )
     store_proxies = values.get("store_proxies", False)
     if not isinstance(store_proxies, (bool, np.bool_)):
         raise ValueError("store_proxies must be a boolean")
@@ -465,7 +476,7 @@ def select_mrmr(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -489,6 +500,21 @@ def select_mrmr(
         names stay in the raw namespace. Evaluate, Gaussian CV, xfit, and
         auto routing learn vocabulary on training folds. Prebuilt caches,
         ``within``, and knockoffs raise.
+        ``"ordinal"`` and ``"frequency"`` are target-blind 1:1 maps over
+        positive-weight training identities (unused pandas levels and
+        ``Categorical.ordered`` are ignored). Ordinal codes are ``0..C-1`` in
+        deterministic identity order (unknown ``-1``); frequency is the
+        training-mass proportion (unknown ``0``). Missing is a fitted level
+        only when observed in positive-weight train rows. Maps ignore ``y``
+        and use explicit ``sample_weight`` only. Scoring, nested evaluate,
+        Gaussian CV, and xfit fit maps on training folds. For
+        ``k_method="evaluate"`` with ``strategy="time_holdout"``, path and
+        scoring maps use the train partition only. Other time-bearing auto-k
+        routes such as in-sample EBIC still encode the call's ``X``.
+        Prefix-only ranking on non-holdout splits may still use a full-data
+        path -- use nested evaluate for holdout-blind selection assessment.
+        Prebuilt caches and resampled auto-k
+        (``stability`` / ``knockoff_path`` / ``consensus``) raise.
     target_cv_n_splits : int, default 5
         Requested fold count for ``cat_encoding="target_cv"``.  Must be at
         least 2; the encoder reports the count it could actually use in
@@ -759,7 +785,7 @@ def select_jmi(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1015,7 +1041,7 @@ def select_jmim(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1283,7 +1309,7 @@ def select_cefsplus(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1562,7 +1588,7 @@ def select_cefsplus_binary(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "ordinal", "frequency", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1761,6 +1787,11 @@ def _select_filter(
             )
         _require_context_auto_k_compatibility(ctx)
         _require_auto_k_eval_context(ctx)
+        encoding = (ctx.selector_kwargs or {}).get("cat_encoding", "none")
+        if encoding in {"ordinal", "frequency"}:
+            from sift._unsupervised_cat import require_unsupervised_auto_k
+
+            require_unsupervised_auto_k(ctx.auto_k_config.k_method)
     else:
         handler = spec.fixed_handler
 
@@ -2457,35 +2488,27 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         class_weight=kw("class_weight"),
     )
     cat_encoding_eff = "loo" if kw("cat_encoding") == "loo_logit" else kw("cat_encoding")
-    result = select_cefsplus(
-        request.X,
-        problem.y01.astype(float),
-        k=options.k_value,
-        groups=problem.groups,
-        time=problem.time,
-        auto_k_config=request.auto_k_config,
+    from sift._unsupervised_cat import is_unsupervised_cat_encoding
+
+    explicit_unsupervised = is_unsupervised_cat_encoding(kw("cat_encoding"))
+    gauss_kwargs = {
+        name: (request.selector_kwargs or {})[name]
+        for name in CEFSPLUS_SELECTOR_KWARGS
+        if name in (request.selector_kwargs or {})
+    }
+    gauss_kwargs["cat_encoding"] = cat_encoding_eff
+    delegated = replace(
+        request,
+        y=problem.y01.astype(float),
+        task="regression",
         sample_weight=problem.weights if problem.weighted else None,
-        top_m=options.top_m,
-        corr_prune=options.corr_prune,
-        cat_features=kw("cat_features"),
-        cat_encoding=cat_encoding_eff,
-        target_cv_n_splits=kw("target_cv_n_splits"),
-        target_cv_smoothing=kw("target_cv_smoothing"),
-        target_prior=kw("target_prior"),
-        warmup_policy=kw("warmup_policy"),
-        allow_full_data_target_encoding=kw("allow_full_data_target_encoding"),
-        subsample=options.subsample,
-        random_state=kw("random_state"),
-        verbose=kw("verbose"),
-        include=kw("include"),
-        exclude=kw("exclude"),
-        candidates=kw("candidates"),
-        feature_blocks=kw("feature_blocks"),
-        onehot_max_levels=kw("onehot_max_levels"),
-        callback=request.callback,
-        return_result=request.return_result,
-        store_proxies=request.store_proxies,
+        encoding_sample_weight=(
+            request.sample_weight if explicit_unsupervised else None
+        ),
+        encoding_weight_explicit=explicit_unsupervised,
+        selector_kwargs=gauss_kwargs,
     )
+    result = _select_filter(CEFSPLUS_SPEC, delegated)
     if not request.return_result:
         return result
 
