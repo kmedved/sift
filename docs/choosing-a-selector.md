@@ -85,7 +85,9 @@ After choosing the statistical contract:
    you want SIFT to size a filter path; auto-k does not change what the path's
    underlying selector optimizes.
 3. Build a `FeatureCache` when the same numeric feature matrix is reused across
-   many targets or Gaussian selectors.
+   many targets or Gaussian selectors. Build a `ClassicFeatureCache` when the
+   reuse is classic mRMR or non-Gaussian JMI/JMIM (`cache=` on those
+   functions/wrappers).
 4. Use group/time-aware evaluation, target encoding, permutation, or resampling
    only through entry points that document that row context. Fixed-k function
    filters reject `groups` and `time` by design.

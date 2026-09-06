@@ -49,7 +49,7 @@ flowchart TD
 | `sift/selection/purged_cv.py` | Additive purged/embargoed time-series CV splitters (`PurgedTimeSeriesSplit`, `GroupPurgedTimeSeriesSplit`). |
 | `sift/selection/orchestration.py` | Internal F6 `SelectionBackend` / `run_selection` contract used by generic `ModelSelector` and the CatBoost preset. |
 | `sift/selection/model_selector.py` | Generic `ModelSelector` around a cloned sklearn estimator (RFE/forward/stability, group/time CV, opt-in nested scoring). |
-| `sift/estimators/` | Relevance scores, Gaussian copula transforms, Gaussian knockoff samplers, and joint mutual-information estimators. |
+| `sift/estimators/` | Relevance scores, Gaussian copula transforms, classic numeric `ClassicFeatureCache`, Gaussian knockoff samplers, and joint mutual-information estimators. |
 | `sift/sampling/` | Smart sampling, anchor strategies, and bootstrap split generators. |
 | `sift/stability.py` | Stability selection estimator and convenience wrappers. |
 | `sift/importance.py` and `sift/_permute.py` | Permutation importance and grouped/time-aware permutation strategies. |

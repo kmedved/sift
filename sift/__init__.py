@@ -2,8 +2,10 @@ __version__ = "0.9.1.dev0"
 
 from sift._logging import set_verbosity
 from sift.api import (
+    ClassicFeatureCache,
     FeatureCache,
     build_cache,
+    build_classic_cache,
     KnockoffSelectionResult,
     sample_knockoffs,
     select_cached,
@@ -136,4 +138,6 @@ __all__ = [
     "PurgedTimeSeriesSplit",
     "GroupPurgedTimeSeriesSplit",
     "ModelSelector",
+    "ClassicFeatureCache",
+    "build_classic_cache",
 ]

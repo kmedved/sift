@@ -350,28 +350,37 @@ def validate_inputs(
 
     X_arr = X_arr.astype(dtype, copy=False)
 
+    y_arr = validate_target(y, task, int(X_arr.shape[0]))
+
+    if feature_names is None:
+        feature_names = [f"x{i}" for i in range(X_arr.shape[1])]
+
+    return X_arr, y_arr, feature_names
+
+
+def validate_target(y, task: str, n_rows: int) -> np.ndarray:
+    """Validate and encode ``y`` without touching ``X``.
+
+    Classification labels are recoded with ``np.unique`` on the full vector.
+    The length check uses the unraveled first axis so a column vector of
+    length ``n_rows`` still matches, matching ``validate_inputs``.
+    """
+    validate_task(task)
     if task == "classification":
         if hasattr(y, "values"):
             y_raw = y.values
         else:
             y_raw = np.asarray(y)
-
         validate_classification_target(y_raw)
-
         _, y_arr = np.unique(y_raw, return_inverse=True)
         y_arr = y_arr.astype(np.int32)
     else:
         y_arr = to_numpy(y, dtype=np.float64)
         if not np.isfinite(y_arr).all():
             raise ValueError("Non-finite values in y are not allowed for regression.")
-
-    if X_arr.shape[0] != y_arr.shape[0]:
-        raise ValueError(f"X has {X_arr.shape[0]} rows but y has {y_arr.shape[0]}")
-
-    if feature_names is None:
-        feature_names = [f"x{i}" for i in range(X_arr.shape[1])]
-
-    return X_arr, y_arr.ravel(), feature_names
+    if y_arr.shape[0] != n_rows:
+        raise ValueError(f"X has {n_rows} rows but y has {y_arr.shape[0]}")
+    return y_arr.ravel()
 
 
 def check_regression_only(task: str, estimator: str) -> None:

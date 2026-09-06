@@ -23,8 +23,10 @@ from sift._preprocess import (
     subsample_xy,
     to_numpy,
     validate_inputs,
+    validate_target,
 )
 from sift.estimators import relevance as rel_est
+from sift.estimators.classic_cache import is_classic_cache
 from sift.estimators.copula import (
     FeatureCache,
     build_cache,
@@ -172,7 +174,9 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
             ranking=ranking,
             diagnostics=diagnostics,
             metadata_extra=_combine_metadata_extra(
-                prep.target_cv_metadata, _row_run_extra(ctx, prep.row_idx)
+                prep.target_cv_metadata,
+                _row_run_extra(ctx, prep.row_idx),
+                _classic_cache_run_extra(ctx),
             ),
         )
 
@@ -276,7 +280,9 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             ranking=ranking,
             diagnostics=diagnostics,
             metadata_extra=_combine_metadata_extra(
-                prep.target_cv_metadata, _row_run_extra(ctx, prep.row_idx)
+                prep.target_cv_metadata,
+                _row_run_extra(ctx, prep.row_idx),
+                _classic_cache_run_extra(ctx),
             ),
         )
 
@@ -751,7 +757,13 @@ def _cache_uses_synthetic_feature_names(cache: FeatureCache) -> bool:
 def validate_standard(ctx: "FilterContext") -> None:
     check_regression_only(ctx.request.task, ctx.estimator)
     _reject_multi_target_unless_cefsplus(ctx)
-    if ctx.request.cache is not None and ctx.estimator != "gaussian":
+    cache = ctx.request.cache
+    if cache is not None and ctx.estimator == "gaussian" and is_classic_cache(cache):
+        raise ValueError(
+            "ClassicFeatureCache cannot be used with estimator='gaussian'; "
+            "build a FeatureCache with sift.build_cache"
+        )
+    if cache is not None and ctx.estimator != "gaussian" and not is_classic_cache(cache):
         raise ValueError("cache is supported only with estimator='gaussian'")
     if ctx.estimator == "gaussian":
         # Gaussian/cache paths bypass validate_inputs, so check the regression
@@ -764,6 +776,12 @@ def validate_ksg_no_weight(ctx: "FilterContext") -> None:
     validate_standard(ctx)
     if ctx.request.sample_weight is not None:
         raise ValueError("estimator='ksg' does not support sample_weight")
+    cache = ctx.request.cache
+    if is_classic_cache(cache) and bool(cache.weights_supplied):
+        raise ValueError(
+            "estimator='ksg' does not support sample_weight; this "
+            "ClassicFeatureCache was built with sample_weight"
+        )
 
 
 def _reject_multi_target_unless_cefsplus(ctx: "FilterContext") -> None:
@@ -1113,6 +1131,23 @@ def _row_run_extra(ctx: "FilterContext", row_idx) -> dict:
     }
 
 
+def _classic_cache_run_extra(ctx: "FilterContext") -> dict:
+    cache = ctx.request.cache
+    if not is_classic_cache(cache):
+        return {}
+    extra = {
+        "cache_kind": "classic",
+        "cache_backed": True,
+        "n_rows_cached": int(np.asarray(cache.row_idx).reshape(-1).size),
+        "feature_names_are_synthetic": bool(cache.feature_names_are_synthetic),
+        "weights_supplied": bool(cache.weights_supplied),
+        "subsample": cache.subsample,
+    }
+    if cache.subsample_applied:
+        extra["random_state"] = int(cache.random_state)
+    return extra
+
+
 def _cache_for_gaussian(
     ctx: "FilterContext",
 ) -> tuple[
@@ -1307,6 +1342,40 @@ def _default_top_m(top_m: Optional[int], k: int) -> int:
 
 
 def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
+    cache = ctx.request.cache
+    if cache is not None:
+        if not is_classic_cache(cache):
+            raise ValueError("cache is supported only with estimator='gaussian'")
+        encoding = _kw(ctx, "cat_encoding", "none")
+        if encoding not in (None, "none"):
+            raise ValueError(
+                f"cat_encoding={encoding!r} cannot be combined with a prebuilt "
+                "classic cache because the cache has no encoding provenance"
+            )
+        y_arr = validate_target(
+            ctx.request.y,
+            ctx.request.task,
+            int(cache.n_rows_original),
+        )
+        row_idx = np.asarray(cache.row_idx, dtype=np.int64)
+        eval_sample_weight = (
+            None
+            if not cache.weights_supplied
+            else np.asarray(cache.sample_weight, dtype=np.float64)
+        )
+        return ClassicPrepared(
+            np.asarray(cache.X, dtype=np.float64),
+            y_arr[row_idx],
+            np.asarray(cache.sample_weight, dtype=np.float64),
+            np.asarray(cache.mi_w, dtype=np.float64),
+            list(cache.feature_names),
+            row_idx,
+            None,
+            eval_sample_weight,
+            None,
+            None,
+            None,
+        )
     cat_features = _kw(ctx, "cat_features")
     if isinstance(ctx.request.X, pd.DataFrame) and cat_features is None:
         cat_features = ctx.request.X.select_dtypes(

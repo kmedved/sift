@@ -28,6 +28,11 @@ from sift._preprocess import (
     validate_task,
     validate_k,
 )
+from sift.estimators.classic_cache import (
+    ClassicFeatureCache,
+    is_classic_cache,
+    validate_classic_cache_compatibility,
+)
 from sift.estimators.copula import FeatureCache
 from sift.selection.auto_k import AutoKConfig, resolve_auto_k_config
 from sift.selection.cefsplus_binary_common import (
@@ -139,7 +144,7 @@ class FilterRequest:
     y: YInput
     k: KInput
     task: Task
-    cache: Optional[FeatureCache] = None
+    cache: Optional[FeatureCache | ClassicFeatureCache] = None
     groups: Optional[np.ndarray] = None
     time: Optional[np.ndarray] = None
     auto_k_config: Optional[AutoKConfig] = None
@@ -338,7 +343,7 @@ def _request_from_public_locals(
 
 def select_mrmr(
     X: XInput, y: YInput, k: KInput, *, task: Task,
-    cache: Optional[FeatureCache] = None, groups: Optional[np.ndarray] = None,
+    cache: Optional[FeatureCache | ClassicFeatureCache] = None, groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
@@ -389,11 +394,13 @@ def select_mrmr(
     task : {"regression", "classification"}
         Required keyword.  Chooses the relevance estimators and the target
         validation applied to ``y``.
-    cache : FeatureCache or None, default None
-        Prebuilt copula cache from ``sift.build_cache``, accepted only
-        with ``estimator="gaussian"``.  A named cache requires ``X`` to be the
+    cache : FeatureCache or ClassicFeatureCache or None, default None
+        Prebuilt cache. ``FeatureCache`` from ``sift.build_cache`` is
+        accepted only with ``estimator="gaussian"``. ``ClassicFeatureCache``
+        from ``sift.build_classic_cache`` is accepted with
+        ``estimator="classic"``. A named cache requires ``X`` to be the
         DataFrame whose column labels and order built it; a positional cache
-        requires the matching ndarray.  Because a cache freezes its rows and
+        requires the matching ndarray. Because a cache freezes its rows and
         weights, ``sample_weight``, ``subsample``, and ``random_state`` cannot
         be passed alongside it.
     groups : ndarray of shape (n_samples,), str, or None, default None
@@ -444,10 +451,10 @@ def select_mrmr(
         ``estimator="gaussian"``, which always uses copula Gaussian MI.
     estimator : {"classic", "gaussian"}, default "classic"
         ``"classic"`` scores relevance with ``relevance`` and redundancy with
-        Pearson-style correlation.  ``"gaussian"`` is the regression-only
-        rank-Gaussian copula path; it is much faster, accepts ``cache``, and
-        is the only route that supports ``store_proxies`` or non-``evaluate``
-        auto-k methods.
+        Pearson-style correlation and accepts ``ClassicFeatureCache``.
+        ``"gaussian"`` is the regression-only rank-Gaussian copula path; it
+        is much faster, accepts ``FeatureCache``, and is the only route that
+        supports ``store_proxies`` or non-``evaluate`` auto-k methods.
     formula : {"quotient", "difference"}, default "quotient"
         How relevance and mean redundancy are combined: ``"quotient"`` scores
         ``relevance / mean_redundancy``, ``"difference"`` scores
@@ -649,7 +656,7 @@ def select_mrmr(
 
 def select_jmi(
     X: XInput, y: YInput, k: KInput, *, task: Task,
-    cache: Optional[FeatureCache] = None, groups: Optional[np.ndarray] = None,
+    cache: Optional[FeatureCache | ClassicFeatureCache] = None, groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
@@ -696,12 +703,15 @@ def select_jmi(
     task : {"regression", "classification"}
         Required keyword.  Chooses the estimator resolution and the target
         validation applied to ``y``.
-    cache : FeatureCache or None, default None
-        Prebuilt copula cache from ``sift.build_cache``, accepted only
-        with ``estimator="gaussian"``.  A named cache requires the DataFrame
-        whose labels and order built it; a positional cache requires the
-        matching ndarray.  ``sample_weight``, ``subsample``, and
-        ``random_state`` cannot accompany it.
+    cache : FeatureCache or ClassicFeatureCache or None, default None
+        Prebuilt cache. ``FeatureCache`` is accepted only with
+        ``estimator="gaussian"``. ``ClassicFeatureCache`` is accepted on the
+        non-Gaussian estimators (``auto``, ``r2``, ``binned``, ``ksg``);
+        a cache built with ``sample_weight`` is rejected by ``ksg``. A named
+        cache requires the DataFrame whose labels and order built it; a
+        positional cache requires the matching ndarray.
+        ``sample_weight``, ``subsample``, and ``random_state`` cannot
+        accompany it.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -905,7 +915,7 @@ def select_jmi(
 
 def select_jmim(
     X: XInput, y: YInput, k: KInput, *, task: Task,
-    cache: Optional[FeatureCache] = None, groups: Optional[np.ndarray] = None,
+    cache: Optional[FeatureCache | ClassicFeatureCache] = None, groups: Optional[np.ndarray] = None,
     time: Optional[np.ndarray] = None,
     auto_k_config: Optional[AutoKConfig] = None,
     sample_weight: np.ndarray | None = None,
@@ -950,12 +960,15 @@ def select_jmim(
     task : {"regression", "classification"}
         Required keyword.  Chooses the estimator resolution and the target
         validation applied to ``y``.
-    cache : FeatureCache or None, default None
-        Prebuilt copula cache from ``sift.build_cache``, accepted only
-        with ``estimator="gaussian"``.  A named cache requires the DataFrame
-        whose labels and order built it; a positional cache requires the
-        matching ndarray.  ``sample_weight``, ``subsample``, and
-        ``random_state`` cannot accompany it.
+    cache : FeatureCache or ClassicFeatureCache or None, default None
+        Prebuilt cache. ``FeatureCache`` is accepted only with
+        ``estimator="gaussian"``. ``ClassicFeatureCache`` is accepted on the
+        non-Gaussian estimators (``auto``, ``r2``, ``binned``, ``ksg``);
+        a cache built with ``sample_weight`` is rejected by ``ksg``. A named
+        cache requires the DataFrame whose labels and order built it; a
+        positional cache requires the matching ndarray.
+        ``sample_weight``, ``subsample``, and ``random_state`` cannot
+        accompany it.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1810,8 +1823,8 @@ def _apply_onehot_encoding(ctx: FilterContext) -> FilterContext:
         return ctx
     if ctx.request.cache is not None:
         raise ValueError(
-            "cat_encoding='onehot' cannot be combined with a prebuilt Gaussian "
-            "cache because the cache has no one-hot provenance"
+            "cat_encoding='onehot' cannot be combined with a prebuilt cache "
+            "because the cache has no one-hot provenance"
         )
     if ctx.within is not None:
         raise ValueError(
@@ -2024,9 +2037,8 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
     if len(x_shape) != 2:
         raise ValueError("X must be a 2D feature matrix")
     n_rows, n_features = int(x_shape[0]), int(x_shape[1])
-    if request.cache is not None and spec.estimator == "gaussian":
-        _validate_gaussian_cache_compatibility(request.X, request.cache, n_rows, n_features)
-        _validate_gaussian_cache_overrides(request)
+    if request.cache is not None:
+        _validate_request_cache(request, spec, n_rows=n_rows, n_features=n_features)
     groups, time = _validate_groups_time(request.groups, request.time, n_rows)
     selector_kwargs = dict(request.selector_kwargs or {})
     if selector_kwargs.get("subsample") is _SUBSAMPLE_DEFAULT:
@@ -2165,6 +2177,41 @@ def _validate_gaussian_cache_overrides(request: FilterRequest) -> None:
             "random_state controls cache construction and cannot be passed with a "
             "prebuilt cache; use the seed used to build the cache"
         )
+
+
+def _validate_classic_cache_overrides(request: FilterRequest) -> None:
+    if request.sample_weight is not None:
+        raise ValueError(
+            "sample_weight cannot be passed with a prebuilt cache; the cache "
+            "already stores row weights"
+        )
+    _validate_gaussian_cache_overrides(request)
+
+
+def _validate_request_cache(
+    request: FilterRequest,
+    spec: FilterSpec,
+    *,
+    n_rows: int,
+    n_features: int,
+) -> None:
+    cache = request.cache
+    if is_classic_cache(cache):
+        if spec.estimator == "gaussian":
+            raise ValueError(
+                "ClassicFeatureCache cannot be used with estimator='gaussian'; "
+                "build a FeatureCache with sift.build_cache"
+            )
+        validate_classic_cache_compatibility(request.X, cache)
+        _validate_classic_cache_overrides(request)
+        return
+    if spec.estimator == "gaussian":
+        _validate_gaussian_cache_compatibility(
+            request.X, cache, n_rows, n_features
+        )
+        _validate_gaussian_cache_overrides(request)
+        return
+    raise ValueError("cache is supported only with estimator='gaussian'")
 
 
 def _require_fixed_filter_metadata(ctx: FilterContext) -> None:

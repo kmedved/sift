@@ -77,6 +77,8 @@ EXPECTED_ALL = [
     "PurgedTimeSeriesSplit",
     "GroupPurgedTimeSeriesSplit",
     "ModelSelector",
+    "ClassicFeatureCache",
+    "build_classic_cache",
 ]
 
 
@@ -98,8 +100,10 @@ def test_version_and_ordered_public_exports():
         "PurgedTimeSeriesSplit",
         "GroupPurgedTimeSeriesSplit",
         "ModelSelector",
+        "ClassicFeatureCache",
+        "build_classic_cache",
     ]
-    assert len(sift.__all__) == 64
+    assert len(sift.__all__) == 66
 
 
 @pytest.mark.parametrize("name", EXPECTED_ALL)

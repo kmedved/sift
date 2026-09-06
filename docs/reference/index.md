@@ -43,6 +43,11 @@ python scripts/generate_api_reference.py
 - [`sift.build_cache`](build_cache.md)
 - [`sift.select_cached`](select_cached.md)
 
+## Classic caches
+
+- [`sift.ClassicFeatureCache`](classicfeaturecache.md)
+- [`sift.build_classic_cache`](build_classic_cache.md)
+
 ## Automatic k
 
 - [`sift.AutoKConfig`](autokconfig.md)

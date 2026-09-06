@@ -1220,9 +1220,10 @@ class MRMRSelector(_BaseSelector):
         Relevance score. Regression accepts ``"f"`` and ``"rf"``;
         classification also accepts ``"ks"``. Any other pairing raises.
     estimator : {"classic", "gaussian"}, default="classic"
-        Redundancy estimator. ``"classic"`` scores redundancy on the raw rows;
-        ``"gaussian"`` is a regression-only fast path over the Gaussian-copula
-        ``sift.FeatureCache`` and the only route that accepts ``cache``.
+        Redundancy estimator. ``"classic"`` scores redundancy on the raw rows
+        and accepts ``ClassicFeatureCache``. ``"gaussian"`` is a
+        regression-only fast path over the Gaussian-copula
+        ``sift.FeatureCache``.
     formula : {"quotient", "difference"}, default="quotient"
         Objective shape: relevance divided by mean redundancy, or relevance
         minus mean redundancy.
@@ -1287,8 +1288,9 @@ class MRMRSelector(_BaseSelector):
         to opt into joblib workers.
     verbose : bool, default=True
         Emit progress at INFO on the ``sift`` logger.
-    cache : FeatureCache or None, default=None
-        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+    cache : FeatureCache or ClassicFeatureCache or None, default=None
+        Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
+        ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
         order; a positional cache requires the matching ndarray. A cache cannot
         be combined with a supervised ``cat_encoding``.
@@ -1471,9 +1473,10 @@ class JMISelector(_BaseSelector):
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default="auto"
         Mutual-information estimator for the joint terms. ``"auto"`` resolves
         to ``"binned"`` for classification and ``"r2"`` for regression;
-        ``"gaussian"`` is the copula-cache fast path and the only route that
-        accepts ``cache``; ``"ksg"`` is the nearest-neighbour estimator and
-        rejects ``sample_weight``.
+        ``"gaussian"`` is the copula-cache fast path; non-Gaussian estimators
+        accept ``ClassicFeatureCache``. ``"ksg"`` is the nearest-neighbour
+        estimator and rejects ``sample_weight``, including a classic cache
+        built with weights.
     relevance : {"f", "ks", "rf"}, default="f"
         Relevance score used for screening and the first step. Regression
         accepts ``"f"`` and ``"rf"``; classification also accepts ``"ks"``.
@@ -1530,8 +1533,9 @@ class JMISelector(_BaseSelector):
         from ``X``. An explicit value beside a ``cache`` raises.
     verbose : bool, default=True
         Emit progress at INFO on the ``sift`` logger.
-    cache : FeatureCache or None, default=None
-        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+    cache : FeatureCache or ClassicFeatureCache or None, default=None
+        Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
+        ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
         order; a positional cache requires the matching ndarray. A cache cannot
         be combined with a supervised ``cat_encoding``.
@@ -1712,9 +1716,10 @@ class JMIMSelector(_BaseSelector):
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default="auto"
         Mutual-information estimator for the joint terms. ``"auto"`` resolves
         to ``"binned"`` for classification and ``"r2"`` for regression;
-        ``"gaussian"`` is the copula-cache fast path and the only route that
-        accepts ``cache``; ``"ksg"`` is the nearest-neighbour estimator and
-        rejects ``sample_weight``.
+        ``"gaussian"`` is the copula-cache fast path; non-Gaussian estimators
+        accept ``ClassicFeatureCache``. ``"ksg"`` is the nearest-neighbour
+        estimator and rejects ``sample_weight``, including a classic cache
+        built with weights.
     relevance : {"f", "ks", "rf"}, default="f"
         Relevance score used for screening and the first step. Regression
         accepts ``"f"`` and ``"rf"``; classification also accepts ``"ks"``.
@@ -1771,8 +1776,9 @@ class JMIMSelector(_BaseSelector):
         from ``X``. An explicit value beside a ``cache`` raises.
     verbose : bool, default=True
         Emit progress at INFO on the ``sift`` logger.
-    cache : FeatureCache or None, default=None
-        Prebuilt Gaussian-copula cache to reuse with ``estimator="gaussian"``.
+    cache : FeatureCache or ClassicFeatureCache or None, default=None
+        Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
+        ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
         order; a positional cache requires the matching ndarray. A cache cannot
         be combined with a supervised ``cat_encoding``.

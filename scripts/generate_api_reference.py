@@ -42,6 +42,7 @@ PUBLIC_API_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Gaussian caches", ("FeatureCache", "build_cache", "select_cached")),
+    ("Classic caches", ("ClassicFeatureCache", "build_classic_cache")),
     (
         "Automatic k",
         (

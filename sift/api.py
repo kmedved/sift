@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sift.estimators.classic_cache import ClassicFeatureCache, build_classic_cache
 from sift.estimators.copula import FeatureCache, build_cache
 from sift.selection.auto_k import (
     AutoKConfig,
@@ -25,8 +26,10 @@ from sift.selection.knockoff_filter import (
 
 __all__ = [
     "FeatureCache",
+    "ClassicFeatureCache",
     "AutoKConfig",
     "build_cache",
+    "build_classic_cache",
     "select_k_auto",
     "select_k_elbow",
     "select_k_penalized_objective",
