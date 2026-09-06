@@ -73,6 +73,7 @@ def _penalty_array(
     *,
     n_eff: float,
     n_candidates: int | None,
+    dimension: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, float | None, int | None]:
     penalty_kind = config.objective_penalty
     if penalty_kind in {"ebic", "ric"}:
@@ -86,13 +87,14 @@ def _penalty_array(
     else:
         n_candidates_int = None
 
+    dim = ks.astype(np.float64) if dimension is None else np.asarray(dimension, dtype=np.float64)
     if penalty_kind == "ebic":
         gamma = _resolve_ebic_gamma(config, n_eff=n_eff, n_candidates=n_candidates_int)
-        penalty = ks.astype(np.float64) * np.log(n_eff) + 2.0 * gamma * _log_comb(n_candidates_int, ks)
+        penalty = dim * np.log(n_eff) + 2.0 * gamma * _log_comb(n_candidates_int, ks)
         return penalty, float(np.log(n_eff)), gamma, n_candidates_int
     if penalty_kind == "ric":
         gamma = None
-        penalty = 2.0 * ks.astype(np.float64) * np.log(float(n_candidates_int))
+        penalty = 2.0 * dim * np.log(float(n_candidates_int))
         return penalty, 2.0 * float(np.log(float(n_candidates_int))), gamma, n_candidates_int
 
     penalty_weight = _penalty_weight(config, n_eff)

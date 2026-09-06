@@ -111,6 +111,38 @@ def weighted_correlation_columns(
     return gram
 
 
+def reject_unavailable_proxy_positions(
+    selected_indices: Iterable[int],
+    *,
+    available_original: Iterable[int],
+    feature_names: Iterable[object] | None = None,
+) -> None:
+    """Reject proxy retention when selected raw columns have no cache correlations.
+
+    Atomic blocks may still expand to cache-dropped constant members. Those
+    columns stay in the selection; they cannot appear in a finite copula
+    proxy block.
+    """
+    selected = _positions(selected_indices, label="selected_indices")
+    available = {int(i) for i in _positions(available_original, label="available_original")}
+    missing = [position for position in selected if position not in available]
+    if not missing:
+        return
+    names = None if feature_names is None else list(feature_names)
+    refs = []
+    for position in missing:
+        if names is not None and 0 <= position < len(names):
+            refs.append(names[position])
+        else:
+            refs.append(position)
+    raise ValueError(
+        "store_proxies=True cannot retain finite copula correlations for "
+        f"cache-dropped constant or otherwise unavailable block members: {refs} "
+        f"(positions {missing}). Atomic selection still expands those raw "
+        "columns; omit store_proxies or drop unavailable members from the block"
+    )
+
+
 def proxy_frame_from_panel(
     correlations: np.ndarray,
     *,

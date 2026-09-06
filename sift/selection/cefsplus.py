@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Optional, Sequence, Tuple
 import warnings
 
 import numpy as np
@@ -16,8 +16,16 @@ from sift.estimators.copula import (
 )
 from sift.selection.objective import objective_from_corr_path
 from sift.selection.panel import build_candidate_panel
-from sift.selection.proxies import proxy_frame_from_panel
+from sift.selection.proxies import (
+    proxy_frame_from_panel,
+    reject_unavailable_proxy_positions,
+)
 from sift.selection.result import _PROXY_CORRELATIONS_ATTR
+from sift.selection.blocks import (
+    map_blocks_to_valid,
+    require_atomic_conditioning,
+    resolve_feature_blocks,
+)
 from sift.selection.conditioning import (
     compose_selected,
     conditioning_record,
@@ -215,6 +223,446 @@ def _gaussian_jmi_select(
             )
 
     return selected[:count]
+
+
+def _chol_logdet(matrix: np.ndarray, *, shrink: float, eps: float) -> float:
+    """Log-determinant with the CEFS+ diagonal floor and optional ridge."""
+    a0 = np.array(matrix, dtype=np.float64, copy=True)
+    a0 = 0.5 * (a0 + a0.T)
+    n = a0.shape[0]
+    for i in range(n):
+        a0[i, i] = max(float(a0[i, i]), eps)
+    ridge = 0.0
+    last_err: Exception | None = None
+    for _attempt in range(8):
+        a = a0 if ridge == 0.0 else a0 + ridge * np.eye(n, dtype=np.float64)
+        try:
+            chol = np.linalg.cholesky(a)
+            diag = np.diag(chol)
+            if np.any(diag <= 0.0):
+                raise np.linalg.LinAlgError("non-positive Cholesky diagonal")
+            return float(2.0 * np.sum(np.log(diag)))
+        except np.linalg.LinAlgError as err:
+            last_err = err
+            ridge = float(shrink) if ridge == 0.0 else max(10.0 * ridge, float(shrink))
+    if last_err is not None:
+        raise last_err
+    raise np.linalg.LinAlgError("Cholesky log-det failed")
+
+
+def _block_residual_cov(
+    R: np.ndarray,
+    L: np.ndarray,
+    d: np.ndarray,
+    members: np.ndarray,
+    t: int,
+    scale: float,
+    eps: float,
+) -> np.ndarray:
+    b = int(members.size)
+    g = np.empty((b, b), dtype=np.float64)
+    for a in range(b):
+        i = int(members[a])
+        g[a, a] = max(float(d[i]), eps)
+        for c in range(a + 1, b):
+            j = int(members[c])
+            acc = float(R[i, j]) * scale
+            for s in range(t):
+                acc -= float(L[i, s]) * float(L[j, s])
+            g[a, c] = acc
+            g[c, a] = acc
+    return 0.5 * (g + g.T)
+
+
+def _cefsplus_apply_column(
+    j: int,
+    *,
+    R: np.ndarray,
+    L: np.ndarray,
+    Ly: np.ndarray,
+    d: np.ndarray,
+    c: np.ndarray,
+    remaining: np.ndarray,
+    t: int,
+    scale: float,
+    eps: float,
+    dy: float,
+) -> float:
+    """Apply one CEFS+ Cholesky column and return the new residual y variance."""
+    if t == 0:
+        s1_best = 1.0
+        s2_best = max(1.0 - float(c[j]) * float(c[j]), eps)
+    else:
+        s1_best = max(float(d[j]), eps)
+        s2_best = max(float(d[j]) - float(c[j]) * float(c[j]) / dy, eps)
+    sq = np.sqrt(s1_best)
+    ly = float(c[j]) / sq
+    Ly[t] = ly
+    dy = dy - ly * ly
+    m = len(c)
+    for i in range(m):
+        if not remaining[i] or i == j:
+            continue
+        acc = float(R[i, j]) * scale
+        for a in range(t):
+            acc -= float(L[i, a]) * float(L[j, a])
+        lij = acc / sq
+        L[i, t] = lij
+        d[i] -= lij * lij
+        c[i] -= lij * ly
+    remaining[j] = False
+    return dy
+
+
+def _cefsplus_block_gain(
+    members: np.ndarray,
+    *,
+    R: np.ndarray,
+    L: np.ndarray,
+    d: np.ndarray,
+    c: np.ndarray,
+    t: int,
+    dy: float,
+    scale: float,
+    shrink: float,
+    eps: float,
+) -> float:
+    """Joint log-det gain of a remaining block given the current selected set."""
+    g = _block_residual_cov(R, L, d, members, t, scale, eps)
+    c_block = np.asarray(c[members], dtype=np.float64)
+    dy_eff = max(float(dy), eps)
+    g_y = g - np.outer(c_block, c_block) / dy_eff
+    return _chol_logdet(g, shrink=shrink, eps=eps) - _chol_logdet(
+        g_y, shrink=shrink, eps=eps
+    )
+
+
+def cefsplus_block_loop(
+    R: np.ndarray,
+    r: np.ndarray,
+    k: int,
+    tie_break_rel: np.ndarray,
+    block_members: Sequence[np.ndarray],
+    *,
+    forced_blocks: Sequence[int] = (),
+    eligible_blocks: Sequence[int] | None = None,
+    want_objective: bool = False,
+    shrink: float = 1e-6,
+    eps: float = 1e-12,
+    callback: ProgressCallback | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """Greedy CEFS+ over blocks using joint residual log-det gain.
+
+    A block's score is ``log|Σ_{B|S}| - log|Σ_{B|S,y}|``, not the gain of a
+    representative column. Singleton blocks recover the column CEFS+ step.
+    Selected blocks expand in member order (original local index order).
+    """
+    m = len(r)
+    n_blocks = len(block_members)
+    if k <= 0 or m == 0 or n_blocks == 0:
+        return (
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.float64),
+            [],
+        )
+    scale = 1.0 - shrink
+    remaining = np.ones(m, dtype=np.bool_)
+    remaining_blocks = np.ones(n_blocks, dtype=np.bool_)
+    if eligible_blocks is not None:
+        remaining_blocks[:] = False
+        for idx in eligible_blocks:
+            remaining_blocks[int(idx)] = True
+    forced = [int(i) for i in forced_blocks]
+    for idx in forced:
+        remaining_blocks[idx] = False
+    n_discover = min(int(k), int(np.sum(remaining_blocks)))
+    L = np.zeros((m, m), dtype=np.float64)
+    Ly = np.zeros(m, dtype=np.float64)
+    d = np.ones(m, dtype=np.float64)
+    c = scale * np.asarray(r, dtype=np.float64)
+    dy = 1.0
+    t = 0
+    selected_cols: list[int] = []
+    selected_block_ids: list[int] = []
+    objective = np.empty(n_discover if want_objective else 0, dtype=np.float64)
+
+    def _commit_block(block_idx: int) -> None:
+        nonlocal dy, t
+        members = np.asarray(block_members[block_idx], dtype=np.int64)
+        for j in members:
+            if not remaining[int(j)]:
+                continue
+            dy = _cefsplus_apply_column(
+                int(j),
+                R=R,
+                L=L,
+                Ly=Ly,
+                d=d,
+                c=c,
+                remaining=remaining,
+                t=t,
+                scale=scale,
+                eps=eps,
+                dy=dy,
+            )
+            selected_cols.append(int(j))
+            t += 1
+        remaining_blocks[block_idx] = False
+
+    for block_idx in forced:
+        _commit_block(block_idx)
+
+    count = 0
+    while count < n_discover:
+        best_idx = -1
+        best_gain = -np.inf
+        best_rel = -np.inf
+        for bidx in range(n_blocks):
+            if not remaining_blocks[bidx]:
+                continue
+            members = np.asarray(block_members[bidx], dtype=np.int64)
+            live = members[remaining[members]]
+            if live.size == 0:
+                remaining_blocks[bidx] = False
+                continue
+            gain = _cefsplus_block_gain(
+                live,
+                R=R,
+                L=L,
+                d=d,
+                c=c,
+                t=t,
+                dy=dy,
+                scale=scale,
+                shrink=shrink,
+                eps=eps,
+            )
+            rel = float(np.max(tie_break_rel[live]))
+            better = False
+            if best_idx < 0 or gain > best_gain + 1e-12:
+                better = True
+            elif abs(gain - best_gain) <= 1e-12:
+                if rel > best_rel + 1e-15 or (
+                    abs(rel - best_rel) <= 1e-15 and bidx < best_idx
+                ):
+                    better = True
+            if better:
+                best_idx = bidx
+                best_gain = gain
+                best_rel = rel
+        if best_idx < 0:
+            break
+        _commit_block(best_idx)
+        selected_block_ids.append(best_idx)
+        if want_objective:
+            objective[count] = best_gain if count == 0 else objective[count - 1] + best_gain
+        count += 1
+        if callback is not None:
+            report_progress(
+                callback,
+                count,
+                n_discover,
+                stage="path",
+                selector="cefsplus",
+            )
+
+    return (
+        np.asarray(selected_cols, dtype=np.int64),
+        objective[:count],
+        selected_block_ids,
+    )
+
+
+def _gaussian_mrmr_select_blocks(
+    R: np.ndarray,
+    rel: np.ndarray,
+    k: int,
+    use_quotient: bool,
+    block_members: Sequence[np.ndarray],
+    *,
+    forced_blocks: Sequence[int] = (),
+    eligible_blocks: Sequence[int] | None = None,
+    floor: float = 1e-6,
+    callback: ProgressCallback | None = None,
+) -> tuple[np.ndarray, list[int]]:
+    m = len(rel)
+    n_blocks = len(block_members)
+    is_sel = np.zeros(m, dtype=bool)
+    remaining_blocks = np.ones(n_blocks, dtype=bool)
+    if eligible_blocks is not None:
+        remaining_blocks[:] = False
+        for idx in eligible_blocks:
+            remaining_blocks[int(idx)] = True
+    for idx in forced_blocks:
+        remaining_blocks[int(idx)] = False
+        for j in np.asarray(block_members[int(idx)], dtype=np.int64):
+            is_sel[int(j)] = True
+    n_discover = min(int(k), int(np.sum(remaining_blocks)))
+    if n_discover <= 0:
+        return np.empty(0, dtype=np.int64), []
+    red_sum = np.zeros(m, dtype=np.float64)
+    n_pre = int(np.sum(is_sel))
+    if n_pre:
+        for j_pre in np.flatnonzero(is_sel):
+            red = gaussian_mi_from_corr(R[int(j_pre)])
+            mask = ~is_sel
+            red_sum[mask] += red[mask]
+    selected_cols: list[int] = []
+    selected_block_ids: list[int] = []
+    t0 = n_pre
+    for step in range(n_discover):
+        best_idx = -1
+        best_score = -np.inf
+        best_rel = -np.inf
+        mean_red = red_sum / max(t0, 1) if t0 else None
+        for bidx in range(n_blocks):
+            if not remaining_blocks[bidx]:
+                continue
+            members = np.asarray(block_members[bidx], dtype=np.int64)
+            live = members[~is_sel[members]]
+            if live.size == 0:
+                remaining_blocks[bidx] = False
+                continue
+            if t0 == 0:
+                scores = rel[live]
+            elif use_quotient:
+                scores = rel[live] / np.maximum(mean_red[live], floor)
+            else:
+                scores = rel[live] - mean_red[live]
+            score = float(np.max(scores))
+            rel_b = float(np.max(rel[live]))
+            if best_idx < 0 or score > best_score + 1e-12 or (
+                abs(score - best_score) <= 1e-12
+                and (rel_b > best_rel + 1e-15 or (abs(rel_b - best_rel) <= 1e-15 and bidx < best_idx))
+            ):
+                best_idx = bidx
+                best_score = score
+                best_rel = rel_b
+        if best_idx < 0 or not np.isfinite(best_score):
+            break
+        members = np.asarray(block_members[best_idx], dtype=np.int64)
+        live = members[~is_sel[members]]
+        for j in live:
+            selected_cols.append(int(j))
+            is_sel[int(j)] = True
+            red = gaussian_mi_from_corr(R[int(j)])
+            mask = ~is_sel
+            red_sum[mask] += red[mask]
+            t0 += 1
+        remaining_blocks[best_idx] = False
+        selected_block_ids.append(best_idx)
+        if callback is not None:
+            report_progress(
+                callback,
+                step + 1,
+                n_discover,
+                stage="path",
+                selector="mrmr_quot" if use_quotient else "mrmr_diff",
+            )
+    return np.asarray(selected_cols, dtype=np.int64), selected_block_ids
+
+
+def _gaussian_jmi_select_blocks(
+    R: np.ndarray,
+    r_y: np.ndarray,
+    rel: np.ndarray,
+    k: int,
+    use_min: bool,
+    block_members: Sequence[np.ndarray],
+    *,
+    forced_blocks: Sequence[int] = (),
+    eligible_blocks: Sequence[int] | None = None,
+    callback: ProgressCallback | None = None,
+) -> tuple[np.ndarray, list[int]]:
+    m = len(r_y)
+    n_blocks = len(block_members)
+    is_sel = np.zeros(m, dtype=bool)
+    remaining_blocks = np.ones(n_blocks, dtype=bool)
+    if eligible_blocks is not None:
+        remaining_blocks[:] = False
+        for idx in eligible_blocks:
+            remaining_blocks[int(idx)] = True
+    scores = np.full(m, np.inf, dtype=np.float64) if use_min else np.zeros(m, dtype=np.float64)
+    r2 = np.empty(m, dtype=np.float64)
+    frac = np.empty(m, dtype=np.float64)
+    eps = 1e-8
+    eligible_mask = np.ones(m, dtype=bool)
+
+    def _accumulate_from(last: int) -> None:
+        r_ys = float(r_y[last])
+        r_fs = R[last]
+        denom = 1.0 - r_fs * r_fs
+        a = r_y - r_ys * r_fs
+        r2.fill(r_ys * r_ys)
+        frac.fill(0.0)
+        np.divide(a * a, denom, out=frac, where=denom >= eps)
+        np.add(r2, frac, out=r2)
+        np.clip(r2, 0.0, 0.99999, out=r2)
+        mi = -0.5 * np.log(1.0 - r2)
+        mask = eligible_mask
+        if use_min:
+            scores[mask] = np.minimum(scores[mask], mi[mask])
+        else:
+            scores[mask] += mi[mask]
+
+    for idx in forced_blocks:
+        remaining_blocks[int(idx)] = False
+        for j in np.asarray(block_members[int(idx)], dtype=np.int64):
+            is_sel[int(j)] = True
+            eligible_mask[int(j)] = False
+            _accumulate_from(int(j))
+    n_discover = min(int(k), int(np.sum(remaining_blocks)))
+    if n_discover <= 0:
+        return np.empty(0, dtype=np.int64), []
+    selected_cols: list[int] = []
+    selected_block_ids: list[int] = []
+    have_selected = bool(np.any(is_sel))
+    for step in range(n_discover):
+        best_idx = -1
+        best_score = -np.inf
+        best_rel = -np.inf
+        for bidx in range(n_blocks):
+            if not remaining_blocks[bidx]:
+                continue
+            members = np.asarray(block_members[bidx], dtype=np.int64)
+            live = members[~is_sel[members]]
+            if live.size == 0:
+                remaining_blocks[bidx] = False
+                continue
+            if not have_selected:
+                col_scores = rel[live]
+            else:
+                col_scores = np.where(np.isfinite(scores[live]), scores[live], rel[live])
+            score = float(np.max(col_scores))
+            rel_b = float(np.max(rel[live]))
+            if best_idx < 0 or score > best_score + 1e-12 or (
+                abs(score - best_score) <= 1e-12
+                and (rel_b > best_rel + 1e-15 or (abs(rel_b - best_rel) <= 1e-15 and bidx < best_idx))
+            ):
+                best_idx = bidx
+                best_score = score
+                best_rel = rel_b
+        if best_idx < 0 or not np.isfinite(best_score):
+            break
+        members = np.asarray(block_members[best_idx], dtype=np.int64)
+        live = members[~is_sel[members]]
+        for j in live:
+            selected_cols.append(int(j))
+            is_sel[int(j)] = True
+            eligible_mask[int(j)] = False
+            _accumulate_from(int(j))
+            have_selected = True
+        remaining_blocks[best_idx] = False
+        selected_block_ids.append(best_idx)
+        if callback is not None:
+            report_progress(
+                callback,
+                step + 1,
+                n_discover,
+                stage="path",
+                selector="jmim" if use_min else "jmi",
+            )
+    return np.asarray(selected_cols, dtype=np.int64), selected_block_ids
 
 
 @njit_optional_cache(cache=True)
@@ -755,6 +1203,7 @@ def select_cached(
     include=None,
     exclude=None,
     candidates=None,
+    feature_blocks=None,
 ) -> List[str] | Tuple[List[str], np.ndarray] | Tuple[List[str], List[int]] | Tuple[
     List[str], List[int], np.ndarray
 ] | "SelectionView":
@@ -830,6 +1279,9 @@ def select_cached(
         block on the view so ``view.proxies()`` and ``view.proxies_at()`` can
         report near-duplicate stand-ins for a selected feature.  Requires
         ``return_result=True``.  The block never contains ``X`` or the cache.
+        Selected blocks that expand to cache-dropped constant members still
+        appear in the selection, but proxy retention then raises rather than
+        inventing correlations.
     include : sequence of names or positions, optional
         Conditioning set. The greedy state is initialized from these features
         before step 1. They are not discoveries; ``k`` counts additional
@@ -840,6 +1292,15 @@ def select_cached(
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. A dict maps block labels to member names or
+        positions; unlisted columns stay singletons. ``"auto"`` groups
+        columns sharing the one-hot prefix ``{block}__{level}`` (double
+        underscore) when at least two columns share that prefix; ordinary
+        single underscores are not split. ``k`` counts additional blocks
+        and selected blocks expand to every raw member column. ``k="auto"``
+        is not supported on ``select_cached``; use the public selectors.
+        Singleton blocks recover the column selector.
 
     Returns
     -------
@@ -938,6 +1399,7 @@ def select_cached(
         include=include,
         exclude=exclude,
         candidates=candidates,
+        feature_blocks=feature_blocks,
         compose_include=True,
     )
 
@@ -958,6 +1420,7 @@ def _select_cached_impl(
     include=None,
     exclude=None,
     candidates=None,
+    feature_blocks=None,
     *,
     compose_include: bool = True,
 ):
@@ -998,9 +1461,21 @@ def _select_cached_impl(
         named=named,
         k=k,
     )
+    blocks = resolve_feature_blocks(
+        feature_blocks,
+        feature_names=cache_names,
+        named=named,
+    )
+    require_atomic_conditioning(
+        resolved,
+        blocks,
+        feature_names=cache_names,
+    )
     protect_valid = None
     pool_valid = None
     forced_local = np.empty(0, dtype=np.int64)
+    block_members_valid = None
+    orig_block_ids: list[int] = []
     if resolved is not None:
         protect_valid = map_original_to_valid(
             resolved.include,
@@ -1019,6 +1494,14 @@ def _select_cached_impl(
             raise ValueError(
                 "candidates contains no valid cache columns eligible for discovery"
             )
+    if blocks is not None:
+        orig_block_ids, block_members_valid = map_blocks_to_valid(
+            blocks, cache.valid_cols
+        )
+        if not block_members_valid:
+            raise ValueError(
+                "feature_blocks contains no valid cache columns eligible for selection"
+            )
     panel = build_candidate_panel(
         cache,
         y_arr,
@@ -1028,6 +1511,7 @@ def _select_cached_impl(
         method=method,
         protect_valid=protect_valid,
         pool_valid=pool_valid,
+        block_members=block_members_valid,
     )
     R_cand = panel.R
     r_cand = panel.r
@@ -1039,9 +1523,80 @@ def _select_cached_impl(
         eligible_local[:n_forced] = False
     k_actual = min(k, int(np.sum(eligible_local)))
     use_forced = n_forced > 0
+    selected_block_labels: list = []
+    use_joint_blocks = False
+    panel_blocks: list[np.ndarray] = []
+    panel_orig_blocks: list[int] = []
+    if blocks is not None and block_members_valid is not None:
+        valid_to_panel = {int(v): i for i, v in enumerate(panel.cand)}
+        for orig_b, valid_members in zip(orig_block_ids, block_members_valid):
+            local = [
+                valid_to_panel[int(v)]
+                for v in valid_members
+                if int(v) in valid_to_panel
+            ]
+            if local:
+                panel_blocks.append(np.asarray(local, dtype=np.int64))
+                panel_orig_blocks.append(int(orig_b))
+        use_joint_blocks = any(len(group) > 1 for group in panel_blocks)
+        include_orig = set(int(i) for i in (resolved.include if resolved is not None else ()))
+        forced_blocks = [
+            bidx
+            for bidx, orig_b in enumerate(panel_orig_blocks)
+            if any(int(col) in include_orig for col in blocks.members[orig_b])
+        ]
+        eligible_blocks = [
+            bidx for bidx in range(len(panel_blocks)) if bidx not in set(forced_blocks)
+        ]
+        k_actual = min(k, len(eligible_blocks))
 
     objective = None
-    if method == "cefsplus":
+    if use_joint_blocks:
+        if method == "cefsplus":
+            sel_local, objective, picked = cefsplus_block_loop(
+                R_cand,
+                r_cand,
+                k_actual,
+                rel_cand,
+                panel_blocks,
+                forced_blocks=forced_blocks,
+                eligible_blocks=eligible_blocks,
+                want_objective=return_objective or return_result,
+                callback=callback,
+            )
+        elif method in ("mrmr_quot", "mrmr_diff"):
+            sel_local, picked = _gaussian_mrmr_select_blocks(
+                R_cand,
+                rel_cand,
+                k_actual,
+                use_quotient=method == "mrmr_quot",
+                block_members=panel_blocks,
+                forced_blocks=forced_blocks,
+                eligible_blocks=eligible_blocks,
+                callback=callback,
+            )
+            if warn_noise_floor:
+                _warn_gaussian_mrmr_noise_floor(panel, sel_local, method)
+        elif method in ("jmi", "jmim"):
+            sel_local, picked = _gaussian_jmi_select_blocks(
+                R_cand,
+                r_cand,
+                rel_cand,
+                k_actual,
+                use_min=method == "jmim",
+                block_members=panel_blocks,
+                forced_blocks=forced_blocks,
+                eligible_blocks=eligible_blocks,
+                callback=callback,
+            )
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        discovered_block_ids = [panel_orig_blocks[int(i)] for i in picked]
+        selected_block_labels = [blocks.block_ids[i] for i in discovered_block_ids]
+        discovered_original = np.asarray(
+            blocks.expand(discovered_block_ids), dtype=np.int64
+        )
+    elif method == "cefsplus":
         if use_forced:
             want_objective = bool(return_objective or return_result)
             sel_local, cond_objective = _cefsplus_loop_core_conditioned(
@@ -1105,7 +1660,20 @@ def _select_cached_impl(
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    discovered_original = panel.original[sel_local].astype(np.int64, copy=False)
+    if not use_joint_blocks:
+        discovered_original = panel.original[sel_local].astype(np.int64, copy=False)
+        if blocks is not None and discovered_original.size:
+            discovered_block_ids = []
+            seen_b: set[int] = set()
+            for col in discovered_original.tolist():
+                bidx = blocks.column_to_block[int(col)]
+                if bidx not in seen_b:
+                    seen_b.add(bidx)
+                    discovered_block_ids.append(bidx)
+            discovered_original = np.asarray(
+                blocks.expand(discovered_block_ids), dtype=np.int64
+            )
+            selected_block_labels = [blocks.block_ids[i] for i in discovered_block_ids]
     if compose_include and resolved is not None and resolved.include:
         _composed_names, composed_idx = compose_selected(
             cache_names,
@@ -1145,19 +1713,24 @@ def _select_cached_impl(
             panel.rel,
             dtype=np.float64,
         )
-        ranking = pd.DataFrame(
-            {
-                "feature": feature_names,
-                "rank": rank,
-                "selected": [position in selected_rank for position in range(len(feature_names))],
-                "selected_index": pd.array(
-                    range(len(feature_names)),
-                    dtype="Int64",
-                ),
-                "relevance": relevance,
-                "selector": f"cached_{method}",
-            }
-        )
+        ranking_data = {
+            "feature": feature_names,
+            "rank": rank,
+            "selected": [position in selected_rank for position in range(len(feature_names))],
+            "selected_index": pd.array(
+                range(len(feature_names)),
+                dtype="Int64",
+            ),
+            "relevance": relevance,
+            "selector": f"cached_{method}",
+        }
+        if blocks is not None:
+            ranking_data["block_id"] = [
+                blocks.block_ids[blocks.column_to_block[position]]
+                for position in range(len(feature_names))
+            ]
+        ranking = pd.DataFrame(ranking_data)
+        from sift.selection.blocks import block_result_metadata
         from sift.selection.result import FilterSelectionResult, build_selector_metadata
         from sift.selection.view import as_result
 
@@ -1180,6 +1753,27 @@ def _select_cached_impl(
                 dtype=np.int64,
             ).copy(),
         }
+        if blocks is not None:
+            include_idx = resolved.include if resolved is not None else ()
+            extra.update(
+                block_result_metadata(
+                    blocks,
+                    selected_indices,
+                    include_idx,
+                    n_columns_selected=len(selected_indices),
+                )
+            )
+            include_block_ids = []
+            if include_idx:
+                include_block_ids = list(
+                    dict.fromkeys(
+                        blocks.column_to_block[int(i)] for i in include_idx
+                    )
+                )
+            diagnostics["selected_blocks"] = [
+                blocks.block_ids[i] for i in include_block_ids
+            ] + list(selected_block_labels)
+            diagnostics["block_path"] = list(selected_block_labels)
         if cond_record is not None:
             extra["conditioning"] = cond_record
             diagnostics["conditioning"] = cond_record
@@ -1199,6 +1793,11 @@ def _select_cached_impl(
             diagnostics_=diagnostics,
         )
         if store_proxies:
+            reject_unavailable_proxy_positions(
+                selected_indices,
+                available_original=cache.valid_cols,
+                feature_names=feature_names,
+            )
             proxy_correlations = proxy_frame_from_panel(
                 panel.R,
                 candidate_indices=panel.original,

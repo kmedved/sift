@@ -100,8 +100,12 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       evidence, full local gate and all six required GitHub CI jobs passed.
 - [x] F8c statistic bakeoff, implementation `ae904b8`, retained CSV SHA256
       `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`.
-      Codex/Opus accepted the runner; evidence recorded. Integration pending.
-- [ ] F3 block/group-aware selection (`k` counts blocks).
+      Codex/Opus accepted; merged as PR #84 at `cfd2f64` after all six required
+      CI jobs passed on `20d07d1`. No 0.9 default change.
+- [ ] F3 block/group-aware selection (`k` counts blocks). Fixed-k Gaussian/
+      classic, block-aware auto-k, and binary log-loss joint blocks
+      (`evaluate`/`elbow`/`penalized_objective`/`auto`) are implemented.
+      Closeout (independent review, clean commit, runtime refresh) remains.
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
 - [ ] Reproducibility manifests (`result.reproducibility_`).

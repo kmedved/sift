@@ -537,7 +537,7 @@ def test_cache_named_positional_and_select_cached_tail():
     pos = select_cached(cache_p, y.to_numpy(), k=1, include=[0], top_m=10)
     assert pos[0] in {0, "x0"}
     params = list(inspect.signature(select_cached).parameters)
-    assert params[-3:] == ["include", "exclude", "candidates"]
+    assert params[-4:] == ["include", "exclude", "candidates", "feature_blocks"]
     assert "compose_include" not in params
     assert params.index("callback") == 9
 

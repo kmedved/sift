@@ -57,7 +57,16 @@ view.metadata
 
 `features` preserves the selector's legacy selected-feature order. `indices`
 contains raw input positions when they are known, and `k` is the number of
-selected features. `table` is a defensive-copy alias for `raw_table`.
+selected features. Filter `feature_blocks` keeps that raw-width convention:
+`view.k` and `metadata["n_columns_selected"]` are expanded column counts,
+while selector metadata `k` / `n_blocks_selected` count additional blocks.
+`n_blocks_selected_total` counts include blocks plus those additional blocks.
+Every supplied `feature_blocks` map uses those block metadata units, including
+identity (all-singleton) maps. Identity parity is the selected features,
+ranking scores, and `refit_every` cadence, not no-block legacy
+`metadata["k"]`, which still counts include columns in the total selected
+width. `view.k` stays the raw expanded count in both cases.
+`table` is a defensive-copy alias for `raw_table`.
 `metadata` is also copied and includes `schema_version`, `table_complete`,
 `transform_available`, and column-identity hashes.
 

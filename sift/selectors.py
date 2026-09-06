@@ -92,6 +92,120 @@ _BLOCKED_FIT_PARAM_OVERRIDES = frozenset(
 )
 
 
+def _as_label_list(value) -> list:
+    """Convert sklearn/numpy feature-name containers without stringifying labels."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return [value]
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return []
+        return list(np.asarray(value, dtype=object).ravel().tolist())
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
+def _effective_nested_blocks_and_conditioning(selector, fit_params):
+    params = dict(fit_params or {})
+    feature_blocks = params.get("feature_blocks", getattr(selector, "feature_blocks", None))
+    include = params.get("include", getattr(selector, "include", None))
+    exclude = params.get("exclude", getattr(selector, "exclude", None))
+    candidates = params.get("candidates", getattr(selector, "candidates", None))
+    return feature_blocks, include, exclude, candidates
+
+
+def _nonconstant_column_indices(X) -> list[int]:
+    """Unsupervised finite non-constant column positions; no target is used."""
+    if hasattr(X, "to_numpy"):
+        values = X.to_numpy()
+    else:
+        values = np.asarray(X)
+    if values.ndim != 2:
+        return []
+    out: list[int] = []
+    for j in range(values.shape[1]):
+        col = np.asarray(values[:, j])
+        try:
+            numeric = np.asarray(col, dtype=np.float64)
+        except (TypeError, ValueError):
+            uniq = pd.unique(col)
+            if uniq.size > 1:
+                out.append(j)
+            continue
+        finite = numeric[np.isfinite(numeric)]
+        if finite.size and np.any(finite != finite[0]):
+            out.append(j)
+    return out
+
+
+def _nested_discovery_units(selector, X, fit_params) -> int | None:
+    """Eligible additional-block count, or None to keep column units."""
+    from sift.selection.blocks import eligible_discovery_block_count, resolve_feature_blocks
+    from sift.selection.conditioning import resolve_conditioning
+
+    feature_blocks, include, exclude, candidates = _effective_nested_blocks_and_conditioning(
+        selector, fit_params
+    )
+    if feature_blocks is None:
+        return None
+    names = list(X.columns) if hasattr(X, "columns") else list(_feature_names_or_default(X))
+    named = hasattr(X, "columns")
+    blocks = resolve_feature_blocks(feature_blocks, feature_names=names, named=named)
+    if blocks is None or blocks.all_singletons():
+        return None
+    resolved = resolve_conditioning(
+        include, exclude, candidates, feature_names=names, named=named, k=1
+    )
+    return int(
+        eligible_discovery_block_count(
+            blocks, valid_cols=_nonconstant_column_indices(X), resolved=resolved
+        )
+    )
+
+
+def _nested_block_prefix_sizes(
+    selector,
+    train_X,
+    *,
+    feature_blocks,
+    include,
+) -> tuple[int, ...] | None:
+    """Raw transform-matrix widths after 1, 2, ... additional blocks.
+
+    ``feature_blocks`` and ``include`` are the already-resolved effective
+    values from the nested caller. Explicit ``None`` means omitted, not
+    "use the constructor attribute".
+    """
+    if feature_blocks is None:
+        return None
+    from sift.selection.blocks import discovery_prefix_widths, resolve_feature_blocks
+    from sift.selection.conditioning import resolve_conditioning
+
+    names = _as_label_list(getattr(selector, "feature_names_in_", None))
+    if not names:
+        names = list(train_X.columns) if hasattr(train_X, "columns") else []
+    named = hasattr(train_X, "columns")
+    blocks = resolve_feature_blocks(feature_blocks, feature_names=names, named=named)
+    if blocks is None or blocks.all_singletons():
+        return None
+    resolved = resolve_conditioning(
+        include, None, None, feature_names=names, named=named, k=1
+    )
+    include_idx = set(resolved.include) if resolved is not None else set()
+    selected = _as_label_list(getattr(selector, "selected_features_", None))
+    name_to_idx = {name: i for i, name in enumerate(names)}
+    selected_idx = [name_to_idx[name] for name in selected if name in name_to_idx]
+    n_include = sum(1 for idx in selected_idx if idx in include_idx)
+    discoveries = [idx for idx in selected_idx if idx not in include_idx]
+    widths = discovery_prefix_widths(discoveries, blocks)
+    if not widths:
+        return None
+    return tuple(int(n_include + width) for width in widths)
+
+
 def _coerce_selection_indices(
     feature_names: list[str], selected_features: list[str]
 ) -> np.ndarray:
@@ -750,7 +864,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             )
 
         y_arr = np.asarray(y).reshape(-1)
-        n_features = len(_feature_names_or_default(X))
+        n_units = _nested_discovery_units(self, X, fit_params)
+        n_features = n_units if n_units is not None else len(_feature_names_or_default(X))
         config = auto_k_config
         fit_w_arr = (
             ensure_weights(sample_weight, len(y_arr), normalize=True)
@@ -776,10 +891,20 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 **fold_fit_params,
             )
             X_val_path = fold_selector.transform(_slice_rows(X, val_idx))
+            feature_blocks, include, _exclude, _candidates = (
+                _effective_nested_blocks_and_conditioning(self, fold_fit_params)
+            )
+            prefix_sizes = _nested_block_prefix_sizes(
+                fold_selector,
+                train_X,
+                feature_blocks=feature_blocks,
+                include=include,
+            )
             return NestedAutoKFold(
                 train_path=X_train_path,
                 val_path=X_val_path,
                 feature_path=list(fold_selector.selected_features_),
+                prefix_sizes=prefix_sizes,
             )
 
         nested = select_k_nested(
@@ -1005,6 +1130,13 @@ class MRMRSelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. ``k`` counts additional blocks; selected
+        blocks expand to raw member columns. ``"auto"`` uses the
+        ``{block}__{level}`` one-hot prefix; ordinary underscores are not
+        split. ``k="auto"`` counts additional blocks on evaluate, elbow,
+        penalized_objective, gaussian_cv, xfit_objective, and auto routing;
+        calibrated column-step rules raise.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1117,6 +1249,7 @@ class MRMRSelector(_BaseSelector):
         include=None,
         exclude=None,
         candidates=None,
+        feature_blocks=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1236,6 +1369,13 @@ class JMISelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. ``k`` counts additional blocks; selected
+        blocks expand to raw member columns. ``"auto"`` uses the
+        ``{block}__{level}`` one-hot prefix; ordinary underscores are not
+        split. ``k="auto"`` counts additional blocks on evaluate, elbow,
+        penalized_objective, gaussian_cv, xfit_objective, and auto routing;
+        calibrated column-step rules raise.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1345,6 +1485,7 @@ class JMISelector(_BaseSelector):
         include=None,
         exclude=None,
         candidates=None,
+        feature_blocks=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1465,6 +1606,13 @@ class JMIMSelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. ``k`` counts additional blocks; selected
+        blocks expand to raw member columns. ``"auto"`` uses the
+        ``{block}__{level}`` one-hot prefix; ordinary underscores are not
+        split. ``k="auto"`` counts additional blocks on evaluate, elbow,
+        penalized_objective, gaussian_cv, xfit_objective, and auto routing;
+        calibrated column-step rules raise.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1575,6 +1723,7 @@ class JMIMSelector(_BaseSelector):
         include=None,
         exclude=None,
         candidates=None,
+        feature_blocks=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1690,6 +1839,13 @@ class CEFSPlusSelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. ``k`` counts additional blocks; selected
+        blocks expand to raw member columns. ``"auto"`` uses the
+        ``{block}__{level}`` one-hot prefix; ordinary underscores are not
+        split. ``k="auto"`` counts additional blocks on evaluate, elbow,
+        penalized_objective, gaussian_cv, xfit_objective, and auto routing;
+        calibrated column-step rules raise.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -1797,6 +1953,7 @@ class CEFSPlusSelector(_BaseSelector):
         include=None,
         exclude=None,
         candidates=None,
+        feature_blocks=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -1854,7 +2011,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
         prefix fits.
     refit_every : int, default=1
         Positive integer stride between full logistic refits along the greedy
-        path; larger values trade objective accuracy for speed.
+        path; larger values trade objective accuracy for speed. With opt-in
+        ``feature_blocks``, the stride is in additional discovery blocks; the
+        no-block and identity cadence is unchanged.
     cat_features : list of str or None, default=None
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
@@ -1922,6 +2081,14 @@ class CEFSPlusBinarySelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Atomic column groups. ``k`` counts additional blocks; selected
+        blocks expand to raw member columns. ``"auto"`` uses the
+        ``{block}__{level}`` one-hot prefix; ordinary underscores are not
+        split. ``k="auto"`` counts additional blocks on evaluate, elbow,
+        penalized_objective, and auto (EBIC). Joint logistic block scores
+        are used; Gaussian CV/xfit and calibrated column-step rules raise.
+        ``loss="brier"`` delegates to Gaussian CEFS+ blocks.
     output_order : {"legacy", "original"}, default="legacy"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
@@ -2035,6 +2202,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         include=None,
         exclude=None,
         candidates=None,
+        feature_blocks=None,
         callback: ProgressCallback | None = None,
         output_order: str = "legacy",
     ):
@@ -2355,6 +2523,13 @@ class KnockoffSelector(_BaseSelector):
     candidates : sequence of names or positions, optional
         Hard allow-list for the tested discovery universe. Requires
         ``include_provenance``.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Additive alias of ``feature_groups``. A mapping is converted to
+        per-column labels (unlisted columns stay singletons). ``"auto"``
+        means the existing correlation-cluster ``feature_groups="auto"``,
+        not the filter one-hot prefix convention. Conflicting
+        ``feature_groups`` and ``feature_blocks`` raise. Grouped FDR
+        validity is unchanged.
     include_provenance : {"prespecified", "sample_split", "data_derived"} or None
         Required when ``include``, ``exclude``, or ``candidates`` is
         provided. FDR-compatible wording is allowed only for
@@ -2488,6 +2663,7 @@ class KnockoffSelector(_BaseSelector):
         exclude=None,
         candidates=None,
         include_provenance=None,
+        feature_blocks=None,
         output_order: str = "legacy",
     ):
         self._init_selector(select_fdr, locals())

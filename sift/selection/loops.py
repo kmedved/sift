@@ -601,9 +601,39 @@ def mrmr_select(
     callback: ProgressCallback | None = None,
     include_idx: np.ndarray | None = None,
     candidate_idx: np.ndarray | None = None,
+    blocks: list[np.ndarray] | None = None,
 ) -> np.ndarray:
     """mRMR feature selection with incremental redundancy."""
     k = validate_k(k, allow_auto=False)
+    if blocks is not None:
+        if all(len(np.asarray(group)) <= 1 for group in blocks):
+            return mrmr_select(
+                X,
+                relevance,
+                k,
+                formula=formula,
+                top_m=top_m,
+                sample_weight=sample_weight,
+                n_jobs=n_jobs,
+                mrmr_backend=mrmr_backend,
+                callback=callback,
+                include_idx=include_idx,
+                candidate_idx=candidate_idx,
+            )
+        return _mrmr_select_blocks(
+            X,
+            relevance,
+            k,
+            formula=formula,
+            top_m=top_m,
+            sample_weight=sample_weight,
+            n_jobs=n_jobs,
+            mrmr_backend=mrmr_backend,
+            callback=callback,
+            include_idx=include_idx,
+            candidate_idx=candidate_idx,
+            blocks=blocks,
+        )
     if top_m is not None and (
         isinstance(top_m, (bool, np.bool_))
         or not isinstance(top_m, (int, np.integer))
@@ -756,6 +786,7 @@ def jmi_select(
     callback: ProgressCallback | None = None,
     include_idx: np.ndarray | None = None,
     candidate_idx: np.ndarray | None = None,
+    blocks: list[np.ndarray] | None = None,
 ) -> np.ndarray:
     """JMI/JMIM selection with incremental scoring."""
     from sift.estimators import joint_mi as jmi_est
@@ -771,6 +802,37 @@ def jmi_select(
         top_m = int(top_m)
     if mi_estimator == "ksg" and sample_weight is not None:
         raise ValueError("estimator='ksg' does not support sample_weight")
+    if blocks is not None:
+        if all(len(np.asarray(group)) <= 1 for group in blocks):
+            return jmi_select(
+                X,
+                y,
+                k,
+                relevance,
+                mi_estimator=mi_estimator,
+                aggregation=aggregation,
+                top_m=top_m,
+                y_kind=y_kind,
+                sample_weight=sample_weight,
+                callback=callback,
+                include_idx=include_idx,
+                candidate_idx=candidate_idx,
+            )
+        return _jmi_select_blocks(
+            X,
+            y,
+            k,
+            relevance,
+            mi_estimator=mi_estimator,
+            aggregation=aggregation,
+            top_m=top_m,
+            y_kind=y_kind,
+            sample_weight=sample_weight,
+            callback=callback,
+            include_idx=include_idx,
+            candidate_idx=candidate_idx,
+            blocks=blocks,
+        )
 
     n, p = X.shape
     w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
@@ -1029,3 +1091,369 @@ def jmi_select(
             )
 
     return idx_map[selected[:count]]
+
+
+def _partition_screened_blocks(
+    blocks: list[np.ndarray],
+    relevance: np.ndarray,
+    *,
+    include_idx: np.ndarray | None,
+    candidate_idx: np.ndarray | None,
+    top_m: int | None,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    include_set = set(int(i) for i in np.asarray(include_idx, dtype=np.int64)) if include_idx is not None else set()
+    if candidate_idx is not None:
+        cand_set = set(int(i) for i in np.asarray(candidate_idx, dtype=np.int64))
+    else:
+        cand_set = None
+    include_blocks: list[np.ndarray] = []
+    discovery_blocks: list[np.ndarray] = []
+    for raw in blocks:
+        members = np.asarray(raw, dtype=np.int64)
+        if members.size == 0:
+            continue
+        member_set = set(int(i) for i in members)
+        if include_set and member_set <= include_set:
+            include_blocks.append(members)
+            continue
+        if include_set and member_set & include_set:
+            raise ValueError("include would split a feature block")
+        if cand_set is not None and not member_set <= cand_set:
+            if member_set & cand_set:
+                raise ValueError("candidates would split a feature block")
+            continue
+        discovery_blocks.append(members)
+    if top_m is not None and top_m < len(discovery_blocks):
+        scores = np.array(
+            [float(np.max(relevance[b])) for b in discovery_blocks],
+            dtype=np.float64,
+        )
+        pick = np.argpartition(scores, -int(top_m))[-int(top_m):]
+        order = np.lexsort((pick, -scores[pick]))
+        discovery_blocks = [discovery_blocks[int(pick[i])] for i in order]
+    return include_blocks, discovery_blocks
+
+
+def _mrmr_select_blocks(
+    X: np.ndarray,
+    relevance: np.ndarray,
+    k: int,
+    *,
+    formula: str,
+    top_m: Optional[int],
+    sample_weight: np.ndarray | None,
+    n_jobs: int,
+    mrmr_backend: MrmrBackend,
+    callback: ProgressCallback | None,
+    include_idx: np.ndarray | None,
+    candidate_idx: np.ndarray | None,
+    blocks: list[np.ndarray],
+) -> np.ndarray:
+    if top_m is not None and (
+        isinstance(top_m, (bool, np.bool_))
+        or not isinstance(top_m, (int, np.integer))
+        or int(top_m) < 1
+    ):
+        raise ValueError("top_m must be a positive integer or None")
+    include_blocks, discovery_blocks = _partition_screened_blocks(
+        blocks,
+        relevance,
+        include_idx=include_idx,
+        candidate_idx=candidate_idx,
+        top_m=None if top_m is None else int(top_m),
+    )
+    if all(len(b) == 1 for b in include_blocks + discovery_blocks):
+        include_arr = (
+            np.concatenate(include_blocks)
+            if include_blocks
+            else np.empty(0, dtype=np.int64)
+        )
+        cand_arr = (
+            np.concatenate(discovery_blocks)
+            if discovery_blocks
+            else np.empty(0, dtype=np.int64)
+        )
+        return mrmr_select(
+            X,
+            relevance,
+            k,
+            formula=formula,
+            top_m=None,
+            sample_weight=sample_weight,
+            n_jobs=n_jobs,
+            mrmr_backend=mrmr_backend,
+            callback=callback,
+            include_idx=include_arr if include_arr.size else None,
+            candidate_idx=cand_arr if cand_arr.size or include_arr.size else None,
+        )
+    n, p = X.shape
+    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    if include_blocks:
+        include_arr = np.concatenate(include_blocks)
+        _require_usable_include_columns(X, w, include_arr)
+    else:
+        include_arr = np.empty(0, dtype=np.int64)
+    usable_discovery = []
+    for members in discovery_blocks:
+        if float(np.max(relevance[members])) > 0:
+            usable_discovery.append(members)
+    if not usable_discovery and k > 0:
+        if candidate_idx is not None:
+            raise ValueError(
+                "candidates contains no usable discovery columns after "
+                "relevance screening"
+            )
+        return np.array([], dtype=np.int64)
+    n_discover = min(int(k), len(usable_discovery))
+    idx_map = (
+        np.concatenate([include_arr, np.concatenate(usable_discovery)])
+        if usable_discovery
+        else include_arr
+    )
+    Z = _standardize_columns_weighted(X[:, idx_map].astype(np.float64, copy=False), w)
+    rel_sub = relevance[idx_map]
+    orig_to_local = {int(orig): i for i, orig in enumerate(idx_map)}
+    local_include = np.arange(include_arr.size, dtype=np.int64)
+    local_disc = [
+        np.asarray([orig_to_local[int(c)] for c in members], dtype=np.int64)
+        for members in usable_discovery
+    ]
+    is_selected = np.zeros(idx_map.size, dtype=bool)
+    red_sum = np.zeros(idx_map.size, dtype=np.float64)
+    w_sum = float(np.sum(w))
+    t0 = 0
+    if local_include.size:
+        is_selected[local_include] = True
+        for j in local_include:
+            weighted_last = w * Z[:, int(j)]
+            new_red = np.abs(Z.T @ weighted_last / w_sum)
+            mask = ~is_selected
+            red_sum[mask] += new_red[mask]
+            t0 += 1
+    remaining = np.ones(len(local_disc), dtype=bool)
+    selected_local: list[int] = []
+    use_quot = formula == "quotient"
+    for step in range(n_discover):
+        best = -1
+        best_score = -1e300
+        mean_red = red_sum / t0 if t0 else None
+        for bidx, members in enumerate(local_disc):
+            if not remaining[bidx]:
+                continue
+            live = members[~is_selected[members]]
+            if live.size == 0:
+                remaining[bidx] = False
+                continue
+            if t0 == 0:
+                scores = rel_sub[live]
+            elif use_quot:
+                scores = rel_sub[live] / np.maximum(mean_red[live], FLOOR)
+            else:
+                scores = rel_sub[live] - mean_red[live]
+            score = float(np.max(scores))
+            if best < 0 or score > best_score:
+                best = bidx
+                best_score = score
+        if best < 0 or not np.isfinite(best_score):
+            break
+        live = local_disc[best][~is_selected[local_disc[best]]]
+        remaining[best] = False
+        for j in live:
+            selected_local.append(int(j))
+            is_selected[int(j)] = True
+            weighted_last = w * Z[:, int(j)]
+            new_red = np.abs(Z.T @ weighted_last / w_sum)
+            mask = ~is_selected
+            red_sum[mask] += new_red[mask]
+            t0 += 1
+        if callback is not None:
+            report_progress(
+                callback, step + 1, n_discover, stage="path", selector="mrmr", backend="blocks"
+            )
+    return idx_map[np.asarray(selected_local, dtype=np.int64)]
+
+
+def _jmi_select_blocks(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    relevance: np.ndarray,
+    *,
+    mi_estimator: Literal["binned", "r2", "ksg"],
+    aggregation: Literal["sum", "min"],
+    top_m: Optional[int],
+    y_kind: Literal["discrete", "continuous"],
+    sample_weight: np.ndarray | None,
+    callback: ProgressCallback | None,
+    include_idx: np.ndarray | None,
+    candidate_idx: np.ndarray | None,
+    blocks: list[np.ndarray],
+) -> np.ndarray:
+    include_blocks, discovery_blocks = _partition_screened_blocks(
+        blocks,
+        relevance,
+        include_idx=include_idx,
+        candidate_idx=candidate_idx,
+        top_m=None if top_m is None else int(top_m),
+    )
+    if all(len(b) == 1 for b in include_blocks + discovery_blocks):
+        include_arr = (
+            np.concatenate(include_blocks)
+            if include_blocks
+            else np.empty(0, dtype=np.int64)
+        )
+        cand_arr = (
+            np.concatenate(discovery_blocks)
+            if discovery_blocks
+            else np.empty(0, dtype=np.int64)
+        )
+        return jmi_select(
+            X,
+            y,
+            k,
+            relevance,
+            mi_estimator=mi_estimator,
+            aggregation=aggregation,
+            top_m=None,
+            y_kind=y_kind,
+            sample_weight=sample_weight,
+            callback=callback,
+            include_idx=include_arr if include_arr.size else None,
+            candidate_idx=cand_arr if cand_arr.size or include_arr.size else None,
+        )
+    from sift.estimators import joint_mi as jmi_est
+
+    n, p = X.shape
+    w = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    y_arr = y.astype(np.float64, copy=False)
+    w_arr = w.astype(np.float64, copy=False)
+    if include_blocks:
+        include_arr = np.concatenate(include_blocks)
+        _require_usable_include_columns(X, w_arr, include_arr)
+    else:
+        include_arr = np.empty(0, dtype=np.int64)
+    usable_discovery = [b for b in discovery_blocks if float(np.max(relevance[b])) > 0]
+    if not usable_discovery and k > 0:
+        if candidate_idx is not None:
+            raise ValueError(
+                "candidates contains no usable discovery columns after "
+                "relevance screening"
+            )
+        return np.array([], dtype=np.int64)
+    n_discover = min(int(k), len(usable_discovery))
+    idx_map = (
+        np.concatenate([include_arr, np.concatenate(usable_discovery)])
+        if usable_discovery
+        else include_arr
+    )
+    X_cand = X[:, idx_map]
+    rel_cand = relevance[idx_map]
+    orig_to_local = {int(orig): i for i, orig in enumerate(idx_map)}
+    local_include = np.arange(include_arr.size, dtype=np.int64)
+    local_disc = [
+        np.asarray([orig_to_local[int(c)] for c in members], dtype=np.int64)
+        for members in usable_discovery
+    ]
+    m = X_cand.shape[1]
+    use_indexed = mi_estimator in ("r2", "binned")
+    if mi_estimator == "r2":
+        Z_cand, r_y, r2_w, r2_w_sum = jmi_est._prepare_r2_joint_mi_state(
+            X_cand, y_arr, w_arr
+        )
+
+        def mi_func_indexed(last_idx, idx):
+            return jmi_est._r2_joint_mi_indexed_from_state(
+                Z_cand, r_y, idx, last_idx, r2_w, r2_w_sum
+            )
+    elif mi_estimator == "binned":
+        positive_w = w_arr[w_arr > 0.0]
+        edge_w = w_arr / float(np.max(positive_w)) if positive_w.size else w_arr
+        entropy_w = ensure_weights(w_arr, n, normalize=True)
+        if positive_w.size:
+            atomic_mass = jmi_est._frequency_atomic_mass(entropy_w[entropy_w > 0.0])
+            if atomic_mass is not None:
+                ratios = entropy_w / atomic_mass
+                entropy_w = np.where(entropy_w > 0.0, np.rint(ratios), 0.0)
+        X_binned = jmi_est.quantile_bin_matrix(X_cand, n_bins=10, weights=edge_w)
+        if y_kind == "discrete":
+            y_binned = jmi_est._factorize(np.asarray(y_arr))
+            n_y_bins = int(y_binned.max()) + 1 if y_binned.size else 1
+        else:
+            y_binned = jmi_est._quantile_bin(y_arr, 10, weights=edge_w)
+            n_y_bins = 10
+
+        def mi_func_indexed(last_idx, idx):
+            s_binned = X_binned[:, int(last_idx)]
+            return jmi_est.binned_joint_mi_indexed_prebinned(
+                X_binned, idx, s_binned, y_binned, entropy_w, n_bins=10, n_y_bins=n_y_bins
+            )
+    elif mi_estimator == "ksg":
+        def mi_func_matrix(s, c):
+            return jmi_est.ksg_joint_mi(s, c, y_arr)
+        use_indexed = False
+    else:
+        raise ValueError(f"Unknown mi_estimator: {mi_estimator}")
+
+    scores = np.zeros(m, dtype=np.float64) if aggregation == "sum" else np.full(m, np.inf, dtype=np.float64)
+    is_selected = np.zeros(m, dtype=bool)
+    remaining = np.ones(len(local_disc), dtype=bool)
+    selected_local: list[int] = []
+
+    def _accumulate(last: int) -> None:
+        cand_indices = np.where(~is_selected)[0]
+        if cand_indices.size == 0:
+            return
+        if use_indexed:
+            mi_values = mi_func_indexed(int(last), cand_indices.astype(np.int64, copy=False))
+        else:
+            mi_values = mi_func_matrix(X_cand[:, int(last)], X_cand[:, cand_indices])
+        if aggregation == "sum":
+            scores[cand_indices] += mi_values
+        else:
+            not_nan = ~np.isnan(mi_values)
+            update_idx = cand_indices[not_nan]
+            scores[update_idx] = np.minimum(scores[update_idx], mi_values[not_nan])
+
+    have_selected = False
+    if local_include.size:
+        is_selected[local_include] = True
+        for last_forced in local_include:
+            _accumulate(int(last_forced))
+        have_selected = True
+    for step in range(n_discover):
+        best = -1
+        best_score = -1e300
+        for bidx, members in enumerate(local_disc):
+            if not remaining[bidx]:
+                continue
+            live = members[~is_selected[members]]
+            if live.size == 0:
+                remaining[bidx] = False
+                continue
+            if not have_selected:
+                col_scores = rel_cand[live]
+            else:
+                col_scores = np.where(np.isfinite(scores[live]), scores[live], rel_cand[live])
+            score = float(np.max(col_scores))
+            if best < 0 or score > best_score:
+                best = bidx
+                best_score = score
+        if best < 0 or not np.isfinite(best_score):
+            break
+        live = local_disc[best][~is_selected[local_disc[best]]]
+        remaining[best] = False
+        for j in live:
+            selected_local.append(int(j))
+            is_selected[int(j)] = True
+            _accumulate(int(j))
+            have_selected = True
+        if callback is not None:
+            report_progress(
+                callback,
+                step + 1,
+                n_discover,
+                stage="path",
+                selector="jmi" if aggregation == "sum" else "jmim",
+                estimator=mi_estimator,
+            )
+    return idx_map[np.asarray(selected_local, dtype=np.int64)]

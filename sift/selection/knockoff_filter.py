@@ -31,6 +31,7 @@ from sift.estimators.knockoffs import (
     gaussian_knockoff_mean,
     sample_gaussian_knockoffs,
 )
+from sift.selection.blocks import labels_for_columns, resolve_feature_blocks
 from sift.selection.conditioning import (
     FDR_COMPATIBLE_PROVENANCE,
     compose_selected,
@@ -772,6 +773,68 @@ def _resolve_feature_groups(cache: FeatureCache, feature_groups: Sequence[Any] |
             "(valid cache columns, or the original input columns)"
         )
     return _stable_group_codes(valid_groups)
+
+
+def _combine_knockoff_feature_groups(
+    cache: FeatureCache,
+    feature_groups: Sequence[Any] | str | None,
+    feature_blocks,
+    *,
+    feature_names: Sequence[Any],
+    named: bool,
+):
+    """Resolve the additive ``feature_blocks`` alias onto ``feature_groups``."""
+    if feature_blocks is None:
+        return feature_groups
+    if isinstance(feature_blocks, str):
+        if feature_blocks != "auto":
+            raise ValueError(
+                "feature_blocks must be None, 'auto', or a mapping of block "
+                f"labels to members; got {feature_blocks!r}"
+            )
+        blocks_as_groups: Sequence[Any] | str = "auto"
+    else:
+        resolved = resolve_feature_blocks(
+            feature_blocks,
+            feature_names=feature_names,
+            named=named,
+        )
+        if resolved is None:
+            return feature_groups
+        blocks_as_groups = labels_for_columns(resolved)
+    if feature_groups is None:
+        return blocks_as_groups
+    if isinstance(feature_groups, str) and feature_groups == "auto":
+        if blocks_as_groups == "auto":
+            return "auto"
+        raise ValueError(
+            "feature_groups='auto' conflicts with an explicit feature_blocks "
+            "mapping; pass only one grouping, or make them identical"
+        )
+    if blocks_as_groups == "auto":
+        raise ValueError(
+            "feature_blocks='auto' (knockoff correlation clustering) conflicts "
+            "with an explicit feature_groups sequence; pass only one grouping"
+        )
+    left = _resolve_feature_groups(cache, feature_groups)
+    right = _resolve_feature_groups(cache, blocks_as_groups)
+    if left is None or right is None:
+        raise ValueError("feature_groups and feature_blocks could not both be resolved")
+    left_parts = _group_partition(left[1])
+    right_parts = _group_partition(right[1])
+    if left_parts != right_parts:
+        raise ValueError(
+            "feature_blocks and feature_groups resolve to different column "
+            "partitions; pass only one grouping or make them identical"
+        )
+    return feature_groups
+
+
+def _group_partition(codes: np.ndarray) -> tuple[tuple[int, ...], ...]:
+    groups: dict[int, list[int]] = {}
+    for i, code in enumerate(np.asarray(codes, dtype=np.int64)):
+        groups.setdefault(int(code), []).append(i)
+    return tuple(tuple(members) for members in groups.values())
 
 
 def _weighted_variance(Z: np.ndarray, w: np.ndarray, *, batch_size: int = 50_000) -> np.ndarray:
@@ -2196,6 +2259,7 @@ def select_fdr(
     screen_pairs: int | None = 2000,
     statistic_options: dict | None = None,
     feature_groups: Sequence[Any] | str | None = None,
+    feature_blocks=None,
     group_corr_threshold: float = 0.7,
     sample_weight=None,
     subsample: Any = _SUBSAMPLE_DEFAULT,
@@ -2309,6 +2373,14 @@ def select_fdr(
         Clustering is average linkage on ``1 - |corr|`` cut at
         ``1 - group_corr_threshold`` and costs ``O(p**2)`` time and memory, so
         pre-screen very wide matrices.
+    feature_blocks : mapping, {"auto"} or None, default None
+        Additive alias of ``feature_groups``. A mapping becomes per-column
+        group labels (unlisted columns stay singletons). ``"auto"`` is the
+        existing correlation-cluster ``feature_groups="auto"``, not the
+        filter-path one-hot prefix ``{block}__{level}``. Providing both
+        ``feature_groups`` and ``feature_blocks`` is allowed only when they
+        resolve to the same partition; otherwise a ``ValueError`` names the
+        conflict. Grouped and representative FDR validity is unchanged.
     sample_weight : ndarray of shape (n_samples,) or None, default None
         Finite, non-negative row weights used when building the cache from
         ``X``.  Rejected with a prebuilt ``cache``, whose weights are already
@@ -2521,6 +2593,13 @@ def select_fdr(
     provenance = require_include_provenance(
         include_provenance,
         conditioning_active=bool(resolved_sets is not None and resolved_sets.active),
+    )
+    feature_groups = _combine_knockoff_feature_groups(
+        resolved_cache,
+        feature_groups,
+        feature_blocks,
+        feature_names=cache_names,
+        named=named,
     )
     if (
         resolved_sets is not None

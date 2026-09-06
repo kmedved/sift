@@ -4,6 +4,23 @@
 
 ### Features
 
+- Added additive `feature_blocks=` on the fixed-k filter selectors,
+  `select_cached`, the sklearn filter wrappers, and as an alias of knockoff
+  `feature_groups`. Explicit dicts map block labels to members; unlisted
+  columns stay singletons. Filter `"auto"` groups `{block}__{level}` one-hot
+  prefixes only (ordinary underscores are not split). Knockoff `"auto"` remains
+  correlation clustering. `k` counts additional blocks;
+  `n_columns_selected` reports raw width; `SelectionView.k` stays
+  `len(features)`. Gaussian CEFS+ uses joint residual log-det gain; classic
+  mRMR/JMI/JMIM aggregate the configured column estimators. Filter `k="auto"`
+  scores complete block prefixes for `evaluate`, `elbow`,
+  `penalized_objective`, `gaussian_cv`, `xfit_objective`, and auto routing
+  (grids stay in additional-block units; selected prefixes expand to raw
+  columns). Column-step calibrated rules raise. Binary log-loss CEFS+ uses a
+  joint logistic block score on `evaluate`/`elbow`/`penalized_objective`/
+  `auto`; Gaussian CV/xfit and calibrated binary stops raise.
+  `loss="brier"` delegates to Gaussian blocks. No-block calls, the 58-name
+  surface, and grouped FDR validity are unchanged.
 - Added additive `include=`, `exclude=`, and `candidates=` keywords on the
   public filter selectors, `select_cached`, the sklearn filter wrappers, and
   `select_fdr`. `include` initializes the actual greedy/conditional state

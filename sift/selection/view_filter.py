@@ -56,6 +56,8 @@ def _normalize_filter_table(
             values = pd.to_numeric(ranking[column], errors="coerce")
             if values.notna().any():
                 table[column] = values
+    if "block_id" in ranking:
+        table["block_id"] = ranking["block_id"].tolist()
 
     if "selected_index" in table:
         known_positions = table["selected_index"].dropna().astype(int)

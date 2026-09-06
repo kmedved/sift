@@ -472,7 +472,31 @@ Pass `feature_groups=[...]` to threshold group-level antisymmetric statistics
 and expand selected groups back to active member features. This is useful for
 one-hot families, lags, spline bases, or other feature families. Interpret it
 as group-discovery control, not exact feature-level FDR inside each selected
-group.
+group. `feature_blocks=` is an additive alias of that grouping: a mapping of
+block labels to members, or `"auto"` for the *existing correlation-cluster*
+`feature_groups="auto"`. That knockoff `"auto"` is not the filter-path one-hot
+prefix. Filter selectors use `feature_blocks` as atomic selection units
+(`k` counts blocks; `"auto"` groups `{block}__{level}` columns only). A
+selected block keeps every raw member, including columns the copula cache
+dropped as constant; `store_proxies=True` still requires finite correlations
+for every selected column and raises if a retained member was unavailable.
+The knockoff alias does not apply those atomic restriction checks:
+`include`/`exclude`/`candidates` keep existing `feature_groups`
+column-restriction semantics. Grouped FDR validity is unchanged.
+Filter `k="auto"` with `feature_blocks` scores complete block prefixes
+(`evaluate`, `elbow`, `penalized_objective`, `gaussian_cv`,
+`xfit_objective`, and auto routing). Nested evaluate rebuilds block
+selection and preprocessing per fold and refits the chosen block `k`.
+EBIC uses copula-rank model dimension plus discovery-block multiplicity
+`log C(B, k)`; RIC uses `2 df log(B)`. BIC/AIC-style penalties use the
+same copula rank, not raw width or constant padding. Identity block maps
+reuse the no-block auto-k routes.
+Column-step calibrated rules (`perm_gap`, `chi2_stop`, `forward_stop`,
+`changepoint`, `k_posterior`, `stability`, `knockoff_path`, `consensus`)
+raise. Binary log-loss CEFS+ uses a joint logistic block score on
+`evaluate`/`elbow`/`penalized_objective`/`auto`; Gaussian CV/xfit and
+calibrated binary stops raise. `loss="brier"` delegates to Gaussian
+blocks.
 
 `n_draws > 1` redraws knockoffs and selects features whose selection frequency
 is at least `eta`. This is useful for run-to-run stability, but the aggregated

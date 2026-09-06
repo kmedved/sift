@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -79,7 +79,7 @@ from sift.selection.conditioning import (
 )
 from sift.selection.loops import jmi_select, mrmr_select
 from sift.selection.panel import build_candidate_panel
-from sift.selection.proxies import proxy_frame_from_panel
+from sift.selection.proxies import proxy_frame_from_panel, reject_unavailable_proxy_positions
 from sift.selection.within import (
     as_float_feature_matrix,
     fit_transform_within,
@@ -152,6 +152,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 ctx.spec.selector,
                 within_relevance=_within_relevance(ctx, relevance),
                 between_relevance=_between_relevance_classic(ctx, prep),
+                block_ids=_block_id_column(ctx, len(prep.feature_names)),
             )
             diagnostics = {
                 "path_relevance": relevance[np.asarray(selected_idx, dtype=np.int64)].astype(float).tolist(),
@@ -216,6 +217,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             return_indices=True,
             return_diagnostics=want_result,
             base_features=_include_names(ctx),
+            feature_blocks=_kw(ctx, "feature_blocks"),
         )
         ranking = None
         diagnostics = None
@@ -291,6 +293,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 include=_kw(ctx, "include"),
                 exclude=_kw(ctx, "exclude"),
                 candidates=_kw(ctx, "candidates"),
+                feature_blocks=_kw(ctx, "feature_blocks"),
             )
         else:
             selected, selected_indices = select_cached(
@@ -305,6 +308,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                 include=_kw(ctx, "include"),
                 exclude=_kw(ctx, "exclude"),
                 candidates=_kw(ctx, "candidates"),
+                feature_blocks=_kw(ctx, "feature_blocks"),
             )
             objective = None
         selected_features, selected_indices, n_features = _gaussian_payload_selection(
@@ -343,6 +347,7 @@ def make_fixed_gaussian(method_func: GaussianMethod) -> Callable[["FilterContext
                     between_relevance=_between_relevance_gaussian(
                         ctx, cache, X_pre
                     ),
+                    block_ids=_block_id_column(ctx, len(ctx.feature_names)),
                 )
             cond = _conditioning_diag(ctx, selected_indices or [])
             if cond is not None:
@@ -421,6 +426,7 @@ def make_auto_gaussian(
             exclude=_kw(ctx, "exclude"),
             candidates=_kw(ctx, "candidates"),
             include_names=_include_names(ctx),
+            feature_blocks=_kw(ctx, "feature_blocks"),
             within=ctx.within,
             within_X=X_pre,
             within_y=ctx.request.y,
@@ -467,6 +473,7 @@ def make_auto_gaussian(
                     between_relevance=_between_relevance_gaussian(
                         ctx, cache, X_pre
                     ),
+                    block_ids=_block_id_column(ctx, len(ctx.feature_names)),
                 )
             cond = _conditioning_diag(ctx, selected_indices or [])
             if cond is not None:
@@ -506,6 +513,7 @@ def _gaussian_proxy_correlations(
         raise ValueError(
             "store_proxies=True requires unambiguous raw selected-feature positions"
         )
+    from sift.selection.blocks import map_blocks_to_valid
     from sift.selection.filter_auto_k_common import _conditioning_valid_sets
 
     protect, pool = _conditioning_valid_sets(
@@ -516,6 +524,16 @@ def _gaussian_proxy_correlations(
             "candidates": _kw(ctx, "candidates"),
         },
     )
+    block_members = None
+    if getattr(ctx, "feature_blocks", None) is not None:
+        _orig_ids, block_members = map_blocks_to_valid(
+            ctx.feature_blocks, cache.valid_cols
+        )
+    reject_unavailable_proxy_positions(
+        selected_indices,
+        available_original=cache.valid_cols,
+        feature_names=cache.feature_names,
+    )
     panel = build_candidate_panel(
         cache,
         ctx.request.y if y is None else y,
@@ -525,6 +543,7 @@ def _gaussian_proxy_correlations(
         method=method,
         protect_valid=protect,
         pool_valid=pool,
+        block_members=block_members,
     )
     return proxy_frame_from_panel(
         panel.R,
@@ -645,6 +664,7 @@ def make_jmi_classic_path(*, aggregation: str, pass_sample_weight: bool) -> Clas
             callback=ctx.request.callback,
             include_idx=_include_indices(ctx),
             candidate_idx=_candidate_indices(ctx),
+            blocks=_block_member_arrays(ctx),
         )
 
     return jmi_classic_path
@@ -842,6 +862,7 @@ def _build_binary_run(ctx: "FilterContext") -> tuple[BinaryProblem, BinaryOption
         callback=ctx.request.callback,
         include_idx=_include_indices(ctx),
         candidate_idx=_candidate_indices(ctx),
+        feature_blocks=getattr(ctx, "feature_blocks", None),
     )
     return problem, options, run
 
@@ -925,11 +946,24 @@ def _binary_payload_from_selection(
         selection.selected_original,
         run.path.univariate_scores,
         "cefsplus_binary",
+        block_ids=_block_id_column(ctx, len(run.feature_names)),
     )
-    discovery_original = list(run.path.selected_original)
-    path_score_by_index = dict(
-        zip(discovery_original, selection.selected_scores)
-    )
+    path_score_by_index: dict[int, float] = {}
+    widths = run.prefix_widths or getattr(run.path, "prefix_widths", ()) or ()
+    discovery = list(run.path.selected_original)
+    if widths and selection.selected_scores:
+        start = 0
+        n_steps = min(len(selection.selected_scores), len(widths))
+        for t in range(n_steps):
+            end = int(widths[t])
+            score = float(selection.selected_scores[t])
+            for orig in discovery[start:end]:
+                path_score_by_index[int(orig)] = score
+            start = end
+    else:
+        path_score_by_index = dict(
+            zip(discovery, selection.selected_scores)
+        )
     ranking.insert(
         ranking.columns.get_loc("selector"),
         "score",
@@ -1082,6 +1116,7 @@ def _mrmr_classic_path(ctx: "FilterContext", prep: ClassicPrepared, k: int, top_
         callback=ctx.request.callback,
         include_idx=_include_indices(ctx),
         candidate_idx=_candidate_indices(ctx),
+        blocks=_block_member_arrays(ctx),
     )
 
 
@@ -1372,6 +1407,7 @@ def _path_ranking(
     *,
     within_relevance: np.ndarray | None = None,
     between_relevance: np.ndarray | None = None,
+    block_ids: Sequence[Any] | None = None,
 ) -> pd.DataFrame:
     relevance_arr = np.asarray(relevance, dtype=np.float64).reshape(-1)
     n_features = len(feature_names)
@@ -1410,11 +1446,29 @@ def _path_ranking(
             raise RuntimeError("between_relevance length must match feature names")
         data["between_relevance"] = between_arr[order]
     data["selector"] = selector
+    if block_ids is not None:
+        if len(list(block_ids)) != n_features:
+            raise RuntimeError("block_ids length must match feature names")
+        data["block_id"] = [block_ids[int(i)] for i in order]
     return pd.DataFrame(data)
 
 
 def _kw(ctx: "FilterContext", name: str, default=None):
     return ctx.selector_kwargs.get(name, default)
+
+
+def _block_member_arrays(ctx: "FilterContext") -> list[np.ndarray] | None:
+    blocks = getattr(ctx, "feature_blocks", None)
+    if blocks is None:
+        return None
+    return [np.asarray(members, dtype=np.int64) for members in blocks.members]
+
+
+def _block_id_column(ctx: "FilterContext", n_features: int) -> list[Any] | None:
+    blocks = getattr(ctx, "feature_blocks", None)
+    if blocks is None:
+        return None
+    return [blocks.block_ids[blocks.column_to_block[i]] for i in range(n_features)]
 
 
 def _include_names(ctx: "FilterContext") -> list[str] | None:

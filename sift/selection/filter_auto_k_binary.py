@@ -37,7 +37,11 @@ def select_binary_elbow(
 ) -> BinarySelection:
     del cat_encoding
     auto_objective = np.cumsum(np.asarray(run.path.path_scores, dtype=np.float64))
-    path_length = len(run.path.selected_features)
+    path_length = (
+        len(run.prefix_widths)
+        if run.prefix_widths
+        else len(run.path.selected_features)
+    )
     selected_count, auto_diag = _select_elbow_count(
         auto_objective,
         auto_k_config,
@@ -82,18 +86,40 @@ def select_binary_penalized(
             run.path.selected_original,
             ridge=options.ridge,
             include_original=run.include_original,
+            prefix_widths=run.prefix_widths,
         )
         score_test_ic_approximation = False
 
-    path_length = len(run.path.selected_features)
+    path_length = (
+        len(run.prefix_widths)
+        if run.prefix_widths
+        else len(run.path.selected_features)
+    )
+    n_candidates = problem.n_features_input
+    df_path = None
+    ic_dimension = "k"
+    if run.prefix_widths:
+        from sift.selection.cefsplus_binary import binary_logistic_prefix_df
+
+        ic_dimension = "df"
+        n_candidates = max(int(run.n_discovery_candidates or path_length), path_length, 1)
+        df_path = binary_logistic_prefix_df(
+            run.X_sub.astype(np.float64, copy=False),
+            run.w_sub.astype(np.float64, copy=False),
+            run.path.selected_original,
+            run.prefix_widths,
+            include_indices=run.include_original,
+        )
     selected_count, auto_diag = _select_penalized_count(
         auto_objective,
         auto_k_config,
         objective_scale=2.0,
         n_samples=len(run.y_sub),
         sample_weight=run.w_sub,
-        n_candidates=problem.n_features_input,
+        n_candidates=n_candidates,
         path_length=path_length,
+        df_path=df_path,
+        ic_dimension=ic_dimension,
     )
     ic_likelihood_type = (
         "weighted_pseudo_likelihood" if problem.weighted else "bernoulli_log_likelihood"
@@ -307,10 +333,15 @@ def select_binary_evaluate(
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
         warmup_policy=warmup_policy,
+        prefix_sizes=run.prefix_widths,
     )
-    selected_count = len(selected_features)
+    selected_count = int(best_k)
     _print_selected_k("CV/holdout", best_k, verbose)
-    path_length = len(run.path.selected_features)
+    path_length = (
+        len(run.prefix_widths)
+        if run.prefix_widths
+        else len(run.path.selected_features)
+    )
     summary = auto_k_summary(
         auto_k_config,
         selected_k=selected_count,
