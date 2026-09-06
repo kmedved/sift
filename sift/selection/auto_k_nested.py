@@ -35,6 +35,8 @@ class NestedAutoKFold:
     val_path: Any
     feature_path: list[str]
     prefix_sizes: tuple[int, ...] | None = None
+    n_include_features: int = 0
+    path_parents: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -174,15 +176,27 @@ def select_k_nested(
         for k, score in split_scores.items():
             all_scores.setdefault(int(k), []).append(score)
             if fold.prefix_sizes is not None and int(k) > 0:
-                raw_k = int(fold.prefix_sizes[min(int(k), len(fold.prefix_sizes)) - 1])
+                sizes = [int(w) for w in fold.prefix_sizes if int(w) > 0]
+                if sizes and (
+                    fold.path_parents is not None
+                    or sizes[-1] == len(fold.feature_path)
+                ):
+                    raw_k = int(sizes[min(int(k), len(sizes)) - 1])
+                else:
+                    raw_k = int(fold.n_include_features) + int(k)
             else:
                 raw_k = int(k)
+            end = min(raw_k, len(fold.feature_path))
+            if fold.path_parents is not None:
+                reported = tuple(dict.fromkeys(fold.path_parents[:end]))
+            else:
+                reported = tuple(fold.feature_path[:end])
             fold_rows.append(
                 {
                     "split": split_id,
                     "k": int(k),
                     "score": score,
-                    "path": tuple(fold.feature_path[: min(raw_k, len(fold.feature_path))]),
+                    "path": reported,
                 }
             )
 

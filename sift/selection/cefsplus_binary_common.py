@@ -133,10 +133,11 @@ def validate_binary_options(
         "loo",
         "james_stein",
         "loo_logit",
+        "onehot",
     }:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target_cv', 'target', 'loo', "
-            "'james_stein', or 'loo_logit'."
+            "cat_encoding must be one of 'none', 'target_cv', 'onehot', "
+            "'target', 'loo', 'james_stein', or 'loo_logit'."
         )
 
     try:

@@ -29,10 +29,12 @@ from sift._selector_compat import (
 )
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
+    OneHotBlockEncoder,
     TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
     suppress_category_encoder_pandas_warnings,
+    validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
 )
 from sift.api import (
@@ -88,6 +90,7 @@ _BLOCKED_FIT_PARAM_OVERRIDES = frozenset(
         "cat_features",
         "cat_encoding",
         "allow_full_data_target_encoding",
+        "onehot_max_levels",
     }
 )
 
@@ -179,6 +182,9 @@ def _nested_block_prefix_sizes(
     values from the nested caller. Explicit ``None`` means omitted, not
     "use the constructor attribute".
     """
+    encoded_widths = getattr(selector, "_encoded_prefix_widths_", None)
+    if encoded_widths:
+        return tuple(int(w) for w in encoded_widths)
     if feature_blocks is None:
         return None
     from sift.selection.blocks import discovery_prefix_widths, resolve_feature_blocks
@@ -277,6 +283,59 @@ def _selected_training_output(X_fit, selected_indices: np.ndarray):
     return np.asarray(X_fit)[:, selected_indices].copy()
 
 
+def _apply_onehot_call_params(selector, call_params, feature_names) -> tuple:
+    encoder = getattr(selector, "categorical_encoder_", None)
+    if not isinstance(encoder, OneHotBlockEncoder):
+        return encoder, None, []
+    from sift.selection.blocks import compose_raw_blocks_through_onehot, resolve_feature_blocks
+    from sift.selection.conditioning import resolve_conditioning
+
+    raw_names = list(feature_names)
+    raw_blocks = resolve_feature_blocks(
+        call_params.get("feature_blocks", getattr(selector, "feature_blocks", None)),
+        feature_names=raw_names,
+        named=True,
+    )
+    encoded_names = list(encoder.output_names_)
+    composed = compose_raw_blocks_through_onehot(
+        raw_blocks,
+        raw_names=raw_names,
+        encoded_names=encoded_names,
+        parents=list(encoder.output_parents_),
+    )
+    call_params["feature_blocks"] = {
+        composed.block_ids[i]: [encoded_names[j] for j in composed.members[i]]
+        for i in range(composed.n_blocks)
+    }
+    resolved = resolve_conditioning(
+        call_params.get("include", getattr(selector, "include", None)),
+        call_params.get("exclude", getattr(selector, "exclude", None)),
+        call_params.get("candidates", getattr(selector, "candidates", None)),
+        feature_names=raw_names,
+        named=True,
+        k=1,
+    )
+    if resolved is not None and resolved.include:
+        call_params["include"] = [
+            dummy
+            for raw_i in resolved.include
+            for dummy in encoder.encoded_columns_for(raw_names[int(raw_i)])
+        ]
+    if resolved is not None and resolved.exclude:
+        call_params["exclude"] = [
+            dummy
+            for raw_i in resolved.exclude
+            for dummy in encoder.encoded_columns_for(raw_names[int(raw_i)])
+        ]
+    if resolved is not None and resolved.candidates is not None:
+        call_params["candidates"] = [
+            dummy
+            for raw_i in resolved.candidates
+            for dummy in encoder.encoded_columns_for(raw_names[int(raw_i)])
+        ]
+    return encoder, composed, encoded_names
+
+
 def _make_category_encoder(
     method: str,
     columns: list[str],
@@ -289,6 +348,7 @@ def _make_category_encoder(
     target_cv_smoothing: Literal["auto"] | float = "auto",
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
+    onehot_max_levels: int = 32,
 ):
     if method == "none" or not columns:
         return None
@@ -308,10 +368,15 @@ def _make_category_encoder(
             clip_min=loo_clip_min,
             clip_max=loo_clip_max,
         )
+    if method == "onehot":
+        return OneHotBlockEncoder(
+            columns,
+            max_levels=validate_onehot_max_levels(onehot_max_levels),
+        )
     if method not in {"loo", "target", "james_stein"}:
         raise ValueError(
-            "cat_encoding must be one of 'none', 'target_cv', 'target', 'loo', "
-            "'james_stein', or 'loo_logit'. "
+            "cat_encoding must be one of 'none', 'target_cv', 'onehot', "
+            "'target', 'loo', 'james_stein', or 'loo_logit'. "
             f"Got {method!r}."
         )
     if importlib.util.find_spec("category_encoders") is None:
@@ -368,6 +433,19 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     def _output_indices(self) -> np.ndarray:
         check_is_fitted(self, ["selected_indices_", "n_features_in_"])
         return ordered_indices(self.selected_indices_, self.output_order)
+
+    def _encoded_output_names(self) -> list[str]:
+        names = list(getattr(self, "_encoded_selected_names_", None) or [])
+        if not names:
+            return [str(name) for name in self.feature_names_in_[self._output_indices()]]
+        if getattr(self, "output_order", "legacy") != "original":
+            return names
+        encoder = getattr(self, "categorical_encoder_", None)
+        parent_pos = {str(name): i for i, name in enumerate(self.feature_names_in_)}
+        def _key(encoded_name: str):
+            parent = encoder.parent_of(encoded_name) if encoder is not None else encoded_name
+            return (parent_pos.get(str(parent), 0), names.index(encoded_name))
+        return sorted(names, key=_key)
 
     def _get_support_mask(self) -> np.ndarray:
         check_is_fitted(self, ["selected_indices_", "n_features_in_"])
@@ -434,6 +512,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             "k_",
             "nested_auto_k_diagnostics_",
             "_row_metadata_columns_",
+            "_encoded_selected_names_",
+            "_encoded_prefix_widths_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -485,6 +565,16 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding == "none" or not isinstance(X, pd.DataFrame):
             return X
+        if cat_encoding == "onehot":
+            cfg = getattr(self, "auto_k_config", None)
+            nested = getattr(cfg, "auto_k_mode", None) == "nested" if cfg is not None else False
+            method = getattr(cfg, "k_method", None) if cfg is not None else None
+            if (
+                getattr(self, "k", None) == "auto"
+                and not nested
+                and method in {None, "auto", "evaluate", "gaussian_cv", "xfit_objective"}
+            ):
+                return X
 
         cat_features = _categorical_columns(X, getattr(self, "cat_features", None))
         self.categorical_features_ = list(cat_features)
@@ -502,10 +592,11 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             target_cv_smoothing=getattr(self, "target_cv_smoothing", "auto"),
             target_prior=getattr(self, "target_prior", None),
             warmup_policy=getattr(self, "warmup_policy", "zero_weight"),
+            onehot_max_levels=getattr(self, "onehot_max_levels", 32),
         )
         if sample_weight is not None and not isinstance(
             encoder,
-            (LeaveOneOutLogitEncoder, TargetCVEncoder),
+            (LeaveOneOutLogitEncoder, TargetCVEncoder, OneHotBlockEncoder),
         ):
             raise ValueError(
                 "sample_weight with selector-class categorical encoding is only "
@@ -531,6 +622,8 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                     groups=groups,
                     time=time,
                 )
+            elif isinstance(encoder, OneHotBlockEncoder):
+                X_encoded = encoder.fit_transform(X, sample_weight=sample_weight)
             else:
                 X_encoded = encoder.fit_transform(X, y_enc)
 
@@ -613,6 +706,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
             call_params["allow_full_data_target_encoding"] = False
+        onehot_encoder, composed, encoded_names = _apply_onehot_call_params(
+            self, call_params, feature_names
+        )
 
         result = self._selector_fn(
             X_fit,
@@ -633,16 +729,61 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 selected_features,
             ).tolist()
 
+        self._encoded_selected_names_ = None
+        self._encoded_prefix_widths_ = None
+        if isinstance(onehot_encoder, OneHotBlockEncoder):
+            encoded_selected = list(selected_features)
+            self._encoded_selected_names_ = encoded_selected
+            selected_features = onehot_encoder.collapse_to_raw(encoded_selected)
+            selected_indices = _coerce_selection_indices(
+                feature_names,
+                selected_features,
+            ).tolist()
+            from sift.selection.blocks import discovery_prefix_widths
+
+            dummy_index = {name: i for i, name in enumerate(encoded_names)}
+            dummy_path = [dummy_index[name] for name in encoded_selected if name in dummy_index]
+            include_dummy = set()
+            if call_params.get("include"):
+                include_dummy = set(call_params["include"])
+            include_idx = {
+                dummy_index[name] for name in include_dummy if name in dummy_index
+            }
+            discoveries = [i for i in dummy_path if i not in include_idx]
+            n_include = sum(1 for i in dummy_path if i in include_idx)
+            widths = discovery_prefix_widths(discoveries, composed)
+            if widths:
+                self._encoded_prefix_widths_ = tuple(int(n_include + w) for w in widths)
+        elif (
+            getattr(self, "cat_encoding", None) == "onehot"
+            and isinstance(X, pd.DataFrame)
+        ):
+            cols = _categorical_columns(X, getattr(self, "cat_features", None))
+            if cols:
+                enc = OneHotBlockEncoder(
+                    cols,
+                    max_levels=validate_onehot_max_levels(
+                        getattr(self, "onehot_max_levels", 32)
+                    ),
+                )
+                enc.fit(X, sample_weight=sample_weight)
+                self.categorical_encoder_ = enc
+                self._categorical_encoding_applied_ = True
+                self._encoded_selected_names_ = enc.expand_selected(selected_features)
+
         self.feature_names_in_ = feature_names_array(feature_names)
         self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
         self.selected_features_ = selected_features
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         if capture_training_output:
-            self._fit_transform_output_ = _selected_training_output(
-                X_fit,
-                self._output_indices(),
-            )
+            if self._encoded_selected_names_ is not None and isinstance(X_fit, pd.DataFrame):
+                self._fit_transform_output_ = X_fit.loc[:, self._encoded_output_names()].copy()
+            else:
+                self._fit_transform_output_ = _selected_training_output(
+                    X_fit,
+                    self._output_indices(),
+                )
         return self
 
     def _fit_impl(
@@ -693,6 +834,20 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
                 "cache so the selector can fit encoders on the training rows."
             )
+        if (
+            resolved_cache is not None
+            and getattr(self, "cat_encoding", "none") == "onehot"
+        ):
+            raise ValueError(
+                "cat_encoding='onehot' cannot be combined with a prebuilt cache "
+                "because the cache has no one-hot provenance"
+            )
+        if getattr(self, "cat_encoding", "none") == "onehot":
+            validate_onehot_max_levels(getattr(self, "onehot_max_levels", 32))
+            if getattr(self, "within", None) is not None:
+                raise ValueError(
+                    "cat_encoding='onehot' is not supported with within panel demeaning"
+                )
 
         if self.k == "auto":
             if not self._supports_auto_k():
@@ -724,6 +879,10 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                     "contextual cat_encoding='target_cv' requires an explicit "
                     "AutoKConfig(auto_k_mode='nested', k_method='evaluate')"
                 )
+            if getattr(self, "cat_encoding", "none") == "onehot":
+                from sift.selection.blocks import require_onehot_auto_k
+
+                require_onehot_auto_k(effective_auto_k.k_method)
             if effective_auto_k.auto_k_mode == "nested":
                 if effective_auto_k.k_method != "evaluate":
                     raise ValueError(
@@ -900,11 +1059,24 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 feature_blocks=feature_blocks,
                 include=include,
             )
+            n_include = 0
+            if include is not None and include is not False:
+                n_include = len(list(include))
+            encoded_names = getattr(fold_selector, "_encoded_selected_names_", None)
+            encoder = getattr(fold_selector, "categorical_encoder_", None)
+            path_parents = None
+            if encoded_names and isinstance(encoder, OneHotBlockEncoder):
+                feature_path = list(encoded_names)
+                path_parents = tuple(encoder.parent_of(name) for name in feature_path)
+            else:
+                feature_path = list(fold_selector.selected_features_)
             return NestedAutoKFold(
                 train_path=X_train_path,
                 val_path=X_val_path,
-                feature_path=list(fold_selector.selected_features_),
+                feature_path=feature_path,
                 prefix_sizes=prefix_sizes,
+                n_include_features=int(n_include),
+                path_parents=path_parents,
             )
 
         nested = select_k_nested(
@@ -952,6 +1124,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         if isinstance(X, pd.DataFrame):
             check_fitted_column_identity(X, self.feature_names_in_)
             X = self._transform_categoricals(X)
+            encoded_names = getattr(self, "_encoded_selected_names_", None)
+            if encoded_names:
+                return X.loc[:, self._encoded_output_names()]
             return X.iloc[:, self._output_indices()]
         X_arr = np.asarray(X)
         if getattr(self, "_categorical_encoding_applied_", False):
@@ -991,6 +1166,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 raise ValueError(
                     "input_features is not equal to feature_names_in_"
                 )
+        encoded_names = getattr(self, "_encoded_selected_names_", None)
+        if encoded_names:
+            return np.asarray(self._encoded_output_names(), dtype=object)
         return fitted_names[self._output_indices()]
 
     def inverse_transform(self, X):
@@ -1053,7 +1231,7 @@ class MRMRSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
@@ -1084,6 +1262,9 @@ class MRMRSelector(_BaseSelector):
         Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
         rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
         contract it contradicts.
+    onehot_max_levels : int, default=32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int, None or {"auto"}, default="auto"
         Row cap for classic row sampling and for uncached Gaussian cache
         construction. ``"auto"`` is the sklearn-clonable spelling of the
@@ -1238,6 +1419,7 @@ class MRMRSelector(_BaseSelector):
         target_prior: float | None = None,
         warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         n_jobs: int = 1,
@@ -1300,7 +1482,7 @@ class JMISelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
@@ -1330,6 +1512,9 @@ class JMISelector(_BaseSelector):
         Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
         rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
         contract it contradicts.
+    onehot_max_levels : int, default=32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int, None or {"auto"}, default="auto"
         Row cap for classic row sampling and for uncached Gaussian cache
         construction. ``"auto"`` is the sklearn-clonable spelling of the
@@ -1476,6 +1661,7 @@ class JMISelector(_BaseSelector):
         target_prior: float | None = None,
         warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
@@ -1537,7 +1723,7 @@ class JMIMSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
@@ -1567,6 +1753,9 @@ class JMIMSelector(_BaseSelector):
         Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
         rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
         contract it contradicts.
+    onehot_max_levels : int, default=32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int, None or {"auto"}, default="auto"
         Row cap for classic row sampling and for uncached Gaussian cache
         construction. ``"auto"`` is the sklearn-clonable spelling of the
@@ -1714,6 +1903,7 @@ class JMIMSelector(_BaseSelector):
         target_prior: float | None = None,
         warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
@@ -1769,7 +1959,7 @@ class CEFSPlusSelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit``.
         ``"target_cv"`` is the built-in leakage-safe contract: out-of-fold
@@ -1799,6 +1989,9 @@ class CEFSPlusSelector(_BaseSelector):
         Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
         rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
         contract it contradicts.
+    onehot_max_levels : int, default=32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int, None or {"auto"}, default="auto"
         Row cap for uncached Gaussian cache construction. ``"auto"`` is the
         sklearn-clonable spelling of the omitted default: 50,000 rows when
@@ -1944,6 +2137,7 @@ class CEFSPlusSelector(_BaseSelector):
         target_prior: float | None = None,
         warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
         verbose: bool = True,
@@ -2018,7 +2212,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns. Unused when
         ``cat_encoding="none"`` or when ``X`` is an ndarray.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target_cv"``, ``"target"``, ``"loo"``,
         ``"james_stein"`` or ``"loo_logit"``, fitted inside ``fit`` against the
         validated 0/1 target. ``"target_cv"`` is the built-in leakage-safe
@@ -2057,6 +2251,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
         Opt in to fitting the 0.8 supervised encoders on the full matrix. It is
         rejected together with ``cat_encoding="target_cv"``, whose cross-fitted
         contract it contradicts.
+    onehot_max_levels : int, default=32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default=None
         Row cap applied before the path is built. ``None`` keeps every
         positively weighted row. This selector takes no cache, so the numeric
@@ -2195,6 +2392,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         loo_clip_min: float = 1e-4,
         loo_clip_max: float = 1.0 - 1e-4,
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         subsample: int | None = None,
         random_state: int = 0,
         verbose: bool = True,
@@ -2350,6 +2548,9 @@ class CEFSPlusBinarySelector(_BaseSelector):
             call_params["cat_features"] = None
             call_params["cat_encoding"] = "none"
             call_params["allow_full_data_target_encoding"] = False
+        onehot_encoder, composed, encoded_names = _apply_onehot_call_params(
+            self, call_params, feature_names
+        )
 
         result = self._selector_fn(
             X_fit,
@@ -2358,23 +2559,64 @@ class CEFSPlusBinarySelector(_BaseSelector):
             return_result=True,
             **call_params,
         )
+        selected_features = list(result.selected_features)
         selected_indices = result.selected_indices
         if selected_indices is None:
             selected_indices = _coerce_selection_indices(
                 feature_names,
-                list(result.selected_features),
+                selected_features,
             ).tolist()
+        self._encoded_selected_names_ = None
+        self._encoded_prefix_widths_ = None
+        if isinstance(onehot_encoder, OneHotBlockEncoder):
+            encoded_selected = list(selected_features)
+            self._encoded_selected_names_ = encoded_selected
+            selected_features = onehot_encoder.collapse_to_raw(encoded_selected)
+            selected_indices = _coerce_selection_indices(
+                feature_names,
+                selected_features,
+            ).tolist()
+            from sift.selection.blocks import discovery_prefix_widths
+
+            dummy_index = {name: i for i, name in enumerate(encoded_names)}
+            dummy_path = [dummy_index[name] for name in encoded_selected if name in dummy_index]
+            include_dummy = set(call_params.get("include") or ())
+            include_idx = {dummy_index[name] for name in include_dummy if name in dummy_index}
+            discoveries = [i for i in dummy_path if i not in include_idx]
+            n_include = sum(1 for i in dummy_path if i in include_idx)
+            widths = discovery_prefix_widths(discoveries, composed)
+            if widths:
+                self._encoded_prefix_widths_ = tuple(int(n_include + w) for w in widths)
+        elif (
+            getattr(self, "cat_encoding", None) == "onehot"
+            and isinstance(X, pd.DataFrame)
+        ):
+            cols = _categorical_columns(X, getattr(self, "cat_features", None))
+            if cols:
+                enc = OneHotBlockEncoder(
+                    cols,
+                    max_levels=validate_onehot_max_levels(
+                        getattr(self, "onehot_max_levels", 32)
+                    ),
+                )
+                enc.fit(X, sample_weight=sample_weight)
+                self.categorical_encoder_ = enc
+                self._categorical_encoding_applied_ = True
+                self._encoded_selected_names_ = enc.expand_selected(selected_features)
 
         self.feature_names_in_ = feature_names_array(feature_names)
         self._fit_feature_names_generated_ = names_generated
         self.n_features_in_ = len(feature_names)
-        self.selected_features_ = list(result.selected_features)
+        self.selected_features_ = selected_features
         self.selected_indices_ = np.asarray(selected_indices, dtype=np.int64)
         if capture_training_output:
-            self._fit_transform_output_ = _selected_training_output(
-                X_fit,
-                self._output_indices(),
-            )
+            if self._encoded_selected_names_ is not None and isinstance(X_fit, pd.DataFrame):
+                self._fit_transform_output_ = X_fit.loc[:, self._encoded_output_names()].copy()
+            else:
+                self._fit_transform_output_ = _selected_training_output(
+                    X_fit,
+                    self._output_indices(),
+                )
         return self
 
 
@@ -2466,7 +2708,7 @@ class KnockoffSelector(_BaseSelector):
     cat_features : list of str or None, default=None
         Categorical column names to encode. ``None`` auto-detects ``object``,
         ``category`` and ``string`` DataFrame columns.
-    cat_encoding : str, default="none"
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", "loo_logit"}, default="none"
         One of ``"none"``, ``"target"``, ``"loo"``, ``"james_stein"`` or
         ``"loo_logit"``. ``"target_cv"`` is rejected outright here.
         ``"none"`` is the only value that preserves the Model-X FDR claim; the
@@ -2487,6 +2729,10 @@ class KnockoffSelector(_BaseSelector):
         for the same reason.
     allow_full_data_target_encoding : bool, default=False
         Opt in to fitting the legacy supervised encoders on the full matrix.
+    onehot_max_levels : int, default=32
+        Accepted for constructor parity and rejected with
+        ``cat_encoding="onehot"``: one-hot blocks are not a knockoff FDR
+        claim.
     loo_smoothing : float, default=20.0
         Positive smoothing constant of the ``cat_encoding="loo_logit"``
         encoder.
@@ -2651,6 +2897,7 @@ class KnockoffSelector(_BaseSelector):
         target_prior: float | None = None,
         warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
         allow_full_data_target_encoding: bool = False,
+        onehot_max_levels: int = 32,
         loo_smoothing: float = 20.0,
         loo_clip_min: float = 1e-4,
         loo_clip_max: float = 1.0 - 1e-4,
@@ -2672,6 +2919,13 @@ class KnockoffSelector(_BaseSelector):
         return False
 
     def _validate_categorical_encoding_params(self) -> None:
+        if self.cat_encoding == "onehot":
+            raise ValueError(
+                "KnockoffSelector does not support cat_encoding='onehot'. "
+                "One-hot blocks are a filter-selector contract and are not a "
+                "Model-X FDR claim. Pre-encode outside the selector or use a "
+                "filter selector."
+            )
         if self.cat_encoding == "target_cv":
             raise ValueError(
                 "KnockoffSelector does not support cat_encoding='target_cv'. "

@@ -82,7 +82,16 @@ columns, weights, and group/time metadata is the
 Function-style selectors default to `cat_encoding="none"` and support
 `cat_features` and explicit encodings. Use `cat_encoding="target_cv"` for the
 built-in leakage-safe regression/binary path; it uses cross-fitted training
-values and needs no optional dependency.
+values and needs no optional dependency. Use `cat_encoding="onehot"` when a
+category should enter selection as one F3 block of dummy columns
+`{column}__{level}`. The encoder is target-independent: positive-weight rows
+set the vocabulary, `onehot_max_levels=32` keeps the most massive levels
+(ties broken by label) and pools the rest as `other`, missing is its own
+level, and unknown transform values join `other` when that remainder exists
+(otherwise they are all-zero). Selected names stay raw; sklearn `transform` /
+`get_feature_names_out` use the encoded width. Nested and prefix-only
+`evaluate`, Gaussian CV, xfit, and auto routing learn the vocabulary inside
+training folds. Prebuilt caches, `within`, knockoffs, and Boruta raise.
 
 `target_cv` emits **centered category effects**, not raw category means: each
 value is the category estimate minus the training prior that produced it. An

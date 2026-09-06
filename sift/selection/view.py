@@ -629,12 +629,26 @@ class SelectionView:
 
         encoded_names = None if encoded_features is None else list(encoded_features)
         encoded_positions = _coerce_indices(encoded_indices, label="encoded_indices")
-        if encoded_positions is not None and len(encoded_positions) != len(selected):
-            raise ValueError("encoded_indices must align with selected features")
+        if encoded_positions is not None and encoded_names is None:
+            raise ValueError("encoded_indices requires encoded_features")
+        if encoded_positions is not None:
+            if any(index < 0 for index in encoded_positions):
+                raise ValueError("encoded_indices contains an out-of-bounds position")
+            if len(set(encoded_positions)) != len(encoded_positions):
+                raise ValueError("encoded_indices must be unique")
         if encoded_names is not None and encoded_positions is not None and any(
             index >= len(encoded_names) for index in encoded_positions
         ):
             raise ValueError("encoded_indices contains an out-of-bounds position")
+        if (
+            encoded_positions is not None
+            and selected_indices is not None
+            and n_raw_features is not None
+            and len(encoded_positions) < len(selected)
+        ):
+            raise ValueError(
+                "encoded_indices must cover every selected raw feature after expansion"
+            )
 
         if not isinstance(raw_table, pd.DataFrame):
             raise TypeError("raw_table must be a pandas DataFrame")

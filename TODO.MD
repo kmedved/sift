@@ -102,12 +102,15 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       `40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf`.
       Codex/Opus accepted; merged as PR #84 at `cfd2f64` after all six required
       CI jobs passed on `20d07d1`. No 0.9 default change.
-- [ ] F3 block/group-aware selection (`k` counts blocks). Fixed-k Gaussian/
+- [x] F3 block/group-aware selection (`k` counts blocks). Fixed-k Gaussian/
       classic, block-aware auto-k, and binary log-loss joint blocks
       (`evaluate`/`elbow`/`penalized_objective`/`auto`) are implemented.
       Codex/Opus review accepted; clean implementation `2586a2c` and refreshed
-      runtime evidence recorded. Full integration CI and merge remain.
+      runtime evidence `9f91781`. PR #85 merged at `e9a4464` after all six
+      required CI jobs passed on the exact head; local gate 2200 passed / 40 skipped.
 - [ ] E4 one-hot encoding, after F3 makes a block the selection unit.
+      Implementation and Codex/Opus review accepted on
+      `codex/0.9x-e4-onehot-blocks`; clean-source benchmark/CI/merge pending.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.

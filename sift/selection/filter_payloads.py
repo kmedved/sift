@@ -15,6 +15,8 @@ from sift._preprocess import (
     RelevanceMethod,
     Task,
     TargetCVEncoder,
+    OneHotBlockEncoder,
+    validate_onehot_max_levels,
     check_regression_only,
     encode_categoricals,
     ensure_weights,
@@ -218,6 +220,12 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
             return_diagnostics=want_result,
             base_features=_include_names(ctx),
             feature_blocks=_kw(ctx, "feature_blocks"),
+            onehot_raw_X=getattr(ctx, "onehot_source_X", None),
+            onehot_encoder=getattr(ctx, "onehot_encoder", None),
+            onehot_cat_features=list(getattr(ctx, "onehot_cat_features", None) or ()),
+            onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
+            onehot_include_names=_raw_onehot_include_names(ctx),
+            onehot_row_idx=prep.row_idx,
         )
         ranking = None
         diagnostics = None
@@ -430,6 +438,12 @@ def make_auto_gaussian(
             within=ctx.within,
             within_X=X_pre,
             within_y=ctx.request.y,
+            onehot_raw_X=getattr(ctx, "onehot_source_X", None),
+            onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
+            onehot_cat_features=list(getattr(ctx, "onehot_cat_features", None) or ()),
+            onehot_raw_blocks=getattr(ctx, "raw_feature_blocks", None),
+            onehot_encoder=getattr(ctx, "onehot_encoder", None),
+            onehot_include_names=_raw_onehot_include_names(ctx),
         )
         selected, selected_indices = _compose_gaussian_auto_selection(
             ctx, selected, selected_indices
@@ -821,6 +835,11 @@ def _binary_auto_payload(
             target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
             target_prior=_kw(ctx, "target_prior"),
             warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+            onehot_raw_X=getattr(ctx, "onehot_source_X", None),
+            onehot_encoder=getattr(ctx, "onehot_encoder", None),
+            onehot_cat_features=list(getattr(ctx, "onehot_cat_features", None) or ()),
+            onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
+            onehot_include_names=_raw_onehot_include_names(ctx),
         )
     selection = handler(
         ctx.request.X,
@@ -1028,12 +1047,13 @@ def _cache_for_gaussian(
     X_pre = ctx.request.X
     if ctx.request.cache is not None:
         if (
-            _kw(ctx, "cat_encoding", "none") == "target_cv"
+            _kw(ctx, "cat_encoding", "none") in {"target_cv", "onehot"}
             and cat_features
         ):
             raise ValueError(
-                "cat_encoding='target_cv' cannot be combined with a prebuilt "
-                "Gaussian cache because the cache has no target-encoding provenance"
+                f"cat_encoding={_kw(ctx, 'cat_encoding')!r} cannot be combined "
+                "with a prebuilt Gaussian cache because the cache has no "
+                "encoding provenance"
             )
         return (
             ctx.request.cache,
@@ -1057,6 +1077,7 @@ def _cache_for_gaussian(
         target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
         target_prior=_kw(ctx, "target_prior"),
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+        onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
     )
     X_encoded, effective_weight, target_cv_metadata = X_encoded
     X_pre = X_encoded
@@ -1142,6 +1163,7 @@ def _encode_categoricals_for_selector(
     target_cv_smoothing: str | float = "auto",
     target_prior: float | None = None,
     warmup_policy: str = "zero_weight",
+    onehot_max_levels: int = 32,
 ) -> tuple[Union[pd.DataFrame, np.ndarray], np.ndarray | None, dict | None]:
     if not cat_features or cat_encoding == "none":
         return X, sample_weight, None
@@ -1162,6 +1184,12 @@ def _encode_categoricals_for_selector(
             "behavior, or set cat_encoding='none' and pre-encode categoricals in a "
             "leakage-safe pipeline."
         )
+    if cat_encoding == "onehot":
+        encoder = OneHotBlockEncoder(
+            present_cat_features,
+            max_levels=validate_onehot_max_levels(onehot_max_levels),
+        )
+        return encoder.fit_transform(X, sample_weight=sample_weight), sample_weight, None
     if cat_encoding == "target_cv":
         encoder = TargetCVEncoder(
             present_cat_features,
@@ -1217,6 +1245,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         target_cv_smoothing=_kw(ctx, "target_cv_smoothing", "auto"),
         target_prior=_kw(ctx, "target_prior"),
         warmup_policy=_kw(ctx, "warmup_policy", "zero_weight"),
+        onehot_max_levels=_kw(ctx, "onehot_max_levels", 32),
     )
     X_encoded, effective_weight, target_cv_metadata = X_encoded
     X_arr, y_arr, feature_names = validate_inputs(
@@ -1469,6 +1498,14 @@ def _block_id_column(ctx: "FilterContext", n_features: int) -> list[Any] | None:
     if blocks is None:
         return None
     return [blocks.block_ids[blocks.column_to_block[i]] for i in range(n_features)]
+
+
+def _raw_onehot_include_names(ctx: "FilterContext") -> list:
+    cond = getattr(ctx, "raw_conditioning", None)
+    names = getattr(ctx, "raw_feature_names", None)
+    if cond is None or names is None or not getattr(cond, "include", None):
+        return []
+    return [names[int(i)] for i in cond.include]
 
 
 def _include_names(ctx: "FilterContext") -> list[str] | None:

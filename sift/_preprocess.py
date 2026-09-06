@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-from typing import Any, List, Literal, Optional, Tuple
+from typing import Any, List, Literal, Optional, Sequence, Tuple
 import warnings
 
 import numpy as np
@@ -21,7 +21,12 @@ CatEncoding = Literal[
     "loo",
     "james_stein",
     "loo_logit",
+    "onehot",
 ]
+ONEHOT_MAX_LEVELS_DEFAULT = 32
+ONEHOT_MISSING_TOKEN = "missing"
+ONEHOT_OTHER_TOKEN = "other"
+ONEHOT_PREFIX_SEP = "__"
 Formula = Literal["quotient", "difference"]
 Task = Literal["regression", "classification"]
 
@@ -335,7 +340,8 @@ def validate_inputs(
             raise ValueError(
                 f"Non-numeric columns found: {sample}{suffix}. "
                 "Either encode them first or set cat_encoding to 'target_cv', "
-                "'loo', 'target', 'james_stein', or binary-only 'loo_logit'."
+                "'onehot', 'loo', 'target', 'james_stein', or binary-only "
+                "'loo_logit'."
             )
     X_arr = to_numpy(X, dtype=np.float64)
 
@@ -1215,6 +1221,287 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         return self._apply_custom_maps(X, self.category_maps_)
 
 
+def validate_onehot_max_levels(onehot_max_levels) -> int:
+    """Require a positive integer dummy-vocabulary cap."""
+    if isinstance(onehot_max_levels, (bool, np.bool_)) or not isinstance(
+        onehot_max_levels, (int, np.integer)
+    ):
+        raise ValueError("onehot_max_levels must be a positive integer")
+    value = int(onehot_max_levels)
+    if value < 1:
+        raise ValueError("onehot_max_levels must be a positive integer")
+    return value
+
+
+def _is_onehot_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (bytes, bytearray, str, list, dict, tuple, set)):
+        return False
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    if isinstance(missing, np.ndarray):
+        return bool(np.all(missing))
+    return bool(missing)
+
+
+def _onehot_level_identity(value: Any) -> tuple:
+    """Hashable identity for a category value; distinct from display tokens."""
+    if _is_onehot_missing(value):
+        return ("missing",)
+    if isinstance(value, (bool, np.bool_)):
+        return ("bool", bool(value))
+    if isinstance(value, (bytes, bytearray)):
+        return ("bytes", bytes(value))
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, (int, np.integer)):
+        return ("int", int(value))
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            return ("missing",)
+        return ("float", float(value))
+    try:
+        hash(value)
+        return ("hashable", type(value).__name__, value)
+    except TypeError:
+        return ("unhashable", type(value).__name__, repr(value))
+
+
+def _onehot_display_token(identity: tuple) -> str:
+    kind = identity[0]
+    if kind == "missing":
+        return ONEHOT_MISSING_TOKEN
+    if kind == "other":
+        return ONEHOT_OTHER_TOKEN
+    if kind == "bool":
+        return "True" if identity[1] else "False"
+    if kind == "str":
+        return identity[1] if identity[1] else "empty"
+    if kind in {"int", "float"}:
+        return str(identity[1])
+    if kind == "bytes":
+        decoded = identity[1].decode("utf-8", errors="replace")
+        return decoded if decoded else "empty"
+    if kind == "hashable":
+        return str(identity[2]) if str(identity[2]) else "empty"
+    return str(identity[-1]) if str(identity[-1]) else "empty"
+
+
+def _format_onehot_level(value: Any) -> str:
+    """Display token for a non-missing value; identities stay separate."""
+    return _onehot_display_token(_onehot_level_identity(value))
+
+
+class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
+    """Target-independent one-hot encoder with a capped, pooled remainder.
+
+    Fitted vocabulary uses rows with positive ``sample_weight`` only. Missing
+    values are their own level (``missing``). Levels beyond ``max_levels``
+    (by descending positive-weight mass, then label) share the ``other``
+    remainder. Unknown transform values join ``other`` when pooling created
+    that remainder; otherwise they are all-zero. Dummy names are
+    ``{column}__{level}`` using the F3 one-hot prefix; colliding display
+    tokens are uniquified and do not merge distinct identities. Output is
+    float64 0/1 indicators; zero-weight rows are still encoded so row count
+    is preserved.
+    """
+
+    def __init__(
+        self,
+        cols: List[str],
+        *,
+        max_levels: int = ONEHOT_MAX_LEVELS_DEFAULT,
+    ):
+        self.cols = list(cols)
+        self.max_levels = validate_onehot_max_levels(max_levels)
+
+    def fit(self, X: pd.DataFrame, y=None, sample_weight=None):
+        del y
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("cat_encoding='onehot' requires a pandas DataFrame")
+        missing = [col for col in self.cols if col not in X.columns]
+        if missing:
+            raise ValueError(
+                f"onehot cat_features are not columns of X: {missing[:5]}"
+            )
+        n = len(X)
+        weights = (
+            np.ones(n, dtype=np.float64)
+            if sample_weight is None
+            else ensure_weights(sample_weight, n, normalize=False)
+        )
+        self._raw_name_strings_ = {str(col) for col in X.columns}
+        occupied = set(self._raw_name_strings_)
+        vocab: dict[Any, dict[str, Any]] = {}
+        dummy_names: list[str] = []
+        cat_set = set(self.cols)
+        for col in self.cols:
+            spec = self._fit_column(X[col], weights, col, occupied)
+            vocab[col] = spec
+            for dummy in spec["dummy_names"]:
+                dummy_names.append(dummy)
+                occupied.add(dummy)
+        output_names: list[str] = []
+        output_parents: list[Any] = []
+        for col in X.columns:
+            if col in cat_set:
+                for dummy in vocab[col]["dummy_names"]:
+                    output_names.append(dummy)
+                    output_parents.append(col)
+            else:
+                output_names.append(col)
+                output_parents.append(col)
+        self.vocabulary_ = vocab
+        self.dummy_names_ = tuple(dummy_names)
+        self.output_names_ = tuple(output_names)
+        self.output_parents_ = tuple(output_parents)
+        self.feature_names_in_ = tuple(X.columns)
+        self.n_features_in_ = int(X.shape[1])
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        from sklearn.utils.validation import check_is_fitted
+
+        check_is_fitted(self, ["vocabulary_", "output_names_"])
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("cat_encoding='onehot' transform requires a pandas DataFrame")
+        if list(X.columns) != list(self.feature_names_in_):
+            raise ValueError(
+                "onehot transform column identity does not match the fitted frame"
+            )
+        pieces: list[pd.Series] = []
+        cat_set = set(self.cols)
+        for col in X.columns:
+            if col in cat_set:
+                pieces.extend(self._transform_column(X[col], col))
+            else:
+                pieces.append(X[col])
+        return pd.concat(pieces, axis=1)
+
+    def fit_transform(self, X: pd.DataFrame, y=None, sample_weight=None) -> pd.DataFrame:
+        return self.fit(X, y, sample_weight=sample_weight).transform(X)
+
+    def encoded_columns_for(self, raw_name: Any) -> list[str]:
+        spec = self.vocabulary_.get(raw_name)
+        if spec is None:
+            return [raw_name]
+        return list(spec["dummy_names"])
+
+    def parent_of(self, encoded_name: Any) -> Any:
+        for dummy, parent in zip(self.output_names_, self.output_parents_):
+            if dummy == encoded_name:
+                return parent
+        return encoded_name
+
+    def collapse_to_raw(self, encoded_names: Sequence[Any]) -> list[Any]:
+        """Unique raw parents in first-exposure order."""
+        out: list[Any] = []
+        seen: set[Any] = set()
+        for name in encoded_names:
+            parent = self.parent_of(name)
+            if parent not in seen:
+                seen.add(parent)
+                out.append(parent)
+        return out
+
+    def expand_selected(self, raw_names: Sequence[Any]) -> list[str]:
+        """Encoded columns for selected raw names, preserving encoder order."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_names:
+            for dummy in self.encoded_columns_for(raw):
+                if dummy not in seen:
+                    seen.add(dummy)
+                    out.append(dummy)
+        return out
+
+    def _fit_column(
+        self,
+        series: pd.Series,
+        weights: np.ndarray,
+        col: Any,
+        occupied: set[str],
+    ) -> dict[str, Any]:
+        observed = series.to_numpy(dtype=object, copy=False)
+        identities = [_onehot_level_identity(value) for value in observed]
+        positive = weights > 0.0
+        mass: dict[tuple, float] = {}
+        for ident, keep, weight in zip(identities, positive, weights):
+            if not keep:
+                continue
+            mass[ident] = mass.get(ident, 0.0) + float(weight)
+        if not mass:
+            raise ValueError(
+                f"onehot column {col!r} has no positive-weight rows to learn a vocabulary"
+            )
+        ranked = sorted(mass.items(), key=lambda item: (-item[1], repr(item[0])))
+        retained = [ident for ident, _ in ranked[: self.max_levels]]
+        pooled = [ident for ident, _ in ranked[self.max_levels :]]
+        has_other = bool(pooled)
+        identity_to_dummy: dict[tuple, str] = {}
+        dummy_names: list[str] = []
+        used = set(occupied)
+        for ident in retained:
+            dummy = self._unique_dummy_name(col, _onehot_display_token(ident), used)
+            dummy_names.append(dummy)
+            used.add(dummy)
+            identity_to_dummy[ident] = dummy
+        other_name = None
+        if has_other:
+            other_name = self._unique_dummy_name(col, ONEHOT_OTHER_TOKEN, used)
+            dummy_names.append(other_name)
+            used.add(other_name)
+            for ident in pooled:
+                identity_to_dummy[ident] = other_name
+        return {
+            "retained": tuple(retained),
+            "pooled": tuple(pooled),
+            "dummy_names": tuple(dummy_names),
+            "identity_to_dummy": identity_to_dummy,
+            "other_name": other_name,
+            "mass": mass,
+        }
+
+    def _transform_column(self, series: pd.Series, col: Any) -> list[pd.Series]:
+        spec = self.vocabulary_[col]
+        dummy_names = list(spec["dummy_names"])
+        mapping: dict[tuple, str] = dict(spec["identity_to_dummy"])
+        other_name = spec["other_name"]
+        n = len(series)
+        values = {name: np.zeros(n, dtype=np.float64) for name in dummy_names}
+        observed = series.to_numpy(dtype=object, copy=False)
+        for i, value in enumerate(observed):
+            dummy = mapping.get(_onehot_level_identity(value), other_name)
+            if dummy is not None:
+                values[dummy][i] = 1.0
+        return [
+            pd.Series(values[name], index=series.index, name=name, dtype=np.float64)
+            for name in dummy_names
+        ]
+
+    def _dummy_prefix(self, col: Any) -> str:
+        return str(col)
+
+    def _unique_dummy_name(self, col: Any, token: str, occupied: set[str]) -> str:
+        prefix = self._dummy_prefix(col)
+        base = f"{prefix}{ONEHOT_PREFIX_SEP}{token}"
+        if base in getattr(self, "_raw_name_strings_", occupied):
+            raise ValueError(
+                f"onehot dummy name {base!r} collides with an existing column; "
+                "rename the raw column or category level so generated dummy "
+                "labels stay unique"
+            )
+        candidate = base
+        suffix = 2
+        while candidate in occupied:
+            candidate = f"{base}{ONEHOT_PREFIX_SEP}{suffix}"
+            suffix += 1
+        return candidate
+
+
 def encode_categoricals(
     X: pd.DataFrame,
     y: pd.Series,
@@ -1236,6 +1523,12 @@ def encode_categoricals(
     """Apply target encoding to categorical features."""
     if method == "none":
         return X
+    if method == "onehot":
+        encoder = OneHotBlockEncoder(
+            cat_features,
+            max_levels=ONEHOT_MAX_LEVELS_DEFAULT,
+        )
+        return encoder.fit_transform(X, sample_weight=sample_weight)
     if method == "target_cv":
         encoder = TargetCVEncoder(
             cat_features,

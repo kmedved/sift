@@ -66,6 +66,9 @@ identity (all-singleton) maps. Identity parity is the selected features,
 ranking scores, and `refit_every` cadence, not no-block legacy
 `metadata["k"]`, which still counts include columns in the total selected
 width. `view.k` stays the raw expanded count in both cases.
+With `cat_encoding="onehot"`, `features` / `indices` / `view.k` stay in the
+raw category namespace while `metadata["n_encoded_columns_selected"]` and
+sklearn `transform` / `get_feature_names_out` report dummy width.
 `table` is a defensive-copy alias for `raw_table`.
 `metadata` is also copied and includes `schema_version`, `table_complete`,
 `transform_available`, and column-identity hashes.

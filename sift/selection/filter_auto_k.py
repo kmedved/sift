@@ -42,6 +42,7 @@ from sift.selection.filter_auto_k_cache import (
     _cached_filter_path as _cached_filter_path,
     _require_positional_cache_dataframe_alignment as _require_positional_cache_dataframe_alignment,
     prepare_filter_eval_data as prepare_filter_eval_data,
+    remap_onehot_prefix_evaluate as remap_onehot_prefix_evaluate,
     select_filter_classic_auto_k as select_filter_classic_auto_k,
 )
 from sift.selection.filter_auto_k_common import (
@@ -287,27 +288,64 @@ def select_gaussian_evaluate_path(
         feature_blocks=_unused.get("feature_blocks"),
     )
     prefix_sizes = getattr(path, "prefix_widths", None)
+    remapped = remap_onehot_prefix_evaluate(
+        path_names=list(path),
+        eval_X=eval_X,
+        onehot_raw_X=_unused.get("onehot_raw_X"),
+        onehot_encoder=_unused.get("onehot_encoder"),
+        onehot_cat_features=_unused.get("onehot_cat_features"),
+        onehot_max_levels=_unused.get("onehot_max_levels", 32),
+        onehot_include_names=_unused.get("onehot_include_names"),
+        row_idx=getattr(cache, "row_idx", None),
+        encoded_prefix_sizes=prefix_sizes,
+    )
+    eval_frame = eval_X
+    eval_path = path
+    eval_cat_features = cat_features
+    eval_cat_encoding = cat_encoding
+    eval_base = list(_unused.get("include_names") or ())
+    eval_prefix = prefix_sizes
+    eval_max_levels = _unused.get("onehot_max_levels", 32)
+    if remapped is not None:
+        eval_frame = remapped["eval_X"]
+        eval_path = remapped["path"]
+        eval_cat_features = remapped["cat_features"]
+        eval_cat_encoding = remapped["cat_encoding"]
+        eval_base = remapped["base_features"]
+        eval_prefix = remapped["prefix_sizes"]
+        eval_max_levels = remapped["onehot_max_levels"]
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
-        eval_X,
+        eval_frame,
         eval_y,
-        path,
+        eval_path,
         auto_k_config,
         groups=groups,
         time=time,
         task="regression",
-        cat_features=cat_features,
-        cat_encoding=cat_encoding,
+        cat_features=eval_cat_features,
+        cat_encoding=eval_cat_encoding,
+        onehot_max_levels=eval_max_levels,
         sample_weight=sample_weight,
         target_cv_n_splits=target_cv_n_splits,
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
         warmup_policy=warmup_policy,
-        base_features=list(_unused.get("include_names") or ()),
+        base_features=eval_base,
         within=_unused.get("within"),
-        prefix_sizes=prefix_sizes,
+        prefix_sizes=eval_prefix,
     )
+    encoder = _unused.get("onehot_encoder")
+    if remapped is not None and encoder is not None:
+        selected = encoder.expand_selected(selected)
+        encoded_index = {name: i for i, name in enumerate(encoder.output_names_)}
+        selected_indices = [
+            int(encoded_index[name]) for name in selected if name in encoded_index
+        ]
+    else:
+        eval_feature_index = {name: idx for idx, name in enumerate(eval_X.columns)}
+        selected_indices = [int(eval_feature_index[name]) for name in selected]
     _print_selected_k("CV/holdout", best_k, verbose)
-    path_steps = len(prefix_sizes) if prefix_sizes else len(path)
+    path_steps = len(eval_prefix) if eval_prefix else len(eval_path)
     summary = auto_k_summary(
         auto_k_config,
         selected_k=int(best_k),
@@ -316,8 +354,6 @@ def select_gaussian_evaluate_path(
         diagnostics=auto_diag,
         extra={"proxy_only_objective": False},
     )
-    eval_feature_index = {name: idx for idx, name in enumerate(eval_X.columns)}
-    selected_indices = [int(eval_feature_index[name]) for name in selected]
     return selected, selected_indices, auto_diag, summary
 
 
@@ -794,6 +830,10 @@ def select_gaussian_xfit_objective_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        onehot_raw_X=_unused.get("onehot_raw_X"),
+        onehot_cat_features=_unused.get("onehot_cat_features"),
+        onehot_max_levels=_unused.get("onehot_max_levels", 32),
+        onehot_raw_blocks=_unused.get("onehot_raw_blocks"),
     )
     selected_count, auto_diag = select_k_xfit_objective(curves, auto_k_config)
     widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))
@@ -869,6 +909,10 @@ def select_gaussian_cv_path(
         include=_unused.get("include"),
         exclude=_unused.get("exclude"),
         candidates=_unused.get("candidates"),
+        onehot_raw_X=_unused.get("onehot_raw_X"),
+        onehot_cat_features=_unused.get("onehot_cat_features"),
+        onehot_max_levels=_unused.get("onehot_max_levels", 32),
+        onehot_raw_blocks=_unused.get("onehot_raw_blocks"),
     )
     selected_count, auto_diag = select_k_gaussian_cv(curves, auto_k_config)
     widths = getattr(path, "prefix_widths", tuple(range(1, len(path) + 1)))

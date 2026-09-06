@@ -179,7 +179,9 @@ def _evaluate_prefix_split(
         "loo",
         "james_stein",
         "loo_logit",
+        "onehot",
     ],
+    onehot_max_levels: int = 32,
     loo_smoothing: float,
     loo_clip_min: float,
     loo_clip_max: float,
@@ -208,6 +210,43 @@ def _evaluate_prefix_split(
     else:
         fold_cat = [col for col in cat_features if col in Xtr_df.columns]
 
+    onehot_width_back: dict[int, int] | None = None
+    if cat_encoding == "onehot" and fold_cat:
+        from sift._preprocess import OneHotBlockEncoder, validate_onehot_max_levels
+
+        enc = OneHotBlockEncoder(
+            fold_cat,
+            max_levels=validate_onehot_max_levels(onehot_max_levels),
+        )
+        w_fit = encoding_weight_arr[train_idx] if encoding_weight_arr is not None else wtr
+        raw_path_cols = list(Xtr_df.columns)
+        enc.fit(Xtr_df, sample_weight=w_fit)
+        Xtr_df = enc.transform(Xtr_df)
+        Xva_df = enc.transform(Xva_df)
+        encoded_cols = list(Xtr_df.columns)
+
+        def _encoded_width(n_raw: int) -> int:
+            total = 0
+            for raw in raw_path_cols[: max(int(n_raw), 0)]:
+                cols = [c for c in enc.encoded_columns_for(raw) if c in encoded_cols]
+                if cols:
+                    total += len(cols)
+                elif raw in encoded_cols:
+                    total += 1
+            return total
+
+        orig_grid = [int(k) for k in k_grid]
+        mapped: list[int] = []
+        onehot_width_back = {}
+        for step in orig_grid:
+            if step <= 0:
+                mapped.append(0)
+                onehot_width_back[0] = step
+                continue
+            width = _encoded_width(step)
+            mapped.append(width)
+            onehot_width_back[width] = step
+        k_grid = mapped
     if cat_encoding == "target_cv" and fold_cat:
         enc = TargetCVEncoder(
             fold_cat,
@@ -244,7 +283,7 @@ def _evaluate_prefix_split(
         )
         Xtr_df = enc.fit_transform(Xtr_df, ytr, sample_weight=wtr)
         Xva_df = enc.transform(Xva_df)
-    elif cat_encoding != "none" and fold_cat:
+    elif cat_encoding not in {"none", "onehot"} and fold_cat:
         if importlib.util.find_spec("category_encoders") is None:
             raise ImportError(
                 "cat_encoding requires category_encoders. Install with: pip install category_encoders"
@@ -288,7 +327,7 @@ def _evaluate_prefix_split(
         Xtr_df = restore_feature_matrix(tr_template, Xtr_num)
         Xva_df = restore_feature_matrix(va_template, Xva_num)
 
-    return evaluate_numeric_prefixes(
+    scores = evaluate_numeric_prefixes(
         Xtr_df,
         Xva_df,
         ytr,
@@ -301,6 +340,12 @@ def _evaluate_prefix_split(
         ridge_alpha_strategy="full_path",
         sample_weight_supplied=sample_weight_supplied,
     )
+    if onehot_width_back:
+        scores = {
+            onehot_width_back.get(int(width), int(width)): score
+            for width, score in scores.items()
+        }
+    return scores
 
 
 def select_k_auto(
@@ -318,6 +363,7 @@ def select_k_auto(
         "loo",
         "james_stein",
         "loo_logit",
+        "onehot",
     ] = "none",
     cat_features: Optional[List[str]] = None,
     sample_weight: Optional[np.ndarray] = None,
@@ -331,6 +377,7 @@ def select_k_auto(
     base_features: Optional[List] = None,
     within: str | None = None,
     prefix_sizes: Optional[Sequence[int]] = None,
+    onehot_max_levels: int = 32,
 ) -> Tuple[int, List[str], pd.DataFrame]:
     """Select optimal k by evaluating prefixes of feature_path.
 
@@ -378,6 +425,7 @@ def select_k_auto(
         ``'target'``, ``'loo'``, and
         ``'james_stein'`` require the optional ``category_encoders``
         dependency; ``'loo_logit'`` requires ``task='classification'``.
+        ``'onehot'`` is in-library and encodes each fold's training rows only.
     cat_features : list of str, optional
         Columns to treat as categorical. When None, object/category/string
         columns of the fold-train frame are detected automatically.
@@ -412,6 +460,8 @@ def select_k_auto(
         ``base_features + feature_path[:prefix_sizes[k-1]]``. Scores are
         mapped back to those block steps; do not slice a raw-column path
         at a block ``k``.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels when ``cat_encoding='onehot'``.
     within : {'groups', 'two_way'} or None, default None
         Fold-local panel demeaning applied after encoding and before the
         prefix proxy model. Regression only. Means are fit on training rows
@@ -618,6 +668,7 @@ def select_k_auto(
         "sample_weight_supplied": sample_weight_supplied,
         "cat_features": cat_features,
         "cat_encoding": cat_encoding,
+        "onehot_max_levels": onehot_max_levels,
         "loo_smoothing": loo_smoothing,
         "loo_clip_min": loo_clip_min,
         "loo_clip_max": loo_clip_max,
