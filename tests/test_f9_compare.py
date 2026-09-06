@@ -332,7 +332,9 @@ def test_compare_forwards_accepted_row_context_and_scorer_direction():
         def fit(self, frame, target, sample_weight=None, groups=None, time=None):
             seen.append((groups is not None, time is not None))
             self.support_ = np.array([True, False, False])
-            self._validate_data(frame, target)
+            self.n_features_in_ = int(frame.shape[1])
+            if hasattr(frame, "columns"):
+                self.feature_names_in_ = np.asarray(list(frame.columns), dtype=object)
             return self
 
         def _get_support_mask(self):
@@ -354,7 +356,9 @@ def test_compare_forwards_accepted_row_context_and_scorer_direction():
     class _Good(SelectorMixin, BaseEstimator):
         def fit(self, frame, target, **kwargs):
             self.support_ = np.array([True, False, False])
-            self._validate_data(frame, target)
+            self.n_features_in_ = int(frame.shape[1])
+            if hasattr(frame, "columns"):
+                self.feature_names_in_ = np.asarray(list(frame.columns), dtype=object)
             return self
 
         def _get_support_mask(self):
@@ -363,7 +367,9 @@ def test_compare_forwards_accepted_row_context_and_scorer_direction():
     class _Bad(SelectorMixin, BaseEstimator):
         def fit(self, frame, target, **kwargs):
             self.support_ = np.array([False, False, True])
-            self._validate_data(frame, target)
+            self.n_features_in_ = int(frame.shape[1])
+            if hasattr(frame, "columns"):
+                self.feature_names_in_ = np.asarray(list(frame.columns), dtype=object)
             return self
 
         def _get_support_mask(self):

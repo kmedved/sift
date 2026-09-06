@@ -113,8 +113,9 @@ the accepted order from `docs/specs/0.9-next-steps.md` Stage 4.
       PR #86 merged at `c5e1d51` after all six CI jobs passed on the exact
       head. Local gate 2221 passed / 40 skipped, no exclusions.
 - [ ] F9 leakage-safe `sift.compare`, with selector fitting inside every fold.
-      Codex/Opus review accepted on `codex/0.9x-f9-compare`; clean-source
-      runtime refresh, full local gate, CI and merge pending.
+      Codex/Opus accepted, clean implementation `6ecbe63`; bound runtime
+      refresh complete. Full local gate 2243 passed / 40 skipped, no exclusions;
+      focused fixture-compatibility tests also pass. CI and merge pending.
 - [ ] Reproducibility manifests (`result.reproducibility_`).
 - [ ] F4 `Stabilized(selector)` meta-selector, after F8b.
 - [ ] F5 multi-target CEFS+.
