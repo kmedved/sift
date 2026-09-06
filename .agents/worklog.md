@@ -2,7 +2,7 @@
 
 ## Objective and constraints
 
-Approved 0.9.1 closeout and ordered 0.9.x roadmap: all implementation and local verification complete. Remote completion is proved by the exact-head six required CI checks and merge history of the final codex/0.9x-unsupervised-encoding PR, not by this local record alone. Keep the unbudgeted goal active until that remote proof is verified.
+Complete: the approved 0.9.1 closeout and ordered 0.9.x roadmap are implemented, independently verified, and merged. PR #93 merged as b6172d5680814678db19439189f620330ab86677 after all six required CI jobs passed on exact head 45682c507672ab08557ef6e162487dc669ab2ee2 (run 34042592595). Its merge tree equals the tested head, and clean benchmark source 3c6f9d1 remains an ancestor. Local main was fast-forwarded to that merge; this completion record is the only subsequent change. No pending implementation, review, or integration work remains in the approved goal. No PyPI publication or new release.
 
 - Grok4.6 primary coder, native6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace/medium. Codex independently verifies and owns Git/CI. Opus native72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only/xhigh, reviews concurrently with Codex between stages. Resume exact sessions, no caps/fresh sessions. If Opus quota fails, Codex works directly; no quota failure through97.
 - Source transmission approved for this task; exclude secrets/unrelated repos. Use exact python3 ~/.codex/skills/grok/scripts/grok_run.py and claude-cli/scripts/claude_cli_run.py launchers. Never sandbox_permissions. Prompts in /private/tmp mode600; delete after terminal. Redact sc_token. Poll exact handles; observation timeout is not termination. No concurrent checkout writes during provider ownership; freeze review source.
@@ -29,6 +29,7 @@ All15 scoped PR78-92 are merged; all merge commits were verified ancestors of cu
 | F5 multi-target | PR90 / 0ee513b | joint logdet/weighted oracle, df=q*k, multi-output evaluation |
 | F6 ModelSelector/purged splits | PR91 / 323da27 | shared native/generic backend, nested fit-row spies, exact purged/tied-time folds |
 | Classic caches | PR92 / 47977b3 | exact result/curve parity, no target/relevance cache, duplicate-name walls |
+| Unsupervised categorical fallbacks | PR93 / b6172d5 | target-blind weighted vocabulary, fixed inference maps, fold-local encoding, within/block composition |
 
 Every listed stage passed its full local gate and all6exact-head required CI jobs before merge. F6 local2372/40, CI34035101543 on e9cbf1d; classic local2386/40, CI34038231034 on fbd0ea0. Merged-tree equality and clean-source ancestry verified. No need repeat earlier audits. No PyPI upload exists in the asset-only GitHub-release workflow.
 
@@ -49,7 +50,7 @@ Branch codex/0.9x-unsupervised-encoding from47977b36b378e4f43f656e192b9aa7b9bb9e
 1. Implementation complete and committed as3c6f9d1; all coding/review sessions terminal, no pending code corrections.
 2. Runtime refreshed from that clean source: dirty=false/status[],18cases x7samples, all pools1,86current source hashes, exact CSV binding and18unchanged data/selection fingerprints. No overlapping provider/test/otherbenchmark observed; ordinary desktop activity present. No claim of an idle host or latency guarantee.
 3. Runtime page/table/SHA and benchmarks README updated; full local and static/doc gates passed. Evidence is committed separately from its measured source to preserve provenance.
-4. Required remote gate: the final branch PR must pass all6required CI on its exact head, merge with --merge (not squash), and preserve tested-tree equality and clean-source ancestry after mainff. This external gate is authoritative for remote status. Final goal completion additionally checks all original requirements against current source/tests/artifacts/merged PRs. No PyPI.
+4. Remote gate passed: PR93 is merged with a merge commit, all6required CI passed on exact head45682c5, merged-tree equality and clean-source ancestry are verified, and mainff completed. The original requirements were checked individually against current source/tests/artifacts and merged PR78-93, as summarized above. The final record-only commit changes no implementation, tests, or benchmark evidence. No PyPI.
 
 ## Retained evidence and commands
 
