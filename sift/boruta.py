@@ -817,6 +817,13 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 cat_features = [c for c in cat_features if c in X.columns]
 
             if cat_features and self.cat_encoding != "none":
+                if self.cat_encoding == "onehot":
+                    raise ValueError(
+                        "BorutaSelector does not support cat_encoding='onehot'. "
+                        "One-hot blocks are a filter-selector contract and Boruta "
+                        "has no atomic feature-block path. Pre-encode outside "
+                        "Boruta or use a filter selector."
+                    )
                 if self.importance_data == "test":
                     raise ValueError(
                         "BorutaSelector(importance_data='test') cannot use supervised "

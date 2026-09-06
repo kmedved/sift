@@ -48,6 +48,9 @@ and expand to raw columns. EBIC uses copula-rank model dimension plus
 `2 γ log C(B, k)` block-search multiplicity; the RIC block adaptation is
 `2 df log(B)`. Neither is a new FDR/calibration claim. BIC/AIC-style
 penalties use the same copula rank, not raw width or constant padding.
+`cat_encoding="onehot"` expands each raw categorical to those `{column}__{level}`
+dummy columns and selects the category as one block. Vocabulary and pooling
+are learned from positive-weight training rows only.
 Calibrated column-step rules (`perm_gap`,
 chi-square stops, posterior, stability, knockoff-path, consensus) raise.
 

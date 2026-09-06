@@ -20,6 +20,64 @@ from sift.selection.filter_auto_k_common import (
 EvalData = tuple[pd.DataFrame, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]
 
 
+def remap_onehot_prefix_evaluate(
+    *,
+    path_names,
+    eval_X: pd.DataFrame,
+    onehot_raw_X=None,
+    onehot_encoder=None,
+    onehot_cat_features=None,
+    onehot_max_levels=32,
+    onehot_include_names=None,
+    row_idx=None,
+    encoded_prefix_sizes=None,
+) -> dict | None:
+    """Score prefix-evaluate on the raw frame with fold-local one-hot vocab."""
+    if onehot_raw_X is None or onehot_encoder is None:
+        return None
+    if not isinstance(onehot_raw_X, pd.DataFrame):
+        raise TypeError("onehot_raw_X must be a pandas DataFrame")
+    raw = onehot_raw_X
+    if row_idx is not None:
+        idx = np.asarray(row_idx)
+        if idx.size and idx.size < len(raw):
+            raw = raw.iloc[idx]
+    if len(raw) != len(eval_X):
+        raise ValueError(
+            "onehot raw evaluation frame is not aligned with the encoded eval_X"
+        )
+    include = list(onehot_include_names or ())
+    include_set = set(include)
+    encoded_names = list(path_names)
+    collapsed = onehot_encoder.collapse_to_raw(encoded_names)
+    path = [name for name in collapsed if name not in include_set]
+    prefix_sizes = None
+    if encoded_prefix_sizes:
+        raw_sizes: list[int] = []
+        for width in encoded_prefix_sizes:
+            w = int(width)
+            if w <= 0:
+                continue
+            raw_prefix = onehot_encoder.collapse_to_raw(encoded_names[:w])
+            raw_sizes.append(len([name for name in raw_prefix if name not in include_set]))
+        if raw_sizes and raw_sizes != list(range(1, len(raw_sizes) + 1)):
+            prefix_sizes = tuple(raw_sizes)
+    cats = list(onehot_cat_features or getattr(onehot_encoder, "cols", ()) or ())
+    return {
+        "eval_X": raw,
+        "path": path,
+        "cat_features": cats,
+        "cat_encoding": "onehot",
+        "onehot_max_levels": int(
+            onehot_max_levels
+            if onehot_max_levels is not None
+            else getattr(onehot_encoder, "max_levels", 32)
+        ),
+        "base_features": include,
+        "prefix_sizes": prefix_sizes,
+    }
+
+
 def prepare_filter_eval_data(
     X, y: np.ndarray, cache, groups: Optional[np.ndarray], time: Optional[np.ndarray],
     sample_weight: Optional[np.ndarray], feature_names: Optional[list[str]] = None,
@@ -177,6 +235,12 @@ def select_filter_classic_auto_k(
     return_diagnostics: bool = False,
     base_features: list | None = None,
     feature_blocks=None,
+    onehot_raw_X=None,
+    onehot_encoder=None,
+    onehot_cat_features=None,
+    onehot_max_levels: int = 32,
+    onehot_include_names=None,
+    onehot_row_idx=None,
 ) -> list[str] | tuple:
     from sift.selection.blocks import discovery_prefix_widths, resolve_feature_blocks
 
@@ -186,32 +250,66 @@ def select_filter_classic_auto_k(
         feature_blocks, feature_names=feature_names, named=named
     )
     prefix_sizes = discovery_prefix_widths(path_idx, blocks) if blocks is not None else None
+    remapped = remap_onehot_prefix_evaluate(
+        path_names=path,
+        eval_X=eval_X,
+        onehot_raw_X=onehot_raw_X,
+        onehot_encoder=onehot_encoder,
+        onehot_cat_features=onehot_cat_features,
+        onehot_max_levels=onehot_max_levels,
+        onehot_include_names=onehot_include_names,
+        row_idx=onehot_row_idx,
+        encoded_prefix_sizes=prefix_sizes,
+    )
+    eval_frame = eval_X
+    eval_path = path
+    eval_cat_features = cat_features
+    eval_cat_encoding = cat_encoding
+    eval_base = base_features
+    eval_prefix = prefix_sizes
+    eval_max_levels = onehot_max_levels
+    if remapped is not None:
+        eval_frame = remapped["eval_X"]
+        eval_path = remapped["path"]
+        eval_cat_features = remapped["cat_features"]
+        eval_cat_encoding = remapped["cat_encoding"]
+        eval_base = remapped["base_features"]
+        eval_prefix = remapped["prefix_sizes"]
+        eval_max_levels = remapped["onehot_max_levels"]
     _require_eval_split_context(auto_k_config, eval_groups, eval_time)
     best_k, selected, auto_diag = auto_k_module.select_k_auto(
-        eval_X,
+        eval_frame,
         y_arr,
-        path,
+        eval_path,
         auto_k_config,
         groups=eval_groups,
         time=eval_time,
         task=task,
-        cat_features=cat_features,
-        cat_encoding=cat_encoding,
+        cat_features=eval_cat_features,
+        cat_encoding=eval_cat_encoding,
+        onehot_max_levels=eval_max_levels,
         sample_weight=sample_weight,
         target_cv_n_splits=target_cv_n_splits,
         target_cv_smoothing=target_cv_smoothing,
         target_prior=target_prior,
         warmup_policy=warmup_policy,
-        base_features=base_features,
+        base_features=eval_base,
         within=within,
-        prefix_sizes=prefix_sizes,
+        prefix_sizes=eval_prefix,
     )
+    if remapped is not None and onehot_encoder is not None:
+        selected = onehot_encoder.expand_selected(selected)
+        encoded_index = {name: i for i, name in enumerate(onehot_encoder.output_names_)}
+        selected_idx = [
+            int(encoded_index[name]) for name in selected if name in encoded_index
+        ]
+    else:
+        selected_idx = [int(i) for i in path_idx[: len(selected)]]
     _print_selected_k("CV/holdout", best_k, verbose)
-    path_steps = len(prefix_sizes) if prefix_sizes is not None else len(path)
+    path_steps = len(eval_prefix) if eval_prefix is not None else len(eval_path)
     result: tuple = (selected,)
     if return_indices:
-        raw = len(selected)
-        result += ([int(i) for i in path_idx[:raw]],)
+        result += (selected_idx,)
     if return_diagnostics:
         summary = auto_k_summary(
             auto_k_config,

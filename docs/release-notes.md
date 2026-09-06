@@ -4,6 +4,16 @@
 
 ### Features
 
+- Added additive `cat_encoding="onehot"` on filter function APIs and sklearn
+  filter wrappers. Each raw categorical becomes `{column}__{level}` dummies
+  selected as one F3 block. Default `onehot_max_levels=32` (positive-weight
+  mass, then label); remainder levels share `other`; unknown values join
+  `other` when pooling created that remainder, otherwise they are all-zero;
+  missing is its own level. Selected names/indices/support stay raw; encoded
+  transform names match dummy width. Nested `evaluate` and prefix-only
+  evaluate/Gaussian CV/xfit/auto learn vocabulary on training folds.
+  Caches, `within`, knockoffs, and Boruta raise. `target_cv` and no-encoding
+  paths are unchanged. Ordinal/frequency fallbacks are not in this stage.
 - Added additive `feature_blocks=` on the fixed-k filter selectors,
   `select_cached`, the sklearn filter wrappers, and as an alias of knockoff
   `feature_groups`. Explicit dicts map block labels to members; unlisted

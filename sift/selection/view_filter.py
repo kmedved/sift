@@ -218,6 +218,13 @@ def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
         }
     )
     metadata.update(curve_metadata)
+    encoded_names = metadata.get("encoded_feature_names")
+    encoded_positions = metadata.get("encoded_selected_indices")
+    encoded_table = None
+    if isinstance(diagnostics, Mapping):
+        ranking = diagnostics.get("encoded_ranking")
+        if isinstance(ranking, pd.DataFrame):
+            encoded_table = ranking.copy()
     return SelectionView(
         features=selected,
         indices=selected_indices,
@@ -227,5 +234,8 @@ def _as_filter_result(result: Any, input_features: Any) -> SelectionView:
         curve=curve,
         metadata=metadata,
         diagnostics=diagnostics,
+        encoded_features=encoded_names,
+        encoded_indices=encoded_positions,
+        encoded_table=encoded_table,
         proxy_correlations=getattr(result, _PROXY_CORRELATIONS_ATTR, None),
     )

@@ -29,6 +29,14 @@ Block auto-k support ledger (filter paths):
   uses additional-block units. ``gaussian_cv``/``xfit_objective`` and calibrated
   column-step rules raise ``require_binary_block_auto_k``. ``loss="brier"``
   delegates to Gaussian CEFS+ blocks.
+- ``cat_encoding="onehot"`` expands each raw categorical to dummy columns
+  named ``{column}__{level}`` and selects them as one F3 block. Supported
+  auto-k: ``auto``, ``elbow``, ``penalized_objective``. Prefix-only
+  ``evaluate``/``gaussian_cv``/``xfit_objective``/``auto`` learn dummy
+  vocabulary on training folds. Nested ``evaluate`` remains the
+  selector-class path-per-fold route. Knockoffs, prebuilt caches, and
+  ``within`` panel demeaning reject one-hot. Binary Gaussian CV/xfit
+  stay unsupported.
 """
 
 from __future__ import annotations
@@ -61,6 +69,16 @@ SUPPORTED_BINARY_BLOCK_AUTO_K = frozenset(
         "penalized_objective",
     }
 )
+SUPPORTED_ONEHOT_AUTO_K = frozenset(
+    {
+        "auto",
+        "evaluate",
+        "elbow",
+        "penalized_objective",
+        "gaussian_cv",
+        "xfit_objective",
+    }
+)
 UNSUPPORTED_BLOCK_AUTO_K = frozenset(
     {
         "stability",
@@ -89,6 +107,13 @@ BINARY_LOGLOSS_BLOCKS_MESSAGE = (
     "joint logistic block scores. Use evaluate, elbow, "
     "penalized_objective, or k_method='auto' (EBIC). loss='brier' delegates "
     "to Gaussian CEFS+ blocks."
+)
+ONEHOT_AUTO_K_MESSAGE = (
+    "cat_encoding='onehot' cannot use this auto-k rule: the method's null, "
+    "degrees-of-freedom, or FDR calibration is defined on scalar column steps. "
+    "Use evaluate, elbow, penalized_objective, gaussian_cv, xfit_objective, "
+    "or k_method='auto'. Nested evaluate and fold-local vocabulary apply to "
+    "the validation routes. Binary log-loss still rejects Gaussian CV/xfit."
 )
 
 
@@ -245,6 +270,64 @@ def require_binary_block_auto_k(method: str | None) -> None:
         "penalized_objective, or k_method='auto' (EBIC). loss='brier' "
         "delegates to Gaussian CEFS+ blocks."
     )
+
+
+def require_onehot_auto_k(method: str | None) -> None:
+    """Reject validation-based auto-k that would fit one-hot vocab on held-out rows."""
+    if method is None or method in SUPPORTED_ONEHOT_AUTO_K:
+        return
+    raise ValueError(
+        f"cat_encoding='onehot' is not supported with k_method={method!r}: "
+        + ONEHOT_AUTO_K_MESSAGE
+    )
+
+
+def compose_raw_blocks_through_onehot(
+    raw_blocks: ResolvedBlocks | None,
+    *,
+    raw_names: Sequence[Any],
+    encoded_names: Sequence[Any],
+    parents: Sequence[Any],
+) -> ResolvedBlocks:
+    """Expand raw-column blocks onto one-hot dummy columns.
+
+    Each raw parent keeps atomic membership: all of its dummy columns belong
+    to the same block. Explicit raw ``feature_blocks`` are expanded; omitted
+    raw blocks become per-parent groups so a category still enters as a unit.
+    """
+    encoded = list(encoded_names)
+    parent_of = list(parents)
+    if len(encoded) != len(parent_of):
+        raise ValueError("onehot parent map must match encoded column count")
+    encoded_by_raw: dict[Any, list[int]] = {}
+    for idx, parent in enumerate(parent_of):
+        encoded_by_raw.setdefault(parent, []).append(idx)
+    raw = list(raw_names)
+    if raw_blocks is None:
+        group_ids = list(dict.fromkeys(parent_of))
+        mapping = {
+            label: [encoded[i] for i in encoded_by_raw.get(label, [])] or [label]
+            for label in group_ids
+        }
+        return resolve_feature_blocks(mapping, feature_names=encoded, named=True)
+    mapping: dict[Any, list[str]] = {}
+    assigned: set[int] = set()
+    for block_id, members in zip(raw_blocks.block_ids, raw_blocks.members):
+        cols: list[str] = []
+        for raw_i in members:
+            parent = raw[int(raw_i)]
+            child = encoded_by_raw.get(parent)
+            if child:
+                cols.extend(encoded[i] for i in child)
+                assigned.update(child)
+            else:
+                cols.append(parent)
+        mapping[block_id] = cols
+    for parent, child in encoded_by_raw.items():
+        leftover = [i for i in child if i not in assigned]
+        if leftover:
+            mapping[parent] = [encoded[i] for i in leftover]
+    return resolve_feature_blocks(mapping, feature_names=encoded, named=True)
 
 
 def discovery_prefix_widths(

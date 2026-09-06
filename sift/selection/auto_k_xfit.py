@@ -351,6 +351,10 @@ def _fold_score_arrays(
     within_X=None,
     within_y=None,
     feature_blocks=None,
+    onehot_raw_X=None,
+    onehot_cat_features=None,
+    onehot_max_levels=32,
+    onehot_raw_blocks=None,
 ) -> tuple[list[np.ndarray], dict]:
     from sift.selection.knockoff_filter import (
         _reject_duplicate_feature_names,
@@ -397,6 +401,7 @@ def _fold_score_arrays(
     fold_scores: list[np.ndarray] = []
     fold_limits: list[int] = []
     fold_n_eff: list[float] = []
+    onehot_block_members = None
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         w_train = split_weights(base_w, train_idx, f"{score_kind} train fold {fold_idx}")
         w_val = split_weights(base_w, val_idx, f"{score_kind} validation fold {fold_idx}")
@@ -408,7 +413,66 @@ def _fold_score_arrays(
             fold_n_eff.append(n_eff_val)
             continue
 
-        if within is not None:
+        if onehot_raw_X is not None:
+            from sift._preprocess import OneHotBlockEncoder, validate_onehot_max_levels
+
+            orig_idx = np.asarray(cache.row_idx, dtype=np.int64)
+            orig_train = orig_idx[train_idx]
+            orig_val = orig_idx[val_idx]
+            raw = onehot_raw_X
+            if not isinstance(raw, pd.DataFrame):
+                raise TypeError("onehot_raw_X must be a pandas DataFrame")
+            cols = list(onehot_cat_features or [])
+            if not cols:
+                cols = raw.select_dtypes(
+                    include=["object", "category", "string"]
+                ).columns.tolist()
+            orig_w = np.ones(int(cache.n_rows_original), dtype=np.float64)
+            if cache.sample_weight is not None and orig_idx.size:
+                orig_w[orig_idx] = np.asarray(cache.sample_weight, dtype=np.float64)
+            enc = OneHotBlockEncoder(
+                cols, max_levels=validate_onehot_max_levels(onehot_max_levels)
+            )
+            enc.fit(raw.iloc[orig_train], sample_weight=orig_w[orig_train])
+            X_tr = np.asarray(enc.transform(raw.iloc[orig_train]), dtype=np.float64)
+            X_va = np.asarray(enc.transform(raw.iloc[orig_val]), dtype=np.float64)
+            y_orig = np.asarray(y, dtype=np.float64).reshape(-1)
+            if y_orig.shape[0] == int(cache.n_rows_original):
+                y_tr = y_orig[orig_train]
+                y_va = y_orig[orig_val]
+            else:
+                y_tr = y_orig[train_idx]
+                y_va = y_orig[val_idx]
+            Z_train = weighted_rank_gauss_2d(X_tr, w_train, n_jobs=1, rank_backend="serial")
+            zy_train = weighted_rank_gauss_1d(y_tr, w_train)
+            Z_val = weighted_rank_gauss_2d(X_va, w_val, n_jobs=1, rank_backend="serial")
+            zy_val = weighted_rank_gauss_1d(y_va, w_val)
+            from sift.selection.blocks import compose_raw_blocks_through_onehot
+
+            raw_blocks = None
+            if onehot_raw_blocks is not None:
+                raw_blocks = onehot_raw_blocks
+            elif feature_blocks is not None:
+                from sift.selection.blocks import resolve_feature_blocks
+
+                try:
+                    raw_blocks = resolve_feature_blocks(
+                        feature_blocks,
+                        feature_names=list(raw.columns),
+                        named=True,
+                    )
+                except ValueError:
+                    raw_blocks = None
+            composed = compose_raw_blocks_through_onehot(
+                raw_blocks,
+                raw_names=list(raw.columns),
+                encoded_names=list(enc.output_names_),
+                parents=list(enc.output_parents_),
+            )
+            onehot_block_members = [
+                np.asarray(members, dtype=np.int64) for members in composed.members
+            ]
+        elif within is not None:
             from sift.selection.within import fit_within_transform
 
             X_tr, y_tr = X_fold[train_idx], y_fold[train_idx]
@@ -430,7 +494,9 @@ def _fold_score_arrays(
             Z_val = Z[val_idx]
             zy_val = zy[val_idx]
         block_members = None
-        if feature_blocks is not None:
+        if onehot_raw_X is not None:
+            block_members = onehot_block_members
+        elif feature_blocks is not None:
             from sift.selection.blocks import map_blocks_to_valid, resolve_feature_blocks
             from sift.selection.conditioning import named_feature_space
 
@@ -607,6 +673,10 @@ def xfit_objective_curves(
     include=None,
     exclude=None,
     candidates=None,
+    onehot_raw_X=None,
+    onehot_cat_features=None,
+    onehot_max_levels=32,
+    onehot_raw_blocks=None,
 ) -> pd.DataFrame:
     """Return a cross-fitted, drift-debiased objective score curve.
 
@@ -666,6 +736,15 @@ def xfit_objective_curves(
     candidates : sequence or None, default None
         Not supported. Any supplied value, including an empty list, is
         rejected.
+    onehot_raw_X : DataFrame or None, default None
+        Original categorical frame for fold-local ``cat_encoding="onehot"``.
+        When set, each fold fits dummy vocabulary on training rows only.
+    onehot_cat_features : sequence or None, default None
+        Raw categorical columns encoded from ``onehot_raw_X``.
+    onehot_max_levels : int, default 32
+        Cap forwarded to the fold-local one-hot encoder.
+    onehot_raw_blocks : ResolvedBlocks or None, default None
+        Raw-column blocks composed onto each fold's dummy columns.
 
     Returns
     -------
@@ -766,6 +845,10 @@ def xfit_objective_curves(
         within_X=within_X,
         within_y=within_y,
         feature_blocks=feature_blocks,
+        onehot_raw_X=onehot_raw_X,
+        onehot_cat_features=onehot_cat_features,
+        onehot_max_levels=onehot_max_levels,
+        onehot_raw_blocks=onehot_raw_blocks,
     )
     diag = _curve_from_fold_scores(
         fold_scores,
@@ -795,6 +878,10 @@ def gaussian_cv_curves(
     include=None,
     exclude=None,
     candidates=None,
+    onehot_raw_X=None,
+    onehot_cat_features=None,
+    onehot_max_levels=32,
+    onehot_raw_blocks=None,
 ) -> pd.DataFrame:
     """Return a closed-form cross-validated Gaussian linear risk curve.
 
@@ -856,6 +943,15 @@ def gaussian_cv_curves(
     candidates : sequence or None, default None
         Not supported. Any supplied value, including an empty list, is
         rejected.
+    onehot_raw_X : DataFrame or None, default None
+        Original categorical frame for fold-local ``cat_encoding="onehot"``.
+        When set, each fold fits dummy vocabulary on training rows only.
+    onehot_cat_features : sequence or None, default None
+        Raw categorical columns encoded from ``onehot_raw_X``.
+    onehot_max_levels : int, default 32
+        Cap forwarded to the fold-local one-hot encoder.
+    onehot_raw_blocks : ResolvedBlocks or None, default None
+        Raw-column blocks composed onto each fold's dummy columns.
 
     Returns
     -------
@@ -957,6 +1053,10 @@ def gaussian_cv_curves(
         within_X=within_X,
         within_y=within_y,
         feature_blocks=feature_blocks,
+        onehot_raw_X=onehot_raw_X,
+        onehot_cat_features=onehot_cat_features,
+        onehot_max_levels=onehot_max_levels,
+        onehot_raw_blocks=onehot_raw_blocks,
     )
     diag = _curve_from_fold_scores(
         fold_scores,

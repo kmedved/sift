@@ -18,9 +18,11 @@ from sift._preprocess import (
     EstimatorJMI,
     EstimatorMRMR,
     Formula,
+    OneHotBlockEncoder,
     RelevanceMethod,
     Task,
     resolve_jmi_estimator,
+    validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
     validate_task,
     validate_k,
@@ -178,6 +180,14 @@ class FilterContext:
     conditioning: object | None = None
     within: str | None = None
     feature_blocks: object | None = None
+    raw_feature_names: tuple[str, ...] | None = None
+    onehot_parents: tuple[str, ...] | None = None
+    onehot_encoder: object | None = None
+    raw_feature_blocks: object | None = None
+    raw_conditioning: object | None = None
+    onehot_deferred: bool = False
+    onehot_source_X: object | None = None
+    onehot_cat_features: tuple | None = None
 
 
 _COMMON_REQUEST_LOCAL_NAMES = frozenset(
@@ -216,6 +226,7 @@ MRMR_SELECTOR_KWARGS = (
     "target_prior",
     "warmup_policy",
     "allow_full_data_target_encoding",
+    "onehot_max_levels",
     "subsample",
     "random_state",
     "n_jobs",
@@ -233,6 +244,7 @@ JMI_SELECTOR_KWARGS = (
     "target_prior",
     "warmup_policy",
     "allow_full_data_target_encoding",
+    "onehot_max_levels",
     "subsample",
     "random_state",
     "verbose",
@@ -247,6 +259,7 @@ CEFSPLUS_SELECTOR_KWARGS = (
     "target_prior",
     "warmup_policy",
     "allow_full_data_target_encoding",
+    "onehot_max_levels",
     "subsample",
     "random_state",
     "verbose",
@@ -268,6 +281,7 @@ CEFSPLUS_BINARY_SELECTOR_KWARGS = (
     "loo_clip_min",
     "loo_clip_max",
     "allow_full_data_target_encoding",
+    "onehot_max_levels",
     "subsample",
     "random_state",
     "verbose",
@@ -290,6 +304,14 @@ def _request_from_public_locals(
         values.get("cat_encoding", "none"),
         values.get("allow_full_data_target_encoding", False),
     )
+    if values.get("cat_encoding", "none") == "onehot":
+        validate_onehot_max_levels(values.get("onehot_max_levels", 32))
+        if bool(values.get("allow_full_data_target_encoding", False)):
+            raise ValueError(
+                "cat_encoding='onehot' cannot be combined with "
+                "allow_full_data_target_encoding=True: one-hot encoding is "
+                "target-independent, so the full-data escape hatch does not apply"
+            )
     store_proxies = values.get("store_proxies", False)
     if not isinstance(store_proxies, (bool, np.bool_)):
         raise ValueError("store_proxies must be a boolean")
@@ -327,6 +349,7 @@ def select_mrmr(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
+    onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
@@ -434,7 +457,7 @@ def select_mrmr(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -449,6 +472,15 @@ def select_mrmr(
         columns or pass ``groups`` if that must not reach selection.  The
         remaining values are the legacy full-data supervised encoders and
         require ``allow_full_data_target_encoding=True``.
+        ``"onehot"`` is target-independent: each raw category becomes dummy
+        columns ``{column}__{level}`` selected as one F3 block. Positive-weight
+        rows determine the vocabulary; at most ``onehot_max_levels`` levels
+        are kept (default 32, by mass then label) and the rest share
+        ``other``. Missing is its own level; unknown transform values join
+        ``other`` when it exists, otherwise they are all-zero. Selected
+        names stay in the raw namespace. Evaluate, Gaussian CV, xfit, and
+        auto routing learn vocabulary on training folds. Prebuilt caches,
+        ``within``, and knockoffs raise.
     target_cv_n_splits : int, default 5
         Requested fold count for ``cat_encoding="target_cv"``.  Must be at
         least 2; the encoder reports the count it could actually use in
@@ -471,6 +503,9 @@ def select_mrmr(
         ``{"target", "loo", "james_stein", "loo_logit"}`` and rejected
         together with ``"target_cv"``, whose cross-fitted contract it
         contradicts.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default 50000
         Row cap for the selection path, sampled with ``random_state``.
         ``None`` uses every row.  Cannot be passed with ``cache``.
@@ -625,6 +660,7 @@ def select_jmi(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
+    onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
@@ -712,7 +748,7 @@ def select_jmi(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -744,6 +780,9 @@ def select_jmi(
         Opt in to fitting a legacy supervised encoder on every row.  Required
         by ``cat_encoding`` in ``{"target", "loo", "james_stein",
         "loo_logit"}`` and rejected together with ``"target_cv"``.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default 50000
         Row cap for the selection path, sampled with ``random_state``.
         ``None`` uses every row.  Cannot be passed with ``cache``.
@@ -877,6 +916,7 @@ def select_jmim(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
+    onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
@@ -961,7 +1001,7 @@ def select_jmim(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -993,6 +1033,9 @@ def select_jmim(
         Opt in to fitting a legacy supervised encoder on every row.  Required
         by ``cat_encoding`` in ``{"target", "loo", "james_stein",
         "loo_logit"}`` and rejected together with ``"target_cv"``.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default 50000
         Row cap for the selection path, sampled with ``random_state``.
         ``None`` uses every row.  Cannot be passed with ``cache``.
@@ -1127,6 +1170,7 @@ def select_cefsplus(
     target_prior: float | None = None,
     warmup_policy: Literal["exclude", "zero_weight"] = "zero_weight",
     allow_full_data_target_encoding: bool = False,
+    onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
@@ -1215,7 +1259,7 @@ def select_cefsplus(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1252,6 +1296,9 @@ def select_cefsplus(
         leaks the target into the features.  Required by ``cat_encoding`` in
         ``{"target", "loo", "james_stein", "loo_logit"}`` and rejected
         together with ``"target_cv"``.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default 50000
         Row cap for the copula cache built from ``X``, sampled with
         ``random_state``.  ``None`` uses every positive-weight row.  Cannot be
@@ -1405,6 +1452,7 @@ def select_cefsplus_binary(
     loo_smoothing: float = 20.0, loo_clip_min: float = 1e-4,
     loo_clip_max: float = 1.0 - 1e-4,
     allow_full_data_target_encoding: bool = False,
+    onehot_max_levels: int = 32,
     subsample: Optional[int] = None, random_state: int = 0,
     verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
@@ -1490,7 +1538,7 @@ def select_cefsplus_binary(
     cat_features : list of str or None, default None
         Categorical columns to encode.  ``None`` with a DataFrame ``X`` means
         every object, category, and string column.
-    cat_encoding : {"none", "target_cv", "target", "loo", "james_stein", \
+    cat_encoding : {"none", "target_cv", "onehot", "target", "loo", "james_stein", \
 "loo_logit"}, default "none"
         Categorical encoding.  ``"none"`` leaves columns untouched, so
         non-numeric ones raise.  ``"target_cv"`` is SIFT's built-in
@@ -1536,6 +1584,9 @@ def select_cefsplus_binary(
         Opt in to fitting a legacy supervised encoder on every row.  Required
         by ``cat_encoding`` in ``{"target", "loo", "james_stein",
         "loo_logit"}`` and rejected together with ``"target_cv"``.
+    onehot_max_levels : int, default 32
+        Cap on retained dummy levels per categorical when
+        ``cat_encoding="onehot"``. Surplus levels share ``other``.
     subsample : int or None, default None
         Row cap for the selection path, sampled with ``random_state``.  Unlike
         the other filters this defaults to ``None``, meaning every row.
@@ -1689,14 +1740,40 @@ def _select_filter(
     else:
         handler = spec.fixed_handler
 
+    ctx = _apply_onehot_encoding(ctx)
     _require_within_support(ctx)
     spec.validate(ctx)
+    if request.store_proxies and (ctx.selector_kwargs or {}).get("cat_encoding") == "onehot":
+        raise ValueError(
+            "store_proxies is not supported with cat_encoding='onehot': "
+            "proxy correlations are dummy-column correlations, not raw-category "
+            "correlations"
+        )
     if request.store_proxies and ctx.estimator != "gaussian":
         raise ValueError(
             "store_proxies=True is currently supported only by Gaussian/cached "
             "filter routes; choose estimator='gaussian' or omit store_proxies"
         )
     payload = handler(ctx)
+    if ctx.onehot_encoder is not None:
+        payload = _collapse_onehot_payload(ctx, payload)
+        raw_names = list(ctx.raw_feature_names or [])
+        raw_blocks = ctx.raw_feature_blocks
+        if raw_blocks is None:
+            from sift.selection.blocks import resolve_feature_blocks
+
+            raw_blocks = resolve_feature_blocks(
+                {name: [name] for name in raw_names},
+                feature_names=raw_names,
+                named=True,
+            )
+        ctx = replace(
+            ctx,
+            feature_names=raw_names,
+            n_features_input=len(raw_names),
+            feature_blocks=raw_blocks,
+            conditioning=ctx.raw_conditioning,
+        )
     if (
         ctx.k == "auto"
         and ctx.auto_k_config is not None
@@ -1713,6 +1790,221 @@ def _select_filter(
             stacklevel=3,
         )
     return _format_payload(ctx, payload)
+
+
+def _apply_onehot_encoding(ctx: FilterContext) -> FilterContext:
+    """Expand categoricals to dummy blocks before selection, keeping raw mapping."""
+    encoding = (ctx.selector_kwargs or {}).get("cat_encoding", "none")
+    if encoding != "onehot":
+        return ctx
+    if ctx.request.cache is not None:
+        raise ValueError(
+            "cat_encoding='onehot' cannot be combined with a prebuilt Gaussian "
+            "cache because the cache has no one-hot provenance"
+        )
+    if ctx.within is not None:
+        raise ValueError(
+            "cat_encoding='onehot' is not supported with within panel demeaning"
+        )
+    if not isinstance(ctx.request.X, pd.DataFrame):
+        raise TypeError("cat_encoding='onehot' requires a pandas DataFrame")
+    from sift.selection.blocks import compose_raw_blocks_through_onehot
+    from sift.selection.conditioning import resolve_conditioning
+    from sift.selection.filter_payloads import _resolve_cat_features
+
+    cat_features = _resolve_cat_features(
+        ctx.request.X, (ctx.selector_kwargs or {}).get("cat_features")
+    )
+    if not cat_features:
+        return ctx
+    max_levels = validate_onehot_max_levels(
+        (ctx.selector_kwargs or {}).get("onehot_max_levels", 32)
+    )
+    if ctx.k == "auto" and ctx.auto_k_config is not None:
+        from sift.selection.blocks import require_onehot_auto_k
+
+        method = str(ctx.auto_k_config.k_method)
+        require_onehot_auto_k(method)
+    fit_frame = ctx.request.X
+    fit_weight = ctx.request.sample_weight
+    if (
+        ctx.k == "auto"
+        and ctx.auto_k_config is not None
+        and str(ctx.auto_k_config.k_method) == "evaluate"
+        and ctx.auto_k_config.strategy == "time_holdout"
+        and ctx.time is not None
+    ):
+        from sift.selection.auto_k_core import time_holdout_split
+
+        train_idx, _val_idx = time_holdout_split(
+            ctx.time, float(ctx.auto_k_config.val_frac)
+        )
+        fit_frame = ctx.request.X.iloc[np.asarray(train_idx)]
+        if fit_weight is not None:
+            fit_weight = np.asarray(fit_weight)[np.asarray(train_idx)]
+    source_X = ctx.request.X
+    encoder = OneHotBlockEncoder(list(cat_features), max_levels=max_levels)
+    encoder.fit(fit_frame, sample_weight=fit_weight)
+    X_encoded = encoder.transform(source_X)
+    encoded_names = list(encoder.output_names_)
+    parents = list(encoder.output_parents_)
+    raw_names = list(ctx.feature_names)
+    composed = compose_raw_blocks_through_onehot(
+        ctx.feature_blocks,
+        raw_names=raw_names,
+        encoded_names=encoded_names,
+        parents=parents,
+    )
+    raw_to_encoded = {
+        parent: [encoded_names[i] for i, p in enumerate(parents) if p == parent]
+        for parent in dict.fromkeys(parents)
+    }
+
+    def _expand_refs(values):
+        if not values:
+            return None
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw_i in values:
+            parent = raw_names[int(raw_i)]
+            for dummy in raw_to_encoded.get(parent, [parent]):
+                if dummy not in seen:
+                    seen.add(dummy)
+                    out.append(dummy)
+        return out
+
+    include_names = None
+    exclude_names = None
+    candidate_names = None
+    if ctx.conditioning is not None:
+        include_names = _expand_refs(getattr(ctx.conditioning, "include", ()))
+        exclude_names = _expand_refs(getattr(ctx.conditioning, "exclude", ()))
+        if getattr(ctx.conditioning, "candidates", None) is not None:
+            candidate_names = _expand_refs(ctx.conditioning.candidates)
+    conditioning = resolve_conditioning(
+        include_names,
+        exclude_names,
+        candidate_names,
+        feature_names=encoded_names,
+        named=True,
+        k=ctx.k,
+    )
+    from sift.selection.blocks import require_atomic_conditioning
+
+    require_atomic_conditioning(
+        conditioning, composed, feature_names=encoded_names
+    )
+    new_request = replace(ctx.request, X=X_encoded)
+    kwargs = dict(ctx.selector_kwargs or {})
+    kwargs["cat_features"] = None
+    kwargs["feature_blocks"] = {
+        composed.block_ids[i]: [encoded_names[j] for j in composed.members[i]]
+        for i in range(composed.n_blocks)
+    }
+    kwargs["include"] = include_names
+    kwargs["exclude"] = exclude_names
+    kwargs["candidates"] = candidate_names
+    return replace(
+        ctx,
+        request=new_request,
+        selector_kwargs=kwargs,
+        n_features_input=len(encoded_names),
+        feature_names=encoded_names,
+        conditioning=conditioning,
+        feature_blocks=composed,
+        raw_feature_names=tuple(raw_names),
+        onehot_parents=tuple(parents),
+        onehot_encoder=encoder,
+        raw_feature_blocks=ctx.feature_blocks,
+        raw_conditioning=ctx.conditioning,
+        onehot_source_X=source_X,
+        onehot_cat_features=tuple(cat_features),
+    )
+
+
+def _collapse_onehot_payload(ctx: FilterContext, payload: SelectionPayload) -> SelectionPayload:
+    if ctx.onehot_encoder is None or ctx.raw_feature_names is None:
+        return payload
+    encoder = ctx.onehot_encoder
+    raw_names = list(ctx.raw_feature_names)
+    encoded_selected = list(payload.selected_features or [])
+    raw_selected = encoder.collapse_to_raw(encoded_selected)
+    raw_index = {name: i for i, name in enumerate(raw_names)}
+    raw_indices = [int(raw_index[name]) for name in raw_selected]
+    ranking = payload.ranking
+    if ranking is not None and "feature" in ranking and "relevance" in ranking:
+        rel_map = {
+            name: float(value)
+            for name, value in zip(ranking["feature"], ranking["relevance"])
+        }
+        relevance = np.full(len(raw_names), np.nan, dtype=np.float64)
+        for encoded_name, parent in zip(ctx.feature_names, ctx.onehot_parents or ()):
+            value = rel_map.get(encoded_name)
+            if value is None or not np.isfinite(value):
+                continue
+            raw_i = raw_index[parent]
+            current = relevance[raw_i]
+            if not np.isfinite(current) or value > current:
+                relevance[raw_i] = value
+        from sift.selection.filter_payloads import _block_id_column, _path_ranking
+
+        raw_blocks = ctx.raw_feature_blocks
+        block_ids = None
+        if raw_blocks is not None:
+            block_ids = [
+                raw_blocks.block_ids[raw_blocks.column_to_block[i]]
+                for i in range(len(raw_names))
+            ]
+        else:
+            block_ids = list(raw_names)
+        ranking = _path_ranking(
+            raw_names,
+            raw_indices,
+            relevance,
+            ctx.spec.selector,
+            block_ids=block_ids,
+        )
+    extra = dict(payload.metadata_extra or {})
+    extra["onehot"] = True
+    extra["n_encoded_columns_selected"] = len(encoded_selected)
+    extra["onehot_max_levels"] = int(encoder.max_levels)
+    extra["encoded_feature_names"] = list(encoder.output_names_)
+    encoded_index = {name: i for i, name in enumerate(encoder.output_names_)}
+    extra["encoded_selected_indices"] = [
+        int(encoded_index[name]) for name in encoded_selected if name in encoded_index
+    ]
+    extra["onehot_mapping"] = {
+        parent: list(encoder.encoded_columns_for(parent))
+        for parent in encoder.feature_names_in_
+    }
+    diagnostics = dict(payload.diagnostics or {})
+    if payload.ranking is not None:
+        encoded_ranking = payload.ranking.copy()
+        parent_of = {
+            dummy: parent
+            for dummy, parent in zip(encoder.output_names_, encoder.output_parents_)
+        }
+        if "feature" in encoded_ranking.columns:
+            encoded_ranking["raw_feature"] = [
+                parent_of.get(name, name) for name in encoded_ranking["feature"]
+            ]
+        diagnostics["encoded_ranking"] = encoded_ranking
+    extra["encoded_n_features"] = len(encoder.output_names_)
+    if payload.proxy_correlations is not None:
+        raise ValueError(
+            "store_proxies is not supported with cat_encoding='onehot': "
+            "proxy correlations are dummy-column correlations and cannot be "
+            "attached to raw-category selected indices"
+        )
+    return replace(
+        payload,
+        selected_features=raw_selected,
+        selected_indices=raw_indices,
+        n_features=len(raw_names),
+        ranking=ranking,
+        metadata_extra=extra,
+        diagnostics=diagnostics,
+    )
 
 
 def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
@@ -2106,6 +2398,7 @@ def _select_brier_delegate(request: FilterRequest) -> list[str] | FilterSelectio
         exclude=kw("exclude"),
         candidates=kw("candidates"),
         feature_blocks=kw("feature_blocks"),
+        onehot_max_levels=kw("onehot_max_levels"),
         callback=request.callback,
         return_result=request.return_result,
         store_proxies=request.store_proxies,

@@ -194,6 +194,16 @@ Gaussian-copula plug-in of that idea. The guarantee holds only to the extent
 the fitted copula matches the true X law; metadata says
 [approximate plugin](#approximate-plugin).
 
+## onehot
+
+Target-independent dummy encoding on filter selectors (`cat_encoding="onehot"`).
+Each raw categorical becomes `{column}__{level}` columns selected as one
+atomic feature block. The default cap is `onehot_max_levels=32`;
+surplus levels share `other`. Unknown transform values join `other` when
+that remainder exists, otherwise they are all-zero. Missing is a fitted
+level. Selected features/indices/support stay in the caller raw namespace;
+encoded output names match transform width. Not a knockoff FDR claim.
+
 ## Out-of-fold
 
 A value computed on rows that were not used to fit the object that produced
