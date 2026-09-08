@@ -29,7 +29,7 @@ def auto_k_mode_label(config: AutoKConfig) -> str:
     return labels[config.k_method]
 
 
-def _auto_route_facts(cache, *, method: str, groups, time) -> dict:
+def _auto_route_facts(cache, *, method: str, groups, time, n_targets: int = 1) -> dict:
     w = np.asarray(cache.sample_weight, dtype=np.float64).reshape(-1)
     weight_sum = float(np.sum(w))
     sum_sq = float(np.sum(w * w))
@@ -45,6 +45,7 @@ def _auto_route_facts(cache, *, method: str, groups, time) -> dict:
         "weight_skew_ratio": float(n_eff_kish / n_rows) if n_rows > 0 else float("nan"),
         "has_groups": groups is not None,
         "has_time": time is not None,
+        "n_targets": int(n_targets),
     }
 
 
@@ -94,7 +95,7 @@ def _auto_route_config(config: AutoKConfig, facts: dict) -> tuple[AutoKConfig, s
             min_k=0,
         )
         reason = "p_valid_exceeds_kish_n_eff"
-    elif facts["weight_skew_ratio"] < 0.8:
+    elif facts["weight_skew_ratio"] < 0.8 and int(facts.get("n_targets", 1)) < 2:
         routed = replace(
             config,
             k_method="perm_gap",
@@ -102,6 +103,14 @@ def _auto_route_config(config: AutoKConfig, facts: dict) -> tuple[AutoKConfig, s
             perm_null="auto",
         )
         reason = "heavy_weight_skew"
+    elif facts["weight_skew_ratio"] < 0.8:
+        routed = replace(
+            config,
+            k_method="penalized_objective",
+            objective_penalty="ebic",
+            min_k=0,
+        )
+        reason = "heavy_weight_skew_multi_target_ebic"
     else:
         routed = replace(
             config,

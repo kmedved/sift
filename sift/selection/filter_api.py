@@ -87,7 +87,7 @@ from sift.selection.blocks import (
     require_atomic_conditioning,
     resolve_feature_blocks,
 )
-from sift.selection.conditioning import resolve_conditioning
+from sift.selection.conditioning import _as_refs, resolve_conditioning
 from sift.selection.within import TWO_WAY_ITERATIONS, validate_within
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
@@ -1861,11 +1861,21 @@ def _apply_onehot_encoding(ctx: FilterContext) -> FilterContext:
         raise ValueError(
             "cat_encoding='onehot' is not supported with within panel demeaning"
         )
-    if not isinstance(ctx.request.X, pd.DataFrame):
-        raise TypeError("cat_encoding='onehot' requires a pandas DataFrame")
     from sift.selection.blocks import compose_raw_blocks_through_onehot
     from sift.selection.conditioning import resolve_conditioning
     from sift.selection.filter_payloads import _resolve_cat_features
+
+    # An ndarray has no categorical metadata to expand.  Keep the explicit
+    # no-category spelling a numeric no-op, matching the DataFrame path; a
+    # requested categorical mapping still needs the DataFrame column labels.
+    if not isinstance(ctx.request.X, pd.DataFrame):
+        cat_features = (ctx.selector_kwargs or {}).get("cat_features")
+        if cat_features is None or len(cat_features) == 0:
+            return ctx
+        raise TypeError(
+            "cat_encoding='onehot' with cat_features requires a pandas "
+            "DataFrame; an ndarray has no categorical column metadata"
+        )
 
     cat_features = _resolve_cat_features(
         ctx.request.X, (ctx.selector_kwargs or {}).get("cat_features")
@@ -2086,6 +2096,13 @@ def _build_context(spec: FilterSpec, request: FilterRequest) -> FilterContext:
         if isinstance(request.X, pd.DataFrame)
         else [f"x{i}" for i in range(n_features)]
     )
+    for key in ("include", "exclude", "candidates"):
+        if key not in selector_kwargs:
+            continue
+        value = selector_kwargs[key]
+        if value is None:
+            continue
+        selector_kwargs[key] = list(_as_refs(value, label=key))
     conditioning = resolve_conditioning(
         selector_kwargs.get("include"),
         selector_kwargs.get("exclude"),

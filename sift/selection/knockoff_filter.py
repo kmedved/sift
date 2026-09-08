@@ -126,7 +126,9 @@ class KnockoffSelectionResult:
         ``selected``, ``selection_frequency``, ``relevance``, ``selector``,
         and one ``W_draw_<i>`` column per draw.  Grouped runs add
         ``feature_group``, and ``feature_groups="auto"`` adds
-        ``is_representative``.
+        ``is_representative``.  In e-value mode, cluster expansion also adds
+        ``representative_evalue``; the ``evalue`` field is missing for
+        non-representative members because they were not tested coordinates.
     threshold : float or None
         The knockoff threshold for a single draw -- ``inf`` when no data-driven
         threshold exists -- and ``None`` for a derandomized ``n_draws > 1``
@@ -302,7 +304,17 @@ class KnockoffSelectionResult:
 
         return as_result(self, input_features=input_features)
 
-    def reproducibility_(self, *, X=None, hash_data: bool = False, input_features=None):
+    def reproducibility_(
+        self,
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        hash_data: bool = False,
+        input_features=None,
+    ):
         """Return a JSON-safe reproducibility manifest for this result.
 
         Delegates to ``result_view(...).reproducibility_``. Environment is
@@ -324,7 +336,12 @@ class KnockoffSelectionResult:
             Schema ``"1"`` manifest. Safe for ``json.dumps``.
         """
         return self.result_view(input_features=input_features).reproducibility_(
-            X=X, hash_data=hash_data
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+            hash_data=hash_data,
         )
 
 
@@ -421,7 +438,13 @@ def _count_bound_min_feasible_q(n_tested: int) -> float:
 
 
 def _draw_knockoff_plus_infeasible(n_tested: int, q: float) -> bool:
-    return bool(int(n_tested) * float(q) < 1.0)
+    # Compare against the mathematical boundary directly.  Multiplying first
+    # makes an exact ``q=1/m`` value look smaller than one for common binary
+    # floating-point representations (for example, ``49 * (1 / 49)``).
+    m = int(n_tested)
+    if m <= 0:
+        return True
+    return bool(float(q) < _count_bound_min_feasible_q(m))
 
 
 def _feasibility_metadata(
@@ -587,9 +610,17 @@ def _knockoff_draw_evalues(
     return e
 
 
+def _validate_evidence(e: np.ndarray) -> np.ndarray:
+    """Validate e-value evidence while allowing valid positive infinity."""
+    e_arr = np.asarray(e, dtype=np.float64).ravel()
+    if np.isnan(e_arr).any() or np.any(e_arr < 0.0):
+        raise ValueError("e-values must be non-negative and may not contain NaN")
+    return e_arr
+
+
 def e_bh_threshold(e: np.ndarray, q: float, *, m: int | None = None) -> float:
     """Return the e-BH cutoff over ``m`` hypotheses, or ``inf`` if none reject."""
-    e_arr = np.asarray(e, dtype=np.float64).ravel()
+    e_arr = _validate_evidence(e)
     q_float = _validate_probability(q, "q")
     m_eff = int(e_arr.size if m is None else m)
     if m_eff <= 0 or e_arr.size == 0:
@@ -608,7 +639,7 @@ def e_bh_threshold(e: np.ndarray, q: float, *, m: int | None = None) -> float:
 
 def e_bh_reject(e: np.ndarray, q: float, *, m: int | None = None) -> np.ndarray:
     """Boolean e-BH rejection mask on the common tested universe."""
-    e_arr = np.asarray(e, dtype=np.float64).ravel()
+    e_arr = _validate_evidence(e)
     thresh = e_bh_threshold(e_arr, q, m=m)
     if not np.isfinite(thresh):
         return np.zeros(e_arr.shape[0], dtype=bool)
@@ -2140,6 +2171,15 @@ def _select_fdr_cluster_representatives(
     for col in rep_result.W.columns:
         if col.startswith("W_draw_") or col == "evalue":
             W_table[col] = rep_result.W[col].to_numpy()[idx_in_rep]
+    if "evalue" in W_table:
+        # e-values are evidence for tested representative coordinates only.
+        # Cluster expansion reports selected members for usability, but a
+        # non-representative member did not receive its own knockoff/e-value
+        # coordinate and must not inherit the representative's evidence. Keep
+        # the latter as an explicitly named cluster-level provenance column.
+        representative_mask = W_table["is_representative"].to_numpy(dtype=bool)
+        W_table["representative_evalue"] = W_table["evalue"].to_numpy(copy=True)
+        W_table.loc[~representative_mask, "evalue"] = np.nan
 
     # Selected features: members of selected clusters, ordered by cluster W
     # (representatives first within a cluster, then valid-column order).
@@ -2338,9 +2378,10 @@ def select_fdr(
         analytic coefficient difference ``|beta_j| - |beta_j_tilde|`` from
         ``(G + lambda I)^-1 [r; r_tilde]``, deterministic and antisymmetric by
         construction.  ``"lsm"`` is the lasso signed-max from a Gram-form LARS
-        path.  ``"cefsplus"`` is a redundancy-aware greedy entry-order
-        statistic and is markedly slower -- treat it as a second opinion, not
-        a better default.  The names ``"lcd"``, ``"mrmr_diff"``,
+        path.  ``"cefsplus"`` is an exploratory greedy entry-order statistic.
+        Its retained bakeoff had frequent nonselection and very low power on
+        correlated designs; those results do not support recommending it as
+        a redundancy-aware alternative. The names ``"lcd"``, ``"mrmr_diff"``,
         ``"mrmr_quot"``, ``"jmi"``, and ``"jmim"`` are reserved and raise.
     n_draws : int, default 1
         Number of independent knockoff draws.  Values above 1 derandomize by
@@ -2350,7 +2391,8 @@ def select_fdr(
         Selection-frequency threshold in ``(0, 1]`` applied when
         ``n_draws > 1`` and ``aggregation`` is omitted or
         ``"selection_frequency"``.  Ignored for a single draw and for
-        ``aggregation="evalues"``.
+        ``aggregation="evalues"``.  With e-values it still controls the
+        offset-zero selection-frequency diagnostic; it never controls e-BH.
     aggregation : {None, "evalues", "selection_frequency"}, default None
         How to combine ``n_draws > 1``.  ``None`` keeps the legacy rule:
         one draw uses the knockoff threshold; several draws vote by
@@ -2540,7 +2582,9 @@ def select_fdr(
     (for example a constant target), so ``n_tested`` is 0 and per-draw lists
     are empty.  ``n_discoveries_offset_0`` counts **reported discovery
     features** from the same ``W`` at ``offset=0`` (group/cluster members
-    expanded); it is not the number of tested groups.  ``m`` is
+    expanded); with multiple draws, ``eta`` is used only for this
+    frequency-vote diagnostic when e-value aggregation is active, not for
+    the actual e-BH selection.  It is not the number of tested groups.  ``m`` is
     post-screening and post-conditioning -- group-level when grouped,
     representative-level under ``feature_groups="auto"`` -- not raw input
     width.  Included conditioning features are not discoveries.  When

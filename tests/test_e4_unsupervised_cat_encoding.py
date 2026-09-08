@@ -566,7 +566,8 @@ def test_gaussian_cv_composes_within_on_original_target(monkeypatch):
     y = groups * 10 + X["signal"].to_numpy()
     cfg = AutoKConfig(
         k_method="gaussian_cv",
-        strategy="group_cv",
+        # Within-validation effects require entity levels seen in training.
+        strategy="kfold",
         xfit_folds=3,
         min_k=1,
         max_k=2,

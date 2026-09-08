@@ -711,8 +711,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     def _validate_frame(self, X: pd.DataFrame) -> None:
         if not isinstance(X, pd.DataFrame):
             raise TypeError("target_cv encoding requires X to be a pandas DataFrame")
-        if not X.columns.is_unique:
-            raise ValueError("target_cv encoding requires unique DataFrame column names")
+        require_unique_encoding_columns(X, encoding="target_cv")
         missing = [col for col in self.cols if col not in X.columns]
         if missing:
             raise ValueError(f"target_cv columns are missing from X: {missing[:5]}")
@@ -1314,6 +1313,14 @@ def _format_onehot_level(value: Any) -> str:
     return _onehot_display_token(_onehot_level_identity(value))
 
 
+def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
+    """Reject duplicate labels before categorical encoding expands width."""
+    if not X.columns.is_unique:
+        raise ValueError(
+            f"{encoding} encoding requires unique DataFrame column names"
+        )
+
+
 class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
     """Target-independent one-hot encoder with a capped, pooled remainder.
 
@@ -1341,6 +1348,7 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
         del y
         if not isinstance(X, pd.DataFrame):
             raise TypeError("cat_encoding='onehot' requires a pandas DataFrame")
+        require_unique_encoding_columns(X, encoding="onehot")
         missing = [col for col in self.cols if col not in X.columns]
         if missing:
             raise ValueError(
@@ -1387,6 +1395,7 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
         check_is_fitted(self, ["vocabulary_", "output_names_"])
         if not isinstance(X, pd.DataFrame):
             raise TypeError("cat_encoding='onehot' transform requires a pandas DataFrame")
+        require_unique_encoding_columns(X, encoding="onehot")
         if list(X.columns) != list(self.feature_names_in_):
             raise ValueError(
                 "onehot transform column identity does not match the fitted frame"

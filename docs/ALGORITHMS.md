@@ -61,6 +61,14 @@ chi-square stops, posterior, stability, knockoff-path, consensus) raise.
 | binary log-loss CEFS+ `auto`/`evaluate`/`elbow`/`penalized_objective` | supported: joint logistic block score; EBIC uses logistic model rank + `log C(B,k)` |
 | binary log-loss calibrated stops, Gaussian CV/xfit | rejected; `loss="brier"` delegates to Gaussian CEFS+ blocks |
 
+For a numeric `y` with shape `(n, q)` and `q≥2`, Gaussian CEFS+ is joint:
+the target covariance enters the residual log-det and the information-criterion
+dimension is `q·k`; the reported path and `k` remain raw feature units. A
+single-column target uses the 1-D path. Raw-unit scale therefore matters: users
+who want equal target contribution should normalize target columns before
+selection. Unsupported selectors reject multi-target input instead of
+flattening it.
+
 `sift.compare` is not a selector. Default `mode="cv"` refits factories inside
 training folds and scores a downstream estimator on the held-out fold. Mean
 `k` keeps an explicit unit (`raw_features` or `additional_blocks`). Empty
@@ -190,8 +198,9 @@ The default statistic is `statistic="relevance"`, a fast marginal
 Gaussian-information difference between each original feature and its knockoff.
 `statistic="ridge"` is the analytic coefficient-difference statistic.
 `statistic="lsm"` is the lasso signed-max path statistic.
-`statistic="cefsplus"` enables a tie-safe greedy statistic that is slower but
-redundancy-aware. The 0.9 default stays `relevance`. The retained
+`statistic="cefsplus"` enables a tie-safe greedy statistic that is slower and
+exploratory; its adaptive path is not covered by the approximate-plugin
+sign-flip claim. The 0.9 default stays `relevance`. The retained
 [statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
 `relevance` for the 1.0 owner decision on its four Gaussian designs; ridge
 did not earn a default flip there. That study reports realized FDP and power;

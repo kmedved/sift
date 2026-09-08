@@ -451,6 +451,10 @@ result = select_fdr(cache=cache, y=y1, q=0.1, random_state=0, verbose=False)
 With a cache, `subsample` must be omitted and sample weights must already be in
 the cache. `random_state` controls this draw; it does not rebuild the cache.
 
+Classic caches (`ClassicFeatureCache`, built by `build_classic_cache`) follow
+the same source-contract rule. A cache is not a resampling recipe: changing
+rows, weights, or construction options requires rebuilding it.
+
 ## Knockoff Workflows
 
 Use knockoffs when a q-calibrated discovery set is more useful than a fixed
@@ -568,9 +572,9 @@ result = select_fdr(
 )
 ```
 
-The CEFS+ statistic is tie-safe and pair-coupled. It is useful as a
-redundancy-aware second opinion, but it is slower than the default relevance
-statistic. If selection count equals `selector_metadata["path_depth"]`, the cap
+The CEFS+ statistic is tie-safe and pair-coupled. It is an exploratory
+alternate statistic, slower than the default relevance statistic, and its
+adaptive path is not covered by the approximate-plugin sign-flip claim. If selection count equals `selector_metadata["path_depth"]`, the cap
 may be binding.
 
 ### Feature Groups

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from sift._selector_compat import ordered_indices, validate_output_order
-from sift.selection.reproducibility import describe_estimator, snapshot_selector_kwargs
+from sift.selection.reproducibility import snapshot_selector_kwargs
 from sift.selection.view import (
     SelectionView,
     _coerce_feature_names,
@@ -206,7 +206,7 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
     else:
         configured = snapshot_selector_kwargs(
             {
-                "base_selector": describe_estimator(selector.selector),
+                "base_selector": selector.selector,
                 "n_resamples": int(selector.n_resamples),
                 "resample": selector.resample,
                 "threshold": float(selector.threshold),
@@ -258,6 +258,10 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
             if isinstance(actual_seed, (int, np.integer))
             else actual_seed
         )
+        metadata["realized_random_state"] = metadata["random_state"]
+    base_seed_control = getattr(selector, "_base_seed_control_", None)
+    if base_seed_control is not None:
+        metadata["base_seed_control"] = copy.deepcopy(base_seed_control)
     if extra:
         metadata["knockoff_metadata"] = extra
         if extra.get("n_rows_used") is not None and n_rows_used is None:
@@ -273,6 +277,7 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
             "time": bool(getattr(selector, "_fit_used_time_", False)),
         },
         "aggregation_mode": mode,
+        "resample_fit_policy": getattr(selector, "_resample_fit_policy_", None),
         "n_completed_resamples": int(
             getattr(selector, "_n_completed_resamples_", n_resamples_requested)
         ),

@@ -302,6 +302,27 @@ class ImportanceResult:
 
         return as_result(self, input_features=input_features)
 
+    def reproducibility_(
+        self,
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        hash_data: bool = False,
+        input_features=None,
+    ):
+        """Return the JSON-safe reproducibility manifest for this result."""
+        return self.result_view(input_features=input_features).reproducibility_(
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+            hash_data=hash_data,
+        )
+
 
 def permutation_importance(
     model,

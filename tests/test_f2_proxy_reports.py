@@ -764,7 +764,7 @@ def test_missing_values_ignore_zero_weight_rows(monkeypatch):
     assert left == pytest.approx(0.97429746, rel=1e-5, abs=1e-5)
 
 
-def test_threshold_zero_selected_constant_is_singleton_cluster():
+def test_proxy_storage_rejects_selected_constant():
     rng = np.random.default_rng(13)
     n = 40
     signal = rng.normal(size=n)
@@ -779,22 +779,17 @@ def test_threshold_zero_selected_constant_is_singleton_cluster():
         verbose=False,
         n_jobs=1,
     ).fit(X, y)
-    with_proxies = sift.StabilitySelector(
-        n_bootstrap=4,
-        threshold=0.0,
-        store_proxies=True,
-        store_coefs=False,
-        random_state=0,
-        verbose=False,
-        n_jobs=1,
-    ).fit(X, y)
-    assert set(plain.selected_feature_names_) == set(with_proxies.selected_feature_names_)
-    view = with_proxies.result_view_
-    clusters = view.proxy_clusters(r_min=0.8)
-    const_rows = clusters.loc[clusters["feature"] == "constant"]
-    assert not const_rows.empty
-    const_id = int(const_rows["cluster_id"].iloc[0])
-    assert set(clusters.loc[clusters["cluster_id"] == const_id, "feature"]) == {"constant"}
+    assert set(plain.selected_feature_names_) == {"signal", "constant"}
+    with pytest.raises(ValueError, match="selected constant features"):
+        sift.StabilitySelector(
+            n_bootstrap=4,
+            threshold=0.0,
+            store_proxies=True,
+            store_coefs=False,
+            random_state=0,
+            verbose=False,
+            n_jobs=1,
+        ).fit(X, y)
 
 
 def test_stability_proxy_uses_direct_column_block(monkeypatch):

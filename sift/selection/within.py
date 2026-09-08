@@ -2,9 +2,16 @@
 
 ``within="groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
 ``within="two_way"`` alternates entity and time demeaning for a fixed
-iteration count (``TWO_WAY_ITERATIONS``). Unseen entity ids at transform
-time fall back to the training grand mean; unseen time ids add no extra
-time effect (time effects are residual after entity demeaning).
+iteration count (``TWO_WAY_ITERATIONS``). The five-pass result is exact for
+balanced, unweighted panels up to floating-point error, but is an
+approximation for unbalanced or weighted panels; ``n_iterations`` reports
+the fixed pass count. Unseen entity ids at transform time fall back to the
+training grand mean; unseen time ids add no extra time effect (time effects
+are residual after entity demeaning). The transform itself requires finite
+numeric ``X`` and ``y``; callers using paths with their own preprocessing
+should make the path's missing-data policy explicit. In particular, classic
+filter entry points may impute feature values before this helper, whereas the
+helper itself never imputes.
 """
 
 from __future__ import annotations
@@ -84,6 +91,41 @@ def _factorize(ids: np.ndarray, *, label: str) -> tuple[pd.Index, np.ndarray]:
     return pd.Index(uniques), codes
 
 
+def require_seen_within_validation_levels(
+    fitted: "WithinTransform",
+    groups: np.ndarray,
+    time: np.ndarray | None = None,
+) -> None:
+    """Require each scored demeaned dimension to overlap training levels.
+
+    This guard is for fold-based validation only.  ``WithinTransform.transform``
+    intentionally keeps its causal fallback for ordinary transforms of rows
+    containing unseen entity or time ids.
+    """
+    group_codes = fitted.group_index.get_indexer(np.asarray(groups).reshape(-1))
+    if not np.any(group_codes >= 0):
+        raise ValueError(
+            "within validation requires at least one entity level seen in the "
+            "training fold; no validation entity can be demeaned from training "
+            "effects. Use overlapping-level splits or omit within when validating "
+            "between-entity effects"
+        )
+    if fitted.mode != "two_way":
+        return
+    if fitted.time_index is None:
+        raise RuntimeError("two-way within transform is missing time effects")
+    if time is None:
+        raise ValueError("within='two_way' requires validation time")
+    time_codes = fitted.time_index.get_indexer(np.asarray(time).reshape(-1))
+    if not np.any(time_codes >= 0):
+        raise ValueError(
+            "within validation requires at least one time level seen in the "
+            "training fold; no validation time can be demeaned from training "
+            "effects. Use overlapping-level splits or omit within when validating "
+            "between-time effects"
+        )
+
+
 def _weighted_mean_rows(values: np.ndarray, weights: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     if values.ndim == 1:
@@ -158,11 +200,16 @@ class WithinTransform:
         groups: np.ndarray,
         time: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        X_arr = np.asarray(X, dtype=np.float64)
+        """Apply fitted effects without estimating validation-level means.
+
+        ``X`` and ``y`` must be finite at this layer.  Unknown levels use the
+        causal training fallbacks described in the module documentation.
+        """
+        # The 1-D reshape below can be a view of a caller-owned array.  The
+        # demeaning operations are in-place, so always detach before them.
+        X_arr = np.array(X, dtype=np.float64, copy=True)
         if X_arr.ndim == 1:
             X_arr = X_arr.reshape(-1, 1)
-        else:
-            X_arr = np.array(X_arr, dtype=np.float64, copy=True)
         y_arr = np.asarray(y, dtype=np.float64).reshape(-1).copy()
         if X_arr.shape[0] != y_arr.shape[0]:
             raise ValueError("X and y must have the same number of rows")
@@ -204,7 +251,12 @@ def fit_within_transform(
     time: np.ndarray | None,
     sample_weight: np.ndarray,
 ) -> WithinTransform:
-    """Fit demeaning parameters on training rows only."""
+    """Fit finite-input demeaning parameters on training rows only.
+
+    ``within="two_way"`` uses the documented fixed five alternating passes;
+    on unbalanced or weighted panels this is an approximate residualization,
+    not an unconstrained convergence solve.
+    """
     resolved = validate_within(mode)
     if resolved is None:
         raise ValueError("fit_within_transform requires within='groups' or 'two_way'")

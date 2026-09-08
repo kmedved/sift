@@ -182,17 +182,49 @@ def _cached_filter_path(
     widths = discovery_prefix_widths(indices, blocks)
     if not widths and path:
         widths = tuple(range(1, len(path) + 1))
-    if (
-        objective is not None
-        and widths
-        and len(np.asarray(objective).ravel()) == len(path)
-        and len(widths) != len(path)
-    ):
-        objective = np.asarray(objective, dtype=np.float64).ravel()[
-            np.asarray(widths, dtype=np.int64) - 1
-        ]
+    objective = _objective_in_additional_block_units(
+        objective, path=path, indices=indices, widths=widths, cache=cache
+    )
     path = _PathList(path, widths)
     return CachedFilterPath(path, indices, objective, widths)
+
+
+def _objective_in_additional_block_units(
+    objective, *, path, indices, widths, cache
+):
+    """Resample a column-wise objective onto additional-block boundaries.
+
+    Cache-dropped constant members still occupy expanded path slots, so the
+    raw objective can be shorter than ``path``. Elbow/penalized rules keep
+    one value per additional block, taken at the last cache-valid member of
+    that block. Expanded ``widths`` are left unchanged for prefix slicing.
+    """
+    if objective is None or not widths:
+        return objective
+    obj = np.asarray(objective, dtype=np.float64).ravel()
+    if len(obj) == len(widths):
+        return obj
+    if len(obj) == len(path) and len(widths) != len(path):
+        return obj[np.asarray(widths, dtype=np.int64) - 1]
+    if not indices:
+        return objective
+    valid_set = {int(i) for i in np.asarray(cache.valid_cols).ravel()}
+    width_set = {int(w) for w in widths}
+    valid_count = 0
+    valid_at_width: list[int] = []
+    for i, idx in enumerate(indices, start=1):
+        if int(idx) in valid_set:
+            valid_count += 1
+        if i in width_set:
+            valid_at_width.append(valid_count)
+    if len(valid_at_width) != len(widths):
+        return objective
+    samples: list[float] = []
+    for count in valid_at_width:
+        if count <= 0 or count > len(obj):
+            return objective
+        samples.append(float(obj[count - 1]))
+    return np.asarray(samples, dtype=np.float64)
 
 
 class _PathList(list):

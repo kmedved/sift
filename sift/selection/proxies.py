@@ -117,11 +117,11 @@ def reject_unavailable_proxy_positions(
     available_original: Iterable[int],
     feature_names: Iterable[object] | None = None,
 ) -> None:
-    """Reject proxy retention when selected raw columns have no cache correlations.
+    """Reject proxy retention when selected raw columns have no correlations.
 
-    Atomic blocks may still expand to cache-dropped constant members. Those
-    columns stay in the selection; they cannot appear in a finite copula
-    proxy block.
+    This covers ordinary selected constants as well as atomic blocks that
+    expand to cache-dropped constant members. Those columns stay in the
+    selection; they cannot appear in a finite copula proxy block.
     """
     selected = _positions(selected_indices, label="selected_indices")
     available = {int(i) for i in _positions(available_original, label="available_original")}
@@ -137,9 +137,10 @@ def reject_unavailable_proxy_positions(
             refs.append(position)
     raise ValueError(
         "store_proxies=True cannot retain finite copula correlations for "
-        f"cache-dropped constant or otherwise unavailable block members: {refs} "
-        f"(positions {missing}). Atomic selection still expands those raw "
-        "columns; omit store_proxies or drop unavailable members from the block"
+        f"selected constant features or cache-dropped constant or otherwise "
+        f"unavailable block members: {refs} (positions {missing}). "
+        "Atomic selection still expands those raw columns; omit store_proxies "
+        "or drop unavailable members from the block"
     )
 
 
@@ -214,7 +215,7 @@ def normalize_proxy_frame(
 
 
 def validate_r_min(r_min: object) -> float:
-    """Reject bools and non-finite values; require ``r_min`` in ``[0, 1]``."""
+    """Validate ``r_min`` and quantize it to the stored float32 precision."""
     if isinstance(r_min, (bool, np.bool_)) or not isinstance(
         r_min,
         (Real, np.integer, np.floating),
@@ -223,7 +224,10 @@ def validate_r_min(r_min: object) -> float:
     threshold = float(r_min)
     if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
         raise ValueError("r_min must be a finite number between 0 and 1")
-    return threshold
+    # Proxy blocks are retained as float32.  Comparing a float64 threshold
+    # against those values would make an exact decimal boundary such as 0.9
+    # fail after its representable float32 rounding.
+    return float(np.float32(threshold))
 
 
 def normalize_resample_selections(
@@ -315,6 +319,8 @@ def redundancy_report_frame(
                 )
             )
     records.sort()
+    if not records:
+        return pd.DataFrame(columns)
     return pd.DataFrame(
         {
             "selected_feature": [item[4] for item in records],

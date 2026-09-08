@@ -139,6 +139,21 @@ def _auto_dense_check_requested(config: AutoKConfig, summary: dict, route: dict)
     return True, "large_ebic_pick"
 
 
+def _reject_unsupported_multi_target_dense_check(config: AutoKConfig, y, cache) -> None:
+    """Reject 2-D dense-check requests before any routed path is built."""
+    if not bool(config.auto_dense_check):
+        return
+    from sift.selection.cefsplus_multi import as_regression_targets
+
+    n_rows = int(getattr(cache, "n_rows_original", np.asarray(y).shape[0]))
+    _y_arr, n_targets = as_regression_targets(y, n_rows)
+    if n_targets >= 2:
+        raise ValueError(
+            "auto_dense_check is not supported for 2-D y; gaussian_cv cannot "
+            "cross-check a joint multi-target path"
+        )
+
+
 def _run_auto_dense_check(
     *,
     config: AutoKConfig,
@@ -156,6 +171,7 @@ def _run_auto_dense_check(
     should_run, reason = _auto_dense_check_requested(config, summary, route)
     if not bool(config.auto_dense_check):
         return
+    _reject_unsupported_multi_target_dense_check(config, y, cache)
 
     selected_k = int(summary.get("selected_k", 0))
     effective_max_k = int(summary.get("effective_max_k", config.max_k))
@@ -1174,7 +1190,16 @@ def select_gaussian_auto_path(
     auto_k_module.validate_auto_k_config(auto_k_config)
     if auto_k_config.k_method != "auto":
         raise ValueError("select_gaussian_auto_path requires AutoKConfig(k_method='auto')")
-    facts = _auto_route_facts(cache, method=method, groups=groups, time=time)
+    from sift.selection.conditioning import omitted_conditioning, require_supported_auto_k
+
+    from sift.selection.cefsplus_multi import as_regression_targets
+
+    n_rows = int(getattr(cache, "n_rows_original", np.asarray(y).shape[0]))
+    _y_arr, n_targets = as_regression_targets(y, n_rows)
+    _reject_unsupported_multi_target_dense_check(auto_k_config, y, cache)
+    facts = _auto_route_facts(
+        cache, method=method, groups=groups, time=time, n_targets=n_targets
+    )
     routed_config, reason = _auto_route_config(auto_k_config, facts)
     if kwargs.get("feature_blocks") is not None and not _feature_blocks_are_identity(
         kwargs.get("feature_blocks"), cache
@@ -1199,6 +1224,29 @@ def select_gaussian_auto_path(
         if routed_config.k_method == "penalized_objective"
         else None,
     }
+    conditioning_active = not omitted_conditioning(
+        kwargs.get("include"), kwargs.get("exclude"), kwargs.get("candidates")
+    )
+    if conditioning_active and bool(auto_k_config.auto_dense_check):
+        raise ValueError(
+            "k_method='auto' with exact include/exclude/candidates conditioning "
+            "cannot use auto_dense_check because the dense check rebuilds an "
+            "unconditioned gaussian_cv path"
+        )
+    if conditioning_active:
+        try:
+            require_supported_auto_k(route["chosen"])
+        except ValueError:
+            remedy = (
+                "k_method='penalized_objective', objective_penalty='ebic'"
+                if method == "cefsplus" else "k_method='elbow'"
+            )
+            raise ValueError(
+                "k_method='auto' cannot honor exact include/exclude/candidates "
+                f"conditioning because the router chose unsupported "
+                f"k_method={route['chosen']!r}. Use an explicit conditioned "
+                f"method such as {remedy}, or omit the conditioning keywords."
+            ) from None
     runner_kwargs = {
         "cache": cache,
         "y": y,
@@ -1299,8 +1347,6 @@ def select_gaussian_auto_path(
                 "automatic-k optimum."
             )
         warnings.warn(message, UserWarning, stacklevel=2)
-    from sift.selection.conditioning import omitted_conditioning
-
     if not omitted_conditioning(
         runner_kwargs.get("include"),
         runner_kwargs.get("exclude"),

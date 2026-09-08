@@ -466,5 +466,6 @@ def test_legacy_encoded_auto_groups_leave_nested_representative_metadata():
     assert result.selector_metadata["cat_encoding"] == "loo_logit"
     nested = result.diagnostics_["representative_result"].selector_metadata
     assert nested["fdr_control"] == "none"
-    assert nested["per_draw_fdr_control"] == "approximate_plugin"
-    assert "cat_encoding" not in nested
+    assert nested["per_draw_fdr_control"] == "none"
+    assert nested["cat_encoding"] == "loo_logit"
+    assert "Model-X exchangeability" in nested["validity_note"]

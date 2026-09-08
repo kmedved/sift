@@ -16,7 +16,8 @@
   datasets or claim FDR for ordinary frequency voting. Opt-in F2 proxy storage
   and an additive `SelectionView` / reproducibility manifest are included.
   `StabilitySelector` and KnockoffSelector defaults are unchanged. The public
-  surface grows from 60 names to 61. Not a 1.0 preset rewrite.
+  surface grows to 66 names in the current 0.9.1 development line. Not a 1.0
+  preset rewrite.
 - Added additive `sift.compare` for leakage-safe selector comparison. Factories
   refit inside each training fold; a fresh downstream estimator is scored on
   the untouched fold. Results include score distributions, explicit-unit mean
@@ -28,10 +29,8 @@
   (schema `"1"` JSON: export-time environment/BLAS/package-bound git, original
   vs used rows, typed column hash, opt-in caller data hash, retained cache
   provenance, known new-run configuration/seeds, compare selector/estimator/
-  splitter snapshots and fold fingerprints). Codex/Opus review is accepted;
-  clean-source runtime refresh is complete; PR #88 merged after all six required CI jobs passed. The
-  previous 58-name surface is unchanged except for the
-  additive `compare` and `CompareResult` exports.
+  splitter snapshots and fold fingerprints). The comparison API is additive;
+  existing selector defaults and return types are unchanged.
 - Added additive `cat_encoding="onehot"` on filter function APIs and sklearn
   filter wrappers. Each raw categorical becomes `{column}__{level}` dummies
   selected as one F3 block. Default `onehot_max_levels=32` (positive-weight
@@ -50,6 +49,18 @@
   evaluate/time-holdout path maps use the train partition. Prefix-only ranking may
   still use a full-data path. Prebuilt caches, resampled auto-k, and Boruta
   `importance_data='test'` raise. No new public exports. No FDR upgrade.
+- Added joint multi-target Gaussian CEFS+ for numeric 2-D targets (`n×q`,
+  `q≥2`). It uses target covariance and a `q·k` information-criterion
+  dimension; one-column targets retain the 1-D path. Other selectors reject
+  multi-target input rather than flattening it.
+- Added generic `ModelSelector` with RFE/forward/stability strategies and
+  additive `PurgedTimeSeriesSplit` / `GroupPurgedTimeSeriesSplit` splitters.
+  Purging and embargo are applied at validation boundaries; group-aware
+  splitting keeps entity identities disjoint between training and validation.
+- Added `ClassicFeatureCache` and `build_classic_cache` for reusable numeric
+  classic-selector statistics. Cache reuse requires the original source
+  contract; row resampling and call-time weights/subsampling are not silently
+  re-applied to a prebuilt cache.
 - Added additive `feature_blocks=` on the fixed-k filter selectors,
   `select_cached`, the sklearn filter wrappers, and as an alias of knockoff
   `feature_groups`. Explicit dicts map block labels to members; unlisted
@@ -65,8 +76,8 @@
   columns). Column-step calibrated rules raise. Binary log-loss CEFS+ uses a
   joint logistic block score on `evaluate`/`elbow`/`penalized_objective`/
   `auto`; Gaussian CV/xfit and calibrated binary stops raise.
-  `loss="brier"` delegates to Gaussian blocks. No-block calls, the 58-name
-  surface, and grouped FDR validity are unchanged.
+  `loss="brier"` delegates to Gaussian blocks. No-block calls and grouped FDR
+  validity are unchanged.
 - Added additive `include=`, `exclude=`, and `candidates=` keywords on the
   public filter selectors, `select_cached`, the sklearn filter wrappers, and
   `select_fdr`. `include` initializes the actual greedy/conditional state
@@ -84,9 +95,11 @@
   applies to discoveries only; the include set is residualized out of the
   Gaussian-copula knockoff model.
 - Added `SelectionView.redundancy_report` and `SelectionView.proxy_clusters`
-  on stored proxy correlations: an all-selected edge report and
-  selected-anchored connected components, with exact per-cluster selection
-  frequencies on `StabilitySelector(store_proxies=True)` resamples.
+  on stored proxy correlations: `redundancy_report` lists selected-to-
+  unselected-candidate edges, while `proxy_clusters` includes selected-
+  selected edges in its selected-anchored connected components, with exact
+  per-cluster selection frequencies on `StabilitySelector(store_proxies=True)`
+  resamples.
   `store_proxies` remains opt-in and default-false; omitted calls are
   unchanged. Cluster frequency is nullable when no resample payload exists.
 - Added regression-filter `within="groups"` and `within="two_way"` panel
@@ -132,7 +145,7 @@
   Its committed CSV and provenance sidecar retain all raw timing samples,
   environment and thread-pool state, effective options, data and selection
   fingerprints, clean-commit Git state (`dirty=false` at
-  `b2a11bdf0d6131ba2714207378619e79a7ea833b`), and hashes for the runner and
+  `3c6f9d1`), and hashes for the runner and
   executed SIFT sources.
 - Added an executable data-type support matrix over the public selector entry
   points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,
@@ -868,7 +881,7 @@ changes in 0.9; it is the complete list of what 1.0 may flip.
 | `verbose` default | `True`, logging-backed; logging formatting/routing may differ, but selection/returns/default progress behavior does not | `False` |
 | `n_jobs=-1` defaults (stability, permutation, CatBoost) | unchanged, documented | `1` |
 | `transform` output order | `"legacy"` default: filter path/selection order, Boruta original order, Stability descending selection frequency with stable original-index ties; `"original"` opt-in | `"original"` default |
-| `sift.__all__` | 58 names in 0.9.0 (55 existing + 3 additions); later 0.9.x additions are explicitly counted or module-scoped; experimental names warn | §2.C allowlist (42 + explicitly counted landed F additions) |
+| `sift.__all__` | 66 current 0.9.1 exports: the 0.9.0 baseline remains 58, with later additions explicitly counted; current additions include `compare`/`CompareResult`, `Stabilized`, `ModelSelector`, `PurgedTimeSeriesSplit`/`GroupPurgedTimeSeriesSplit`, and `ClassicFeatureCache`/`build_classic_cache` | §2.C exact 42-name allowlist plus the originally named landed workstream-F additions (`compare`, `Stabilized`, `ModelSelector`, `PurgedTimeSeriesSplit`/`GroupPurgedTimeSeriesSplit`); placement of `CompareResult`, `ClassicFeatureCache`, and `build_classic_cache` remains an owner decision |
 | `select_cached` tuple returns | unchanged + `return_result=True` added | tuples deprecated |
 | CatBoost `group_col`/`sample_weight_col` | aliases beside arrays | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
 | stability `alpha` | joined by `penalty=` alias | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |

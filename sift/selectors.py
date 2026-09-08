@@ -3231,6 +3231,13 @@ class KnockoffSelector(_BaseSelector):
             }
         )
         updates = {"selector_metadata": metadata}
+        for key in (
+            "representative_fdr_control",
+            "representative_per_draw_fdr_control",
+        ):
+            if key in metadata:
+                metadata[key] = "none"
+        metadata["exploratory"] = True
         if (
             metadata.get("aggregation") in {"evalues", "evalues_then_cluster_expansion"}
             or "evalue_validated" in metadata
@@ -3241,22 +3248,19 @@ class KnockoffSelector(_BaseSelector):
             if "supervised_categorical_encoding" not in reasons:
                 reasons.append("supervised_categorical_encoding")
             metadata["evalue_exploratory_reasons"] = reasons
-            metadata["exploratory"] = True
-            for key in (
-                "representative_fdr_control",
-                "representative_per_draw_fdr_control",
-            ):
-                if key in metadata:
-                    metadata[key] = "none"
             updates["selector_metadata"] = metadata
-            diagnostics = result.diagnostics_
-            nested = None if diagnostics is None else diagnostics.get("representative_result")
-            if nested is not None:
-                diagnostics = dict(diagnostics)
-                diagnostics["representative_result"] = (
-                    self._apply_supervised_encoding_fdr_downgrade(nested)
-                )
-                updates["diagnostics_"] = diagnostics
+        # Representative results are nested for both legacy frequency
+        # aggregation and e-value aggregation.  A supervised encoder invalidates
+        # the Model-X claim in either case, so propagate the downgrade through
+        # every nested representative result rather than only e-value metadata.
+        diagnostics = result.diagnostics_
+        nested = None if diagnostics is None else diagnostics.get("representative_result")
+        if nested is not None:
+            diagnostics = dict(diagnostics)
+            diagnostics["representative_result"] = (
+                self._apply_supervised_encoding_fdr_downgrade(nested)
+            )
+            updates["diagnostics_"] = diagnostics
         return replace(result, **updates)
 
 

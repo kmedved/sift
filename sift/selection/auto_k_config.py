@@ -208,8 +208,9 @@ class AutoKConfig:
         ``'stability'``.
     auto_dense_check : bool, default False
         Opt-in dense-regime cross-check for ``k_method='auto'`` on Gaussian
-        CEFS+. Non-default ``auto_dense_*`` values are rejected by binary
-        log-loss CEFS+.
+        CEFS+ with a 1-D target. 2-D ``y`` is rejected rather than running
+        ``gaussian_cv``. Non-default ``auto_dense_*`` values are rejected by
+        binary log-loss CEFS+.
     auto_dense_min_k : int, default 100
         Selected-k count above which the dense check runs; non-negative.
     auto_dense_min_frac : float, default 0.25
