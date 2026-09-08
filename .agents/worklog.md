@@ -1,8 +1,8 @@
-# SIFT audit corrections — complete
+# SIFT audit corrections — implementation complete
 
 ## Objective and authority
 
-Address all agreed findings in Fable's post-roadmap audit of d038698. The user authorized implementation and then explicitly approved local commits and refreshing the existing runtime benchmark. Branch: codex/0.9.1-audit-corrections. Version remains 0.9.1.dev0. No push, merge, tag, release, PyPI publication, unrelated cleanup, or other external action is authorized or performed.
+Address all agreed findings in Fable's post-roadmap audit of d038698. The user authorized implementation, local commits and the existing runtime refresh, then approved pushing this branch, opening a PR, running required CI on the exact PR head, and merging without squashing once green. Branch: codex/0.9.1-audit-corrections; base: main. Version remains 0.9.1.dev0. No tag, release, PyPI publication, unrelated cleanup, or other external action is authorized.
 
 ## Completed work
 
@@ -23,6 +23,6 @@ Grok implemented the initial corrections, then exhausted its balance; Codex comp
 - Historical quality evidence is unchanged: CSV SHA256 40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf; JSON SHA256 bd84c19ca731cfb92e553c308c74969f547484355448b676fbad89a0d0606cd9.
 - Hash-memory correction preserved the exact 2000x10 string-fixture digest while median tracemalloc peak fell from 5,970,868B to 164,267B. This is traced allocation, not process RSS or a runtime speedup. Runtime refresh occurred without launched SIFT tests/reviews; ordinary desktop background activity remained.
 
-## Final state
+## Integration
 
-All agreed corrections and the remaining evidence gate are complete, ready for integration. No active task processes or remaining blockers. Historical runtime evidence remains in Git history. Integration and publication are outside the authorized task; do not start them automatically.
+All agreed corrections and the local evidence gate are complete. The authorized integration requires passing CI on the exact PR head and a merge commit preserving measured source 06c569e. The PR checks and Git ancestry are authoritative for integration status; there is no further local implementation or review round pending. Historical runtime evidence remains in Git history. Tagging, releases and publication remain outside the authorized task.
