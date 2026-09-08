@@ -129,6 +129,15 @@ def _base_accepts_sample_weight(selector: Any) -> bool:
     ``sample_weight`` only when their nested ``estimator.fit`` names it.
     A bare ``**kwargs`` sink is not treated as consumption.
     """
+    estimator = getattr(selector, "estimator", None)
+    if (
+        str(type(selector).__module__).startswith("sift.")
+        and hasattr(selector, "_selector_fn")
+        and isinstance(estimator, str)
+        and estimator == "ksg"
+    ):
+        # SIFT's common fit signature names weights, but KSG rejects them.
+        return False
     if _explicit_kwarg(selector.fit, "sample_weight"):
         return True
     if not _has_var_keyword(selector.fit):
@@ -192,6 +201,109 @@ def _base_consumes_row_context(selector: Any, name: str) -> bool:
     if _is_sift_fixed_k_filter(selector):
         return False
     return True
+
+
+_IN_SAMPLE_AUTO_K = frozenset(
+    {
+        "elbow",
+        "penalized_objective",
+        "chi2_stop",
+        "forward_stop",
+        "changepoint",
+        "k_posterior",
+        "perm_gap",
+        "knockoff_path",
+        "stability",
+    }
+)
+
+
+def _is_prebuilt_row_cache(obj: Any) -> bool:
+    if obj is None:
+        return False
+    from sift.estimators.classic_cache import is_classic_cache
+    from sift.estimators.copula import FeatureCache
+
+    return is_classic_cache(obj) or isinstance(obj, FeatureCache)
+
+
+def _prebuilt_caches(selector: Any) -> list[Any]:
+    found: list[Any] = []
+    seen: set[int] = set()
+
+    def _add(obj: Any) -> None:
+        if not _is_prebuilt_row_cache(obj):
+            return
+        ident = id(obj)
+        if ident in seen:
+            return
+        seen.add(ident)
+        found.append(obj)
+
+    _add(getattr(selector, "cache", None))
+    try:
+        params = selector.get_params(deep=True)
+    except (AttributeError, TypeError, ValueError):
+        params = {}
+    for value in params.values():
+        _add(value)
+    return found
+
+
+def _base_has_inner_row_cv(selector: Any) -> bool:
+    """Detect SIFT auto-k and declared CV, including nested estimators.
+
+    Opaque custom fits that hide row splitting cannot be inferred here.
+    """
+    estimators = [selector]
+    estimators.extend(selector.get_params(deep=True).values())
+    for estimator in estimators:
+        if not hasattr(estimator, "fit") or not hasattr(estimator, "get_params"):
+            continue
+        params = estimator.get_params(deep=False)
+        if getattr(estimator, "cat_encoding", None) == "target_cv":
+            return True
+        cls = type(estimator)
+        if cls.__name__ == "ModelSelector" and str(cls.__module__).startswith("sift."):
+            if (
+                estimator.nested
+                or estimator.method == "stability"
+                or not isinstance(estimator.n_features_to_select, (int, np.integer))
+            ):
+                return True
+            continue
+        # cv=None still enables default CV in sklearn CV estimators.
+        if "cv" in params:
+            return True
+        if getattr(estimator, "k", None) == "auto":
+            config = getattr(estimator, "auto_k_config", None)
+            method = "auto" if config is None else str(getattr(config, "k_method", "auto"))
+            if method == "consensus":
+                if not {"gaussian_cv", "xfit_objective"}.intersection(config.consensus_methods):
+                    continue
+            if (
+                method == "auto"
+                and cls.__name__ == "CEFSPlusSelector"
+                and str(cls.__module__).startswith("sift.")
+                and not bool(getattr(config, "auto_dense_check", False))
+            ):
+                continue
+            if method not in _IN_SAMPLE_AUTO_K:
+                return True
+    return False
+
+
+def _multiplicity_weights(idx: np.ndarray, sample_weight) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse resampled indices to unique rows with bootstrap multiplicities."""
+    positions = np.asarray(idx, dtype=np.int64).reshape(-1)
+    unique_idx, inverse = np.unique(positions, return_inverse=True)
+    if sample_weight is None:
+        base = np.ones(positions.size, dtype=np.float64)
+    else:
+        weights = np.asarray(sample_weight, dtype=np.float64).reshape(-1)
+        base = weights[positions]
+    summed = np.bincount(inverse, weights=base, minlength=int(unique_idx.size))
+    return unique_idx, np.asarray(summed, dtype=np.float64)
 
 
 def _row_take(values: Any, idx: np.ndarray) -> Any:
@@ -292,11 +404,29 @@ class Stabilized(SelectorMixin, BaseEstimator):
     is a subsample *without* replacement and is not used for
     ``resample="bootstrap"``.
 
+    Prebuilt row caches are not compatible with row resampling; let each
+    base fit build its own cache. For bases with declared inner CV (including
+    SIFT CV-based auto-k and ``target_cv`` encoding), replacement draws use
+    unique source rows and multiply
+    sample weights by draw multiplicity, preventing copies of one observation
+    from crossing folds. A base that cannot accept these weights must use
+    ``resample="half"``. This is a weighted unique-row fit, not a promise of
+    numerical equivalence to duplicated-row preprocessing. Custom selectors
+    that hide internal row splitting must likewise use ``"half"``.
+
     Random numbers use ``numpy.random.SeedSequence(random_state)`` to spawn
     one child sequence per resample; each child seeds
     ``numpy.random.default_rng`` for that resample's row index draw. The
     default ``random_state=0`` is a plain integer. This class does not change
     ``StabilitySelector`` or ``KnockoffSelector`` defaults.
+
+    In frequency mode, exposed base ``random_state=None`` parameters (also
+    nested sklearn parameters) receive derived per-resample integer seeds.
+    Explicit base seeds are preserved. These use separate SeedSequence
+    children, without consuming the row-draw generators. The manifest
+    distinguishes row-draw seeds from this declared-parameter control;
+    custom bases may hide other randomness, so it is not a general replay
+    guarantee for arbitrary selector code.
 
     ``aggregation="evalues"`` is valid only for a ``KnockoffSelector`` base.
     It reuses that class's native full-data ``n_draws`` /
@@ -609,11 +739,11 @@ class Stabilized(SelectorMixin, BaseEstimator):
         return self
 
     def _snapshot_fit_configuration(self) -> dict[str, Any]:
-        from sift.selection.reproducibility import describe_estimator, snapshot_selector_kwargs
+        from sift.selection.reproducibility import snapshot_selector_kwargs
 
         return snapshot_selector_kwargs(
             {
-                "base_selector": describe_estimator(self.selector),
+                "base_selector": self.selector,
                 "n_resamples": int(self.n_resamples),
                 "resample": self.resample,
                 "threshold": float(self.threshold),
@@ -634,6 +764,13 @@ class Stabilized(SelectorMixin, BaseEstimator):
             raise TypeError("selector must be a cloneable estimator instance, not a class")
         if not hasattr(selector, "fit"):
             raise TypeError("selector must be a cloneable sklearn-style estimator with fit")
+        if self._resolved_aggregation() != "evalues" and _prebuilt_caches(selector):
+            raise ValueError(
+                "Stabilized row resampling cannot reuse a prebuilt feature cache, "
+                "including a nested estimator cache. Remove the cache so each "
+                "resample builds it from its own rows; full-data e-value "
+                "aggregation is not subject to this restriction."
+            )
         try:
             clone(selector)
         except Exception as exc:
@@ -900,6 +1037,41 @@ class Stabilized(SelectorMixin, BaseEstimator):
         return np.asarray(train_idx, dtype=np.int64)
 
     def _fit_frequency(self, X, y, *, sample_weight, groups, time, names) -> None:
+        protect_inner_cv = self.resample != "half" and _base_has_inner_row_cv(self.selector)
+        if protect_inner_cv and not _base_accepts_sample_weight(self.selector):
+            raise ValueError(
+                "Replacement resampling with an inner-CV base requires sample_weight "
+                "support to preserve bootstrap multiplicities on unique source rows. "
+                "Use resample='half' or a base that consumes sample_weight."
+            )
+        self._resample_fit_policy_ = (
+            "unique_rows_with_multiplicity_weights" if protect_inner_cv else "drawn_rows"
+        )
+        base_params = self.selector.get_params(deep=True)
+        seed_names = sorted(
+            name for name in base_params if name.split("__")[-1] == "random_state"
+        )
+        unset_seed_names = [name for name in seed_names if base_params[name] is None]
+        explicit_integer_names = [
+            name for name in seed_names
+            if isinstance(base_params[name], (int, np.integer))
+            and not isinstance(base_params[name], (bool, np.bool_))
+        ]
+        self._base_seed_control_ = {
+            "scope": "declared_random_state_parameters",
+            "status": "parameters_configured" if seed_names else "not_declared",
+            "derived_parameters": unset_seed_names,
+            "preserved_integer_parameters": explicit_integer_names,
+            "uncontrolled_parameters": [
+                name for name in seed_names
+                if name not in unset_seed_names and name not in explicit_integer_names
+            ],
+            "derivation": (
+                "SeedSequence(random_state, spawn_key=(resample_index, 1))"
+                ".generate_state; sorted parameter order"
+                if unset_seed_names else None
+            ),
+        }
         n = int(X.shape[0])
         p = int(self.n_features_in_)
         n_resamples = int(self.n_resamples)
@@ -933,9 +1105,12 @@ class Stabilized(SelectorMixin, BaseEstimator):
             idx = self._draw_indices(rng, n, groups, time)
             row_counts.append(int(np.asarray(idx).size))
             unique_counts.append(int(np.unique(idx).size))
+            if protect_inner_cv:
+                idx, w_i = _multiplicity_weights(idx, sample_weight)
+            else:
+                w_i = _row_take(sample_weight, idx)
             X_i = _row_take(X, idx)
             y_i = _row_take(y, idx)
-            w_i = _row_take(sample_weight, idx)
             g_i = _row_take(groups, idx) if self._fit_used_groups_ else None
             t_i = _row_take(time, idx) if self._fit_used_time_ else None
             if not _base_consumes_row_context(self.selector, "groups"):
@@ -943,6 +1118,13 @@ class Stabilized(SelectorMixin, BaseEstimator):
             if not _base_consumes_row_context(self.selector, "time"):
                 t_i = None
             fitted = clone(self.selector)
+            if unset_seed_names:
+                seeds = np.random.SeedSequence(
+                    int(self.random_state), spawn_key=(i, 1)
+                ).generate_state(len(unset_seed_names))
+                fitted.set_params(**{
+                    name: int(seed) for name, seed in zip(unset_seed_names, seeds)
+                })
             mask = self._fit_one(
                 fitted, X_i, y_i, w_i, g_i, t_i, feature_names=names
             )
@@ -1024,6 +1206,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
         from sift.estimators.copula import weighted_rank_gauss_2d
         from sift.selection.proxies import (
             _check_storage_size,
+            reject_unavailable_proxy_positions,
             weighted_correlation_columns,
         )
 
@@ -1050,6 +1233,11 @@ class Stabilized(SelectorMixin, BaseEstimator):
         )
         selected = [int(i) for i in np.asarray(self.selected_indices_)]
         varying_raw = np.flatnonzero(varying).astype(np.int64)
+        reject_unavailable_proxy_positions(
+            selected,
+            available_original=varying_raw,
+            feature_names=self.feature_names_in_,
+        )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))
         varying_selected = [pos for pos in selected if bool(varying[pos])]
@@ -1086,11 +1274,13 @@ class Stabilized(SelectorMixin, BaseEstimator):
             "_fit_used_sample_weight_",
             "_fit_used_time_",
             "_actual_random_state_",
+            "_base_seed_control_",
             "_n_completed_resamples_",
             "_n_rows_original_",
             "_n_rows_used_",
             "_proxy_correlations",
             "_resample_row_counts_",
+            "_resample_fit_policy_",
             "_resample_unique_counts_",
             "_rng_mechanism_",
             "_resample_selections_",

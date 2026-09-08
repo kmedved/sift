@@ -239,7 +239,7 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         Number of train/validation folds. Must be at least 2.
     max_train_size : int or None, default None
         Optional cap on the number of distinct *training* timestamps kept
-        in the candidate window before purge/embargo. Forward mode keeps
+        after purge, embargo, and group exclusion. Forward mode keeps
         the most recent eligible timestamps. ``purged_kfold`` keeps the
         ``max_train_size`` unique-time *indices* nearest the validation
         block (index distance, not elapsed time). ``None`` keeps every
@@ -460,20 +460,10 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
             val_ids = np.arange(val_start_id, val_start_id + val_width, dtype=np.int64)
             if mode == _FORWARD:
                 train_ids = np.arange(0, val_start_id, dtype=np.int64)
-                if self.max_train_size is not None and train_ids.size > self.max_train_size:
-                    train_ids = train_ids[-int(self.max_train_size) :]
             else:
                 train_ids = np.setdiff1d(
                     np.arange(n_unique, dtype=np.int64), val_ids, assume_unique=True
                 )
-                if self.max_train_size is not None and train_ids.size > self.max_train_size:
-                    # Unique-time *index* distance, not elapsed-time ranking.
-                    dist = np.minimum(
-                        np.abs(train_ids - val_ids[0]),
-                        np.abs(train_ids - val_ids[-1]),
-                    )
-                    keep = np.argsort(dist, kind="mergesort")[: int(self.max_train_size)]
-                    train_ids = np.sort(train_ids[keep], kind="mergesort")
 
             val_mask = np.isin(time_id, val_ids)
             train_mask = np.isin(time_id, train_ids)
@@ -504,6 +494,27 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
                     f"training fold {fold_i} is empty after purge, embargo, "
                     "or group exclusion"
                 )
+            if self.max_train_size is not None:
+                remaining_ids = np.unique(time_id[train_idx])
+                cap = int(self.max_train_size)
+                if remaining_ids.size > cap:
+                    if mode == _FORWARD:
+                        keep_ids = remaining_ids[-cap:]
+                    else:
+                        dist = np.minimum(
+                            np.abs(remaining_ids - val_ids[0]),
+                            np.abs(remaining_ids - val_ids[-1]),
+                        )
+                        keep_local = np.argsort(dist, kind="mergesort")[:cap]
+                        keep_ids = np.sort(
+                            remaining_ids[keep_local], kind="mergesort"
+                        )
+                    train_idx = train_idx[np.isin(time_id[train_idx], keep_ids)]
+                if train_idx.size == 0:
+                    raise ValueError(
+                        f"training fold {fold_i} is empty after purge, embargo, "
+                        "or group exclusion"
+                    )
             if mode == _FORWARD and np.max(start[train_idx]) >= np.min(start[val_idx]):
                 raise ValueError(
                     "forward mode produced a training timestamp at or after "
@@ -612,7 +623,7 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
     n_splits : int, default 5
         Number of train/validation folds. Must be at least 2.
     max_train_size : int or None, default None
-        Optional cap on distinct training timestamps before purge/embargo.
+        Optional cap on distinct training timestamps after purge/embargo.
     test_size : int or None, default None
         Distinct timestamps in each validation block. See
         ``PurgedTimeSeriesSplit``.

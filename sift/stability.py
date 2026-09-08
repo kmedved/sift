@@ -215,6 +215,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Random seed for reproducibility. The 0.9 default is None, which draws
         nondeterministic entropy and makes ``fit`` emit a ``FutureWarning``;
         SIFT 1.0 will default to seed 0. Pass an integer to silence it.
+        Each unseeded fit records its realized integer root in the result
+        view and manifest, without changing the configured ``None``. Refit
+        with that integer and the same inputs/options to replay its streams.
     verbose : bool, default=True
         Emit the bootstrap scheme, the per-fit selection summary and any
         ``tune_threshold`` table at INFO on the ``sift`` logger. Use
@@ -388,6 +391,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             self._fit_feature_names_generated_ = (
                 feature_names is None and not isinstance(X, pd.DataFrame)
             )
+            shape = getattr(X, "shape", None)
+            self._n_rows_original_ = int(
+                shape[0] if shape is not None else np.asarray(X).shape[0]
+            )
             if isinstance(X, pd.DataFrame):
                 column_index = _feature_names_index(X.columns)
                 duplicate_mask = column_index.duplicated()
@@ -441,6 +448,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             self._finalize_stability_selection(sel_count, sum_abs_coef, n_runs, feature_names)
             if self.store_proxies:
                 self._store_proxy_payload(X_proxy, w_proxy)
+            from sift.selection.reproducibility import snapshot_selector_kwargs
+
+            self._fit_configured_options_ = snapshot_selector_kwargs(self.get_params(deep=False))
         except Exception:
             self._clear_fit_state()
             raise
@@ -454,11 +464,14 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             "_alpha_ref_weight_",
             "_target_center_",
             "_fit_feature_names_generated_",
+            "_fit_configured_options_",
             "_fit_input_kind_",
             "_fit_used_groups_",
             "_fit_used_sample_weight_",
             "_fit_used_time_",
             "_row_metadata_columns_",
+            "_actual_random_state_",
+            "_n_rows_original_",
             "alpha_",
             "alpha_rule_effective_",
             "classes_",
@@ -482,6 +495,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         self._validate_runtime_params()
         if self.random_state is None:
             warn_random_state_none("StabilitySelector.fit")
+            self._actual_random_state_ = int(np.random.SeedSequence().generate_state(1)[0])
+        else:
+            self._actual_random_state_ = self.random_state
         if self.use_smart_sampler and (groups is not None or time is not None):
             raise ValueError("groups/time are not supported when use_smart_sampler=True.")
         if self.use_smart_sampler:
@@ -562,6 +578,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
 
         return X_proxy, w_proxy, X_scaled, y, sample_weight, feature_names, groups, time
 
+    def _random_seed_for_fit(self):
+        """Use one recorded root for an unseeded fit, without changing params."""
+        return getattr(self, "_actual_random_state_", self.random_state)
+
     def _make_stability_split_iterator(self, n: int, y, groups, time):
         use_block = groups is not None and time is not None
         if use_block:
@@ -578,7 +598,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 block_method=self.block_method,
                 y=y if self.task == "classification" else None,
                 task=self.task,
-                random_state=self.random_state,
+                random_state=self._random_seed_for_fit(),
                 sample_frac=self.sample_frac,
             )
         else:
@@ -590,7 +610,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 sample_frac=self.sample_frac,
                 y=y if self.task == "classification" else None,
                 task=self.task,
-                random_state=self.random_state,
+                random_state=self._random_seed_for_fit(),
             )
 
         return split_iter
@@ -640,7 +660,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     @_single_threaded_blas
     def _run_stability_chunks(self, X_scaled, y, sample_weight, split_iter):
         p = X_scaled.shape[1]
-        rng = np.random.default_rng(self.random_state)
+        rng = np.random.default_rng(self._random_seed_for_fit())
 
         # Chunked execution to reduce peak memory. Splits are streamed instead
         # of materialized up front, which matters for large block bootstraps.
@@ -757,6 +777,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         from sift.estimators.copula import weighted_rank_gauss_2d
         from sift.selection.proxies import (
             _check_storage_size,
+            reject_unavailable_proxy_positions,
             weighted_correlation_columns,
         )
 
@@ -777,6 +798,11 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         )
         selected = [int(i) for i in np.asarray(self.selected_features_)]
         varying_raw = np.flatnonzero(varying).astype(np.int64)
+        reject_unavailable_proxy_positions(
+            selected,
+            available_original=varying_raw,
+            feature_names=getattr(self, "feature_names_in_", None),
+        )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))
         varying_selected = [pos for pos in selected if bool(varying[pos])]
@@ -1549,7 +1575,8 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         config = replace(self.sampler_config) if self.sampler_config is not None else SmartSamplerConfig()
         # Fix: use `is None` check to handle random_state=0
         if config.random_state is None:
-            config.random_state = self.random_state if self.random_state is not None else 42
+            seed = self._random_seed_for_fit()
+            config.random_state = seed if seed is not None else 42
         config.verbose = self.verbose
 
         # For classification, disable residual-based sampling (regression on class IDs is meaningless)
@@ -1664,7 +1691,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     ) -> float:
         """Estimate alpha via CV on subsample."""
         n = X.shape[0]
-        rng = np.random.default_rng(self.random_state)
+        rng = np.random.default_rng(self._random_seed_for_fit())
         idx = rng.choice(n, size=min(30_000, n), replace=False)
         if time is not None:
             if groups is None:
@@ -1680,7 +1707,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 solver='saga',
                 tol=1e-3,
                 max_iter=2000,
-                random_state=self.random_state,
+                random_state=self._random_seed_for_fit(),
                 n_jobs=1,
                 **_logistic_penalty_kwargs(LogisticRegression, "l1"),
             )

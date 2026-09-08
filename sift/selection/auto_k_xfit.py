@@ -458,7 +458,10 @@ def _fold_score_arrays(
                 y_tr = y_orig[train_idx]
                 y_va = y_orig[val_idx]
             if within is not None:
-                from sift.selection.within import fit_within_transform
+                from sift.selection.within import (
+                    fit_within_transform,
+                    require_seen_within_validation_levels,
+                )
 
                 g_tr = None if groups_cache is None else groups_cache[train_idx]
                 g_va = None if groups_cache is None else groups_cache[val_idx]
@@ -466,6 +469,7 @@ def _fold_score_arrays(
                 t_va = None if time_cache is None else time_cache[val_idx]
                 fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
                 X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
+                require_seen_within_validation_levels(fitted, g_va, t_va)
                 X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
             valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
             if valid_cols.size:
@@ -535,7 +539,10 @@ def _fold_score_arrays(
                 np.asarray(members, dtype=np.int64) for members in composed.members
             ]
         elif within is not None:
-            from sift.selection.within import fit_within_transform
+            from sift.selection.within import (
+                fit_within_transform,
+                require_seen_within_validation_levels,
+            )
 
             X_tr, y_tr = X_fold[train_idx], y_fold[train_idx]
             X_va, y_va = X_fold[val_idx], y_fold[val_idx]
@@ -545,6 +552,7 @@ def _fold_score_arrays(
             t_va = None if time_cache is None else time_cache[val_idx]
             fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
             X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
+            require_seen_within_validation_levels(fitted, g_va, t_va)
             X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
             Z_train = weighted_rank_gauss_2d(X_tr, w_train, n_jobs=1, rank_backend="serial")
             zy_train = weighted_rank_gauss_1d(y_tr, w_train)

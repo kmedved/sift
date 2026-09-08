@@ -79,6 +79,8 @@ _EFFECTIVE_KEYS = (
     "resample",
     "threshold",
     "aggregation",
+    "n_targets",
+    "ic_df_rule",
 )
 _COMPARE_PROTOCOL_KEYS = (
     "mode",
@@ -90,6 +92,15 @@ _COMPARE_PROTOCOL_KEYS = (
     "selection_identity",
 )
 _SCALAR_TYPES = (bool, int, float, str, type(None))
+_DESCRIPTOR_STATUSES = {
+    "params",
+    "opaque",
+    "cache_provenance",
+    "sequence_digest",
+    "array_digest",
+    "varies",
+    "partial",
+}
 
 
 def _module_version(module_name: str) -> str | None:
@@ -173,8 +184,8 @@ def _configured_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         for key in _CONFIGURED_IDENTITY_KEYS:
             if key in metadata:
                 configured.setdefault(key, metadata[key])
-        return configured
-    return _subset(metadata, _CONFIGURED_KEYS)
+        return _sanitize_param(configured)
+    return _sanitize_param(_subset(metadata, _CONFIGURED_KEYS))
 
 
 def _is_int(value: Any) -> bool:
@@ -220,13 +231,23 @@ def _data_hash(X) -> str:
     digest.update(np.asarray(payload.shape, dtype=np.int64).tobytes())
     digest.update(str(payload.dtype).encode("utf-8"))
     if payload.dtype == object:
-        encoded = json.dumps(
-            [_label_token(value) for value in payload.reshape(-1)],
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        digest.update(encoded)
+        # Keep the historical JSON-array framing byte-for-byte while hashing
+        # one token at a time.  This avoids retaining a list of every object
+        # token for large object frames.
+        digest.update(b"[")
+        for position, value in enumerate(payload.reshape(-1)):
+            if position:
+                digest.update(b",")
+            token = _label_token(value)
+            digest.update(
+                json.dumps(
+                    token,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+        digest.update(b"]")
     else:
         digest.update(np.ascontiguousarray(payload).tobytes())
     return digest.hexdigest()
@@ -234,7 +255,9 @@ def _data_hash(X) -> str:
 
 def _is_feature_cache(obj: Any) -> bool:
     cls = type(obj)
-    return cls.__name__ == "FeatureCache" and str(cls.__module__).startswith("sift.")
+    return cls.__name__ in {"FeatureCache", "ClassicFeatureCache"} and str(
+        cls.__module__
+    ).startswith("sift.")
 
 
 def describe_feature_cache(obj: Any) -> dict[str, Any]:
@@ -253,10 +276,24 @@ def describe_feature_cache(obj: Any) -> dict[str, Any]:
             getattr(obj, "feature_names_are_synthetic", False)
         ),
         "has_rxx": getattr(obj, "Rxx", None) is not None,
+        **{
+            key: _sanitize_param(getattr(obj, key))
+            for key in (
+                "subsample",
+                "random_state",
+                "weights_supplied",
+                "subsample_applied",
+            )
+            if hasattr(obj, key)
+        },
     }
 
 
-def snapshot_selector_kwargs(kwargs: Mapping[str, Any] | None, *, unused: tuple[str, ...] = ()) -> dict[str, Any]:
+def snapshot_selector_kwargs(
+    kwargs: Mapping[str, Any] | None,
+    *,
+    unused: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Typed snapshot of non-data function-selector options."""
     skip = {"callback", *unused}
     data = {key: value for key, value in dict(kwargs or {}).items() if key not in skip}
@@ -277,17 +314,23 @@ def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
         return value
     if isinstance(value, (list, tuple)):
         if len(value) > 32:
-            return {"status": "partial", "reason": "sequence_too_long", "length": len(value)}
+            return _sequence_digest(value)
         return [_sanitize_param(item, depth=depth + 1) for item in value]
     if isinstance(value, np.ndarray):
         if value.size > 32:
-            return {
-                "status": "partial",
-                "reason": "array_omitted",
-                "shape": [int(dim) for dim in value.shape],
-            }
+            return _array_digest(value)
         return _sanitize_param(value.tolist(), depth=depth + 1)
     if isinstance(value, Mapping):
+        # ``describe_estimator`` already returns this shape.  Re-sanitizing
+        # nested descriptors with the ordinary depth counter used to erase
+        # their inner estimator parameters and seeds.
+        if value.get("status") in _DESCRIPTOR_STATUSES and (
+            "type" in value or value.get("status") in {"varies", "partial"}
+        ):
+            return {
+                key: _sanitize_param(item, depth=0)
+                for key, item in value.items()
+            }
         items = list(value.items())
         if len(items) > 256:
             return {
@@ -307,6 +350,73 @@ def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
         return describe_estimator(value)
     type_name = f"{type(value).__module__}.{type(value).__qualname__}"
     return {"status": "opaque", "type": type_name}
+
+
+def _sequence_digest(value: list | tuple) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    digest.update(f"sequence:{type(value).__module__}.{type(value).__qualname__}:".encode())
+    digest.update(str(len(value)).encode("ascii"))
+    digest.update(b"[")
+    try:
+        for position, item in enumerate(value):
+            if position:
+                digest.update(b",")
+            digest.update(
+                json.dumps(
+                    _label_token(item),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+    except TypeError as exc:
+        return {
+            "status": "opaque",
+            "reason": "unsupported_sequence_value",
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "error": str(exc),
+        }
+    digest.update(b"]")
+    return {
+        "status": "sequence_digest",
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "length": len(value),
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _array_digest(value: np.ndarray) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    digest.update(str(value.dtype).encode("utf-8"))
+    digest.update(np.asarray(value.shape, dtype=np.int64).tobytes())
+    if value.dtype == object:
+        try:
+            for item in value.reshape(-1):
+                digest.update(
+                    json.dumps(
+                        _label_token(item),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                )
+        except TypeError as exc:
+            return {
+                "status": "opaque",
+                "reason": "unsupported_array_value",
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "shape": [int(dim) for dim in value.shape],
+                "error": str(exc),
+            }
+    else:
+        digest.update(np.ascontiguousarray(value).tobytes())
+    return {
+        "status": "array_digest",
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "dtype": str(value.dtype),
+        "shape": [int(dim) for dim in value.shape],
+        "sha256": digest.hexdigest(),
+    }
 
 
 _PURGED_SPLITTER_FIELDS = (
@@ -383,12 +493,16 @@ def describe_estimator(obj: Any) -> dict[str, Any]:
             "params": {key: _sanitize_param(item) for key, item in raw.items()},
         }
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        try:
+            fields = dataclasses.asdict(obj)
+        except Exception:
+            return {"type": type_name, "status": "opaque"}
         return {
             "type": type_name,
             "status": "params",
             "params": {
                 str(key): _sanitize_param(item)
-                for key, item in dataclasses.asdict(obj).items()
+                for key, item in fields.items()
             },
         }
     return {"type": type_name, "status": "opaque"}
@@ -423,18 +537,143 @@ def _seed_block(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "available": False,
         "random_state": None,
         "auto_k_random_state": None,
+        "realized_random_state": None,
+        "base_seed_control": None,
     }
+    configured = metadata.get("configured_options")
+    configured_seed = (
+        configured.get("random_state")
+        if isinstance(configured, Mapping)
+        else None
+    )
     if "random_state" in metadata:
+        configured_seed = metadata.get("random_state")
+    if _is_int(configured_seed):
         seeds["available"] = True
-        seeds["random_state"] = metadata["random_state"]
+    if configured_seed is not None:
+        seeds["random_state"] = _sanitize_param(configured_seed)
+    elif "random_state" in metadata:
+        # Preserve an explicit configured None without treating it as a
+        # reproducible seed.  This is distinct from an unavailable field.
+        seeds["random_state"] = None
+    realized = metadata.get("realized_random_state")
+    if realized is not None:
+        seeds["realized_random_state"] = _sanitize_param(realized)
+        if _is_int(realized):
+            seeds["available"] = True
+    base_control = metadata.get("base_seed_control")
+    if base_control is not None:
+        seeds["base_seed_control"] = _sanitize_param(base_control)
     cfg = metadata.get("auto_k_config")
     params = None
     if isinstance(cfg, Mapping):
         params = cfg.get("params") if isinstance(cfg.get("params"), Mapping) else cfg
-    if isinstance(params, Mapping) and "random_state" in params:
-        seeds["auto_k_random_state"] = params["random_state"]
-        seeds["available"] = True
+    if isinstance(params, Mapping) and params.get("random_state") is not None:
+        auto_seed = params["random_state"]
+        seeds["auto_k_random_state"] = _sanitize_param(auto_seed)
+        if _is_int(auto_seed):
+            seeds["available"] = True
     return seeds
+
+
+def _context_hash(value: Any, *, label: str, n_rows: int | None) -> str:
+    """Hash caller-supplied row context without retaining it."""
+    array = (
+        value.to_numpy()
+        if isinstance(value, (pd.Series, pd.DataFrame))
+        else np.asarray(value)
+    )
+    allowed_ndim = (1, 2) if label == "y" else (1,)
+    if array.ndim not in allowed_ndim:
+        expected = "1-D or 2-D" if label == "y" else "1-D"
+        raise ValueError(f"{label} must be {expected} when supplied for hashing")
+    if n_rows is not None and int(array.shape[0]) != int(n_rows):
+        raise ValueError(
+            f"{label} has {int(array.shape[0])} rows but the result describes "
+            f"{int(n_rows)} rows"
+        )
+    digest = hashlib.sha256()
+    digest.update(f"{label}:".encode("utf-8"))
+    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    digest.update(str(array.dtype).encode("utf-8"))
+    if array.dtype == object:
+        digest.update(b"[")
+        for position, item in enumerate(array.reshape(-1)):
+            if position:
+                digest.update(b",")
+            digest.update(
+                json.dumps(
+                    _label_token(item),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+        digest.update(b"]")
+    else:
+        digest.update(np.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
+
+
+def _context_input_fields(
+    *,
+    y: Any,
+    sample_weight: Any,
+    groups: Any,
+    time: Any,
+    hash_data: bool,
+    n_rows: int | None,
+) -> dict[str, Any]:
+    values = {
+        "y": y,
+        "sample_weight": sample_weight,
+        "groups": groups,
+        "time": time,
+    }
+    observed_rows: int | None = n_rows
+    for label, value in values.items():
+        if value is None:
+            continue
+        array = (
+            value.to_numpy()
+            if isinstance(value, (pd.Series, pd.DataFrame))
+            else np.asarray(value)
+        )
+        allowed_ndim = (1, 2) if label == "y" else (1,)
+        if array.ndim not in allowed_ndim:
+            expected = "1-D or 2-D" if label == "y" else "1-D"
+            raise ValueError(f"{label} must be {expected} when supplied for hashing")
+        rows = int(array.shape[0])
+        if observed_rows is None:
+            observed_rows = rows
+        elif rows != observed_rows:
+            raise ValueError(
+                f"{label} has {rows} rows but other manifest inputs describe "
+                f"{observed_rows} rows"
+            )
+    fields: dict[str, Any] = {}
+    for label, value in values.items():
+        key = f"{label}_hash"
+        source_key = f"{label}_hash_source"
+        complete_key = f"{label}_hash_complete"
+        if value is None:
+            fields[key] = None
+            fields[source_key] = None
+            fields[complete_key] = None
+        elif hash_data:
+            fields[key] = _context_hash(value, label=label, n_rows=n_rows)
+            fields[source_key] = "caller"
+            fields[complete_key] = True
+        else:
+            fields[key] = None
+            fields[source_key] = "caller_unhashed"
+            fields[complete_key] = False
+    fields["context_hashes_complete"] = bool(
+        hash_data and all(value is not None for value in values.values())
+    )
+    fields["context_hash_scope"] = "caller_only"
+    fields["context_selection_time_verified"] = False
+    return fields
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -498,7 +737,16 @@ def _row_fields(metadata: Mapping[str, Any], X) -> dict[str, Any]:
     }
 
 
-def manifest_from_view(view, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+def manifest_from_view(
+    view,
+    *,
+    X=None,
+    y=None,
+    sample_weight=None,
+    groups=None,
+    time=None,
+    hash_data: bool = False,
+) -> dict[str, Any]:
     """Build a JSON-safe manifest from a SelectionView.
 
     Environment, BLAS identity, and git commit are always labelled as
@@ -525,8 +773,12 @@ def manifest_from_view(view, *, X=None, hash_data: bool = False) -> dict[str, An
     if columns_hash is None and X is not None:
         caller_names = _caller_columns(X)
         if caller_names is not None:
-            columns_hash = _columns_hash(caller_names)
-            columns_source = "caller"
+            try:
+                columns_hash = _columns_hash(caller_names)
+            except TypeError:
+                columns_hash = None
+            else:
+                columns_source = "caller"
     if n_features is None and X is not None:
         n_features = _n_features_of(X)
         n_features_source = "caller"
@@ -535,8 +787,16 @@ def manifest_from_view(view, *, X=None, hash_data: bool = False) -> dict[str, An
     else:
         n_features_source = "result"
     data_hash = _data_hash(X) if hash_data else None
+    context_fields = _context_input_fields(
+        y=y,
+        sample_weight=sample_weight,
+        groups=groups,
+        time=time,
+        hash_data=hash_data,
+        n_rows=rows["n_rows"],
+    )
     configured = _configured_from_metadata(metadata)
-    effective = _subset(metadata, _EFFECTIVE_KEYS)
+    effective = _sanitize_param(_subset(metadata, _EFFECTIVE_KEYS))
     captured = (
         "selection"
         if configured or effective or _seed_block(metadata)["available"]
@@ -557,6 +817,7 @@ def manifest_from_view(view, *, X=None, hash_data: bool = False) -> dict[str, An
             "columns_hash_source": columns_source,
             "data_hash": data_hash,
             "data_hash_source": None if data_hash is None else "caller",
+            **context_fields,
             "cache": rows["cache"],
         },
         "configuration": {
@@ -570,7 +831,16 @@ def manifest_from_view(view, *, X=None, hash_data: bool = False) -> dict[str, An
     return _json_safe(payload)
 
 
-def manifest_from_compare(result, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+def manifest_from_compare(
+    result,
+    *,
+    X=None,
+    y=None,
+    sample_weight=None,
+    groups=None,
+    time=None,
+    hash_data: bool = False,
+) -> dict[str, Any]:
     """Build a JSON-safe manifest from a CompareResult.
 
     Fold fingerprints are the compare-time bookkeeping already stored on the
@@ -611,9 +881,21 @@ def manifest_from_compare(result, *, X=None, hash_data: bool = False) -> dict[st
     if not columns_hash and X is not None:
         caller_names = _caller_columns(X)
         if caller_names is not None:
-            columns_hash = _columns_hash(caller_names)
-            columns_source = "caller"
+            try:
+                columns_hash = _columns_hash(caller_names)
+            except TypeError:
+                columns_hash = None
+            else:
+                columns_source = "caller"
     data_hash = _data_hash(X) if hash_data else None
+    context_fields = _context_input_fields(
+        y=y,
+        sample_weight=sample_weight,
+        groups=groups,
+        time=time,
+        hash_data=hash_data,
+        n_rows=n_rows,
+    )
     protocol = _subset(diagnostics, _COMPARE_PROTOCOL_KEYS)
     split = diagnostics.get("split")
     selectors = diagnostics.get("selectors")
@@ -638,6 +920,14 @@ def manifest_from_compare(result, *, X=None, hash_data: bool = False) -> dict[st
         configured["estimator"] = estimator
     if compare_seed is not None:
         configured["compare_random_state"] = compare_seed
+    configured = _sanitize_param(configured)
+    effective = _sanitize_param(
+        {
+            "split": split,
+            "selectors": selectors,
+            "estimator": estimator,
+        }
+    )
     payload = {
         "schema_version": "1",
         "kind": "compare",
@@ -653,6 +943,7 @@ def manifest_from_compare(result, *, X=None, hash_data: bool = False) -> dict[st
             "columns_hash_source": columns_source,
             "data_hash": data_hash,
             "data_hash_source": None if data_hash is None else "caller",
+            **context_fields,
             "cache": {
                 "available": False,
                 "n_rows_original": None,
@@ -662,11 +953,7 @@ def manifest_from_compare(result, *, X=None, hash_data: bool = False) -> dict[st
         "configuration": {
             "captured_at": "compare" if configured else "unknown",
             "configured": configured,
-            "effective": {
-                "split": split,
-                "selectors": selectors,
-                "estimator": estimator,
-            },
+            "effective": effective,
             "seeds": {
                 "available": compare_seed is not None or split_seed is not None,
                 "compare_random_state": compare_seed,

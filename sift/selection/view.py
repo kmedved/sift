@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import dataclasses
 import datetime
@@ -37,6 +38,17 @@ _MAPPING_ENVELOPE_KIND = "typed_key_entries"
 
 
 def _label_token(value: Any) -> Any:
+    """Return a deterministic, typed token for a supported feature label/value.
+
+    This helper is also used by the opt-in data hash.  Deliberately reject
+    arbitrary objects: their ``repr`` commonly contains a process-local
+    address and is not a reproducible identity.
+    """
+    if value is pd.NA or value is pd.NaT:
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "value": "missing",
+        }
     if isinstance(value, np.datetime64):
         return {
             "type": "numpy.datetime64",
@@ -50,10 +62,17 @@ def _label_token(value: Any) -> Any:
             "value": str(value),
         }
     if isinstance(value, np.generic):
+        # Keep the established label contract: NumPy scalar labels normalize
+        # to their Python scalar counterparts (while int/float remain distinct).
         value = value.item()
     type_name = f"{type(value).__module__}.{type(value).__qualname__}"
     if value is None or isinstance(value, (bool, int, str)):
         payload: Any = value
+    elif isinstance(value, (bytes, bytearray)):
+        payload = {
+            "encoding": "base64",
+            "value": base64.b64encode(bytes(value)).decode("ascii"),
+        }
     elif isinstance(value, float):
         if math.isnan(value):
             payload = "NaN"
@@ -63,10 +82,27 @@ def _label_token(value: Any) -> Any:
             payload = value
     elif isinstance(value, tuple):
         payload = [_label_token(item) for item in value]
+    elif isinstance(value, (set, frozenset)):
+        tokens = [_label_token(item) for item in value]
+        tokens.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+        payload = tokens
     elif isinstance(value, (pd.Timestamp, pd.Timedelta)):
         payload = value.isoformat()
+    elif isinstance(value, datetime.timedelta):
+        payload = {
+            "days": value.days,
+            "seconds": value.seconds,
+            "microseconds": value.microseconds,
+        }
+    elif isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        payload = value.isoformat()
+    elif isinstance(value, Path):
+        payload = str(value)
     else:
-        payload = repr(value)
+        raise TypeError(
+            f"{type_name} has no deterministic identity token; pass primitive, "
+            "datetime/timedelta, bytes, path, tuple, set, or frozenset values"
+        )
     return {"type": type_name, "value": payload}
 
 
@@ -728,12 +764,18 @@ class SelectionView:
                 )
         meta["transform_available"] = transformer is not None
         meta["inverse_transform_available"] = inverse_transformer is not None
-        meta["raw_columns_hash"] = (
-            _columns_hash(raw_names) if raw_names is not None else None
-        )
-        meta["encoded_columns_hash"] = (
-            _columns_hash(encoded_names) if encoded_names is not None else None
-        )
+        try:
+            raw_columns_hash = _columns_hash(raw_names) if raw_names is not None else None
+        except TypeError:
+            raw_columns_hash = None
+        try:
+            encoded_columns_hash = (
+                _columns_hash(encoded_names) if encoded_names is not None else None
+            )
+        except TypeError:
+            encoded_columns_hash = None
+        meta["raw_columns_hash"] = raw_columns_hash
+        meta["encoded_columns_hash"] = encoded_columns_hash
 
         support = None
         if n_raw_features is not None and selected_indices is not None:
@@ -989,7 +1031,9 @@ class SelectionView:
         """
         if self._proxy_correlations is None:
             raise NotImplementedError(
-                "proxy correlations were not stored; rerun selection with store_proxies=True"
+                "proxy correlations are unavailable for this selected set; rerun or "
+                "refit selection with store_proxies=True. If a threshold change added "
+                "features, refit to compute correlations for those newly selected features"
             )
         raw_names = self.raw_features
         if raw_names is None:
@@ -1047,7 +1091,9 @@ class SelectionView:
         """
         if self._proxy_correlations is None:
             raise NotImplementedError(
-                "proxy correlations were not stored; rerun selection with store_proxies=True"
+                "proxy correlations are unavailable for this selected set; rerun or "
+                "refit selection with store_proxies=True. If a threshold change added "
+                "features, refit to compute correlations for those newly selected features"
             )
         if isinstance(selected_index, (bool, np.bool_)) or not isinstance(
             selected_index,
@@ -1179,7 +1225,9 @@ class SelectionView:
     def _require_proxy_block(self) -> pd.DataFrame:
         if self._proxy_correlations is None:
             raise NotImplementedError(
-                "proxy correlations were not stored; rerun selection with store_proxies=True"
+                "proxy correlations are unavailable for this selected set; rerun or "
+                "refit selection with store_proxies=True. If a threshold change added "
+                "features, refit to compute correlations for those newly selected features"
             )
         return self._proxy_correlations
 
@@ -1310,7 +1358,16 @@ class SelectionView:
         }
         return _json_safe(payload)
 
-    def reproducibility_(self, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+    def reproducibility_(
+        self,
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        hash_data: bool = False,
+    ) -> dict[str, Any]:
         """Return a JSON-safe reproducibility manifest for this view.
 
         Package versions, BLAS identity, and git commit are captured at
@@ -1325,6 +1382,12 @@ class SelectionView:
         X : DataFrame or ndarray, optional
             Caller-supplied matrix used only when hashing data or filling
             unknown shape at export. Not retained.
+        y, sample_weight, groups, time : array-like, optional
+            Caller-supplied row context. When ``hash_data=True`` these are
+            hashed in memory and only their fingerprints are emitted. With
+            hashing disabled their presence is reported as caller-supplied but
+            unhashed; they are never retained or treated as selection-time
+            provenance.
         hash_data : bool, default False
             If True, hash ``X``. Raises if ``X`` is omitted.
 
@@ -1346,7 +1409,15 @@ class SelectionView:
         """
         from sift.selection.reproducibility import manifest_from_view
 
-        return manifest_from_view(self, X=X, hash_data=hash_data)
+        return manifest_from_view(
+            self,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+            hash_data=hash_data,
+        )
 
     def __repr__(self) -> str:
         metadata = getattr(self, "_metadata", {})

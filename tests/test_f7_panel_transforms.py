@@ -193,7 +193,7 @@ def test_two_way_uses_documented_iteration_count():
     assert groups_only or two_way
 
 
-def test_evaluate_is_fold_local_not_global_demean():
+def test_evaluate_rejects_all_unseen_validation_groups():
     rng = np.random.default_rng(4)
     n_groups, n_time = 6, 8
     groups = np.repeat(np.arange(n_groups), n_time)
@@ -214,24 +214,15 @@ def test_evaluate_is_fold_local_not_global_demean():
         max_k=2,
         selection_rule="best",
     )
-    _best_k, _feats, diag = select_k_auto(
-        X,
-        np.asarray(y, dtype=np.float64),
-        ["between_only", "noise"],
-        config,
-        groups=groups,
-        within="groups",
-    )
-    X_arr = X.to_numpy(dtype=np.float64)
-    y_arr = np.asarray(y, dtype=np.float64)
-    w = np.ones(n)
-    global_fit = fit_within_transform("groups", X_arr, y_arr, groups, None, w)
-    X_global, y_global = global_fit.transform(X_arr, y_arr, groups, None)
-    # Held-out groups keep between variation after train-only fallback,
-    # so fold scores are not the near-zero residuals of a global demean.
-    assert float(np.var(y_global)) < 0.05
-    assert diag["score_mean"].notna().any()
-    assert float(diag["score_mean"].min()) > 0.05
+    with pytest.raises(ValueError, match="no validation entity can be demeaned"):
+        select_k_auto(
+            X,
+            np.asarray(y, dtype=np.float64),
+            ["between_only", "noise"],
+            config,
+            groups=groups,
+            within="groups",
+        )
 
 
 def test_gaussian_cv_with_within_does_not_require_cache():
@@ -244,18 +235,17 @@ def test_gaussian_cv_with_within_does_not_require_cache():
         max_k=2,
         selection_rule="best",
     )
-    selected = sift.select_cefsplus(
-        X,
-        y,
-        k="auto",
-        groups=groups,
-        within="groups",
-        auto_k_config=config,
-        verbose=False,
-        subsample=None,
-    )
-    assert selected
-    assert "within_signal" in selected
+    with pytest.raises(ValueError, match="no validation entity can be demeaned"):
+        sift.select_cefsplus(
+            X,
+            y,
+            k="auto",
+            groups=groups,
+            within="groups",
+            auto_k_config=config,
+            verbose=False,
+            subsample=None,
+        )
 
 
 def test_unsupported_combinations_raise():

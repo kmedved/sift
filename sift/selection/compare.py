@@ -629,11 +629,26 @@ def _encoded_column_index(selector, raw_prefix: Sequence[Hashable], encoded_name
         wanted = list(encoder.expand_selected(list(raw_prefix)))
     else:
         wanted = list(raw_prefix)
-    wanted_set = set(wanted)
+    if not wanted:
+        return np.empty(0, dtype=np.int64)
     if encoded_names:
-        idx = [i for i, name in enumerate(encoded_names) if name in wanted_set]
-        if idx:
-            return np.asarray(idx, dtype=np.int64)
+        positions: dict[Hashable, int] = {}
+        for i, name in enumerate(encoded_names):
+            if name not in positions:
+                positions[name] = int(i)
+        missing = [name for name in wanted if name not in positions]
+        if missing:
+            raise ValueError(
+                "compare cannot map selected prefix names onto transformed "
+                f"columns; missing {missing[:5]!r}"
+            )
+        idx = np.asarray([positions[name] for name in wanted], dtype=np.int64)
+        n_encoded = len(encoded_names)
+        if int(idx.min()) < 0 or int(idx.max()) >= n_encoded:
+            raise ValueError(
+                "compare prefix column index is outside the transformed matrix"
+            )
+        return idx
     widths = getattr(selector, "_encoded_prefix_widths_", None)
     if widths and raw_prefix:
         n_steps = max(1, len(_cluster_discovery(
@@ -643,7 +658,10 @@ def _encoded_column_index(selector, raw_prefix: Sequence[Hashable], encoded_name
         )))
         width = int(widths[min(n_steps, len(widths)) - 1])
         return np.arange(width, dtype=np.int64)
-    return np.arange(len(wanted), dtype=np.int64)
+    raise ValueError(
+        "compare cannot establish transformed-column identity for prefix "
+        "scoring; expose get_feature_names_out() aligned with transform()"
+    )
 
 
 def _slice_columns(matrix, idx: np.ndarray):
@@ -774,7 +792,16 @@ class CompareResult:
             }
         )
 
-    def reproducibility_(self, *, X=None, hash_data: bool = False) -> dict[str, Any]:
+    def reproducibility_(
+        self,
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        hash_data: bool = False,
+    ) -> dict[str, Any]:
         """Return a JSON-safe reproducibility manifest for this comparison.
 
         Per-fold split fingerprints reuse ``fold_bookkeeping``. Instantiated
@@ -798,7 +825,15 @@ class CompareResult:
         """
         from sift.selection.reproducibility import manifest_from_compare
 
-        return manifest_from_compare(self, X=X, hash_data=hash_data)
+        return manifest_from_compare(
+            self,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+            hash_data=hash_data,
+        )
 
 
 def compare(
@@ -838,7 +873,8 @@ def compare(
         single full-sample fit in ``in_sample_path``) calls the factory and
         clones the result.
     X : DataFrame or ndarray
-        Feature matrix.
+        Feature matrix. NaN support depends on both the selector and downstream
+        estimator/pipeline; compare does not insert an imputer.
     y : array-like
         Target aligned with ``X``.
     estimator : estimator, optional
@@ -861,8 +897,9 @@ def compare(
         accepts them. SIFT fixed-k filter wrappers and ``KnockoffSelector``
         do not receive ``groups``; Stability and other accepting selectors do.
     time : array-like or str, optional
-        Selector ``fit`` time only when accepted. Not used to invent a
-        time-series splitter.
+        Selector ``fit`` time when accepted, and forwarded to ``cv.split``
+        when that splitter declares a ``time`` argument (purged time-series
+        splitters require it). Not used to invent a time-series splitter.
     sample_weight : array-like, optional
         Row weights sliced per train/validation fold and consumed by
         selectors, estimators, and scorers that accept them.
@@ -874,9 +911,9 @@ def compare(
     random_state : int, default 0
         Shuffle seed for default ``KFold``.
     val_frac : float, default 0.2
-        Holdout fraction only when ``cv`` is a single pair constructed via
-        the path-evaluation splitter helper with ``splitter=None``. Unused
-        for sklearn ``KFold``/``GroupKFold`` objects.
+        Retained compatibility parameter, unused by compare's CV protocol.
+        Only the default is accepted. To configure a holdout, pass a splitter
+        with the desired test size through ``cv``.
 
     Returns
     -------
@@ -898,6 +935,8 @@ def compare(
     one-hot blocks. ``k`` is ``len(selected_features_)`` unless the fitted
     metadata reports ``feature_blocks``, in which case mean ``k`` uses
     additional-block units and ``n_columns`` remains the raw width.
+    ``scores.empty`` and ``summary.n_empty`` describe an empty scoring design,
+    including a nonempty raw selection transformed to zero encoded columns.
 
     Examples
     --------
@@ -929,6 +968,18 @@ def compare(
         raise ValueError("mode must be 'cv' or 'in_sample_path'")
     if task not in {"regression", "classification"}:
         raise ValueError("task must be 'regression' or 'classification'")
+    if (
+        isinstance(val_frac, (bool, np.bool_))
+        or not isinstance(val_frac, (int, float, np.integer, np.floating))
+        or not np.isfinite(float(val_frac))
+        or not 0.0 < float(val_frac) < 1.0
+    ):
+        raise ValueError("val_frac must be a finite number in (0, 1)")
+    if float(val_frac) != 0.2:
+        raise ValueError(
+            "compare does not use val_frac; omit it and configure the desired "
+            "holdout size through the cv splitter instead"
+        )
     if estimator is not None and estimator_factory is not None:
         raise ValueError("Pass either estimator or estimator_factory, not both")
     if estimator is None and estimator_factory is None:
@@ -970,6 +1021,7 @@ def compare(
         val_frac=val_frac,
         groups=None if groups is None else np.asarray(groups).reshape(-1),
         y=y_arr,
+        time=None if time is None else np.asarray(time).reshape(-1),
     )
     fold_rows = []
     bookkeeping = []
@@ -1147,7 +1199,7 @@ def _compare_cv(
                     "n_blocks": report["n_blocks"],
                     "n_columns": report["n_columns"],
                     "n_encoded_columns": int(n_encoded),
-                    "empty": bool(report["empty"]),
+                    "empty": int(n_encoded) == 0,
                     "in_sample": False,
                     "mode": "cv",
                 }
@@ -1260,9 +1312,15 @@ def _compare_in_sample_path(
                         encoded_names = [name for name in selector.get_feature_names_out()]
                     except Exception:
                         encoded_names = []
+                if not encoded_names and hasattr(X_tr_full, "columns"):
+                    encoded_names = [name for name in X_tr_full.columns]
                 prefixes = []
                 for step, raw_prefix in _raw_prefixes(selector, report, names):
-                    col_idx = _encoded_column_index(selector, raw_prefix, encoded_names)
+                    col_idx = (
+                        np.empty(0, dtype=np.int64)
+                        if int(np.asarray(X_tr_full).shape[1]) == 0
+                        else _encoded_column_index(selector, raw_prefix, encoded_names)
+                    )
                     prefixes.append((step, col_idx))
                 score, n_encoded, est_desc = _score_matrices(
                     X_tr_sel=X_tr_full,
@@ -1296,7 +1354,7 @@ def _compare_in_sample_path(
                     "n_blocks": report["n_blocks"],
                     "n_columns": report["n_columns"],
                     "n_encoded_columns": int(n_encoded),
-                    "empty": bool(report["empty"]),
+                    "empty": int(n_encoded) == 0,
                     "in_sample": True,
                     "mode": "in_sample_path",
                 }
@@ -1463,6 +1521,10 @@ def _assemble_result(
     overlap = _frame(overlap_rows, OVERLAP_COLUMNS)
     prefix_scores = _frame(prefix_rows, PREFIX_COLUMNS)
     folds = folds.reindex(columns=list(FOLDS_COLUMNS))
+    try:
+        raw_columns_hash = _columns_hash(names)
+    except TypeError:
+        raw_columns_hash = None
     diagnostics = {
         "mode": mode,
         "in_sample": bool(in_sample),
@@ -1475,7 +1537,7 @@ def _assemble_result(
         "empty_selection": "intercept_only",
         "n_rows": None if n_rows is None else int(n_rows),
         "n_features": int(len(names)),
-        "raw_columns_hash": _columns_hash(names),
+        "raw_columns_hash": raw_columns_hash,
         "input_kind": input_kind,
         "compare_random_state": random_state,
         "split": split,

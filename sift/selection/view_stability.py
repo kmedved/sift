@@ -295,6 +295,16 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         "coefs_available": coefs_available,
         "store_proxies": bool(getattr(selector, "store_proxies", False)),
     }
+    configured = getattr(selector, "_fit_configured_options_", None)
+    if isinstance(configured, dict):
+        metadata["configured_options"] = copy.deepcopy(configured)
+        metadata["random_state"] = configured.get("random_state")
+    realized_seed = getattr(selector, "_actual_random_state_", None)
+    if isinstance(realized_seed, (int, np.integer)):
+        metadata["realized_random_state"] = int(realized_seed)
+    original_rows = getattr(selector, "_n_rows_original_", None)
+    if original_rows is not None:
+        metadata["n_rows_original"] = int(original_rows)
     diagnostics = {
         "fit_context": {
             "sample_weight": bool(

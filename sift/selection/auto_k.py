@@ -326,6 +326,7 @@ def _evaluate_prefix_split(
         from sift.selection.within import (
             as_float_feature_matrix,
             fit_within_transform,
+            require_seen_within_validation_levels,
             restore_feature_matrix,
         )
 
@@ -337,6 +338,7 @@ def _evaluate_prefix_split(
         t_va = None if time is None else time[val_idx]
         fitted = fit_within_transform(within, Xtr_num, ytr, g_tr, t_tr, wtr)
         Xtr_num, ytr = fitted.transform(Xtr_num, ytr, g_tr, t_tr)
+        require_seen_within_validation_levels(fitted, g_va, t_va)
         Xva_num, yva = fitted.transform(Xva_num, yva, g_va, t_va)
         Xtr_df = restore_feature_matrix(tr_template, Xtr_num)
         Xva_df = restore_feature_matrix(va_template, Xva_num)

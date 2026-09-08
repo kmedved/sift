@@ -616,8 +616,10 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         Training-fold importance. ``'auto'`` uses ``feature_importances_`` or
         mean absolute ``coef_``. ``'permutation'`` is permutation importance
         on the training fold. A callable is ``importance(fitted) -> ndarray``
-        aligned to the current raw columns. Direct coefficient extraction
-        walks each fitted pipeline segment on the unwrap path, including a
+        aligned to the current raw columns. Non-finite callable values are
+        replaced with ``-inf``, matching extracted importances. Direct
+        coefficient extraction walks each fitted pipeline segment on the
+        unwrap path, including a
         nested pipeline used as the final estimator. Alignment uses reported
         ``get_feature_names_out`` names and known mixing structure such as
         PCA ``components_``; in-place scalers such as ``StandardScaler``
@@ -1506,6 +1508,8 @@ class ModelSelector(SelectorMixin, BaseEstimator):
                 raise ValueError(
                     "importance callable must return one value per current feature"
                 )
+            if not np.isfinite(values).all():
+                values = np.where(np.isfinite(values), values, -np.inf)
             return values
         if kind != "permutation":
             _require_raw_aligned_extraction(est, X_sub)

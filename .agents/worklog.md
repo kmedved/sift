@@ -1,65 +1,28 @@
-# SIFT 0.9 roadmap worklog
+# SIFT audit corrections — implementation complete
 
-## Objective and constraints
+## Objective and authority
 
-Complete: the approved 0.9.1 closeout and ordered 0.9.x roadmap are implemented, independently verified, and merged. PR #93 merged as b6172d5680814678db19439189f620330ab86677 after all six required CI jobs passed on exact head 45682c507672ab08557ef6e162487dc669ab2ee2 (run 34042592595). Its merge tree equals the tested head, and clean benchmark source 3c6f9d1 remains an ancestor. Local main was fast-forwarded to that merge; this completion record is the only subsequent change. No pending implementation, review, or integration work remains in the approved goal. No PyPI publication or new release.
+Address all agreed findings in Fable's post-roadmap audit of d038698. The user authorized implementation, local commits and the existing runtime refresh, then approved pushing this branch, opening a PR, running required CI on the exact PR head, and merging without squashing once green. Branch: codex/0.9.1-audit-corrections; base: main. Version remains 0.9.1.dev0. No tag, release, PyPI publication, unrelated cleanup, or other external action is authorized.
 
-- Grok4.6 primary coder, native6942c6e1-14da-42e0-8ef2-27e77a0ab942, workspace/medium. Codex independently verifies and owns Git/CI. Opus native72bc11aa-3fc5-4cae-8b5a-9197b89f270c, read-only/xhigh, reviews concurrently with Codex between stages. Resume exact sessions, no caps/fresh sessions. If Opus quota fails, Codex works directly; no quota failure through97.
-- Source transmission approved for this task; exclude secrets/unrelated repos. Use exact python3 ~/.codex/skills/grok/scripts/grok_run.py and claude-cli/scripts/claude_cli_run.py launchers. Never sandbox_permissions. Prompts in /private/tmp mode600; delete after terminal. Redact sc_token. Poll exact handles; observation timeout is not termination. No concurrent checkout writes during provider ownership; freeze review source.
-- Preserve unrelated edits. No PyPI, new tag/release, old-PR or PID cleanup. Keep0.9.1.dev0 and immutablev0.9.0. Merge commits, not squash, preserve clean benchmark-source ancestry.
+## Completed work
 
-## Completed milestones and goal coverage
+- Wrong-result/routing fixes: compare prefix identity and purged time forwarding; conditioning iterables; dropped-constant block units; nonfinite callable importance; duplicate categorical labels; rolling training caps after purging; supported weighted multi-target routes and early dense-check errors.
+- Composition/validity fixes: frozen-cache resampling rejection; multiplicity-preserving deduplication for supported inner-CV bases or explicit restrictions; unseen-level within-validation guard; 1-D transform copy and two-way approximation disclosure; constant-selected proxy restrictions, typed empty reports, float32 boundary policy and refit guidance; nested knockoff validity, feasibility rounding, e-BH input validation and representative-evidence labeling.
+- Manifest/API fixes: deterministic supported identities and streamed object hashes; long-configuration digests; opt-in caller context hashes with honest completeness and selection-time limits; cache privacy; effective multi-target metadata; legacy delegates; replayable unseeded StabilitySelector roots and controlled declared Stabilized base seeds; numeric onehot no-op; conditioned-auto preflight; compare val_frac/empty-design/unsupported-label behavior; supported duck-array row counting.
+- Documentation: complete feature/export/provenance entries, base-dependent support matrix, future 1.0 owner decisions, raw-unit scoring and typed ordinal limits, within/proxy behavior, and bakeoff no-discovery/floor interpretation. Unsupported CEFS+ recommendations removed.
+- Qualified claims remain qualified: raw-unit multi-target scoring, nominal repr-ordered typed encoding, empty-selection FDP=0, and the selected-selected report/cluster distinction were not silently redefined.
 
-All15 scoped PR78-92 are merged; all merge commits were verified ancestors of current base47977b3. Actual committed source/tests inspected against the original goal, not only trackers:
+Grok implemented the initial corrections, then exhausted its balance; Codex completed the unfinished work. Resumed Opus read-only/xhigh reviews plus independent Codex probes closed all accepted findings. No additional speculative review or optimization round is pending.
 
-| Requirement | Merged evidence | Decisive coverage |
-| --- | --- | --- |
-| 0.9.1 matrix, glossary, tutorial; router/adapter splits | PR78 / 3b9ac0a | executable26x8 matrix, glossary/links/tutorial tests; actual split-module delegation |
-| F1 conditioning | PR79 / 14bfb5c | independent conditional Schur-gain oracle |
-| F2 proxy/redundancy clusters | PR80 / 17fe3bf | edge values, bridging clusters, positional identity, storage cap |
-| F7 within/between | PR81 / 76e4d51 | weighted group-mean and within-signal tests |
-| F8a knockoff UX | PR82 / 40f8af7 | effective-group minimum-q and qualified FDR tests |
-| F8b e-values | PR83 / f70a3da | literal e-value/eBH arithmetic, common-m zero padding, symmetry guards |
-| F8c statistic bakeoff | PR84 / cfd2f64 | frozen480-record paired quality artifact; defaults unchanged |
-| F3 blocks | PR85 / e9a4464 | joint-block gain oracle, atomic support, block-count/width/df auto-k tests |
-| E4 one-hot blocks | PR86 / c5e1d51 | train-only weighted vocabulary, unknown/missing, raw/encoded output widths |
-| F9 compare | PR87 / 7314355 | spies prove selector and model refit only on outer training rows |
-| Manifests | PR88 / c29e99e | versioned JSON, typed identities, optional data hashing, no retainedX |
-| F4 Stabilized | PR89 / 18cdf40 | frequencies match manual resampling oracle |
-| F5 multi-target | PR90 / 0ee513b | joint logdet/weighted oracle, df=q*k, multi-output evaluation |
-| F6 ModelSelector/purged splits | PR91 / 323da27 | shared native/generic backend, nested fit-row spies, exact purged/tied-time folds |
-| Classic caches | PR92 / 47977b3 | exact result/curve parity, no target/relevance cache, duplicate-name walls |
-| Unsupervised categorical fallbacks | PR93 / b6172d5 | target-blind weighted vocabulary, fixed inference maps, fold-local encoding, within/block composition |
+## Decisive verification
 
-Every listed stage passed its full local gate and all6exact-head required CI jobs before merge. F6 local2372/40, CI34035101543 on e9cbf1d; classic local2386/40, CI34038231034 on fbd0ea0. Merged-tree equality and clean-source ancestry verified. No need repeat earlier audits. No PyPI upload exists in the asset-only GitHub-release workflow.
+- Accepted source full warnings-as-errors run: 2480 passed, 40 skipped, with only the then-stale runtime source binding failing. No production source changed afterward.
+- After the authorized refresh: existing runtime/provenance/table and release-ledger tests, 5 passed. Strict MkDocs rebuilt successfully. Ruff, API generator (66 exports), support-matrix check, and diff checks passed.
+- Runtime: unchanged 18 method/workload cases, seed 20260903, one warm-up and seven timed calls, single-threaded native pools. All 18 settings, data hashes, and selection hashes match the previous reference; all 86 source hashes and the rendered table bind to the refreshed artifact.
+- Clean measured source: 06c569ecc5d6b8e7b489c34f530fb20306175737, dirty=false, captured 2026-09-08T00:11:23.971160+00:00. Runtime CSV SHA256 c37f97b0b9ffbb5126df22f375c3fb7cdee31cf73c9b6e4f338843307b2a9cdc. Source and refreshed evidence are retained in separate local commits.
+- Historical quality evidence is unchanged: CSV SHA256 40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf; JSON SHA256 bd84c19ca731cfb92e553c308c74969f547484355448b676fbad89a0d0606cd9.
+- Hash-memory correction preserved the exact 2000x10 string-fixture digest while median tracemalloc peak fell from 5,970,868B to 164,267B. This is traced allocation, not process RSS or a runtime speedup. Runtime refresh occurred without launched SIFT tests/reviews; ordinary desktop background activity remained.
 
-## Final encoding implementation accepted
+## Integration
 
-Branch codex/0.9x-unsupervised-encoding from47977b36b378e4f43f656e192b9aa7b9bb9efb29. Grok112 implemented,113-115 corrected reproduced defects. Grok115 terminal0 unified85832 (2026-09-06T15:19:29UTC); Opus97 terminal0 unified48919. All providers stopped, caller prompts deleted, review97 hashes unchanged before Codex tracker edits. No known correctness blocker remains.
-
-- Additive dependency-free ordinal/frequency on existing cat_encoding APIs;66exports/defaults unchanged. Positive training-mass vocabulary, ordinal0..C-1/unknown-1, frequency proportions/unknown0; missing observed-only; y/class_weight excluded from encoding. Fixed inference maps and numeric training output.
-- Actual evaluate/group/time/nested and GaussianCV/xfit fold encoders train locally; evaluate/time path maps train-only. In-sample EBIC remains in-sample; no full-path holdout-blind claim for prefix-only evaluation.
-- Within and valid-column/block composition verified; Brier/logloss encoding weights remain separate from scoring/class weights; finite large weights normalize safely. Private Brier weight plumbing; public advanced override applies only to unsupervised modes.
-- Explicit scoped limits remain: resampled stability/knockoff_path/consensus, prebuilt caches without encoding provenance, Boruta test-importance. No added APIs on ModelSelector/nativeCatBoost/select_fdr; no FDR upgrade.
-- Codex94 found5bugs despite Opus94 no findings. Codex95 found double encoding/docstring gaps; Codex96 found override applicability. All reproduced and returned to same Grok, now closed. Reports /private/tmp/sift_unsup_codex94_findings.md through _codex96_findings.md and _opus94_report.md through _opus97_report.md.
-- Final Codex97:190focused tests-Werror,4TargetCV default/None/array override cases with exact full-curve equality,13deferred/binary fold-map/weight checks. Codex96:271focused tests10skip,8fixed/nondeferred training-value checks; original within/block repros repaired. Opus97:204tests plus explicit frequency-map inheritance probe. No extra review needed absent new evidence.
-- Clean implementation3c6f9d1b3777211be86832c1b7e6f58b466faeaf committed. Refreshed runtime binding is accepted; full local suite2409passed40skipped-Werror/noexclusions73.60s, Ruff/API66/matrix/diff and strictMkDocs1.62s pass. No source change after the clean implementation commit. Frozen quality artifact unchanged.
-
-## Integration record and remote gate
-
-1. Implementation complete and committed as3c6f9d1; all coding/review sessions terminal, no pending code corrections.
-2. Runtime refreshed from that clean source: dirty=false/status[],18cases x7samples, all pools1,86current source hashes, exact CSV binding and18unchanged data/selection fingerprints. No overlapping provider/test/otherbenchmark observed; ordinary desktop activity present. No claim of an idle host or latency guarantee.
-3. Runtime page/table/SHA and benchmarks README updated; full local and static/doc gates passed. Evidence is committed separately from its measured source to preserve provenance.
-4. Remote gate passed: PR93 is merged with a merge commit, all6required CI passed on exact head45682c5, merged-tree equality and clean-source ancestry are verified, and mainff completed. The original requirements were checked individually against current source/tests/artifacts and merged PR78-93, as summarized above. The final record-only commit changes no implementation, tests, or benchmark evidence. No PyPI.
-
-## Retained evidence and commands
-
-Runtime: clean source3c6f9d1b3777211be86832c1b7e6f58b466faeaf, capture2026-09-06T15:25:53.740754UTC/generated15:26:23.186724UTC, dirtyfalse/status[],86hashes,18cases/7samples/pools1. benchmarks/results/runtime_scaling_2026-09-03.csv/.provenance.json, CSVsha7f0c09743415337baf55eabe2be6a019ad26a4ce956e3fd3c0561dd344de5785, docsratio8.1. Previous18fingerprints unchanged.
-
-Frozen F8c quality MUST NOT refresh: clean sourceae904b8af02037eb66cd649384c4665dba17049d, capture2026-09-05T06:32:30.226365UTC, dirtyfalse/status[],75hashes/480records/pools1. knockoff_statistic_bakeoff.csv/.provenance.json, CSVsha40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf. Preserve CRLF/historical binding and existing FDR/default caveats. Hash/source ancestry reverified.
-
-- Tests /private/tmp/sift-pytest9.5nI4QH/bin/python (pytest9.1.1); base /opt/anaconda3/bin/python (3.12.7, numpy1.26.4,pandas2.2.2,sklearn1.5.1,scipy1.13.1,numba0.60); docs /private/tmp/sift-docs-venv/bin/python. No optional dependency installs; native CI required.
-- Set OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 LOKY_MAX_CPU_COUNT=8; PYTHONPATHcwd for scratch.
-- Full tests: testpython -m pytest -q -W error, NO exclusions. Ruff testpython -m ruff check sift tests scripts. Basepython scripts/generate_api_reference.py --check and scripts/generate_data_type_matrix.py --check. Strict MkDocs into mktemp /private/tmp dir. git diff --check.
-- Runtime: basepython benchmarks/bench_runtime_scaling.py --full --warmup-runs 1 --timing-repeats 7 --output benchmarks/results/runtime_scaling_2026-09-03.csv; VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1 too. Audit processes before/during/after; never kill unrelated work. Ordinary desktop activity disclosed.
-- CI6: test(3.10),test(3.11),test(3.12),test-catboost,min-pins,wheel-smoke. gh --repo kmedved/sift. No squash. Test/docs-only fixes need decisive checks plus CI, not another production review/runtime.
+All agreed corrections and the local evidence gate are complete. The authorized integration requires passing CI on the exact PR head and a merge commit preserving measured source 06c569e. The PR checks and Git ancestry are authoritative for integration status; there is no further local implementation or review round pending. Historical runtime evidence remains in Git history. Tagging, releases and publication remain outside the authorized task.

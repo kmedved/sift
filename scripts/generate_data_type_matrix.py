@@ -573,10 +573,29 @@ def call_model_selector(payload: Payload, **mode) -> None:
     selector.fit(payload.X, payload.y, **kwargs)
 
 
-def call_stabilized(payload: Payload, **_mode) -> None:
-    from sift import CEFSPlusSelector, Stabilized
+def call_stabilized(payload: Payload, **mode) -> None:
+    from sklearn.linear_model import Ridge
 
-    inner = CEFSPlusSelector(k=K, verbose=False, subsample=None, random_state=SEED)
+    from sift import CEFSPlusSelector, ModelSelector, Stabilized
+
+    if mode.get("stabilized_categorical"):
+        inner = CEFSPlusSelector(
+            k=K,
+            cat_features=payload.cat_features,
+            cat_encoding="target_cv",
+            verbose=False,
+            subsample=None,
+            random_state=SEED,
+        )
+    elif mode.get("stabilized_row_context"):
+        inner = ModelSelector(
+            Ridge(),
+            n_features_to_select=[1, K],
+            random_state=SEED,
+            verbose=False,
+        )
+    else:
+        inner = CEFSPlusSelector(k=K, verbose=False, subsample=None, random_state=SEED)
     estimator = Stabilized(
         inner,
         n_resamples=2,
@@ -885,6 +904,8 @@ def entries() -> tuple[Entry, ...]:
 
 
 def _enabled_mode(axis: str, entry: Entry) -> dict | None:
+    if axis == "categorical" and entry.name == "Stabilized":
+        return {"stabilized_categorical": True}
     if axis == "categorical" and entry.supports_target_cv:
         return {"cat_encoding": "target_cv"}
     if axis == "categorical" and entry.name == "KnockoffSelector":
@@ -895,6 +916,8 @@ def _enabled_mode(axis: str, entry: Entry) -> dict | None:
         return {"auto": True}
     if axis in {"groups", "time"} and entry.name == "ModelSelector":
         return {"search_counts": True}
+    if axis in {"groups", "time"} and entry.name == "Stabilized":
+        return {"stabilized_row_context": axis}
     return None
 
 
@@ -945,6 +968,12 @@ def _stable_note(
             "`importance='permutation'` completes. Categorical handling is "
             "estimator-dependent and is not a ModelSelector encoding default"
         )
+    if status == CONDITIONAL and axis == "categorical" and entry.name == "Stabilized":
+        return (
+            "the fixed CEFS+ base rejects string/category columns; a disclosed "
+            "CEFS+ base with `cat_encoding=\"target_cv\"` completes. Categorical "
+            "support is base-dependent and is not a Stabilized encoding default"
+        )
     if status == CONDITIONAL and axis == "categorical":
         return (
             'baseline `cat_encoding="none"` rejects string/category columns; '
@@ -957,6 +986,13 @@ def _stable_note(
                 f"`{axis}` metadata; a searched count grid with the default "
                 f"reusable `{axis}` CV is accepted"
             )
+        if entry.name == "Stabilized":
+            return (
+                "the fixed CEFS+ base rejects unused row metadata; a disclosed "
+                "`ModelSelector(Ridge())` searched count grid accepts the metadata. "
+                "Row-context support is base-dependent; weights are forwarded only "
+                "when the wrapped base consumes them"
+            )
         return (
             "fixed-k baseline calls reject row context; "
             f'`k="auto"` with evaluate `{axis}` splits is accepted'
@@ -966,6 +1002,11 @@ def _stable_note(
             "weights belong on `build_cache(X, sample_weight=w, subsample=None)`; "
             "`select_cached` has no call-time `sample_weight` because the cache "
             "already stores row weights"
+        )
+    if status == SUPPORTED and axis == "sample_weight" and entry.name == "Stabilized":
+        return (
+            "weights are forwarded to the wrapped base when it accepts them; this "
+            "seeded baseline uses the CEFS+ base"
         )
     if status == SUPPORTED and axis in {"categorical", "datetime_timedelta"} and (
         entry.name == "permutation_importance"

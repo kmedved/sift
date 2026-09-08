@@ -149,6 +149,22 @@ The earlier uncommitted AR(1) contrast (power 0.39 vs 0.90) used a different
 unretained design. This run does not reproduce or generalize that claim, and
 it is not a universal disproof of ridge.
 
+Supplemental zero-discovery counts (not part of the frozen table above) make
+the empty-set behavior explicit:
+
+| design | `relevance` | `lsm` | `ridge` | `cefsplus` |
+| --- | ---: | ---: | ---: | ---: |
+| independent | 0/30 | 0/30 | 0/30 | 22/30 |
+| ar1 | 0/30 | 0/30 | 2/30 | 29/30 |
+| block | 0/30 | 2/30 | 16/30 | 30/30 |
+| dense_weak | 0/30 | 0/30 | 0/30 | 1/30 |
+
+Here `x/30` is the number of completed seeds with no discoveries. An FDP of
+zero is therefore correct for an empty selected set, but it is weak evidence
+about power. With knockoff+ (`q=0.1`, `offset=1`), the threshold's numerator
+floor is 1 and the denominator must reach 10 before any discovery is possible;
+the resulting empty sets should not be read as a universal quality ranking.
+
 ## What this study does not do
 
 - It does not change `select_fdr` defaults in 0.9.

@@ -100,7 +100,10 @@ observed in positive-weight training rows, in deterministic identity order
 ignored; unknown is `-1`). Frequency is that level's share of positive
 training `sample_weight` mass (unknown is `0`). Missing is a fitted level
 only when it appears in that training mass. Maps ignore `y` and do not
-consume class-weight. Sklearn wrappers keep the train-fit encoder at
+consume class-weight. One-hot vocabulary ordering is also typed: values are
+ordered by positive-weight mass, then by a type-tagged identity and its `repr`,
+so integer `1` and string `"1"` remain distinct and deterministic. Sklearn
+wrappers keep the train-fit encoder at
 `transform`. Held-out scoring (evaluate / nested / group / time / Gaussian
 CV / xfit) fits maps on training-fold raw `X`. For `k_method="evaluate"`
 with `strategy="time_holdout"`, path and scoring maps use the train
@@ -509,11 +512,11 @@ signals and remains the 0.9 default. The retained
 [statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
 `relevance` for the 1.0 owner decision on its four Gaussian designs: ridge
 cut realized FDP but lost substantial power on AR(1) and block-correlated
-draws. That is scoped evidence, not a universal winner. `statistic="cefsplus"` enables a tie-safe greedy
-CEFS+ statistic with pair-coupled screening and objective-gain W magnitudes. It
-can recover redundant signal families that a marginal statistic treats as a
-single effect, but it is still slower at large `screen_pairs`/`path_depth`, so
-use it as a redundancy-aware second opinion rather than a better default.
+draws. That is scoped evidence, not a universal winner. `statistic="cefsplus"`
+enables a tie-safe greedy CEFS+ statistic with pair-coupled screening and
+objective-gain W magnitudes. It is an exploratory alternate statistic: it is
+slower at large `screen_pairs`/`path_depth`, and its adaptive path is not
+covered by the approximate-plugin sign-flip claim.
 Without an explicit `path_depth`, CEFS+ starts with a q-aware bounded path and
 doubles it when discoveries reach the cap. The initial and final depths are
 reported in selector metadata. Set `statistic_options={"path_depth": ...}` only
@@ -541,7 +544,12 @@ dropped as constant; `store_proxies=True` still requires finite correlations
 for every selected column and raises if a retained member was unavailable.
 The knockoff alias does not apply those atomic restriction checks:
 `include`/`exclude`/`candidates` keep existing `feature_groups`
-column-restriction semantics. Grouped FDR validity is unchanged.
+column-restriction semantics. Stored proxy correlations are a float32
+candidate-by-selected block: selected-selected pairs are intentionally
+excluded from the candidate rows, and constant or cache-dropped selected
+columns cannot provide a finite proxy and therefore make `store_proxies=True`
+raise. Refit/rebuild the selector or cache after changing the feature panel;
+the stored proxy block is not a live view. Grouped FDR validity is unchanged.
 Filter `k="auto"` with `feature_blocks` scores complete block prefixes
 (`evaluate`, `elbow`, `penalized_objective`, `gaussian_cv`,
 `xfit_objective`, and auto routing). Nested evaluate rebuilds block
@@ -556,6 +564,15 @@ raise. Binary log-loss CEFS+ uses a joint logistic block score on
 `evaluate`/`elbow`/`penalized_objective`/`auto`; Gaussian CV/xfit and
 calibrated binary stops raise. `loss="brier"` delegates to Gaussian
 blocks.
+
+For a numeric multi-target regression target, pass a two-dimensional `y` to
+CEFS+ (`n×q`, `q≥2`). This is joint selection: CEFS+ models target covariance
+and reports the path in raw feature units while its information-criterion
+dimension is `q·k`. A `(n, 1)` target remains the ordinary 1-D route. Because
+the objective is in raw target units, rescaling target columns changes the
+result; normalize them explicitly when equal target-scale contribution is
+intended. Unsupported selectors reject multi-target input rather than
+flattening it.
 
 `n_draws > 1` redraws knockoffs and selects features whose selection frequency
 is at least `eta`. This is useful for run-to-run stability, but the aggregated
@@ -605,6 +622,12 @@ and must omit `subsample` and construction `random_state`; the cache already
 fixes its sampled rows and weights. For `select_fdr`, `random_state` remains
 available because it seeds a fresh knockoff draw; `sample_weight` and
 `subsample` remain forbidden.
+`ClassicFeatureCache` / `build_classic_cache` provide the analogous reusable
+numeric cache for classic mRMR/JMI/JMIM estimators. They preserve the fitted
+row sample, weights, names, and estimator state. Do not apply a new row
+resample or call-time weight/subsample override to an existing cache; rebuild
+it when those inputs change.
+
 The opt-in cached `SelectionView` includes selected positions, the objective
 path, relevance, and cache provenance. `return_result=True` is mutually
 exclusive with the legacy `return_objective` and `return_indices` tuple flags.
@@ -747,6 +770,17 @@ full-sample path. Do not read it as fold-local selection.
 snapshots and fold fingerprints plus export-time environment. It does not hash
 `X` unless you pass `hash_data=True`, and an explicit splitter's seed is not
 replaced by `compare(..., random_state=...)`.
+
+## Estimator-backed selection and fold preprocessing
+
+`ModelSelector` is the estimator-backed route for RFE, forward, and stability
+selection. An explicit `n_features_to_select` is a count/cap (for example,
+five features), not a promise to pad short results. Its estimator or pipeline
+owns imputation: SIFT does not insert an imputer, and any imputer must be fit
+inside each training fold. `PurgedTimeSeriesSplit` and
+`GroupPurgedTimeSeriesSplit` are available when validation must respect time,
+embargo, or entity boundaries. Validation rows are scored with preprocessing
+fit on training rows only; unseen validation entities do not alter that fit.
 
 ## 10. Checklist and next steps
 

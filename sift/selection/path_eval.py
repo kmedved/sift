@@ -19,6 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from sift._metadata import resolve_row_metadata
 from sift._preprocess import best_score_from_dict, ensure_weights
 from sift.selection.auto_k_core import weighted_regression_score
+from sift.selection.purged_cv import PurgedTimeSeriesSplit
 from sift.scoring import (
     UnsupportedScorerSampleWeightError,
     is_sklearn_scorer,
@@ -132,6 +133,27 @@ class FeaturePathEvaluationResult:
 
         return as_result(self, input_features=input_features)
 
+    def reproducibility_(
+        self,
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        groups=None,
+        time=None,
+        hash_data: bool = False,
+        input_features=None,
+    ):
+        """Return the JSON-safe reproducibility manifest for this result."""
+        return self.result_view(input_features=input_features).reproducibility_(
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            groups=groups,
+            time=time,
+            hash_data=hash_data,
+        )
+
 
 def _split_weights(weights: np.ndarray, idx: np.ndarray, *, label: str) -> np.ndarray:
     """Return fold-local mean-one weights."""
@@ -236,8 +258,15 @@ def _build_splits(
     val_frac: float,
     groups: Optional[np.ndarray],
     y: Optional[np.ndarray] = None,
+    time: Optional[np.ndarray] = None,
+    event_end: Optional[np.ndarray] = None,
 ) -> List[tuple[np.ndarray, np.ndarray]]:
-    """Build train/validation splits from splitter or default holdout."""
+    """Build train/validation splits from splitter or default holdout.
+
+    ``time`` and ``event_end`` are forwarded only when ``splitter.split``
+    declares those keywords. An omitted ``time`` keeps the splitter's own
+    optional default. Purged time-series splitters still require ``time``.
+    """
     def _coerce_split_pair(pair: Any) -> tuple[np.ndarray, np.ndarray]:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise ValueError("split entries must be (train_idx, val_idx)")
@@ -300,15 +329,34 @@ def _build_splits(
         groups_arr = None if groups is None else np.asarray(groups).ravel()
         if groups_arr is not None and groups_arr.shape[0] != n:
             raise ValueError(f"groups has {groups_arr.shape[0]} rows but expected {n}")
-        if groups_arr is not None and not _accepts_keyword(splitter.split, "groups"):
-            raise TypeError(
-                "groups were provided, but splitter.split does not accept a groups argument"
-            )
-        raw_splits = (
-            splitter.split(data, y_split, groups=groups_arr)
-            if groups_arr is not None
-            else splitter.split(data, y_split)
-        )
+        split_kwargs: dict[str, Any] = {}
+        if groups_arr is not None:
+            if not _accepts_keyword(splitter.split, "groups"):
+                raise TypeError(
+                    "groups were provided, but splitter.split does not accept a groups argument"
+                )
+            split_kwargs["groups"] = groups_arr
+        if time is not None:
+            time_arr = np.asarray(time).reshape(-1)
+            if time_arr.shape[0] != n:
+                raise ValueError(f"time has {time_arr.shape[0]} rows but expected {n}")
+            if _has_explicit_keyword(splitter.split, "time"):
+                split_kwargs["time"] = time_arr
+        elif isinstance(splitter, PurgedTimeSeriesSplit):
+            raise ValueError(f"{type(splitter).__name__} requires time")
+        if event_end is not None:
+            end_arr = np.asarray(event_end).reshape(-1)
+            if end_arr.shape[0] != n:
+                raise ValueError(
+                    f"event_end has {end_arr.shape[0]} rows but expected {n}"
+                )
+            if not _has_explicit_keyword(splitter.split, "event_end"):
+                raise TypeError(
+                    "event_end was provided, but splitter.split does not "
+                    "accept an event_end argument"
+                )
+            split_kwargs["event_end"] = end_arr
+        raw_splits = splitter.split(data, y_split, **split_kwargs)
         splits = [_coerce_split_pair(pair) for pair in raw_splits]
         if not splits:
             raise ValueError("splitter object produced no splits")
@@ -388,6 +436,25 @@ def _accepts_keyword(callable_obj: Any, keyword: str) -> bool:
     return any(
         parameter.name == keyword or parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in parameters
+    )
+
+
+def _has_explicit_keyword(callable_obj: Any, keyword: str) -> bool:
+    """Return whether a callable declares ``keyword`` by name.
+
+    ``**kwargs`` alone is not treated as accepting purged-split metadata.
+    """
+    try:
+        parameter = inspect.signature(callable_obj).parameters.get(keyword)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"Cannot inspect {callable_obj!r} to determine support for {keyword!r}"
+        ) from exc
+    if parameter is None:
+        return False
+    return parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
     )
 
 
@@ -480,6 +547,7 @@ def evaluate_feature_path(
     random_state: int = 42,
     sample_weight: np.ndarray | None = None,
     groups: np.ndarray | None = None,
+    time=None,
 ) -> FeaturePathEvaluationResult:
     """Evaluate an ordered feature path over an explicit k grid.
 
@@ -518,6 +586,10 @@ def evaluate_feature_path(
         Row weights used in fits and scoring.
     groups : ndarray, optional
         Optional groups passed through to splitter objects that accept groups.
+    time : array-like or str, optional
+        Forwarded to ``splitter.split`` when that splitter declares ``time``.
+        Purged time-series splitters require it. Splitters that only declare
+        optional ``time=None`` keep that default when ``time`` is omitted.
 
     Returns
     -------
@@ -559,10 +631,12 @@ def evaluate_feature_path(
     metadata = resolve_row_metadata(
         X,
         groups=groups,
+        time=time,
         sample_weight=sample_weight,
     )
     X = metadata.X
     groups = metadata.groups
+    time = metadata.time
     sample_weight = metadata.sample_weight
     if estimator is not None and estimator_factory is not None:
         raise ValueError("Pass either estimator or estimator_factory, not both")
@@ -601,6 +675,7 @@ def evaluate_feature_path(
         val_frac=val_frac,
         groups=groups,
         y=y_arr,
+        time=None if time is None else np.asarray(time).reshape(-1),
     )
 
     raw_scores: dict[int, list[float]] = {k: [] for k in k_values}

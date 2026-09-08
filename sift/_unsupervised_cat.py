@@ -13,7 +13,11 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
-from sift._preprocess import _onehot_level_identity, ensure_weights
+from sift._preprocess import (
+    _onehot_level_identity,
+    ensure_weights,
+    require_unique_encoding_columns,
+)
 
 UnsupervisedCatEncoding = Literal["ordinal", "frequency"]
 
@@ -108,6 +112,7 @@ class UnsupervisedCatEncoder(BaseEstimator, TransformerMixin):
             raise TypeError(
                 f"cat_encoding={self.method!r} requires a pandas DataFrame"
             )
+        require_unique_encoding_columns(X, encoding=self.method)
         missing = [col for col in self.cols if col not in X.columns]
         if missing:
             raise ValueError(
@@ -159,6 +164,7 @@ class UnsupervisedCatEncoder(BaseEstimator, TransformerMixin):
             raise TypeError(
                 f"cat_encoding={self.method!r} transform requires a pandas DataFrame"
             )
+        require_unique_encoding_columns(X, encoding=self.method)
         if list(X.columns) != list(self.feature_names_in_):
             raise ValueError(
                 f"{self.method} transform column identity does not match the "
