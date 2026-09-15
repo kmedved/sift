@@ -6,7 +6,7 @@ they change.
 
 ## Development Setup
 
-SIFT requires Python 3.10 or newer.
+SIFT requires Python 3.11 or newer.
 
 ```bash
 python -m venv .venv

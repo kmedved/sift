@@ -4,7 +4,7 @@ This guide covers local setup, validation, and release-oriented checks for SIFT.
 
 ## Setup
 
-Use Python 3.10, 3.11, or 3.12.
+Use Python 3.11 or 3.12.
 
 ```bash
 python -m pip install --upgrade pip
@@ -264,7 +264,7 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.10, 3.11, and 3.12, plus a `min-pins` job on
+GitHub Actions run tests on Python 3.11 and 3.12, plus a `min-pins` job on
 the declared dependency floors, optional CatBoost coverage, a clean-wheel
 installation smoke test, a scheduled latest-dependency canary, and a scheduled
 quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
@@ -291,9 +291,7 @@ python -m venv /tmp/sift-min-pins
 The floors are mutually consistent and resolve to numpy 1.24.4, pandas 2.0.3,
 scikit-learn 1.3.2, scipy 1.10.1, numba 0.59.1, joblib 1.3.2 and
 threadpoolctl 3.1.0. numba 0.59 constrains numpy to `<1.27`, which is what makes
-1.24 the binding floor rather than an arbitrary one. CI runs this on Python 3.10;
-3.11 is a valid local stand-in, since every one of these pins ships wheels for
-both.
+1.24 the binding floor rather than an arbitrary one. CI runs this on Python 3.11.
 
 Two behaviours differ at the floor and are worth knowing before you debug a
 failure there: older LAPACK returns a slightly smaller minimum eigenvalue, so the
