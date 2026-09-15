@@ -2,6 +2,12 @@
 
 ## 0.9.1 (unreleased)
 
+### Compatibility
+
+- Raised the minimum supported Python version from 3.10 to 3.11. CI now tests
+  Python 3.11 and 3.12, and the Python 3.12 job installs PyArrow so Arrow dtype
+  contracts run instead of being skipped.
+
 ### Features
 
 - Added additive `Stabilized(selector)` to threshold selection frequency of any
