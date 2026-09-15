@@ -1,27 +1,23 @@
-# SIFT Python 3.11 floor and audited branch cleanup
+# SIFT Python 3.11 floor and audited branch cleanup — complete
 
 ## Objective and authority
 
-Raise the minimum supported Python to 3.11, add pyarrow to the Python 3.12 CI test job, land the changes, close superseded PRs #43 and #51, delete the exact audited allowlist of 27 local and 85 origin feature branches, prune four stale worktree registrations, and finish clean and synchronized on main. The user explicitly authorized commits, push, PR, merge, and these audited deletions. No tags, releases, PyPI publication, unrelated cleanup, stashes, archive branches, or backup worktrees.
+Raise the minimum supported Python to 3.11, add PyArrow to the Python 3.12 CI test job, land the changes, close superseded PRs #43 and #51, delete the exact audited allowlist of 27 local and 85 origin feature branches, prune four stale worktree registrations, and finish clean and synchronized on main. No tags, releases, PyPI publication, unrelated cleanup, stashes, archive branches, or backup worktrees.
 
-## Current state
+## Completed work
 
-- Delivery branch `codex/python311-ci-cleanup` starts from fetched origin/main at e533d42ef7a2b59f7f601cc83797239358605124.
-- Audit allowlist and expected tip SHAs are in /private/tmp/sift-branch-audit-20260915/cleanup_candidates.json.
-- All 27 local and 85 fetched origin feature refs still match their audited tip SHAs; the four audited worktrees remain the only dry-run prune targets.
-- Metadata, CI, contribution guide, development guide, and unreleased release notes now state the Python 3.11 floor; the Python 3.12 test job installs PyArrow.
+- PR #95 merged with merge commit 5a9b4f0ad5634d3df8cc5ee93c5bc3c622056de8. Package metadata now requires Python 3.11; CI tests Python 3.11 and 3.12, runs minimum pins on 3.11, and installs PyArrow in the 3.12 job.
+- Historical runtime evidence remains unchanged. Its binding test now excludes packaging metadata because the provenance records the actual measured package versions.
+- Superseded PRs #43 and #51 are closed.
+- All 27 audited local feature branches and 85 audited origin feature branches were deleted against their expected tip SHAs. The temporary delivery branch was also deleted locally and remotely.
+- The four audited nonexistent scratch worktree registrations were pruned. Only the primary main worktree remains.
 
 ## Decisive verification
 
-- Focused docs and Arrow contract slice: 8 passed on Python 3.11.16 with PyArrow installed.
-- Ruff, generated API reference check, and `git diff --check` passed.
-- Wheel built successfully and declares `Requires-Python: >=3.11`.
-- Local strict MkDocs was unavailable in the designated environment; the Python 3.12 PR job installs docs dependencies and runs it.
-- Initial PR CI exposed one shared failure: historical runtime evidence bound `pyproject.toml` despite recording the actual measured package versions. The test now excludes packaging metadata from runtime-source invalidation; no benchmark or frozen artifact was rewritten.
-
-## Next action
-
-Verify the focused runtime-evidence contract, update PR #95, then land through green CI and perform the approved close/delete/prune cleanup.
+- Required PR checks passed on exact head 5dbd0961fb31afeb2c4ea2b63270d5e0adb2a449: Python 3.11, Python 3.12 with PyArrow and strict docs build, minimum pins, CatBoost, and clean-wheel smoke.
+- Local focused docs, Arrow, and runtime-evidence slice: 9 passed. Ruff, generated API reference, wheel metadata (`Requires-Python: >=3.11`), and diff checks passed.
+- Post-cleanup live verification found all 27 audited local and 85 audited origin refs absent, both delivery refs absent, PRs #43/#51 closed, PR #95 merged, one local branch (`main`), one origin head (`main`), no stale worktree registrations, and no stashes.
+- Main is clean and synchronized with origin after this closeout commit is pushed.
 
 ## Blockers
 
