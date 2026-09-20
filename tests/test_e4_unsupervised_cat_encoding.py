@@ -20,7 +20,6 @@ from sift import (
     select_k_auto,
     select_mrmr,
 )
-from sift._preprocess import _onehot_level_identity
 from sift._unsupervised_cat import UnsupervisedCatEncoder
 
 
@@ -37,12 +36,10 @@ def test_known_ordinal_and_frequency_mappings():
     w = np.array([1.0, 2.0, 1.0, 1.0])
     ordinal = UnsupervisedCatEncoder(["city"], method="ordinal").fit(X, y=np.arange(4), sample_weight=w)
     identities = ordinal.vocabulary_["city"]["identities"]
-    assert identities == tuple(sorted(identities, key=repr))
-    assert set(identities) == {("str", "CHI"), ("str", "LA"), ("str", "NY")}
+    # Alphabetical over the three observed strings: CHI=0, LA=1, NY=2.
+    assert identities == (("str", "CHI"), ("str", "LA"), ("str", "NY"))
     Xt = ordinal.transform(X)
-    codes = {ident: i for i, ident in enumerate(identities)}
-    expected = [codes[_onehot_level_identity(v)] for v in X["city"]]
-    assert Xt["city"].to_numpy().tolist() == expected
+    assert Xt["city"].to_numpy().tolist() == [1.0, 2.0, 0.0, 2.0]
     assert Xt["city"].dtype == np.float64
     assert list(Xt.columns) == ["city", "x0"]
 
@@ -290,6 +287,7 @@ def _spy_unsupervised_fits(monkeypatch):
                 "ids": tuple(spec.get("identities", ())),
                 "mapping": dict(spec.get("mapping", {})),
                 "method": self.method,
+                "rows": np.asarray(X_fit.index),
                 "weight": None if sample_weight is None else np.asarray(sample_weight, dtype=float).copy(),
             }
         )
@@ -297,6 +295,25 @@ def _spy_unsupervised_fits(monkeypatch):
 
     monkeypatch.setattr(UnsupervisedCatEncoder, "fit", spy)
     return fits
+
+
+def _assert_fold_maps_are_train_only(fold_fits, groups, holdout):
+    """Every fold map holds exactly the levels of its own training rows.
+
+    The holdout level lives in one whole group, so a fold learns it if and
+    only if that group is part of the fold's training rows: a map fitted on
+    the full frame (or on any validation row) breaks the equivalence. The
+    complement check pins that each fold drops one entire group.
+    """
+    assert fold_fits
+    excluded = set()
+    for row in fold_fits:
+        seen = set(groups[row["rows"]])
+        assert (holdout in row["ids"]) == (2 in seen)
+        dropped = sorted(set(groups.tolist()) - seen)
+        assert len(dropped) == 1
+        excluded.add(dropped[0])
+    assert 2 in excluded
 
 
 def test_evaluate_and_gaussian_cv_fit_train_rows_only(monkeypatch):
@@ -331,7 +348,7 @@ def test_evaluate_and_gaussian_cv_fit_train_rows_only(monkeypatch):
     holdout = ("str", "fold_only")
     fold_fits = [row for row in fits if row["n"] < n]
     assert fold_fits
-    assert any(holdout not in row["ids"] for row in fold_fits)
+    _assert_fold_maps_are_train_only(fold_fits, groups, holdout)
 
     fits.clear()
     cv = select_mrmr(
@@ -356,7 +373,7 @@ def test_evaluate_and_gaussian_cv_fit_train_rows_only(monkeypatch):
     assert cv.selected_features
     fold_fits = [row for row in fits if row["n"] < n]
     assert fold_fits
-    assert any(holdout not in row["ids"] for row in fold_fits)
+    _assert_fold_maps_are_train_only(fold_fits, groups, holdout)
 
 
 def test_time_holdout_path_map_is_train_only(monkeypatch):
