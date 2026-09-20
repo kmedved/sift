@@ -1602,6 +1602,10 @@ def _compare_in_sample_path(
 
 def _frame(rows, columns) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=list(columns))
+    if columns == PREFIX_COLUMNS and not frame.empty:
+        # Pandas may infer StringDtype for populated string columns while the
+        # empty table has object columns. Keep the public prefix schema stable.
+        frame = frame.astype({name: "object" for name in ("selector", "mode", "protocol")})
     if frame.empty:
         # ``pd.DataFrame([], columns=...)`` leaves every column object, so an
         # empty table (cv-mode ``prefix_scores``, or ``overlap`` with a single

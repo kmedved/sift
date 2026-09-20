@@ -440,11 +440,12 @@ def _blas_identity() -> list[dict[str, Any]]:
         entries = threadpool_info()
     except Exception:
         return []
-    return [
+    cleaned = [
         {key: entry[key] for key in _BLAS_ENTRY_KEYS if key in entry}
         for entry in entries
         if isinstance(entry, Mapping)
     ]
+    return sorted(cleaned, key=lambda entry: json.dumps(entry, sort_keys=True))
 
 
 def _export_environment() -> dict[str, Any]:

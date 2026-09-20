@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
-from sklearn.feature_selection import SelectorMixin
+from sklearn.feature_selection import RFECV, SelectorMixin
 from sklearn.utils.metadata_routing import UNUSED
 from sklearn.utils.validation import check_is_fitted
 from threadpoolctl import threadpool_limits
@@ -140,6 +140,10 @@ def _base_accepts_sample_weight(selector: Any) -> bool:
         return False
     if _explicit_kwarg(selector.fit, "sample_weight"):
         return True
+    if isinstance(selector, RFECV):
+        # Newer sklearn versions expose **params here, but RFECV rejects
+        # sample_weight unless metadata routing is explicitly configured.
+        return False
     if not _has_var_keyword(selector.fit):
         return False
     nested = getattr(selector, "estimator", None)
