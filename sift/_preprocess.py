@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-from typing import Any, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Container, List, Literal, Optional, Sequence, Tuple, get_args
 import warnings
 
 import numpy as np
@@ -339,11 +339,15 @@ def validate_inputs(
         if non_numeric:
             sample = non_numeric[:5]
             suffix = "..." if len(non_numeric) > 5 else ""
+            # Derived from CatEncoding so the guidance cannot go stale; 'none'
+            # is omitted because it leaves the columns unencoded.
+            encodings = ", ".join(
+                repr(name) for name in get_args(CatEncoding) if name != "none"
+            )
             raise ValueError(
                 f"Non-numeric columns found: {sample}{suffix}. "
-                "Either encode them first or set cat_encoding to 'target_cv', "
-                "'onehot', 'loo', 'target', 'james_stein', or binary-only "
-                "'loo_logit'."
+                f"Either encode them first or set cat_encoding to one of "
+                f"{encodings} ('loo_logit' is binary-only)."
             )
     X_arr = to_numpy(X, dtype=np.float64)
 
@@ -1288,6 +1292,40 @@ def _onehot_level_identity(value: Any) -> tuple:
         return ("unhashable", type(value).__name__, repr(value))
 
 
+def _fitted_level_identity(identity: tuple, vocabulary: Container[tuple]) -> tuple | None:
+    """Fitted identity for a transform value, or ``None`` when unknown.
+
+    Transform-time only: fitting on a float column (a missing value forces
+    float dtype) and scoring an integer batch of the same levels must not turn
+    every row into an unknown. An exact identity always wins; otherwise a
+    numerically equal identity of the other numeric kind is accepted, and there
+    is at most one because ``("int", v)`` and ``("float", v)`` are single keys.
+    Equality must be exact, so ``2**53 + 1`` never borrows the float ``2**53``.
+    Bools, strings and bytes never match across kinds, and the fitted
+    vocabulary is not modified.
+    """
+    if identity in vocabulary:
+        return identity
+    kind = identity[0]
+    if kind == "int":
+        value = identity[1]
+        try:
+            twin = float(value)
+        except (OverflowError, ValueError):
+            return None
+        if twin != value:
+            return None
+        candidate = ("float", twin)
+    elif kind == "float":
+        value = float(identity[1])
+        if not value.is_integer():
+            return None
+        candidate = ("int", int(value))
+    else:
+        return None
+    return candidate if candidate in vocabulary else None
+
+
 def _onehot_display_token(identity: tuple) -> str:
     kind = identity[0]
     if kind == "missing":
@@ -1328,7 +1366,9 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
     values are their own level (``missing``). Levels beyond ``max_levels``
     (by descending positive-weight mass, then label) share the ``other``
     remainder. Unknown transform values join ``other`` when pooling created
-    that remainder; otherwise they are all-zero. Dummy names are
+    that remainder; otherwise they are all-zero. A transform value whose exact
+    identity is unfitted but that equals a fitted level of the other numeric
+    kind (``1`` against a fitted ``1.0``) uses that fitted level. Dummy names are
     ``{column}__{level}`` using the F3 one-hot prefix; colliding display
     tokens are uniquified and do not merge distinct identities. Output is
     float64 0/1 indicators; zero-weight rows are still encoded so row count
@@ -1502,7 +1542,8 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
         values = {name: np.zeros(n, dtype=np.float64) for name in dummy_names}
         observed = series.to_numpy(dtype=object, copy=False)
         for i, value in enumerate(observed):
-            dummy = mapping.get(_onehot_level_identity(value), other_name)
+            ident = _fitted_level_identity(_onehot_level_identity(value), mapping)
+            dummy = other_name if ident is None else mapping[ident]
             if dummy is not None:
                 values[dummy][i] = 1.0
         return [

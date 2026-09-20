@@ -38,6 +38,75 @@ def _binary_block_frame(n=160, seed=4):
     return X, y, blocks
 
 
+def _irls_logistic_probabilities(design, y, w, tol=1e-13, max_iter=200):
+    """Weighted logistic MLE by plain IRLS; returns the fitted probabilities."""
+    beta = np.zeros(design.shape[1], dtype=np.float64)
+    for _ in range(max_iter):
+        prob = 1.0 / (1.0 + np.exp(-(design @ beta)))
+        gradient = design.T @ (w * (y - prob))
+        hessian = design.T @ (design * (w * prob * (1.0 - prob))[:, None])
+        step = np.linalg.solve(hessian, gradient)
+        beta = beta + step
+        if np.max(np.abs(step)) < tol:
+            break
+    return 1.0 / (1.0 + np.exp(-(design @ beta)))
+
+
+def test_joint_block_score_matches_an_independent_rao_statistic():
+    rng = np.random.default_rng(11)
+    n = 150
+    nuisance = rng.normal(size=(n, 2))
+    shared = rng.normal(size=n)
+    # Correlated with the nuisance columns, so the adjustment carries weight:
+    # dropping it inflates the statistic by about a quarter.
+    block = np.column_stack(
+        [
+            shared + 0.9 * nuisance[:, 0] + 0.3 * rng.normal(size=n),
+            shared - 0.6 * nuisance[:, 1] - 0.5 * rng.normal(size=n),
+        ]
+    )
+    w = rng.uniform(0.5, 1.5, size=n)
+    logits = 0.8 * nuisance[:, 0] + 1.1 * shared
+    y = (logits + rng.normal(size=n) > 0.0).astype(np.float64)
+
+    # Null model: intercept plus the nuisance columns, fitted by IRLS.
+    null_design = np.column_stack([np.ones(n), nuisance])
+    p = _irls_logistic_probabilities(null_design, y, w)
+    assert np.max(np.abs(null_design.T @ (w * (y - p)))) < 1e-9
+    # The intercept-only helper is the MLE of the same model without nuisance.
+    np.testing.assert_allclose(
+        intercept_only_prob(y, w),
+        _irls_logistic_probabilities(np.ones((n, 1)), y, w),
+        rtol=1e-12,
+    )
+
+    joint, failures, invalid = logistic_joint_score_test(
+        block, y, w, p, Z_selected=nuisance, ridge=0.0
+    )
+    assert (failures, invalid) == (0, 0)
+
+    # Oracle: Rao score statistic for adding the whole block, taken from the
+    # inverse of the full Fisher information (the nuisance adjustment is the
+    # block of that inverse, not a Schur complement computed as above).
+    full_design = np.column_stack([null_design, block])
+    fisher = full_design.T @ (full_design * (w * p * (1.0 - p))[:, None])
+    score = full_design.T @ (w * (y - p))
+    covariance = np.linalg.inv(fisher)
+    start = null_design.shape[1]
+    block_score = score[start:]
+    rao = float(block_score @ covariance[start:, start:] @ block_score)
+    assert rao > 0.0
+    # The implementation reports half the Rao statistic.
+    assert 2.0 * joint == pytest.approx(rao, rel=1e-8)
+
+    # At the null MLE the nuisance score is zero, so the explicit adjustment
+    # must not move the statistic.
+    adjusted, _, _ = logistic_joint_score_test(
+        block, y, w, p, Z_selected=nuisance, ridge=0.0, adjust_score=True
+    )
+    assert adjusted == pytest.approx(joint, rel=1e-8)
+
+
 def test_joint_score_is_not_max_or_sum_of_scalars():
     rng = np.random.default_rng(0)
     n = 120
