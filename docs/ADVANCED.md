@@ -182,8 +182,9 @@ within-entity (and optionally within-time) variation. Weighted entity means
 are subtracted from `X` and `y` before ranks; `two_way` alternates entity and
 time demeaning until convergence (at most 200 passes). Sklearn `transform` still returns
 the selected raw columns. Auto-k evaluate, Gaussian CV, and xfit-objective
-fit those means on training rows only; partially unseen validation levels use
-the training grand mean with a warning. Routes where none can be seen are
+fit those means on training rows only. Unseen entity levels use the training
+grand mean for the entity effect; unseen time levels add no time effect. A
+warning reports affected rows. Routes where none can be seen are
 rejected up front.
 
 ```python

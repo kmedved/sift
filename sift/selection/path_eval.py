@@ -648,8 +648,9 @@ def evaluate_feature_path(
         the training and the validation rows of the same fold, and an
         all-missing training column is filled with ``0.0`` -- before the
         estimator is fitted. The imputation is silent and unconditional;
-        pass an already-imputed matrix, or an ``estimator`` pipeline with
-        its own imputer, when a different policy is wanted.
+        pass an already-imputed matrix when a different policy is wanted.
+        An imputer inside an ``estimator`` pipeline sees these filled values,
+        so it cannot override this preprocessing step.
     y : array-like of shape (n_samples,) or (n_samples, n_targets)
         Regression target. A 2-D array is scored as multi-output RMSE/MAE
         with the same row weights on every target. The default estimator

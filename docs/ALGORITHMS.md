@@ -150,10 +150,11 @@ path before pruning too aggressively. With `store_proxies=True`,
 near-duplicates from the stored copula block without retaining `X`.
 
 Regression filters also accept `within="groups"` or `within="two_way"`. Those
-subtract weighted entity means, or alternate entity and time demeaning for a
+subtract weighted entity means, or alternate entity and time demeaning until
 convergence (at most 200 passes), from `X` and `y` before ranks. Auto-k evaluate,
-Gaussian CV, and xfit-objective fit those means on training rows only; an
-partially unseen validation levels use the training grand mean with a warning;
+Gaussian CV, and xfit-objective fit those means on training rows only. Unseen
+entity levels use the training grand mean for the entity effect; unseen time
+levels add no time effect. A warning reports the affected rows;
 routes where no validation level can be seen are rejected. Demeaning can leave
 no within-entity variation, including when every group is a singleton; the
 call then returns an empty selection or raises. `between_relevance` is an

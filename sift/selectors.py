@@ -1367,11 +1367,11 @@ class MRMRSelector(_BaseSelector):
         numeric level whose exact type is absent from the fitted vocabulary
         matches the numerically equal fitted level (``1`` matches a fitted
         ``1.0`` and vice versa), so a float training column (float because of
-        NaN) and an int scoring column encode consistently. Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a perfectly balanced categorical becomes a constant column
-        and an identifier-like column carries no information, and ordinal
-        turns one into an arbitrary permutation. ``sample_weight`` is
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
         consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
         ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
         rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
@@ -1438,9 +1438,9 @@ class MRMRSelector(_BaseSelector):
         and time demeaning until the relative change falls below ``1e-10``, at
         most 200 passes. Regression only. Fixed-``k`` fits then require
         ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: validation rows whose level was unseen
-        fall back to the training grand mean and raise one ``UserWarning``
-        reporting how many rows that affected, and a route on which no
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -1675,11 +1675,11 @@ class JMISelector(_BaseSelector):
         numeric level whose exact type is absent from the fitted vocabulary
         matches the numerically equal fitted level (``1`` matches a fitted
         ``1.0`` and vice versa), so a float training column (float because of
-        NaN) and an int scoring column encode consistently. Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a perfectly balanced categorical becomes a constant column
-        and an identifier-like column carries no information, and ordinal
-        turns one into an arbitrary permutation. ``sample_weight`` is
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
         consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
         ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
         rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
@@ -1739,9 +1739,9 @@ class JMISelector(_BaseSelector):
         and time demeaning until the relative change falls below ``1e-10``, at
         most 200 passes. Regression only. Fixed-``k`` fits then require
         ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: validation rows whose level was unseen
-        fall back to the training grand mean and raise one ``UserWarning``
-        reporting how many rows that affected, and a route on which no
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -1974,11 +1974,11 @@ class JMIMSelector(_BaseSelector):
         numeric level whose exact type is absent from the fitted vocabulary
         matches the numerically equal fitted level (``1`` matches a fitted
         ``1.0`` and vice versa), so a float training column (float because of
-        NaN) and an int scoring column encode consistently. Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a perfectly balanced categorical becomes a constant column
-        and an identifier-like column carries no information, and ordinal
-        turns one into an arbitrary permutation. ``sample_weight`` is
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
         consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
         ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
         rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
@@ -2038,9 +2038,9 @@ class JMIMSelector(_BaseSelector):
         and time demeaning until the relative change falls below ``1e-10``, at
         most 200 passes. Regression only. Fixed-``k`` fits then require
         ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: validation rows whose level was unseen
-        fall back to the training grand mean and raise one ``UserWarning``
-        reporting how many rows that affected, and a route on which no
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -2269,11 +2269,11 @@ class CEFSPlusSelector(_BaseSelector):
         numeric level whose exact type is absent from the fitted vocabulary
         matches the numerically equal fitted level (``1`` matches a fitted
         ``1.0`` and vice versa), so a float training column (float because of
-        NaN) and an int scoring column encode consistently. Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a perfectly balanced categorical becomes a constant column
-        and an identifier-like column carries no information, and ordinal
-        turns one into an arbitrary permutation. ``sample_weight`` is
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
         consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
         ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
         rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
@@ -2333,9 +2333,9 @@ class CEFSPlusSelector(_BaseSelector):
         and time demeaning until the relative change falls below ``1e-10``, at
         most 200 passes. Regression only. Fixed-``k`` fits then require
         ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: validation rows whose level was unseen
-        fall back to the training grand mean and raise one ``UserWarning``
-        reporting how many rows that affected, and a route on which no
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -2598,11 +2598,11 @@ class CEFSPlusBinarySelector(_BaseSelector):
         numeric level whose exact type is absent from the fitted vocabulary
         matches the numerically equal fitted level (``1`` matches a fitted
         ``1.0`` and vice versa), so a float training column (float because of
-        NaN) and an int scoring column encode consistently. Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a perfectly balanced categorical becomes a constant column
-        and an identifier-like column carries no information, and ordinal
-        turns one into an arbitrary permutation. ``sample_weight`` is
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
         consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
         ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
         rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
@@ -3137,10 +3137,11 @@ class KnockoffSelector(_BaseSelector):
         last -- while frequency emits the level's share of training weight;
         unknown levels map to ``-1`` / ``0`` and a numeric level whose exact
         type is absent from the fitted vocabulary matches the numerically
-        equal fitted level (``1`` matches a fitted ``1.0``). Neither map is
-        one-to-one: frequency gives levels of equal training weight the same
-        value, so a balanced categorical becomes a constant column, and
-        ordinal only permutes an identifier-like column arbitrarily. Both
+        equal fitted level (``1`` matches a fitted ``1.0``). Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A balanced categorical then
+        becomes constant under frequency encoding; ordinal can permute an
+        identifier-like column arbitrarily. Both
         consume ``sample_weight``; ``"target"``, ``"loo"`` and
         ``"james_stein"`` reject it. ``"none"`` is the only value that
         preserves the Model-X FDR claim; the four legacy supervised encodings

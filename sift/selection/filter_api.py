@@ -88,7 +88,7 @@ from sift.selection.blocks import (
     resolve_feature_blocks,
 )
 from sift.selection.conditioning import _as_refs, resolve_conditioning
-from sift.selection.within import TWO_WAY_ITERATIONS, validate_within
+from sift.selection.within import validate_within
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -530,11 +530,11 @@ def select_mrmr(
         type is absent from the fitted vocabulary matches the numerically
         equal fitted level (``1`` matches a fitted ``1.0`` and vice versa),
         so a float training column (float because of NaN) and an int scoring
-        column encode consistently. Neither map is one-to-one: frequency
-        gives levels of equal training weight the same value, so a perfectly
-        balanced categorical becomes a constant column and an
-        identifier-like column carries no information, while ordinal turns
-        one into an arbitrary permutation. Missing is a fitted level only
+        column encode consistently. Ordinal assigns distinct codes to fitted
+        levels, while frequency can give levels of equal training weight the
+        same value. A perfectly balanced categorical then becomes constant
+        under frequency encoding; ordinal can turn an identifier into an
+        arbitrary permutation. Missing is a fitted level only
         when observed in positive-weight train rows. Maps ignore ``y`` and
         use explicit ``sample_weight`` only. Scoring under nested evaluate,
         Gaussian CV, and xfit fits maps on training folds, while the
@@ -809,9 +809,10 @@ def select_jmi(
         ``"two_way"`` alternates entity and time demeaning until the relative
         change falls below ``1e-10``, at most 200 passes.  Regression only;
         rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
-        scoring fits the means on training folds only: validation rows whose
-        level was unseen fall back to the training grand mean and raise one
-        ``UserWarning`` counting them, and a route on which no validation row
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -1086,9 +1087,10 @@ def select_jmim(
         ``"two_way"`` alternates entity and time demeaning until the relative
         change falls below ``1e-10``, at most 200 passes.  Regression only;
         rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
-        scoring fits the means on training folds only: validation rows whose
-        level was unseen fall back to the training grand mean and raise one
-        ``UserWarning`` counting them, and a route on which no validation row
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -1379,9 +1381,10 @@ def select_cefsplus(
         ``X`` and ``y``.  ``"two_way"`` alternates entity and time demeaning
         until the relative change falls below ``1e-10``, at most 200 passes.
         Rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
-        scoring fits the means on training folds only: validation rows whose
-        level was unseen fall back to the training grand mean and raise one
-        ``UserWarning`` counting them, and a route on which no validation row
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
@@ -2445,8 +2448,6 @@ def _format_payload(
                 )
     if ctx.within is not None:
         extra["within"] = ctx.within
-        if ctx.within == "two_way":
-            extra["within_two_way_iterations"] = TWO_WAY_ITERATIONS
     if ctx.k == "auto":
         assert ctx.auto_k_config is not None
         extra.update(

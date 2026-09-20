@@ -9,7 +9,7 @@ from sklearn.base import clone
 
 import sift
 from sift.selection.auto_k import AutoKConfig, select_k_auto
-from sift.selection.within import TWO_WAY_ITERATIONS, fit_within_transform
+from sift.selection.within import fit_within_transform
 
 
 def _panel(n_groups=8, n_time=6, seed=0):
@@ -179,10 +179,6 @@ def test_unseen_group_falls_back_to_training_grand_mean():
 
 
 def test_two_way_and_groups_modes_both_isolate_within_variation():
-    # TWO_WAY_ITERATIONS is the legacy fixed pass count kept only for the
-    # published metadata key; the solver now iterates to convergence and the
-    # real contract is pinned in tests/test_closure_panel_proxies.py.
-    assert TWO_WAY_ITERATIONS == 5
     X, y, groups, time = _panel(n_groups=6, n_time=5, seed=3)
     result = sift.select_cefsplus(
         X,
@@ -195,7 +191,10 @@ def test_two_way_and_groups_modes_both_isolate_within_variation():
         return_result=True,
     )
     assert result.selector_metadata["within"] == "two_way"
-    assert result.selector_metadata["within_two_way_iterations"] == TWO_WAY_ITERATIONS
+    fitted = fit_within_transform(
+        "two_way", X.to_numpy(), y, groups, time, np.ones(len(X))
+    )
+    assert result.selector_metadata["within_two_way_iterations"] == fitted.n_iterations
     groups_only = sift.select_cefsplus(
         X, y, k=1, groups=groups, within="groups", verbose=False
     )
@@ -211,6 +210,27 @@ def test_two_way_and_groups_modes_both_isolate_within_variation():
         indexed.loc["within_signal", "within_relevance"]
         > 10.0 * indexed.loc["noise", "within_relevance"]
     )
+
+
+@pytest.mark.parametrize("selector,options", [
+    (sift.select_cefsplus, {}),
+    (sift.select_mrmr, {"task": "regression", "estimator": "classic"}),
+])
+def test_two_way_result_reports_path_fit_iterations(selector, options):
+    rng = np.random.default_rng(739)
+    groups = np.repeat(np.arange(10), 8)
+    time = np.tile(np.arange(8), 10)
+    X = rng.normal(size=(80, 4))
+    y = X[:, 0] + rng.normal(size=80)
+    expected = fit_within_transform(
+        "two_way", X, y, groups, time, np.ones(len(X))
+    ).n_iterations
+    assert expected == 2  # distinguished from the obsolete five-pass metadata
+    result = selector(
+        X, y, k=1, within="two_way", groups=groups, time=time,
+        return_result=True, subsample=None, verbose=False, **options,
+    )
+    assert result.selector_metadata["within_two_way_iterations"] == expected
 
 
 def test_evaluate_rejects_all_unseen_validation_groups():

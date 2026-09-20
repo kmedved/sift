@@ -109,10 +109,11 @@
   `store_proxies` remains opt-in and default-false; omitted calls are
   unchanged. Cluster frequency is nullable when no resample payload exists.
 - Added regression-filter `within="groups"` and `within="two_way"` panel
-  transforms, with weighted entity means and five alternating entity/time
-  demeaning iterations before ranks. Supported auto-k scoring fits means on
-  training folds only. Partially unseen validation levels use the training
-  grand mean with a warning; routes where none can be seen are rejected.
+  transforms, with weighted entity means and alternating entity/time
+  demeaning until convergence before ranks. Supported auto-k scoring fits means
+  on training folds only. Unseen entity levels use the training grand mean for
+  that effect; unseen time levels add no time effect. A warning reports affected
+  rows; routes where none can be seen are rejected.
   Result views expose within/between relevance; raw transform output and
   calls omitting `within` are unchanged. Prebuilt caches, classification,
   nested mode and non-fold auto-k methods reject the new option explicitly.
@@ -196,9 +197,9 @@
 - Added a runtime/scaling guide backed by a reproducible six-method benchmark.
   Its committed CSV and provenance sidecar retain all raw timing samples,
   environment and thread-pool state, effective options, data and selection
-  fingerprints, clean-commit Git state (`dirty=false` at
-  `06c569e`), and hashes for the runner and
-  executed SIFT sources.
+  fingerprints, clean-commit Git state (`dirty=false`), and hashes for the
+  runner and executed SIFT sources. The [runtime guide](runtime-scaling.md)
+  records the current bound commit and CSV checksum.
 - Added an executable data-type support matrix over the public selector entry
   points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,
   sparse matrices, datetime/timedelta feature columns, sample weights, groups,

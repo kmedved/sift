@@ -31,10 +31,6 @@ from sift._preprocess import reject_datetime_like_features
 
 WithinMode = Literal["groups", "two_way"]
 
-#: Legacy fixed pass count.  The two-way solver now iterates to convergence;
-#: this constant is retained only for the ``within_two_way_iterations``
-#: metadata key published by ``sift.selection.filter_api``.
-TWO_WAY_ITERATIONS = 5
 #: Scaled residual below which the alternating projection is called converged.
 TWO_WAY_TOLERANCE = 1e-10
 #: Hard cap on alternating passes; hitting it emits a ``UserWarning``.
@@ -213,9 +209,9 @@ def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None")
     """Emit one warning per auto-k call for partially unseen validation levels.
 
     ``require_seen_within_validation_levels`` only rejects folds in which *no*
-    level overlaps training.  Rows whose own level is unseen still score, but
-    they are centred on the training grand mean and therefore carry no within
-    information; say so once instead of silently mixing the two kinds of row.
+    level overlaps training. Rows with an unseen entity use the training grand
+    mean for that effect; an unseen time level contributes no time effect.
+    Effects from a seen level in the other dimension still apply.
     """
     if tally is None or tally.n_rows <= 0:
         return
@@ -227,11 +223,19 @@ def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None")
     if not clauses:
         return
     mode = tally.mode or "groups"
+    missing_effects = []
+    if tally.entity_unseen:
+        missing_effects.append("the unavailable entity effect fell back to the training grand mean")
+    if tally.time_unseen:
+        missing_effects.append("the unavailable time effect was omitted")
+    other_effect = (
+        "A fitted effect in the other dimension still applies when its level is seen. "
+        if mode == "two_way" else ""
+    )
     warnings.warn(
-        f"within={mode!r} auto-k scoring: {' and '.join(clauses)}, so their "
-        "demeaning fell back to the training grand mean instead of a fitted "
-        "level effect. Those rows carry no within information and the chosen k "
-        "is based on a mixture of demeaned and grand-mean-centred rows. Drop or "
+        f"within={mode!r} auto-k scoring: {' and '.join(clauses)}; "
+        f"{' and '.join(missing_effects)}. {other_effect}The chosen k "
+        "uses a mixture of fully and partially demeaned rows. Drop or "
         "otherwise handle late-entering or early-exiting entities, or choose a "
         f"split that keeps levels overlapping: {within_split_guidance(mode)}",
         UserWarning,

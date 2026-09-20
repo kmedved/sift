@@ -18,7 +18,9 @@ from sift.selection.proxies import reject_unavailable_proxy_positions
 from sift.selection.within import (
     TWO_WAY_MAX_ITERATIONS,
     TWO_WAY_TOLERANCE,
+    UnseenWithinLevelTally,
     fit_within_transform,
+    warn_unseen_within_validation_levels,
 )
 
 
@@ -260,6 +262,18 @@ def test_partially_unseen_validation_entities_warn_once_with_counts():
     assert f"{unseen / len(val_idx):.1%}" in message
     assert "entity" in message
     assert "late-entering" in message
+
+
+def test_unseen_time_warning_preserves_known_entity_effect():
+    tally = UnseenWithinLevelTally()
+    tally.add(mode="two_way", n_rows=4, entity_unseen=0, time_unseen=2)
+    with pytest.warns(UserWarning) as caught:
+        warn_unseen_within_validation_levels(tally)
+    message = str(caught[0].message)
+    assert "2 of 4 validation rows (50.0%) had an unseen time level" in message
+    assert "time effect was omitted" in message
+    assert "other dimension still applies" in message
+    assert "grand mean" not in message
 
 
 def test_fully_overlapping_validation_levels_do_not_warn():

@@ -114,6 +114,7 @@ class ClassicPrepared:
     X_pre_within: np.ndarray | None = None
     y_pre_within: np.ndarray | None = None
     groups_sub: np.ndarray | None = None
+    within_two_way_iterations: int | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,8 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
+                {"within_two_way_iterations": prep.within_two_way_iterations}
+                if prep.within_two_way_iterations is not None else None,
             ),
         )
 
@@ -289,6 +292,8 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
+                {"within_two_way_iterations": prep.within_two_way_iterations}
+                if prep.within_two_way_iterations is not None else None,
             ),
         )
 
@@ -1170,6 +1175,9 @@ def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
         extra["feature_names_are_synthetic"] = bool(
             getattr(cache, "feature_names_are_synthetic", False)
         )
+    within_iterations = getattr(cache, "_within_two_way_iterations", None)
+    if within_iterations is not None:
+        extra["within_two_way_iterations"] = int(within_iterations)
     return extra
 
 
@@ -1254,6 +1262,7 @@ def _cache_for_gaussian(
     ):
         effective_weight = ctx.request.sample_weight
     X_pre = X_encoded
+    within_iterations = None
     if ctx.within is not None:
         X_arr, template = as_float_feature_matrix(X_encoded)
         y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
@@ -1271,6 +1280,8 @@ def _cache_for_gaussian(
             ctx.time,
             weights,
         )
+        if ctx.within == "two_way":
+            within_iterations = int(_fitted.n_iterations)
         X_encoded = restore_feature_matrix(template, X_arr)
         y_sel = y_arr
         positive = weights > 0.0
@@ -1288,6 +1299,8 @@ def _cache_for_gaussian(
         rank_backend=ctx.rank_backend,
     )
     cache._built_for_filter_call = True
+    if within_iterations is not None:
+        cache._within_two_way_iterations = within_iterations
     if ctx.onehot_parents is not None:
         cache._raw_name_by_encoded = dict(zip(ctx.feature_names, ctx.onehot_parents))
     return (
@@ -1543,6 +1556,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     X_pre_within = None
     y_pre_within = None
     groups_sub = None
+    within_iterations = None
     if ctx.within is not None:
         X_pre_within = np.array(X_arr, dtype=np.float64, copy=True)
         y_pre_within = np.array(y_arr, dtype=np.float64, copy=True)
@@ -1556,6 +1570,8 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
             time_sub,
             w,
         )
+        if ctx.within == "two_way":
+            within_iterations = int(_fitted.n_iterations)
         positive = np.asarray(w, dtype=np.float64) > 0.0
         if np.any(positive) and not np.any(np.ptp(X_arr[positive], axis=0) > 0.0):
             raise ValueError(
@@ -1574,6 +1590,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         X_pre_within,
         y_pre_within,
         groups_sub,
+        within_iterations,
     )
 
 

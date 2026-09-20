@@ -416,12 +416,13 @@ default statistic is `relevance`; that default is not an exact-FDR upgrade.
 Optional regression-filter panel transform (`within="groups"` or
 `"two_way"`). Weighted entity means, and for two-way alternating entity/time
 means until convergence (at most 200 passes), are subtracted from `X` and `y`
-before ranks. Validation folds fit those means on training rows only; partially
-unseen validation levels use the training grand mean with a warning, while
+before ranks. Validation folds fit those means on training rows only. An
+unseen entity uses the training grand mean for its entity effect; an unseen
+time level adds no time effect. A warning reports affected rows, while
 routes where no validation level can be seen are rejected up front. Demeaning
-can remove all variation,
-including singleton-only groups, and then the selection is empty or the
+can remove all variation, including singleton-only groups, and then the selection is empty or the
 call raises that no within-entity signal remains. Ranking tables then
 include `within_relevance` (the selector relevance on the demeaned data)
 and [`between_relevance`](#between-relevance). Sklearn `transform` still
-returns selected raw columns.
+returns selected raw columns. Result metadata's `within_two_way_iterations`
+counts the path-building transform, not separate validation-fold fits.
