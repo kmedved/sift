@@ -24,10 +24,37 @@ from sift.selection.auto_k_objective import _log_comb, _penalty_array
 from sift.selection.cefsplus_multi import (
     TARGET_CONDITION_CAP,
     _spd_inverse_middle,
-    joint_logdet_oracle,
     multivariate_ic_df,
 )
 from sift.selection.panel import build_candidate_panel
+
+_SHRINK = 1e-6
+
+
+def _joint_mi_oracle(R, C, Ryy, selected, shrink=_SHRINK):
+    """``log|Σ_Y| - log|Σ_{Y|S}|`` for a fixed set ``S``, in plain numpy.
+
+    Takes the cache-derived copula Gram blocks as given and evaluates the
+    Schur complement ``Σ_Y - Cᵀ G⁻¹ C`` with ``np.linalg`` only, so it shares
+    no code path with the greedy residual recursion it checks. ``shrink`` is
+    the documented off-diagonal shrink of the CEFS+ objective (unit
+    diagonals kept), not a helper import.
+    """
+    scale = 1.0 - float(shrink)
+    sigma_y = scale * np.asarray(Ryy, dtype=np.float64)
+    np.fill_diagonal(sigma_y, 1.0)
+    sign_y, logdet_y = np.linalg.slogdet(sigma_y)
+    assert sign_y > 0
+    idx = np.asarray(list(selected), dtype=np.int64)
+    if idx.size == 0:
+        return 0.0
+    g = scale * np.asarray(R, dtype=np.float64)[np.ix_(idx, idx)]
+    np.fill_diagonal(g, 1.0)
+    c = scale * np.asarray(C, dtype=np.float64)[idx]
+    resid = sigma_y - c.T @ np.linalg.solve(g, c)
+    sign_r, logdet_r = np.linalg.slogdet(resid)
+    assert sign_r > 0
+    return float(logdet_y - logdet_r)
 
 
 def _shared_signal_frame(n=240, p=12, q=3, seed=0):
@@ -82,7 +109,7 @@ def test_joint_gain_matches_direct_logdet_oracle():
     local = [
         int(np.flatnonzero(panel.original == idx)[0]) for idx in indices
     ]
-    oracle = joint_logdet_oracle(panel.R, panel.C, panel.Ryy, local)
+    oracle = _joint_mi_oracle(panel.R, panel.C, panel.Ryy, local)
     np.testing.assert_allclose(float(objective[-1]), float(oracle), rtol=1e-8, atol=1e-8)
 
 
@@ -163,10 +190,10 @@ def test_include_conditions_path_keeps_k_discoveries_and_conditional_objective()
     orig_to_local = {int(o): i for i, o in enumerate(panel.original)}
     include_local = [orig_to_local[int(X.columns.get_loc("f3"))]]
     disc_local = [orig_to_local[int(i)] for i in idx if int(i) != int(X.columns.get_loc("f3"))]
-    oracle_full = joint_logdet_oracle(
+    oracle_full = _joint_mi_oracle(
         panel.R, panel.C, panel.Ryy, include_local + disc_local
     )
-    oracle_inc = joint_logdet_oracle(panel.R, panel.C, panel.Ryy, include_local)
+    oracle_inc = _joint_mi_oracle(panel.R, panel.C, panel.Ryy, include_local)
     np.testing.assert_allclose(
         float(obj[-1]), float(oracle_full - oracle_inc), rtol=1e-8, atol=1e-8
     )
@@ -460,3 +487,56 @@ def test_auto_k_evaluate_penalized_and_measured_default_on_shared_design():
     )
     assert count_qk <= count_k
     assert count_qk >= 2
+
+
+@pytest.mark.parametrize("penalty", ["bic", "aic", "hqc", "ebic", "ric"])
+def test_multi_target_penalized_curve_uses_q_times_k_dimensions(penalty):
+    X, Y = _shared_signal_frame(n=120, p=7, q=2, seed=92)
+    config = AutoKConfig(
+        k_method="penalized_objective", objective_penalty=penalty,
+        ebic_gamma=0.5 if penalty == "ebic" else "auto", min_k=0, max_k=4,
+    )
+    result = select_cefsplus(
+        X, Y, "auto", auto_k_config=config, return_result=True, verbose=False,
+    )
+    diag = result.diagnostics_["auto_k_diagnostics"]
+    ks = diag["k"].to_numpy(dtype=int)
+    objective = diag["objective"].to_numpy(dtype=float)
+    n_eff = diag["n_eff"].iloc[0]
+    dimension = 2 * ks
+    if penalty == "bic":
+        expected_penalty = dimension * np.log(n_eff)
+    elif penalty == "aic":
+        expected_penalty = 2.0 * dimension
+    elif penalty == "hqc":
+        expected_penalty = 2.0 * np.log(np.log(n_eff)) * dimension
+    elif penalty == "ebic":
+        from math import comb
+
+        expected_penalty = dimension * np.log(n_eff) + np.array(
+            [np.log(comb(X.shape[1], int(k))) for k in ks]
+        )
+    else:
+        expected_penalty = 2.0 * dimension * np.log(X.shape[1])
+    np.testing.assert_allclose(diag["df"], dimension)
+    np.testing.assert_allclose(diag["penalty"], expected_penalty)
+    score = n_eff * objective - expected_penalty
+    np.testing.assert_allclose(diag["penalized_score"], score)
+    chosen = int(ks[np.lexsort((ks, -score))[0]])
+    assert result.diagnostics_["auto_k"]["selected_k"] == chosen
+
+
+@pytest.mark.parametrize("encoding", ["ordinal", "frequency"])
+def test_multi_target_accepts_target_blind_numeric_encoding(encoding):
+    X, Y = _shared_signal_frame(n=120, p=6, q=2, seed=93)
+    X["category"] = np.where(X["f0"] > 0, "high", "low")
+    selected = select_cefsplus(
+        X, Y, 2, cat_features=["category"], cat_encoding=encoding,
+        verbose=False,
+    )
+    assert len(selected) == 2
+    with pytest.raises(ValueError, match="multi-target|2-D|supervised"):
+        select_cefsplus(
+            X, Y, 2, cat_features=["category"], cat_encoding="target_cv",
+            verbose=False,
+        )

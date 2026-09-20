@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -350,11 +351,18 @@ def test_committed_dated_gate_is_bound_to_its_full_clean_provenance(tmp_path):
         check=False,
     ).returncode == 0
     if not have_commit:
-        pytest.skip(
+        # 88a8705 sits on the squash-merged PR #72 branch, so no branch or tag
+        # reaches it: even a full-history clone lacks it until the PR ref is
+        # fetched. CI fetches that ref and sets SIFT_REQUIRE_PROVENANCE_COMMITS,
+        # which turns a silent skip into a failure there.
+        message = (
             "provenance commit "
-            f"{provenance_commit[:12]} is not available in this checkout (shallow "
-            "clone or archive); CI runs this verification on a full-history checkout"
+            f"{provenance_commit[:12]} is not available in this checkout; fetch it "
+            "with `git fetch origin +refs/pull/72/head:refs/provenance/pr-72`"
         )
+        if os.environ.get("SIFT_REQUIRE_PROVENANCE_COMMITS") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
     output_path = tmp_path / "gates.csv"
     regenerate_gate_csv(
         results / "auto_k_v2_main.csv",

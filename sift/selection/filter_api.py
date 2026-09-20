@@ -88,7 +88,7 @@ from sift.selection.blocks import (
     resolve_feature_blocks,
 )
 from sift.selection.conditioning import _as_refs, resolve_conditioning
-from sift.selection.within import TWO_WAY_ITERATIONS, validate_within
+from sift.selection.within import validate_within
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -411,9 +411,15 @@ def select_mrmr(
         from ``sift.build_classic_cache`` is accepted with
         ``estimator="classic"``. A named cache requires ``X`` to be the
         DataFrame whose column labels and order built it; a positional cache
-        requires the matching ndarray. Because a cache freezes its rows and
-        weights, ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        be passed alongside it.
+        requires the matching ndarray. Only the row count and the column names
+        are checked, never the row values, so a cache must be used with
+        exactly the rows it was built from. Because a cache freezes its rows
+        and weights, ``sample_weight``, ``subsample``, and ``random_state``
+        cannot be passed alongside it. A cache also stores no encoding
+        provenance: a ``ClassicFeatureCache`` rejects every ``cat_encoding``
+        other than ``"none"``, and a ``FeatureCache`` rejects ``"onehot"``
+        (no cache can be built from a frame that still holds categorical
+        columns in the first place).
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -444,13 +450,20 @@ def select_mrmr(
         Optional panel transform applied *after* encoding and *before* ranks
         or classic relevance.  ``"groups"`` subtracts per-entity weighted
         means of ``X`` and ``y``.  ``"two_way"`` alternates entity and time
-        demeaning for ``sift.selection.within.TWO_WAY_ITERATIONS`` (5)
-        iterations.  Regression only; rejected with a prebuilt ``cache``,
+        demeaning until the relative change falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache``,
         classification, or auto-k methods that are not fold-backed.
-        Validation/resampling fits the means on training rows only; entities
-        unseen in training fall back to the training grand mean.  Demeaning
-        can remove all variation, including singleton-only groups, yielding
-        an empty selection or a no-within-signal error.  ``between_relevance``
+        Validation/resampling fits the means on training folds only:
+        validation rows whose level was unseen fall back to the training grand
+        mean and raise one ``UserWarning`` counting them, and a route on which
+        no validation row has a seen level raises before any path work --
+        always the case for ``strategy="group_cv"``, and for ``"two_way"``
+        with ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
+        the classic estimators mean-impute first.  Demeaning can remove all
+        variation, including singleton-only groups, yielding an empty
+        selection or a no-within-signal error.  ``between_relevance``
         summarizes weighted entity means (entity-level support only; degenerate
         with two or fewer positive-mass entities) and is not on the same
         scale as ``within_relevance``.  Sklearn ``transform`` still returns
@@ -497,20 +510,38 @@ def select_mrmr(
         are kept (default 32, by mass then label) and the rest share
         ``other``. Missing is its own level; unknown transform values join
         ``other`` when it exists, otherwise they are all-zero. Selected
-        names stay in the raw namespace. Evaluate, Gaussian CV, xfit, and
-        auto routing learn vocabulary on training folds. Prebuilt caches,
-        ``within``, and knockoffs raise.
-        ``"ordinal"`` and ``"frequency"`` are target-blind 1:1 maps over
-        positive-weight training identities (unused pandas levels and
-        ``Categorical.ordered`` are ignored). Ordinal codes are ``0..C-1`` in
-        deterministic identity order (unknown ``-1``); frequency is the
-        training-mass proportion (unknown ``0``). Missing is a fitted level
-        only when observed in positive-weight train rows. Maps ignore ``y``
-        and use explicit ``sample_weight`` only. Scoring, nested evaluate,
-        Gaussian CV, and xfit fit maps on training folds. For
-        ``k_method="evaluate"`` with ``strategy="time_holdout"``, path and
-        scoring maps use the train partition only. Other time-bearing auto-k
-        routes such as in-sample EBIC still encode the call's ``X``.
+        names stay in the raw namespace. Held-out scoring under evaluate,
+        Gaussian CV, xfit, and auto routing refits the encoder on each
+        training fold, but the path-building encoder that fixes the dummy
+        columns is fit on every row, except under ``k_method="evaluate"``
+        with ``strategy="time_holdout"``, where it is fit on the training
+        partition; the map is target-blind, so this is not target leakage.
+        Prebuilt caches, ``within``, and knockoffs raise.
+        ``"ordinal"`` and ``"frequency"`` are target-blind numeric maps over
+        the levels observed in positive-weight training rows; pandas
+        categories that are declared but never observed are skipped. Ordinal
+        codes are ``0..C-1`` in natural order -- an ordered ``Categorical``
+        keeps its declared category order, otherwise bool, then numeric
+        levels ascending by value (ints and floats together), then
+        datetime-like by value, then strings in ordinary string order, then
+        other types, with a fitted missing level taking the last code -- and
+        unknown levels map to ``-1``; frequency is the training-mass
+        proportion (unknown ``0``). At transform a numeric level whose exact
+        type is absent from the fitted vocabulary matches the numerically
+        equal fitted level (``1`` matches a fitted ``1.0`` and vice versa),
+        so a float training column (float because of NaN) and an int scoring
+        column encode consistently. Ordinal assigns distinct codes to fitted
+        levels, while frequency can give levels of equal training weight the
+        same value. A perfectly balanced categorical then becomes constant
+        under frequency encoding; ordinal can turn an identifier into an
+        arbitrary permutation. Missing is a fitted level only
+        when observed in positive-weight train rows. Maps ignore ``y`` and
+        use explicit ``sample_weight`` only. Scoring under nested evaluate,
+        Gaussian CV, and xfit fits maps on training folds, while the
+        path-building map is fit on every row except under
+        ``k_method="evaluate"`` with ``strategy="time_holdout"``, where path
+        and scoring maps use the train partition only. Other time-bearing
+        auto-k routes such as in-sample EBIC still encode the call's ``X``.
         Prefix-only ranking on non-holdout splits may still use a full-data
         path -- use nested evaluate for holdout-blind selection assessment.
         Prebuilt caches and resampled auto-k
@@ -565,15 +596,21 @@ def select_mrmr(
         Retain the selection-time copula correlation block so
         ``result_view().proxies()`` can report near-duplicate stand-ins.
         Requires ``return_result=True`` and ``estimator="gaussian"``.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Redundancy state is initialized from these features
         before step 1. They appear in the output in caller order but are not
         discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. Each
+        argument is materialized once per call, so a generator or other
+        one-shot iterator works here; the sklearn selector classes reject
+        one instead, because it would not survive a refit or ``clone``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -735,9 +772,15 @@ def select_jmi(
         non-Gaussian estimators (``auto``, ``r2``, ``binned``, ``ksg``);
         a cache built with ``sample_weight`` is rejected by ``ksg``. A named
         cache requires the DataFrame whose labels and order built it; a
-        positional cache requires the matching ndarray.
+        positional cache requires the matching ndarray. Only the row count
+        and the column names are checked, never the row values, so a cache
+        must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it.
+        accompany it. A cache also stores no encoding provenance: a
+        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
+        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
+        be built from a frame that still holds categorical columns in the
+        first place).
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -763,10 +806,19 @@ def select_jmi(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning for a fixed five
-        iterations.  Regression only; rejected with a prebuilt ``cache`` or
-        non-fold auto-k methods.  Fold scoring fits means on training rows
-        only; unseen entities use the training grand mean.
+        ``"two_way"`` alternates entity and time demeaning until the relative
+        change falls below ``1e-10``, at most 200 passes.  Regression only;
+        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
+        has a seen level raises before any path work -- always the case for
+        ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
+        the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
         Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
         classification and ``"r2"`` for regression.  ``"binned"`` uses
@@ -835,15 +887,21 @@ def select_jmi(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``estimator="gaussian"``.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Joint-information state is initialized from these
         features before step 1. They appear in the output in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. Each
+        argument is materialized once per call, so a generator or other
+        one-shot iterator works here; the sklearn selector classes reject
+        one instead, because it would not survive a refit or ``clone``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -992,9 +1050,15 @@ def select_jmim(
         non-Gaussian estimators (``auto``, ``r2``, ``binned``, ``ksg``);
         a cache built with ``sample_weight`` is rejected by ``ksg``. A named
         cache requires the DataFrame whose labels and order built it; a
-        positional cache requires the matching ndarray.
+        positional cache requires the matching ndarray. Only the row count
+        and the column names are checked, never the row values, so a cache
+        must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it.
+        accompany it. A cache also stores no encoding provenance: a
+        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
+        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
+        be built from a frame that still holds categorical columns in the
+        first place).
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1020,10 +1084,19 @@ def select_jmim(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning for a fixed five
-        iterations.  Regression only; rejected with a prebuilt ``cache`` or
-        non-fold auto-k methods.  Fold scoring fits means on training rows
-        only; unseen entities use the training grand mean.
+        ``"two_way"`` alternates entity and time demeaning until the relative
+        change falls below ``1e-10``, at most 200 passes.  Regression only;
+        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
+        has a seen level raises before any path work -- always the case for
+        ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
+        the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
         Mutual-information estimator.  ``"auto"`` resolves to ``"binned"`` for
         classification and ``"r2"`` for regression.  ``"binned"`` uses
@@ -1091,15 +1164,21 @@ def select_jmim(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``estimator="gaussian"``.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Joint-information state is initialized from these
         features before step 1. They appear in the output in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. Each
+        argument is materialized once per call, so a generator or other
+        one-shot iterator works here; the sklearn selector classes reject
+        one instead, because it would not survive a refit or ``clone``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -1249,7 +1328,13 @@ def select_cefsplus(
         ``cat_encoding``, and auto-k methods other than ``evaluate``,
         ``elbow``, ``penalized_objective``, and measured ``k="auto"`` (EBIC)
         are rejected for ``q>=2``. The penalized-objective default uses
-        likelihood df ``q·k`` (search multiplicity remains ``k``).
+        likelihood df ``q·k`` (search multiplicity remains ``k``). The
+        selection path itself is rank-based and invariant to per-target
+        scaling, but ``k_method="evaluate"`` averages the per-target held-out
+        errors in raw target units, so rescaling one target column can change
+        the chosen ``k``; standardize the targets first when each should
+        count equally. With heavily skewed ``sample_weight`` the measured
+        ``k="auto"`` router uses the EBIC penalized objective for 2-D targets.
     k : int or "auto", default 75
         Number of features to select, treated as an *upper bound*.  ``"auto"``
         hands the count to the auto-k machinery -- see ``auto_k_config``.
@@ -1257,9 +1342,13 @@ def select_cefsplus(
         Prebuilt copula cache from ``sift.build_cache``, reused instead of
         transforming ``X`` again.  A named cache requires the DataFrame whose
         labels and order built it; a positional cache requires the matching
-        ndarray.  Because a cache freezes its rows and weights,
+        ndarray.  Only the row count and the column names are checked, never
+        the row values, so a cache must be used with exactly the rows it was
+        built from.  Because a cache freezes its rows and weights,
         ``sample_weight``, ``subsample``, and ``random_state`` cannot be
-        passed alongside it.
+        passed alongside it, and it stores no encoding provenance, so
+        ``cat_encoding="onehot"`` is rejected beside it (no cache can be built
+        from a frame that still holds categorical columns in the first place).
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1290,10 +1379,18 @@ def select_cefsplus(
         Optional panel transform applied after encoding and before the rank
         transform.  ``"groups"`` subtracts per-entity weighted means of
         ``X`` and ``y``.  ``"two_way"`` alternates entity and time demeaning
-        for a fixed five iterations.  Rejected with a prebuilt ``cache`` or
-        non-fold auto-k methods.  Fold scoring fits means on training rows
-        only; unseen entities use the training grand mean.  Sklearn
-        ``transform`` still returns the selected raw columns.
+        until the relative change falls below ``1e-10``, at most 200 passes.
+        Rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        scoring fits the means on training folds only: unseen entity levels
+        use the training grand mean for that effect, while unseen time levels
+        add no time effect. One ``UserWarning`` counts affected rows, and a
+        route on which no validation row
+        has a seen level raises before any path work -- always the case for
+        ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        This Gaussian route needs finite ``X`` and ``y`` under ``within``.
+        Sklearn ``transform`` still returns the selected raw columns.
     top_m : int or None, default None
         Candidate screen applied before the greedy loop: only the features
         with the largest absolute copula correlation with ``y`` compete.
@@ -1369,15 +1466,21 @@ def select_cefsplus(
         block so ``result_view().proxies()`` can report near-duplicate
         stand-ins for a selected feature.  Requires ``return_result=True``;
         the block never contains ``X`` or a cache.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Partial-Cholesky residual state is initialized from
         these features before step 1. They appear in the output in caller
         order but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. Each
+        argument is materialized once per call, so a generator or other
+        one-shot iterator works here; the sklearn selector classes reject
+        one instead, because it would not survive a refit or ``clone``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -1651,15 +1754,21 @@ def select_cefsplus_binary(
         Retain the selection-time copula correlation block for
         ``result_view().proxies()``.  Requires ``return_result=True`` and
         ``loss="brier"``; the log-loss path rejects it rather than ignoring it.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. The logistic score-test state is initialized from
         these features before step 1. They appear in the output in caller
         order but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. Each
+        argument is materialized once per call, so a generator or other
+        one-shot iterator works here; the sklearn selector classes reject
+        one instead, because it would not survive a refit or ``clone``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -2339,8 +2448,6 @@ def _format_payload(
                 )
     if ctx.within is not None:
         extra["within"] = ctx.within
-        if ctx.within == "two_way":
-            extra["within_two_way_iterations"] = TWO_WAY_ITERATIONS
     if ctx.k == "auto":
         assert ctx.auto_k_config is not None
         extra.update(

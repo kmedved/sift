@@ -50,7 +50,7 @@
 - Added additive `cat_encoding="ordinal"` and `"frequency"` on existing
   `cat_encoding` surfaces (filter functions/wrappers, binary CEFS+, Boruta
   `importance_data='train'`, `KnockoffSelector`, multi-target CEFS+).
-  Target-blind 1:1 maps; unknown `-1` / `0`; explicit `sample_weight` only
+  Target-blind numeric maps; unknown `-1` / `0`; explicit `sample_weight` only
   (not class-weight). Held-out scoring fits maps on training-fold raw `X`;
   evaluate/time-holdout path maps use the train partition. Prefix-only ranking may
   still use a full-data path. Prebuilt caches, resampled auto-k, and Boruta
@@ -58,7 +58,7 @@
 - Added joint multi-target Gaussian CEFS+ for numeric 2-D targets (`n×q`,
   `q≥2`). It uses target covariance and a `q·k` information-criterion
   dimension; one-column targets retain the 1-D path. Other selectors reject
-  multi-target input rather than flattening it.
+  multi-target input with a clear error.
 - Added generic `ModelSelector` with RFE/forward/stability strategies and
   additive `PurgedTimeSeriesSplit` / `GroupPurgedTimeSeriesSplit` splitters.
   Purging and embargo are applied at validation boundaries; group-aware
@@ -109,9 +109,11 @@
   `store_proxies` remains opt-in and default-false; omitted calls are
   unchanged. Cluster frequency is nullable when no resample payload exists.
 - Added regression-filter `within="groups"` and `within="two_way"` panel
-  transforms, with weighted entity means and five alternating entity/time
-  demeaning iterations before ranks. Supported auto-k scoring fits means on
-  training folds only, with training-grand-mean fallback for unseen entities.
+  transforms, with weighted entity means and alternating entity/time
+  demeaning until convergence before ranks. Supported auto-k scoring fits means
+  on training folds only. Unseen entity levels use the training grand mean for
+  that effect; unseen time levels add no time effect. A warning reports affected
+  rows; routes where none can be seen are rejected.
   Result views expose within/between relevance; raw transform output and
   calls omitting `within` are unchanged. Prebuilt caches, classification,
   nested mode and non-fold auto-k methods reject the new option explicitly.
@@ -137,6 +139,51 @@
   default remains `relevance`. Realized FDP does not upgrade
   `approximate_plugin` and does not prove sign-flip for LSM or CEFS+.
 
+### Fixes and behavior changes
+
+- Fixed purged time splits to apply `max_train_size` after purge, embargo and
+  group exclusion; mixed numeric timeline/end dtypes now use the timeline's
+  embargo rule, and unsupported time dtypes fail clearly.
+- `compare` now accepts purged splitters and `event_end`, keeps each candidate
+  on paired folds, validates holdout settings, handles generated split pairs,
+  and stratifies its default classification folds. `in_sample_path` refuses
+  ambiguous column identity; empty selections and empty result tables have
+  consistent contracts.
+- `Stabilized` now prevents duplicate source rows from leaking across an
+  inner-CV base's folds under replacement resampling, preserves multiplicity
+  with weights where supported, seeds each resample independently, and rejects
+  stale prebuilt caches. Unsupported block resampling reports the compatible
+  alternatives.
+- Panel `within` scoring now warns on partially unseen validation levels and
+  rejects split strategies where no levels can be seen. Two-way demeaning
+  iterates to convergence on unbalanced panels; `between_relevance` is not
+  reported as a finite score when too few entities exist.
+- Ordinal categories now follow natural numeric order or declared ordered
+  categorical order. Integral float and integer scoring values match fitted
+  categories across ordinal, frequency and one-hot transforms without
+  changing the fitted vocabulary.
+- Conditioning now rejects integer positions on named DataFrames with
+  actionable guidance and reports raw categorical names when an included
+  one-hot level is unusable. Sklearn wrappers reject one-shot conditioning
+  iterators at fit time instead of silently changing on refit.
+- Grouped knockoff e-values now distinguish representatives from cluster
+  members; members have `NaN` e-values and a separate representative value.
+  e-BH helpers reject invalid values, and nested validity labels reflect the
+  actual selection route.
+- Auto-k fixes include block-unit elbow curves after dead columns are
+  removed, conditioned-route preflight, valid weighted multi-target routing
+  to EBIC, and the `min_feasible_q` boundary. `ModelSelector` handles missing
+  callable importance and records its effective splitter.
+- Encoders reject duplicate column labels; one-hot with no categorical
+  ndarray columns is a no-op. Unsupported multi-target inputs now raise a
+  direct error in Boruta, comparison, stability and permutation importance.
+- Reproducibility manifests now distinguish input targets, weights, groups,
+  time, long option lists, seeds and cache provenance; prebuilt caches no
+  longer serialize raw training arrays. Deterministic `Decimal`, UUID,
+  complex and fraction labels can be hashed again. Export metadata records
+  Python, platform and repository dirtiness without absolute BLAS paths.
+  Manifest schema `1` is documented before its first release.
+
 ### Documentation
 
 - Replaced the handwritten `docs/API.md` page with a generated reference page
@@ -150,9 +197,9 @@
 - Added a runtime/scaling guide backed by a reproducible six-method benchmark.
   Its committed CSV and provenance sidecar retain all raw timing samples,
   environment and thread-pool state, effective options, data and selection
-  fingerprints, clean-commit Git state (`dirty=false` at
-  `06c569e`), and hashes for the runner and
-  executed SIFT sources.
+  fingerprints, clean-commit Git state (`dirty=false`), and hashes for the
+  runner and executed SIFT sources. The [runtime guide](runtime-scaling.md)
+  records the current bound commit and CSV checksum.
 - Added an executable data-type support matrix over the public selector entry
   points. Cells are live probes of numeric ndarray/DataFrame input, categoricals,
   sparse matrices, datetime/timedelta feature columns, sample weights, groups,

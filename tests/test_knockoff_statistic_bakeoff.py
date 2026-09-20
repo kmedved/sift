@@ -27,20 +27,52 @@ RETAINED_COMMIT = "ae904b8af02037eb66cd649384c4665dba17049d"
 RETAINED_CSV_SHA256 = "40d4e7944b81b012996f9c9f08327b1c7f2be33a4eee766f9af7a0a482c88acf"
 
 
-def test_paired_designs_share_data_across_statistics():
-    first = None
+def test_every_statistic_sees_the_same_design_and_knockoff_draw(monkeypatch):
+    """The paired comparison is only meaningful if nothing but W differs.
+
+    Run one real ``evaluate_one`` per statistic on a fixed (design, seed) and
+    spy on the Gaussian knockoff sampler: the copula matrix it is handed and
+    the knockoff copy it returns must be bit-identical across statistics, as
+    must the design itself.
+    """
+    from sift.selection import knockoff_filter as kf
+
+    real_sampler = kf.sample_gaussian_knockoffs
+    reference = bakeoff.make_design("ar1", 7, n=40, p=12)
+    seen = {}
     for statistic in bakeoff.STATISTICS:
         x, y, truth, spec = bakeoff.make_design("ar1", 7, n=40, p=12)
-        if first is None:
-            first = (x.copy(), y.copy(), set(truth), spec)
-        else:
-            np.testing.assert_allclose(x, first[0])
-            np.testing.assert_allclose(y, first[1])
-            assert truth == first[2]
-            assert spec == first[3]
-        assert statistic in bakeoff.STATISTICS
-    assert len(first[2]) == spec["n_signal"]
-    assert spec["n_signal"] * bakeoff.SELECT_FDR_FIXED["q"] < spec["n_signal"]
+        np.testing.assert_array_equal(x, reference[0])
+        np.testing.assert_array_equal(y, reference[1])
+        assert truth == reference[2] == set(range(spec["n_signal"]))
+        assert spec == reference[3]
+
+        draws = []
+
+        def spy(Z, model, rng, mean=None, _draws=draws):
+            Z_tilde = real_sampler(Z, model, rng, mean=mean)
+            _draws.append((np.array(Z, copy=True), np.array(Z_tilde, copy=True)))
+            return Z_tilde
+
+        monkeypatch.setattr(kf, "sample_gaussian_knockoffs", spy)
+        row = bakeoff.evaluate_one(
+            design="ar1",
+            statistic=statistic,
+            seed=7,
+            n=40,
+            p=12,
+            warmup_runs=0,
+            timing_repeats=1,
+        )
+        assert row["status"] == "ok", row["error"]
+        assert len(draws) == 1
+        seen[statistic] = (draws[0], row["data_sha256"])
+
+    reference_draw, reference_sha = seen["relevance"]
+    for statistic, ((Z, Z_tilde), data_sha) in seen.items():
+        np.testing.assert_array_equal(Z, reference_draw[0])
+        np.testing.assert_array_equal(Z_tilde, reference_draw[1])
+        assert data_sha == reference_sha, statistic
 
 
 def test_public_defaults_are_the_documented_select_fdr_settings():
@@ -429,10 +461,13 @@ def test_retained_bakeoff_artifacts_bind_report_and_historical_sources():
     for csv_row in csv_rows:
         key = (csv_row["design"], csv_row["statistic"], int(csv_row["seed"]))
         rec = json_by_key[key]
+        # Every CSV cell must be the provenance value the writer would emit:
+        # csv.DictWriter stringifies each field and writes None as "".
+        for column in bakeoff.CSV_COLUMNS:
+            value = rec.get(column)
+            expected = "" if value is None else str(value)
+            assert csv_row[column] == expected, (key, column)
         assert rec["status"] == "ok"
-        assert csv_row["status"] == "ok"
-        assert csv_row["data_sha256"] == rec["data_sha256"]
-        assert csv_row["selection_sha256"] == rec["selection_sha256"]
         assert rec["selected_indices"] is not None
         assert bakeoff._selection_fingerprint(rec["selected_indices"]) == rec[
             "selection_sha256"
@@ -444,8 +479,6 @@ def test_retained_bakeoff_artifacts_bind_report_and_historical_sources():
         assert n_disc == int(rec["n_discoveries"]) == int(csv_row["n_discoveries"])
         assert fdp == pytest.approx(float(rec["fdp"]))
         assert power == pytest.approx(float(rec["power"]))
-        assert fdp == pytest.approx(float(csv_row["fdp"]))
-        assert power == pytest.approx(float(csv_row["power"]))
         samples = rec["runtime_samples_s"]
         assert samples
         assert all(isinstance(value, (int, float)) and value > 0 for value in samples)
@@ -475,13 +508,6 @@ def test_retained_bakeoff_artifacts_bind_report_and_historical_sources():
                     assert got == pytest.approx(expected, rel=1e-14, abs=1e-15)
                 else:
                     assert got == expected
-    assert 0.08195540221559611 == pytest.approx(
-        0.08195540221559612, rel=1e-14, abs=1e-15
-    )
-    assert 0.012383912195267962 == pytest.approx(
-        0.012383912195267965, rel=1e-14, abs=1e-15
-    )
-    assert 0.08195540221559611 != pytest.approx(0.082, rel=1e-14, abs=1e-15)
     rendered = bakeoff.render_summary_markdown(provenance["summary"], study="full")
     doc = DOC.read_text(encoding="utf-8")
     documented = doc.split(TABLE_START, 1)[1].split(TABLE_END, 1)[0]

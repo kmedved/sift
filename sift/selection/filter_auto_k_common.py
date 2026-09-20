@@ -212,6 +212,8 @@ def _conditioning_valid_sets(cache, unused: dict | None) -> tuple[np.ndarray | N
         cache.valid_cols,
         feature_names=cache_names,
         label="include",
+        raw_names=getattr(cache, "_raw_name_by_encoded", None),
+        prebuilt_cache=not getattr(cache, "_built_for_filter_call", False),
     )
     pool = map_original_to_valid(
         resolved.discovery,

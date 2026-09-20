@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 import hashlib
+import math
 from typing import Any, Callable, Hashable, Literal, Mapping, Sequence
 
 import numpy as np
@@ -12,7 +13,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.model_selection import GroupKFold, KFold
+from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold
 
 from sift._metadata import resolve_row_metadata
 from sift.scoring import (
@@ -22,6 +23,7 @@ from sift.scoring import (
     sklearn_scorer_label,
 )
 from sift.selection.reproducibility import (
+    _context_hash,
     collapse_fold_snapshots,
     describe_estimator,
     describe_splitter,
@@ -32,6 +34,7 @@ from sift.selection.path_eval import (
     _build_splits,
     _fit_estimator,
     _to_estimator,
+    resolve_event_end,
 )
 
 
@@ -100,11 +103,50 @@ PREFIX_COLUMNS = (
     "mode",
     "protocol",
 )
+#: Dtype every result column carries once it holds at least one row. An empty
+#: table is cast to these so ``prefix_scores`` in ``mode="cv"`` (and ``overlap``
+#: for a single selector) is not silently all-object.
+_EMPTY_FRAME_DTYPES: dict[str, str] = {
+    "selector": "object",
+    "selector_a": "object",
+    "selector_b": "object",
+    "feature": "object",
+    "k_unit": "object",
+    "mode": "object",
+    "protocol": "object",
+    "selection_identity": "object",
+    "split_id": "int64",
+    "k": "int64",
+    "n_raw_features": "int64",
+    "n_blocks": "int64",
+    "n_columns": "int64",
+    "n_encoded_columns": "int64",
+    "n_folds": "int64",
+    "n_empty": "int64",
+    "n_splits": "int64",
+    "score": "float64",
+    "score_mean": "float64",
+    "score_std": "float64",
+    "mean_k": "float64",
+    "frequency": "float64",
+    "mean_jaccard": "float64",
+    "empty": "bool",
+    "in_sample": "bool",
+}
+#: Summary rows shown by ``CompareResult.__repr__``.
+_REPR_SUMMARY_ROWS = 5
 
 
 def _fingerprint_indices(idx: np.ndarray) -> str:
     arr = np.ascontiguousarray(np.asarray(idx, dtype=np.int64).reshape(-1))
     return hashlib.sha256(arr.tobytes()).hexdigest()
+
+
+def _row_context_digest(values, *, label: str, n_rows: int) -> str | None:
+    """Digest fold-shaping row metadata; never retain the values themselves."""
+    if values is None:
+        return None
+    return _context_hash(values, label=label, n_rows=int(n_rows))
 
 
 def _as_2d(X) -> np.ndarray:
@@ -710,6 +752,10 @@ class CompareResult:
         flag, encoded transform width, and ``in_sample``.
     summary : DataFrame
         Score mean/std, mean ``k`` in ``k_unit``, and empty-selection counts.
+        ``score_std`` is the across-fold standard deviation
+        (``np.std(..., ddof=1)``) of that one selector's scores. It is not a
+        standard error, and in particular not the standard error of a paired
+        difference between two selectors.
     selection_frequency : DataFrame
         Raw-feature selection rate across folds (or the single full-sample
         path when ``in_sample``).
@@ -732,6 +778,23 @@ class CompareResult:
     reproducibility_(X=None, hash_data=False)
         JSON-safe provenance manifest. Fold fingerprints are the stored
         compare-time bookkeeping; environment is export-time.
+
+    Notes
+    -----
+    Every selector was scored on the same folds, so per-split scores are
+    paired by construction and per-fold differences between two selectors
+    are legitimate paired quantities to compute from ``scores``.
+    ``summary.score_std`` is not one of them: it is the across-fold standard
+    deviation of a single selector's scores, not a standard error of a
+    paired difference.
+
+    Picking the winner out of ``summary`` and then reporting that winner's
+    ``score_mean`` is itself a selection step, so the reported number is
+    optimistically biased. Quote the winner's score from an outer holdout
+    this comparison never touched, or from a nested run.
+
+    ``compare`` performs no imputation, so whether missing values are
+    tolerated depends on the selector and the downstream estimator.
 
     See Also
     --------
@@ -770,6 +833,42 @@ class CompareResult:
     prefix_scores: pd.DataFrame
     fold_bookkeeping: tuple[dict[str, Any], ...]
     diagnostics: dict[str, Any]
+
+    def __repr__(self) -> str:
+        """Return a few compact lines, never the seven tables in full.
+
+        The dataclass default renders every DataFrame, so a plain
+        ``compare`` result printed thousands of characters into the console.
+        This keeps the labels plus the head of ``summary``.
+        """
+        selectors = [str(name) for name in self.summary["selector"]]
+        if not selectors:
+            selectors = ["<none>"]
+        head = (
+            f"CompareResult(selectors={selectors!r}, n_folds={len(self.folds)}, "
+            f"mode={self.mode!r}, scoring={self.scoring!r}, "
+            f"higher_is_better={self.higher_is_better})"
+        )
+        if self.summary.empty:
+            return head + "\n  summary: <empty>"
+        shown = self.summary.head(_REPR_SUMMARY_ROWS)
+        lines = [head, "  summary:"]
+        for _, row in shown.iterrows():
+            std = row["score_std"]
+            std_text = "nan" if pd.isna(std) else f"{float(std):.4g}"
+            lines.append(
+                f"    {row['selector']}: score_mean={float(row['score_mean']):.4g} "
+                f"score_std={std_text} mean_k={float(row['mean_k']):.4g} "
+                f"{row['k_unit']}"
+            )
+        hidden = len(self.summary) - len(shown)
+        if hidden > 0:
+            lines.append(f"    ... {hidden} more selector(s)")
+        lines.append(
+            "  tables: folds, scores, summary, selection_frequency, overlap, "
+            "prefix_scores"
+        )
+        return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot without changing this result."""
@@ -852,6 +951,7 @@ def compare(
     task: Task = "regression",
     random_state: int = 0,
     val_frac: float = 0.2,
+    event_end=None,
 ) -> CompareResult:
     """Compare selector factories with fold-local selection and scoring.
 
@@ -885,8 +985,13 @@ def compare(
         Called to build one downstream estimator per fold.
     cv : int, splitter, or None, default None
         Fold specification. ``None`` uses ``GroupKFold(5)`` when ``groups``
-        is supplied and shuffled ``KFold(5)`` otherwise. An integer ``n`` is
-        ``KFold(n)`` (or ``GroupKFold(n)`` with groups).
+        is supplied, shuffled ``StratifiedKFold(5)`` when
+        ``task="classification"`` with neither ``groups`` nor ``time``, and
+        shuffled ``KFold(5)`` otherwise. An integer ``n`` selects the same
+        family with ``n`` folds. May also be an iterable -- including a
+        generator -- of ``(train_idx, val_idx)`` pairs, which is
+        materialized once. The splitter that actually ran is recorded in
+        ``diagnostics["split"]``.
     scoring : str, sklearn scorer, or None, default None
         Scoring from ``sift.scoring`` names or an sklearn scorer object.
         Sklearn scorer outputs follow the maximize convention, so
@@ -912,8 +1017,20 @@ def compare(
         Shuffle seed for default ``KFold``.
     val_frac : float, default 0.2
         Retained compatibility parameter, unused by compare's CV protocol.
-        Only the default is accepted. To configure a holdout, pass a splitter
+        Only the default is accepted, compared with a tolerance so
+        ``np.float32(0.2)`` passes. To configure a holdout, pass a splitter
         with the desired test size through ``cv``.
+    event_end : array-like or str, optional
+        Per-row information-interval ends forwarded to ``cv.split`` when
+        that splitter declares ``event_end``. This is what makes the
+        label-horizon purge of ``PurgedTimeSeriesSplit`` /
+        ``GroupPurgedTimeSeriesSplit`` reachable from ``compare``; without
+        it those splitters treat every row as a point observation. Requires
+        ``time``, accepts the same DataFrame column-name shorthand, and
+        raises ``ValueError`` when the chosen ``cv`` cannot consume it.
+        Only a SHA-256 digest of the values reaches
+        ``diagnostics["split"]["event_end_sha256"]``; the values themselves
+        are never retained. Not passed to selectors.
 
     Returns
     -------
@@ -937,6 +1054,26 @@ def compare(
     additional-block units and ``n_columns`` remains the raw width.
     ``scores.empty`` and ``summary.n_empty`` describe an empty scoring design,
     including a nonempty raw selection transformed to zero encoded columns.
+
+    Every candidate is scored on the *same* folds, so the per-split scores
+    are paired by construction and a per-fold difference between two
+    selectors is a legitimate paired quantity. ``summary.score_std`` is
+    **not** that quantity: it is the across-fold standard deviation of one
+    selector's own scores (``np.std(..., ddof=1)``), not the standard error
+    of a paired difference and not a standard error of the mean. Build
+    paired differences from ``scores`` yourself when you want one.
+
+    Reading the winner off ``summary`` and then quoting that winner's
+    ``score_mean`` is itself a selection step, and the quoted number is
+    optimistically biased by exactly that choice. Report the winner's score
+    from an outer holdout the comparison never saw, or from a nested run
+    that repeats this whole comparison inside each outer training fold.
+
+    ``compare`` does not impute. Missing values reach the selector and the
+    downstream estimator exactly as supplied, so NaN support is whatever
+    that selector and that estimator (or pipeline) provide; many sklearn
+    estimators raise. This differs from ``evaluate_feature_path``, which
+    mean-imputes per training fold.
 
     Examples
     --------
@@ -975,7 +1112,10 @@ def compare(
         or not 0.0 < float(val_frac) < 1.0
     ):
         raise ValueError("val_frac must be a finite number in (0, 1)")
-    if float(val_frac) != 0.2:
+    # Compared with a tolerance so np.float32(0.2) -- which is not exactly 0.2
+    # in binary -- still reads as the default; genuinely different fractions
+    # are still rejected.
+    if not math.isclose(float(val_frac), 0.2, rel_tol=1e-6, abs_tol=1e-9):
         raise ValueError(
             "compare does not use val_frac; omit it and configure the desired "
             "holdout size through the cv splitter instead"
@@ -992,7 +1132,15 @@ def compare(
     groups = metadata.groups
     time = metadata.time
     sample_weight = metadata.sample_weight
-    y_arr = np.asarray(y).reshape(-1)
+    X, event_end = resolve_event_end(X, event_end, time=time, n_rows=_n_rows(X))
+    y_probe = np.asarray(y)
+    if y_probe.ndim >= 2 and int(y_probe.shape[1]) > 1:
+        raise ValueError(
+            "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+            "and select_cached(method='cefsplus'); compare scores one target "
+            f"per run, got y with {int(y_probe.shape[1])} columns"
+        )
+    y_arr = y_probe.reshape(-1)
     n = _n_rows(X)
     if y_arr.shape[0] != n:
         raise ValueError(f"X has {n} rows but y has {y_arr.shape[0]}")
@@ -1000,7 +1148,9 @@ def compare(
     scoring_obj, higher_is_better = _resolve_scoring(scoring, task=task)
     scoring_name = _scoring_label(scoring_obj)
     sample_weight_supplied = sample_weight is not None
-    splitter = _resolve_cv(cv, groups=groups, random_state=random_state)
+    splitter = _resolve_cv(
+        cv, groups=groups, time=time, random_state=random_state, task=task
+    )
     split_source = (
         "caller"
         if cv is not None
@@ -1014,6 +1164,12 @@ def compare(
         and getattr(splitter, "shuffle", False)
         and getattr(splitter, "random_state", None) is not None
     )
+    # Row metadata that shaped the folds, recorded as a digest only: the
+    # timestamps themselves are never retained on the result.
+    split_desc["time_sha256"] = _row_context_digest(time, label="time", n_rows=n)
+    split_desc["event_end_sha256"] = _row_context_digest(
+        event_end, label="event_end", n_rows=n
+    )
     splits = _build_splits(
         n,
         splitter,
@@ -1022,6 +1178,7 @@ def compare(
         groups=None if groups is None else np.asarray(groups).reshape(-1),
         y=y_arr,
         time=None if time is None else np.asarray(time).reshape(-1),
+        event_end=event_end,
     )
     fold_rows = []
     bookkeeping = []
@@ -1090,18 +1247,29 @@ def compare(
     )
 
 
-def _resolve_cv(cv, *, groups, random_state: int):
-    if cv is None:
+def _resolve_cv(cv, *, groups, time, random_state: int, task: Task):
+    """Build the splitter for ``cv=None`` or an integer fold count.
+
+    Ungrouped, timeless classification uses ``StratifiedKFold``, matching
+    scikit-learn's own default so a rare class cannot vanish from a
+    validation fold. Every other route is unchanged.
+    """
+    def _plain(n_splits: int):
         if groups is not None:
-            return GroupKFold(n_splits=5)
-        return KFold(n_splits=5, shuffle=True, random_state=int(random_state))
+            return GroupKFold(n_splits=n_splits)
+        if task == "classification" and time is None:
+            return StratifiedKFold(
+                n_splits=n_splits, shuffle=True, random_state=int(random_state)
+            )
+        return KFold(n_splits=n_splits, shuffle=True, random_state=int(random_state))
+
+    if cv is None:
+        return _plain(5)
     if isinstance(cv, (int, np.integer)) and not isinstance(cv, (bool, np.bool_)):
         n_splits = int(cv)
         if n_splits < 2:
             raise ValueError("cv integer must be >= 2")
-        if groups is not None:
-            return GroupKFold(n_splits=n_splits)
-        return KFold(n_splits=n_splits, shuffle=True, random_state=int(random_state))
+        return _plain(n_splits)
     return cv
 
 
@@ -1433,7 +1601,24 @@ def _compare_in_sample_path(
 
 
 def _frame(rows, columns) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=list(columns))
+    frame = pd.DataFrame(rows, columns=list(columns))
+    if columns == PREFIX_COLUMNS and not frame.empty:
+        # Pandas may infer StringDtype for populated string columns while the
+        # empty table has object columns. Keep the public prefix schema stable.
+        frame = frame.astype({name: "object" for name in ("selector", "mode", "protocol")})
+    if frame.empty:
+        # ``pd.DataFrame([], columns=...)`` leaves every column object, so an
+        # empty table (cv-mode ``prefix_scores``, or ``overlap`` with a single
+        # selector) would not compare, concatenate, or serialize like the
+        # populated one. Give it the dtypes the populated frame has.
+        cast = {
+            name: dtype
+            for name, dtype in _EMPTY_FRAME_DTYPES.items()
+            if name in frame.columns
+        }
+        if cast:
+            frame = frame.astype(cast)
+    return frame
 
 
 def _assemble_result(

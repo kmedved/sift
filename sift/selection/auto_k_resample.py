@@ -129,6 +129,9 @@ def null_objective_paths(
 
     Raises
     ------
+    TypeError
+        If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
+        ``FeatureCache`` from ``build_cache``.
     ValueError
         If ``y``, ``groups``, or ``time`` do not match the cache's original
         row count; if ``null`` is not one of the four accepted values; if
@@ -459,6 +462,9 @@ def bootstrap_paths(
 
     Raises
     ------
+    TypeError
+        If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
+        ``FeatureCache`` from ``build_cache``.
     ValueError
         If ``y`` does not have ``cache.n_rows_original`` rows, if
         ``boot_mode`` is neither ``'bayes'`` nor ``'half'``, if ``method`` is

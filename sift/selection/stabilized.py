@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
-from sklearn.feature_selection import SelectorMixin
+from sklearn.feature_selection import RFECV, SelectorMixin
 from sklearn.utils.metadata_routing import UNUSED
 from sklearn.utils.validation import check_is_fitted
 from threadpoolctl import threadpool_limits
@@ -140,6 +140,10 @@ def _base_accepts_sample_weight(selector: Any) -> bool:
         return False
     if _explicit_kwarg(selector.fit, "sample_weight"):
         return True
+    if isinstance(selector, RFECV):
+        # Newer sklearn versions expose **params here, but RFECV rejects
+        # sample_weight unless metadata routing is explicitly configured.
+        return False
     if not _has_var_keyword(selector.fit):
         return False
     nested = getattr(selector, "estimator", None)
@@ -409,7 +413,12 @@ class Stabilized(SelectorMixin, BaseEstimator):
     SIFT CV-based auto-k and ``target_cv`` encoding), replacement draws use
     unique source rows and multiply
     sample weights by draw multiplicity, preventing copies of one observation
-    from crossing folds. A base that cannot accept these weights must use
+    from crossing folds. ``resample="blocks"`` draws blocks with replacement
+    and is collapsed the same way: a weight-accepting inner-CV base is fitted
+    on the SORTED UNIQUE drawn rows with multiplicity weights, so 60 drawn
+    rows can reach the base as 43 weighted rows and block contiguity is
+    represented through those weights rather than through repeated adjacent
+    rows. A base that cannot accept these weights must use
     ``resample="half"``. This is a weighted unique-row fit, not a promise of
     numerical equivalence to duplicated-row preprocessing. Custom selectors
     that hide internal row splitting must likewise use ``"half"``.
@@ -471,8 +480,9 @@ class Stabilized(SelectorMixin, BaseEstimator):
         Transform order. ``"legacy"`` is descending frequency then original
         index in frequency mode, or the base discovery order for e-values.
         ``"original"`` is ascending fitted position.
-    n_jobs : int, default=1
-        Resamples run serially. Values other than ``1`` raise.
+    n_jobs : int or None, default=1
+        Resamples run serially. Only ``1`` and ``None`` are accepted, and
+        both mean serial; any other value raises.
     block_size : int or {"auto"}, default="auto"
         Block length for ``resample="blocks"``. Overrides raise in other modes.
     block_method : {"moving", "circular", "stationary"}, default="moving"
@@ -525,6 +535,17 @@ class Stabilized(SelectorMixin, BaseEstimator):
     Frequency aggregation has no FDR claim. E-value mode keeps the existing
     ``approximate_plugin`` / exploratory qualifications, antisymmetry,
     conditioning, screening, and group limitations of ``KnockoffSelector``.
+
+    ``sift.as_result`` reports ``n_resamples_completed`` and the
+    ``selection_frequency_source`` ``"completed_resample_fraction"``. A
+    resample whose base fit raises aborts the whole fit, so the completed
+    count always equals the requested ``n_resamples`` today; the keys name
+    the denominator of ``selection_frequencies_`` rather than a partial-run
+    outcome. Its ``diagnostics`` add ``resample_n_rows`` (rows drawn per
+    resample), ``resample_n_rows_fitted`` (rows the base was actually fitted
+    on, smaller under the unique-row policy above) and
+    ``multiplicity_weights_synthesized``, which is True when this wrapper
+    handed the base multiplicity weights the caller did not supply.
 
     Examples
     --------
@@ -1039,14 +1060,21 @@ class Stabilized(SelectorMixin, BaseEstimator):
     def _fit_frequency(self, X, y, *, sample_weight, groups, time, names) -> None:
         protect_inner_cv = self.resample != "half" and _base_has_inner_row_cv(self.selector)
         if protect_inner_cv and not _base_accepts_sample_weight(self.selector):
+            drawn = "blocks of rows" if self.resample == "blocks" else "rows"
             raise ValueError(
-                "Replacement resampling with an inner-CV base requires sample_weight "
-                "support to preserve bootstrap multiplicities on unique source rows. "
-                "Use resample='half' or a base that consumes sample_weight."
+                f"resample={self.resample!r} draws {drawn} with replacement, and this "
+                "base selector declares an inner-CV split but does not accept "
+                "sample_weight, so duplicated rows would be split across its inner "
+                "folds and leak one observation between them. Pass a base that "
+                "consumes sample_weight (SIFT's own selectors do), which lets each "
+                "draw be refitted on its unique rows with multiplicity weights, or "
+                "set resample='half', which draws without replacement but ignores "
+                "groups and time."
             )
         self._resample_fit_policy_ = (
             "unique_rows_with_multiplicity_weights" if protect_inner_cv else "drawn_rows"
         )
+        self._multiplicity_weights_synthesized_ = bool(protect_inner_cv)
         base_params = self.selector.get_params(deep=True)
         seed_names = sorted(
             name for name in base_params if name.split("__")[-1] == "random_state"
@@ -1099,6 +1127,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
         completed = 0
         row_counts: list[int] = []
         unique_counts: list[int] = []
+        fitted_counts: list[int] = []
         base_used: list[int] = []
         missing_base_used = False
         for i, rng in enumerate(rngs):
@@ -1109,6 +1138,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
                 idx, w_i = _multiplicity_weights(idx, sample_weight)
             else:
                 w_i = _row_take(sample_weight, idx)
+            fitted_counts.append(int(np.asarray(idx).size))
             X_i = _row_take(X, idx)
             y_i = _row_take(y, idx)
             g_i = _row_take(groups, idx) if self._fit_used_groups_ else None
@@ -1139,6 +1169,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
             completed += 1
         self._resample_row_counts_ = np.asarray(row_counts, dtype=np.int64)
         self._resample_unique_counts_ = np.asarray(unique_counts, dtype=np.int64)
+        self._resample_fitted_row_counts_ = np.asarray(fitted_counts, dtype=np.int64)
         if (
             not missing_base_used
             and base_used
@@ -1275,12 +1306,14 @@ class Stabilized(SelectorMixin, BaseEstimator):
             "_fit_used_time_",
             "_actual_random_state_",
             "_base_seed_control_",
+            "_multiplicity_weights_synthesized_",
             "_n_completed_resamples_",
             "_n_rows_original_",
             "_n_rows_used_",
             "_proxy_correlations",
             "_resample_row_counts_",
             "_resample_fit_policy_",
+            "_resample_fitted_row_counts_",
             "_resample_unique_counts_",
             "_rng_mechanism_",
             "_resample_selections_",

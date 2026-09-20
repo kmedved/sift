@@ -233,11 +233,12 @@ encoded output names match transform width. Not a knockoff FDR claim.
 
 ## ordinal / frequency encoding
 
-Target-independent 1:1 maps (`cat_encoding="ordinal"` / `"frequency"`).
+Target-independent numeric maps (`cat_encoding="ordinal"` / `"frequency"`).
 One numeric column per raw categorical. Vocabulary is the identities
 observed in positive-weight training rows (one-hot identity semantics;
-unused pandas levels are ignored). Ordinal codes are `0..C-1` in
-deterministic `repr(identity)` order; unknown is `-1`. Frequency is the
+unused unordered pandas levels are ignored). Ordinal codes are `0..C-1` in
+natural order for numeric levels and declared order for ordered categoricals;
+unknown is `-1`. Frequency is the
 level's share of positive training mass; unknown is `0`. Missing is a
 fitted level only when observed in that mass. Maps ignore `y`. Not a
 stronger knockoff FDR claim.
@@ -294,8 +295,9 @@ on the estimator). High relevance does not imply low [redundancy](#redundancy).
 
 `result.reproducibility_()` / `SelectionView.reproducibility_()` /
 `CompareResult.reproducibility_()` export a schema-`"1"` JSON payload:
-package versions, BLAS identity, git commit bound to the sift package tree,
-original vs used row counts, typed column hash, optional caller data hash,
+package/Python/platform versions, BLAS identity without absolute paths, git
+commit and package-tree dirty state, original vs used row counts, typed column
+hash, optional caller data hash,
 retained cache provenance, known new-run configuration and seeds, instantiated
 compare selector/estimator/splitter snapshots, and compare fold fingerprints.
 Environment is labelled export-time. Effective row counts and cache provenance
@@ -412,12 +414,15 @@ default statistic is `relevance`; that default is not an exact-FDR upgrade.
 ## Within
 
 Optional regression-filter panel transform (`within="groups"` or
-`"two_way"`). Weighted entity means, and for two-way a fixed five-iteration
-alternation with time means, are subtracted from `X` and `y` before ranks.
-Validation folds fit those means on training rows only; unseen entities fall
-back to the training grand mean. Demeaning can remove all variation,
-including singleton-only groups, and then the selection is empty or the
+`"two_way"`). Weighted entity means, and for two-way alternating entity/time
+means until convergence (at most 200 passes), are subtracted from `X` and `y`
+before ranks. Validation folds fit those means on training rows only. An
+unseen entity uses the training grand mean for its entity effect; an unseen
+time level adds no time effect. A warning reports affected rows, while
+routes where no validation level can be seen are rejected up front. Demeaning
+can remove all variation, including singleton-only groups, and then the selection is empty or the
 call raises that no within-entity signal remains. Ranking tables then
 include `within_relevance` (the selector relevance on the demeaned data)
 and [`between_relevance`](#between-relevance). Sklearn `transform` still
-returns selected raw columns.
+returns selected raw columns. Result metadata's `within_two_way_iterations`
+counts the path-building transform, not separate validation-fold fits.

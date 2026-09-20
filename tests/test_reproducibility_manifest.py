@@ -12,6 +12,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import GroupKFold, KFold
 
+import sift
 from sift import (
     AutoKConfig,
     CEFSPlusSelector,
@@ -37,7 +38,7 @@ def _regression_frame(n=90, p=4, seed=4):
 def _assert_export_environment(payload):
     env = payload["environment"]
     assert env["captured_at"] == "export"
-    assert env["sift"] == "0.9.1.dev0"
+    assert env["sift"] == sift.__version__
     assert isinstance(env["numpy"], str) and env["numpy"]
     assert isinstance(env["pandas"], str) and env["pandas"]
     assert isinstance(env["scikit-learn"], str) and env["scikit-learn"]

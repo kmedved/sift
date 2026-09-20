@@ -90,14 +90,15 @@ set the vocabulary, `onehot_max_levels=32` keeps the most massive levels
 level, and unknown transform values join `other` when that remainder exists
 (otherwise they are all-zero). Selected names stay raw; sklearn `transform` /
 `get_feature_names_out` use the encoded width. Nested and prefix-only
-`evaluate`, Gaussian CV, xfit, and auto routing learn the vocabulary inside
-training folds. Prebuilt caches, `within`, knockoffs, and Boruta raise.
+`evaluate` held-out scoring learns the vocabulary inside training folds;
+in-sample prefix rules can use a full-data vocabulary. Prebuilt caches,
+`within`, knockoffs, and Boruta raise.
 
-Use `cat_encoding="ordinal"` or `"frequency"` for target-blind 1:1 numeric
+Use `cat_encoding="ordinal"` or `"frequency"` for target-blind numeric
 maps (no extra dependency). Ordinal codes are `0..C-1` over identities
-observed in positive-weight training rows, in deterministic identity order
-(declared-but-unobserved pandas levels and `Categorical.ordered` are
-ignored; unknown is `-1`). Frequency is that level's share of positive
+observed in positive-weight fitting rows, in natural numeric order or an
+ordered categorical's declared order (unobserved levels are ignored;
+unknown is `-1`). Frequency is that level's share of positive
 training `sample_weight` mass (unknown is `0`). Missing is a fitted level
 only when it appears in that training mass. Maps ignore `y` and do not
 consume class-weight. One-hot vocabulary ordering is also typed: values are
@@ -413,7 +414,9 @@ To threshold any cloneable selector, wrap it in `Stabilized` instead of
 switching to the Lasso-only `StabilitySelector`. Row metadata still arrives at
 `fit`, not in the constructor. `resample="half"` is without replacement;
 `resample="bootstrap"` is with replacement; `resample="blocks"` needs both
-`groups` and `time`. Frequency voting is not FDR control. For a
+`groups` and `time`. With an inner-CV base, block replacement needs a base
+that accepts `sample_weight` so repeated source rows can be fitted once with
+multiplicity weights; `half` ignores panel blocks. Frequency voting is not FDR control. For a
 `KnockoffSelector` base, `aggregation="evalues"` reuses that class's native
 full-data e-value path and does not average e-values across bootstrap datasets.
 
@@ -568,11 +571,11 @@ blocks.
 For a numeric multi-target regression target, pass a two-dimensional `y` to
 CEFS+ (`n×q`, `q≥2`). This is joint selection: CEFS+ models target covariance
 and reports the path in raw feature units while its information-criterion
-dimension is `q·k`. A `(n, 1)` target remains the ordinary 1-D route. Because
-the objective is in raw target units, rescaling target columns changes the
-result; normalize them explicitly when equal target-scale contribution is
-intended. Unsupported selectors reject multi-target input rather than
-flattening it.
+dimension is `q·k`. A `(n, 1)` target remains the ordinary 1-D route. The
+selection path objective uses copula ranks and is scale-invariant; the
+`evaluate` held-out metric averages errors in raw target units, so rescaling a
+target can change its chosen `k`. Normalize targets when equal contribution is
+intended. Other selectors reject multi-target input.
 
 `n_draws > 1` redraws knockoffs and selects features whose selection frequency
 is at least `eta`. This is useful for run-to-run stability, but the aggregated
@@ -739,7 +742,9 @@ filter path.
 ## 9. Compare selectors without scoring a full-sample subset
 
 `sift.compare` refits each selector factory inside the training fold and
-scores a fresh estimator on the held-out fold. Pass `groups` for splitters
+scores a fresh estimator on the held-out fold. All candidates use the same
+folds. For label-horizon purging, pass `time`, `event_end`, and a purged
+splitter. Pass `groups` for splitters
 that need them; fixed-`k` selectors and `KnockoffSelector` do not receive
 those metadata. Empty knockoff sets stay empty.
 

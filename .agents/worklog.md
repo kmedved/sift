@@ -1,24 +1,9 @@
-# SIFT Python 3.11 floor and audited branch cleanup — complete
+# SIFT 0.9.1 closure — PR #96 delivery
 
-## Objective and authority
+Objective: deliver the reviewed closure fixes through PR #96, merge with a merge commit after exact-head CI, synchronize clean primary main, and verify benchmark-smoke plus test-latest-deps by workflow_dispatch. The owner authorized push, PR and merge after CI. Version choice, bump, tag, GitHub Release and publication remain out of scope.
 
-Raise the minimum supported Python to 3.11, add PyArrow to the Python 3.12 CI test job, land the changes, close superseded PRs #43 and #51, delete the exact audited allowlist of 27 local and 85 origin feature branches, prune four stale worktree registrations, and finish clean and synchronized on main. No tags, releases, PyPI publication, unrelated cleanup, stashes, archive branches, or backup worktrees.
+State: main and origin/main were c72900c when PR #96 opened. Integration branch audit/0.9.1-closure-fixes preserves Fable's CI provenance fix and all seven closure branches as merge commits. Initial PR run 35516772496 passed wheel-smoke and minimum pins but found four dependency-sensitive failures shared by Python 3.11, 3.12 and CatBoost: pandas string dtype inference, unstable BLAS-entry order in manifests, and two RFECV weight-support misclassifications. The three narrow source corrections are committed at a325e31. Runtime evidence was rerun from that clean source commit: 18 cases, unchanged data and selection fingerprints, source binding clean; CSV and docs now match the refreshed run. PR state and exact check results should be read live from GitHub, not inferred from this file.
 
-## Completed work
+Decisive prior evidence: before the latest CI repairs, integrated suite 2760 passed, 41 skipped with one runtime-binding test deferred until evidence refresh; later binding/panel slice 68 passed. Astra correction slice 154 passed. The four initial CI failures now pass focused checks, including pandas future string inference; post-refresh binding checks pass 7/7, Ruff, diff check and strict MkDocs pass. Compare A/B matched c72900c on 11 unchanged routes and four feature-path routes, with intended classification stratification alone differing. Frozen knockoff bakeoff checksum remains unchanged. The first PR run fetched the orphaned provenance ref in every required job.
 
-- PR #95 merged with merge commit 5a9b4f0ad5634d3df8cc5ee93c5bc3c622056de8. Package metadata now requires Python 3.11; CI tests Python 3.11 and 3.12, runs minimum pins on 3.11, and installs PyArrow in the 3.12 job.
-- Historical runtime evidence remains unchanged. Its binding test now excludes packaging metadata because the provenance records the actual measured package versions.
-- Superseded PRs #43 and #51 are closed.
-- All 27 audited local feature branches and 85 audited origin feature branches were deleted against their expected tip SHAs. The temporary delivery branch was also deleted locally and remotely.
-- The four audited nonexistent scratch worktree registrations were pruned. Only the primary main worktree remains.
-
-## Decisive verification
-
-- Required PR checks passed on exact head 5dbd0961fb31afeb2c4ea2b63270d5e0adb2a449: Python 3.11, Python 3.12 with PyArrow and strict docs build, minimum pins, CatBoost, and clean-wheel smoke.
-- Local focused docs, Arrow, and runtime-evidence slice: 9 passed. Ruff, generated API reference, wheel metadata (`Requires-Python: >=3.11`), and diff checks passed.
-- Post-cleanup live verification found all 27 audited local and 85 audited origin refs absent, both delivery refs absent, PRs #43/#51 closed, PR #95 merged, one local branch (`main`), one origin head (`main`), no stale worktree registrations, and no stashes.
-- Main is clean and synchronized with origin after this closeout commit is pushed.
-
-## Blockers
-
-None.
+Next: commit the refreshed benchmark evidence and docs, push a new PR head, await all PR-gated jobs. Then merge, verify tested tree, fast-forward clean primary main, dispatch and verify the scheduled jobs. Repair only demonstrated failures.

@@ -30,8 +30,9 @@ class ClassicFeatureCache:
         Positions in the original matrix of the retained positive-weight
         rows, after optional subsampling without replacement.
     sample_weight : ndarray of shape (n_cached_rows,), float64
-        Normalized weights of the retained rows (mean exactly 1), used for
-        selection and relevance.
+        Normalized weights of the retained rows, rescaled to mean 1 up to
+        float64 rounding (the realized mean can be one ulp away from 1.0),
+        used for selection and relevance.
     mi_w : ndarray of shape (n_cached_rows,), float64
         Raw selected MI weights: unnormalized ``sample_weight[row_idx]`` when
         weights were supplied, otherwise ones. Binned JMI must see this, not
@@ -69,6 +70,15 @@ class ClassicFeatureCache:
     ``sample_weight``, ``subsample``, and ``random_state`` are rejected.
     Categorical encoding, ``within``, nested auto-k, and Gaussian methods
     are rejected rather than guessed.
+
+    Row identity is NOT verified. Consumers check only that ``X`` has
+    ``n_rows_original`` rows and the same column names in the same order;
+    the feature values themselves always come from this cache. Passing a
+    different matrix of the same shape and names -- a row permutation, a
+    later vintage, a different panel slice -- is therefore accepted
+    silently and returns results for the CACHED rows' features paired with
+    the new ``y``, which is a wrong answer rather than an error. Rebuild the
+    cache whenever the rows change.
 
     Examples
     --------
@@ -124,7 +134,10 @@ def build_classic_cache(
     MI weights. Reach for this when several 1-D targets share one numeric
     ``X`` on classic mRMR or non-Gaussian JMI/JMIM. The target is not used.
     Categorical columns are rejected; unsupervised ordinal/frequency
-    encoding is a later stage.
+    encoding is a later stage. The cache owns the feature values from here
+    on: consumers re-check only the row count and the column names, never
+    the row contents, so reuse it only with the very rows it was built from
+    (see Notes).
 
     Parameters
     ----------
@@ -166,6 +179,16 @@ def build_classic_cache(
     ClassicFeatureCache : Returned container.
     sift.select_mrmr : Pass the cache as ``cache=`` with ``estimator="classic"``.
     build_cache : Gaussian copula cache builder.
+
+    Notes
+    -----
+    Row identity is not verified downstream. A consumer checks that ``X``
+    has ``n_rows_original`` rows and carries the same column names in the
+    same order, and then uses the cached feature values; it never compares
+    the rows. A same-shape, same-names matrix with different rows -- for
+    example ``X.iloc[permutation]`` or a refreshed vintage -- is accepted
+    without an error and silently selects for the CACHED rows' features
+    paired with the new ``y``. Rebuild the cache whenever the rows change.
 
     Examples
     --------

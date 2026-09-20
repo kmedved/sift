@@ -70,8 +70,7 @@ def test_evaluate_selects_complete_unequal_block_prefixes():
         return_result=True,
     )
     names = result.selected_features
-    if "ab__0" in names or "ab__1" in names:
-        assert {"ab__0", "ab__1"} <= set(names)
+    assert {"ab__0", "ab__1"} <= set(names)
     md = result.selector_metadata
     assert md["n_columns_selected"] == len(names)
     assert md["n_blocks_selected"] == md["k"]
@@ -324,8 +323,7 @@ def test_elbow_and_gaussian_cv_keep_complete_blocks():
         return_result=True,
     )
     cv_names = cv.selected_features
-    if "ab__0" in cv_names or "ab__1" in cv_names:
-        assert {"ab__0", "ab__1"} <= set(cv_names)
+    assert {"ab__0", "ab__1"} <= set(cv_names)
     xfit = select_cefsplus(
         X,
         y,
@@ -344,8 +342,7 @@ def test_elbow_and_gaussian_cv_keep_complete_blocks():
         return_result=True,
     )
     xf_names = xfit.selected_features
-    if "ab__0" in xf_names or "ab__1" in xf_names:
-        assert {"ab__0", "ab__1"} <= set(xf_names)
+    assert {"ab__0", "ab__1"} <= set(xf_names)
 
 
 def test_default_auto_routing_and_wrapper_cache_alignment():

@@ -93,6 +93,7 @@ from sift.selection.within import (
     as_float_feature_matrix,
     fit_transform_within,
     group_level_design,
+    reject_impossible_within_split,
     restore_feature_matrix,
 )
 
@@ -113,6 +114,7 @@ class ClassicPrepared:
     X_pre_within: np.ndarray | None = None
     y_pre_within: np.ndarray | None = None
     groups_sub: np.ndarray | None = None
+    within_two_way_iterations: int | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,8 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
+                {"within_two_way_iterations": prep.within_two_way_iterations}
+                if prep.within_two_way_iterations is not None else None,
             ),
         )
 
@@ -288,6 +292,8 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
+                {"within_two_way_iterations": prep.within_two_way_iterations}
+                if prep.within_two_way_iterations is not None else None,
             ),
         )
 
@@ -407,6 +413,13 @@ def make_auto_gaussian(
             require_supported_auto_k(ctx.auto_k_config.k_method)
         cache, cat_features, effective_weight, target_cv_metadata, y_sel, X_pre = (
             _cache_for_gaussian(ctx)
+        )
+        # Splits that can never leave a within level seen in training fail the
+        # fold guard anyway; say so before building the feature path.
+        reject_impossible_within_split(
+            ctx.within,
+            k_method=ctx.auto_k_config.k_method,
+            strategy=ctx.auto_k_config.strategy,
         )
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
@@ -605,6 +618,7 @@ def _gaussian_proxy_correlations(
         selected_indices,
         available_original=cache.valid_cols,
         feature_names=cache.feature_names,
+        blocks_in_play=getattr(ctx, "feature_blocks", None) is not None,
     )
     panel = build_candidate_panel(
         cache,
@@ -1161,6 +1175,9 @@ def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
         extra["feature_names_are_synthetic"] = bool(
             getattr(cache, "feature_names_are_synthetic", False)
         )
+    within_iterations = getattr(cache, "_within_two_way_iterations", None)
+    if within_iterations is not None:
+        extra["within_two_way_iterations"] = int(within_iterations)
     return extra
 
 
@@ -1245,6 +1262,7 @@ def _cache_for_gaussian(
     ):
         effective_weight = ctx.request.sample_weight
     X_pre = X_encoded
+    within_iterations = None
     if ctx.within is not None:
         X_arr, template = as_float_feature_matrix(X_encoded)
         y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
@@ -1262,6 +1280,8 @@ def _cache_for_gaussian(
             ctx.time,
             weights,
         )
+        if ctx.within == "two_way":
+            within_iterations = int(_fitted.n_iterations)
         X_encoded = restore_feature_matrix(template, X_arr)
         y_sel = y_arr
         positive = weights > 0.0
@@ -1270,15 +1290,21 @@ def _cache_for_gaussian(
                 "within demeaning removed all feature variation; "
                 "no within-entity signal remains"
             )
+    cache = build_cache(
+        X_encoded,
+        sample_weight=effective_weight,
+        subsample=_kw(ctx, "subsample", 50_000),
+        random_state=_kw(ctx, "random_state", 0),
+        n_jobs=ctx.n_jobs,
+        rank_backend=ctx.rank_backend,
+    )
+    cache._built_for_filter_call = True
+    if within_iterations is not None:
+        cache._within_two_way_iterations = within_iterations
+    if ctx.onehot_parents is not None:
+        cache._raw_name_by_encoded = dict(zip(ctx.feature_names, ctx.onehot_parents))
     return (
-        build_cache(
-            X_encoded,
-            sample_weight=effective_weight,
-            subsample=_kw(ctx, "subsample", 50_000),
-            random_state=_kw(ctx, "random_state", 0),
-            n_jobs=ctx.n_jobs,
-            rank_backend=ctx.rank_backend,
-        ),
+        cache,
         cat_features,
         effective_weight,
         target_cv_metadata,
@@ -1530,6 +1556,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     X_pre_within = None
     y_pre_within = None
     groups_sub = None
+    within_iterations = None
     if ctx.within is not None:
         X_pre_within = np.array(X_arr, dtype=np.float64, copy=True)
         y_pre_within = np.array(y_arr, dtype=np.float64, copy=True)
@@ -1543,6 +1570,8 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
             time_sub,
             w,
         )
+        if ctx.within == "two_way":
+            within_iterations = int(_fitted.n_iterations)
         positive = np.asarray(w, dtype=np.float64) > 0.0
         if np.any(positive) and not np.any(np.ptp(X_arr[positive], axis=0) > 0.0):
             raise ValueError(
@@ -1561,6 +1590,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         X_pre_within,
         y_pre_within,
         groups_sub,
+        within_iterations,
     )
 
 
@@ -1655,6 +1685,19 @@ def _within_relevance(ctx: "FilterContext", relevance: np.ndarray) -> np.ndarray
     return np.asarray(relevance, dtype=np.float64)
 
 
+#: Fewer entity-level rows than this makes every between-entity association
+#: degenerate: with one or two points any monotone score saturates, so the
+#: estimators return one huge identical number for every feature.
+_MIN_BETWEEN_ENTITIES = 3
+
+
+def _degenerate_between_relevance(n_entities: int, n_features: int) -> np.ndarray | None:
+    """Return an all-NaN column when the entity-level table cannot support a score."""
+    if int(n_entities) >= _MIN_BETWEEN_ENTITIES:
+        return None
+    return np.full(int(n_features), np.nan, dtype=np.float64)
+
+
 def _between_relevance_classic(ctx: "FilterContext", prep: ClassicPrepared) -> np.ndarray | None:
     if ctx.within is None or prep.X_pre_within is None or prep.y_pre_within is None:
         return None
@@ -1664,6 +1707,9 @@ def _between_relevance_classic(ctx: "FilterContext", prep: ClassicPrepared) -> n
         prep.groups_sub if prep.groups_sub is not None else ctx.groups[prep.row_idx],
         prep.w,
     )
+    degenerate = _degenerate_between_relevance(X_g.shape[0], X_g.shape[1])
+    if degenerate is not None:
+        return degenerate
     return _compute_relevance(
         X_g,
         y_g,
@@ -1690,6 +1736,9 @@ def _between_relevance_gaussian(
         ctx.groups[row_idx],
         weights,
     )
+    degenerate = _degenerate_between_relevance(X_g.shape[0], ctx.n_features_input)
+    if degenerate is not None:
+        return degenerate
     zy = weighted_rank_gauss_1d(y_g, w_g)
     Z_g = weighted_rank_gauss_2d(X_g, w_g, n_jobs=1, rank_backend="serial")
     rel_valid = gaussian_mi_from_corr(weighted_corr_with_vector(Z_g, zy, w_g))

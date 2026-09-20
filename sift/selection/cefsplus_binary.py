@@ -1191,8 +1191,11 @@ def binary_logistic_prefix_df(
 ) -> np.ndarray:
     """Usable logistic model df at each additional-block prefix.
 
-    Weighted rank of the standardized design of non-constant members,
-    minus include rank. Distinct from discovery-block multiplicity.
+    Weighted rank of the raw logistic design of non-constant members, minus
+    include rank. ``X`` enters as the weighted-standardized columns this
+    module fits on: despite the name of the shared rank helper, no
+    rank-Gaussian (copula) transform is applied here. Distinct from
+    discovery-block multiplicity.
     """
     from sift.selection.blocks import weighted_copula_design_rank
 

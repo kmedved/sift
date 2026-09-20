@@ -82,46 +82,103 @@ class EmptySelector(SelectorMixin, BaseEstimator):
         return np.asarray(self.support_, dtype=bool)
 
 
-def _oracle_frequencies(X, *, n_resamples, random_state, resample, sample_frac, cutoff=0.0):
-    n, p = X.shape
-    rngs = _spawn_resample_rngs(random_state, n_resamples)
-    counts = np.zeros(p, dtype=np.int64)
-    for rng in rngs:
-        if resample == "half":
-            size = max(1, min(n, int(n * sample_frac)))
-            idx = rng.choice(n, size=size, replace=False)
-        else:
-            size = max(1, int(round(n * sample_frac)))
-            idx = rng.choice(n, size=size, replace=True)
-        means = X[idx].mean(axis=0)
-        counts += means > cutoff
-    return (counts / float(n_resamples)).astype(np.float64)
+class RowIdRecorder(SelectorMixin, BaseEstimator):
+    """Record the row ids of every fitted resample; select nothing."""
+
+    rows = []
+
+    def fit(self, X, y=None):
+        values = np.asarray(X, dtype=np.float64)
+        type(self).rows.append(values[:, 0].astype(np.int64).tolist())
+        self.n_features_in_ = values.shape[1]
+        return self
+
+    def _get_support_mask(self):
+        return np.zeros(self.n_features_in_, dtype=bool)
 
 
-def test_seeded_half_frequencies_match_manual_oracle():
+class ScriptedSelector(SelectorMixin, BaseEstimator):
+    """Select the support scripted for the current fit call, in order."""
+
+    calls = []
+
+    def __init__(self, script=(), n_features=0):
+        self.script = script
+        self.n_features = n_features
+
+    def fit(self, X, y=None):
+        values = np.asarray(X)
+        self.n_features_in_ = values.shape[1]
+        chosen = self.script[len(type(self).calls) % len(self.script)]
+        type(self).calls.append(tuple(chosen))
+        self.support_ = np.zeros(self.n_features_in_, dtype=bool)
+        self.support_[list(chosen)] = True
+        return self
+
+    def _get_support_mask(self):
+        return np.asarray(self.support_, dtype=bool)
+
+
+@pytest.mark.parametrize(
+    ("resample", "sample_frac", "expected_size", "unique"),
+    [
+        # half keeps floor(n * frac) rows without replacement; bootstrap draws
+        # round(n * frac) rows with replacement.  n=41 with frac=0.7 gives
+        # 28.7, so floor and round disagree and pin which rule runs.
+        ("half", None, 20, True),
+        ("half", 0.7, 28, True),
+        ("bootstrap", None, 41, False),
+        ("bootstrap", 0.7, 29, False),
+    ],
+)
+def test_resample_sizes_follow_the_documented_rounding_rule(
+    resample, sample_frac, expected_size, unique
+):
+    n = 41
     rng = np.random.default_rng(0)
-    X = rng.normal(size=(40, 4))
-    X[:, 0] += 1.5
-    X[:, 3] -= 1.5
-    y = rng.normal(size=40)
-    fitted = Stabilized(
-        MeanSignSelector(),
-        n_resamples=12,
-        resample="half",
-        threshold=0.6,
-        random_state=7,
+    X = np.column_stack([np.arange(n, dtype=float), rng.normal(size=(n, 2))])
+    y = rng.normal(size=n)
+    RowIdRecorder.rows = []
+    Stabilized(
+        RowIdRecorder(),
+        n_resamples=4,
+        resample=resample,
+        sample_frac=sample_frac,
+        threshold=0.5,
+        random_state=5,
         verbose=False,
     ).fit(X, y)
-    expected = _oracle_frequencies(
-        X, n_resamples=12, random_state=7, resample="half", sample_frac=0.5
-    )
+    assert len(RowIdRecorder.rows) == 4
+    for rows in RowIdRecorder.rows:
+        assert len(rows) == expected_size
+        assert set(rows).issubset(range(n))
+        assert (len(set(rows)) == len(rows)) is unique
+    if not unique:
+        assert any(len(set(rows)) < len(rows) for rows in RowIdRecorder.rows)
+
+
+def test_frequencies_are_the_hand_counted_scripted_selection_share():
+    script = ((0, 1), (0, 2), (0, 1), (1,), ())
+    # f0 in 3 of 5 resamples, f1 in 3, f2 in 1, f3 in none.
+    expected = np.array([0.6, 0.6, 0.2, 0.0])
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(30, 4))
+    y = rng.normal(size=30)
+    ScriptedSelector.calls = []
+    fitted = Stabilized(
+        ScriptedSelector(script=script, n_features=4),
+        n_resamples=5,
+        resample="half",
+        threshold=0.6,
+        random_state=1,
+        verbose=False,
+    ).fit(X, y)
+    assert ScriptedSelector.calls == list(script)
     np.testing.assert_array_equal(fitted.selection_frequencies_, expected)
     assert fitted.selection_frequencies_.dtype == np.float64
-    keep = np.flatnonzero(expected >= 0.6)
-    order = np.argsort(-expected[keep], kind="mergesort")
-    assert list(fitted.selected_features_) == [
-        fitted.feature_names_in_[int(i)] for i in keep[order]
-    ]
+    # threshold 0.6 keeps the two 0.6 features, tied and left in column order.
+    assert list(fitted.selected_features_) == ["x0", "x1"]
+    assert fitted.selected_indices_.tolist() == [0, 1]
 
 
 def test_bootstrap_draws_with_replacement_and_half_does_not():
@@ -365,17 +422,30 @@ def test_atomic_blocks_stay_atomic_in_frequencies():
     X = pd.DataFrame(rng.normal(size=(80, 4)), columns=list("abcd"))
     X["b"] = X["a"] + 0.05 * rng.normal(size=80)
     y = X["a"] + X["b"] + rng.normal(scale=0.05, size=80)
-    fitted = Stabilized(
+    blocked = Stabilized(
         CEFSPlusSelector(k=1, feature_blocks={"ab": ["a", "b"]}, verbose=False),
         n_resamples=6,
         threshold=0.0,
         random_state=0,
         verbose=False,
     ).fit(X, y)
+    # The block enters or stays out as a unit, so its members must share a
+    # frequency -- and it has to be a frequency the block actually reached,
+    # not a shared zero.
     np.testing.assert_array_equal(
-        fitted.selection_frequencies_[:2],
-        np.full(2, fitted.selection_frequencies_[0]),
+        blocked.selection_frequencies_[:2], np.array([1.0, 1.0])
     )
+    # Without the block the same resamples split "a" and "b" apart, so the
+    # equality above is a property of blocking rather than of the design.
+    unblocked = Stabilized(
+        CEFSPlusSelector(k=1, verbose=False),
+        n_resamples=6,
+        threshold=0.0,
+        random_state=0,
+        verbose=False,
+    ).fit(X, y)
+    assert unblocked.selection_frequencies_[0] != unblocked.selection_frequencies_[1]
+    assert unblocked.selection_frequencies_[:2].sum() == pytest.approx(1.0)
 
 
 def test_evalues_mode_matches_native_knockoff_and_rejects_overrides():
@@ -549,6 +619,15 @@ def test_evalue_frequencies_reindex_dropped_constant_columns():
         aggregation="evalues",
         verbose=False,
     ).fit(X, y)
+    # The wrapper only delegates, so its answer must be the independent
+    # KnockoffSelector's answer, not its own vote on the copied frequencies:
+    # nine features clear the default threshold=0.6 here and e-BH still
+    # rejects nothing, so a frequency vote would give a different answer.
+    assert list(wrapped.selected_features_) == list(native.selected_features_)
+    assert wrapped.selected_indices_.tolist() == [
+        list(X.columns).index(name) for name in native.selected_features_
+    ]
+    assert (wrapped.selection_frequencies_ >= float(wrapped.threshold)).sum() == 9
     expected = np.zeros(20, dtype=np.float64)
     table = native.result_.W
     expected[np.asarray(table["selected_index"], dtype=np.int64)] = np.nan_to_num(
@@ -556,6 +635,8 @@ def test_evalue_frequencies_reindex_dropped_constant_columns():
         nan=0.0,
     )
     np.testing.assert_allclose(wrapped.selection_frequencies_, expected)
+    # "f7" is constant, never reaches the cache, and must read a true zero.
+    assert 7 not in set(int(v) for v in table["selected_index"])
     assert wrapped.selection_frequencies_[7] == 0.0
     assert np.any(wrapped.selection_frequencies_ > 0.0)
     assert np.any((wrapped.selection_frequencies_ > 0.0) & (wrapped.selection_frequencies_ < 1.0))

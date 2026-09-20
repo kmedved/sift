@@ -6,10 +6,11 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 - `v0.9.0` is published at `94bae05` with the verified wheel and source
   distribution attached. Development has moved to `0.9.1.dev0`.
-- Full suite here (Python 3.12, numpy 1.26 / pandas 2.2 / scikit-learn 1.5.1, no
-  `catboost` or `category_encoders`): the final encoding integration run gives
-  **2,409 passed, 40 skipped** under warnings-as-errors, with no exclusions.
-  All public docstring
+- Main at `c72900c` includes PR #94's audit corrections and PR #95's Python
+  3.11 floor and CI update. Its verified baseline is **2,481 passed, 40
+  skipped** under warnings-as-errors. The current closure fix round is in
+  progress on a separate local branch; its count will be recorded after the
+  runtime evidence is refreshed. All public docstring
   examples and the six remaining manual sources still execute independently.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs

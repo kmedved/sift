@@ -53,7 +53,8 @@ class FeatureCache:
         positive-weight rows, subsampled without replacement when ``subsample``
         applied.  Consumers index a full-length ``y`` with this array.
     sample_weight : ndarray of shape (n_cached_rows,), float32
-        Weights of the retained rows, rescaled so their mean is exactly 1.
+        Weights of the retained rows, rescaled to mean 1 up to float32
+        rounding; the realized mean is 1 only to about 1e-7.
     n_rows_original : int
         Row count of the matrix the cache was built from.  Consumers require a
         target of exactly this length.
@@ -92,6 +93,14 @@ class FeatureCache:
     ndarray.  Weights and the subsample are frozen into the cache, which is why
     ``sample_weight``, ``subsample`` and ``random_state`` cannot be passed
     again alongside a prebuilt cache.
+
+    Row identity is *not* verified.  Consumers check only the row count
+    (``n_rows_original``) and the column names and order; the feature side
+    always comes from ``Z``.  A same-shape, same-names matrix holding
+    different rows -- a row permutation, a later vintage -- is therefore
+    accepted without an error and silently returns results for the *cached*
+    rows' features paired with the new ``y``.  Rebuild the cache whenever the
+    rows change.
 
     Examples
     --------
@@ -223,6 +232,13 @@ def build_cache(
     was built from, consumers reject ``sample_weight``, ``subsample`` and
     ``random_state`` passed alongside a prebuilt cache rather than silently
     ignoring them.
+
+    What consumers do *not* check is row identity: only the row count and the
+    column names and order are validated, and the feature side always comes
+    from the cached ``Z``.  Handing a later call a same-shape, same-names
+    matrix whose rows differ -- a permutation, a refreshed vintage -- raises
+    nothing and silently selects for the *cached* rows' features paired with
+    the new ``y``.  Build a new cache whenever the rows change.
 
     Examples
     --------

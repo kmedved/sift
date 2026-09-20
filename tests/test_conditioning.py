@@ -518,12 +518,15 @@ def test_constant_include_rejected_consistently():
     X, y = _small_regression()
     X = X.copy()
     X["f0"] = 1.0
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    # The Gaussian cache drops the constant column before conditioning, so the
+    # message says so; the classic path reports it as unusable variation.
+    dead = "usable variation|dropped as constant|not present|not a valid"
+    with pytest.raises(ValueError, match=dead):
         select_mrmr(X, y, k=1, task="regression", include=["f0"], verbose=False)
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    with pytest.raises(ValueError, match=dead):
         select_cefsplus(X, y, k=1, include=["f0"], verbose=False, subsample=None)
     y_bin = (y > np.median(y)).astype(int)
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    with pytest.raises(ValueError, match=dead):
         select_cefsplus_binary(X, y_bin, k=1, include=["f0"], verbose=False, subsample=None)
 
 
@@ -613,6 +616,35 @@ def test_omitted_conditioning_is_noop_parity():
             )
         assert "conditioning" not in fdr_a.selector_metadata
         assert "exploratory" not in fdr_a.selector_metadata
+
+
+@pytest.mark.parametrize(
+    "selector,task,names,scores", [
+        (select_mrmr, "regression", ["f0", "f1", "f6"],
+         [220.8014266244, 72.5956079068, 6.8707035618]),
+        (select_jmi, "regression", ["f0", "f1", "f6"],
+         [220.8014266244, 72.5956079068, 6.8707035618]),
+        (select_cefsplus, "regression", ["f0", "f1", "f6"],
+         [0.4985158815, 0.2267948643, 0.0284842660]),
+        (select_mrmr, "classification", ["f0", "f1", "f6"],
+         [80.4076390373, 40.3646487963, 4.4755354976]),
+        (select_jmi, "classification", ["f0", "f1", "f5"],
+         [80.4076390373, 40.3646487963, 0.0260632402]),
+        (select_cefsplus_binary, "classification", ["f0", "f1", "f4"],
+         [24.3158090292, 15.2930017733, 0.0392569599]),
+    ],
+)
+def test_unconditioned_selection_matches_c72900c_golden(selector, task, names, scores):
+    # Values measured on unmodified c72900c, before the closure integration.
+    rng = np.random.default_rng(27)
+    X = pd.DataFrame(rng.normal(size=(120, 7)), columns=[f"f{i}" for i in range(7)])
+    y = X["f0"] + 0.75 * X["f1"] + 0.25 * rng.normal(size=len(X))
+    if task == "classification":
+        y = (y > np.median(y)).astype(int)
+    kwargs = {"task": task} if selector in (select_mrmr, select_jmi) else {}
+    result = selector(X, y, 3, return_result=True, verbose=False, **kwargs)
+    assert result.selected_features == names
+    np.testing.assert_allclose(result.ranking_.relevance.iloc[:3], scores, rtol=0, atol=1e-8)
 
 
 def test_fdr_dropped_provenance_not_false_zero_variance():
@@ -1114,4 +1146,3 @@ def test_candidate_list_permutation_does_not_change_path():
         X, y, k=2, candidates=["d", "e", "c"], verbose=False, subsample=None, top_m=10
     )
     assert a == b
-

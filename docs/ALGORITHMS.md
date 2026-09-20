@@ -38,8 +38,8 @@ estimator uses rank-Gaussian correlation and the Gaussian mutual-information
 proxy, which is fast for regression.
 
 Filter `feature_blocks` (explicit dict or `"auto"` from the `{block}__{level}`
-prefix) makes those scores atomic: relevance is the max over members, redundancy
-and JMI/JMIM scores use the same configured estimators, and a selected block
+prefix) makes those scores atomic: the classic block score is the maximum of
+the complete per-member mRMR/JMI/JMIM score, including redundancy, and a selected block
 expands to every raw member. Gaussian CEFS+ uses the joint residual log-det of
 the block, not a representative column. `k` counts additional blocks.
 Auto-k `evaluate`, `elbow`, `penalized_objective`, `gaussian_cv`,
@@ -64,10 +64,10 @@ chi-square stops, posterior, stability, knockoff-path, consensus) raise.
 For a numeric `y` with shape `(n, q)` and `q≥2`, Gaussian CEFS+ is joint:
 the target covariance enters the residual log-det and the information-criterion
 dimension is `q·k`; the reported path and `k` remain raw feature units. A
-single-column target uses the 1-D path. Raw-unit scale therefore matters: users
-who want equal target contribution should normalize target columns before
-selection. Unsupported selectors reject multi-target input instead of
-flattening it.
+single-column target uses the 1-D path. The path objective uses copula ranks
+and is scale-invariant; only `evaluate` averages held-out errors in raw target
+units. Normalize targets when those errors should contribute equally. Other
+selectors reject multi-target input.
 
 `sift.compare` is not a selector. Default `mode="cv"` refits factories inside
 training folds and scores a downstream estimator on the held-out fold. Mean
@@ -150,10 +150,12 @@ path before pruning too aggressively. With `store_proxies=True`,
 near-duplicates from the stored copula block without retaining `X`.
 
 Regression filters also accept `within="groups"` or `within="two_way"`. Those
-subtract weighted entity means, or alternate entity and time demeaning for a
-fixed five iterations, from `X` and `y` before ranks. Auto-k evaluate,
-Gaussian CV, and xfit-objective fit those means on training rows only; an
-entity unseen in training uses the training grand mean. Demeaning can leave
+subtract weighted entity means, or alternate entity and time demeaning until
+convergence (at most 200 passes), from `X` and `y` before ranks. Auto-k evaluate,
+Gaussian CV, and xfit-objective fit those means on training rows only. Unseen
+entity levels use the training grand mean for the entity effect; unseen time
+levels add no time effect. A warning reports the affected rows;
+routes where no validation level can be seen are rejected. Demeaning can leave
 no within-entity variation, including when every group is a singleton; the
 call then returns an empty selection or raises. `between_relevance` is an
 entity-mean summary, not row-level evidence, and is not comparable in

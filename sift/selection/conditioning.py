@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -38,6 +38,8 @@ class ResolvedConditioning:
     ``candidates`` tuple (when provided) and ``discovery`` are in stable
     original-column order so allow-list permutation cannot change ties.
     An omitted ``candidates`` argument is recorded as ``None``.
+    ``discovery`` is the eligible pool before ``top_m`` relevance screening
+    and ``corr_prune`` correlation pruning, which run on the candidate panel.
     """
 
     include: tuple[int, ...]
@@ -68,7 +70,8 @@ def resolve_conditioning(
 ) -> ResolvedConditioning | None:
     """Resolve public feature-set arguments against one feature namespace.
 
-    Named spaces (DataFrame columns, named caches) accept those labels.
+    Named spaces (DataFrame columns, named caches) accept those labels, and
+    reject integer entries that are not themselves column labels.
     Positional spaces (ndarrays, synthetic-name caches) accept integer
     positions and the synthetic ``x{{i}}`` names. Strings are never iterated
     as character sequences.
@@ -201,7 +204,19 @@ def conditioning_record(
     include_provenance: str | None = None,
     discovery_universe: Sequence[int] | None = None,
 ) -> dict[str, Any] | None:
-    """Machine-readable conditioning payload for diagnostics/metadata."""
+    """Machine-readable conditioning payload for diagnostics/metadata.
+
+    ``discovery_universe`` (and ``discovery_universe_indices``) is the
+    *eligibility* pool: every original column left after ``exclude``,
+    ``candidates`` and ``include`` are applied. It is recorded BEFORE
+    relevance screening (``top_m``) and correlation pruning
+    (``corr_prune``), which run later on the candidate panel and are not
+    visible here, so it is not the set of columns the greedy loop actually
+    scored: with ``top_m=3`` and seven eligible columns it still lists all
+    seven. Read ``selector_metadata['top_m']`` for the screening width.
+    The value answers "what was this call allowed to discover from", which
+    is what manifests and conditioning tests compare.
+    """
     if resolved is None or not resolved.active:
         return None
     names = list(feature_names)
@@ -249,8 +264,19 @@ def map_original_to_valid(
     feature_names: Sequence[str] | None,
     label: str,
     missing: Literal["error", "drop"] = "error",
+    raw_names: Mapping[Any, Any] | None = None,
+    prebuilt_cache: bool = False,
 ) -> np.ndarray:
-    """Map original column positions onto cache.valid_cols / Z columns."""
+    """Map original column positions onto cache.valid_cols / Z columns.
+
+    ``raw_names`` maps an internal column name back to the raw column the
+    caller passed, so an error never quotes a name the user never wrote
+    (one-hot dummies such as ``city__NY``). Omitting it reports the internal
+    names unchanged. ``prebuilt_cache`` is set by callers that received a
+    cache from the user: only those can report a column as "never cached",
+    because a cache built from ``X`` in this call drops columns for exactly
+    one reason.
+    """
     lookup = {int(orig): int(local) for local, orig in enumerate(np.asarray(valid_cols))}
     mapped: list[int] = []
     missing_idx: list[int] = []
@@ -261,10 +287,21 @@ def map_original_to_valid(
         else:
             mapped.append(lookup[key])
     if missing_idx and missing == "error":
-        refs = _format_original_refs(missing_idx, feature_names or [], named=bool(feature_names))
+        names = list(feature_names or [])
+        refs = _format_original_refs(
+            missing_idx, names, named=bool(names), raw_names=raw_names
+        )
+        if prebuilt_cache:
+            raise ValueError(
+                f"{label} features are not present in the cache valid columns "
+                f"(dropped as constant/non-finite or never cached): {refs}. "
+                f"Drop them from {label}, or rebuild the cache from columns "
+                "that vary"
+            )
         raise ValueError(
-            f"{label} features are not present in the cache valid columns "
-            f"(dropped as constant/non-finite or never cached): {refs}"
+            f"{label} features were dropped as constant or non-finite, so they "
+            f"carry no information to condition on: {refs}. Drop them from "
+            f"{label}, or pass columns that vary on the retained rows"
         )
     return np.asarray(mapped, dtype=np.int64)
 
@@ -343,8 +380,10 @@ def _resolve_one(
         try:
             loc = index.get_loc(ref)
         except KeyError:
+            _reject_position_in_named_space(ref, index=index, label=label)
             raise ValueError(f"{label} contains unknown feature {ref!r}") from None
         except InvalidIndexError:
+            _reject_position_in_named_space(ref, index=index, label=label)
             raise ValueError(f"{label} contains unknown feature {ref!r}") from None
         if isinstance(loc, slice):
             raise ValueError(f"{label} refers to duplicate input feature name {ref!r}")
@@ -373,6 +412,25 @@ def _resolve_one(
     raise ValueError(f"{label} entries must be feature names or integer positions")
 
 
+def _reject_position_in_named_space(ref, *, index: pd.Index, label: str) -> None:
+    """Reject an integer position against a named space; integer labels pass first.
+
+    Only reached once ``index.get_loc(ref)`` has already failed, so an
+    integer that *is* a column label never lands here.
+    """
+    if isinstance(ref, (bool, np.bool_)) or not isinstance(ref, (int, np.integer)):
+        return
+    value = int(ref)
+    hint = ""
+    if 0 <= value < len(index):
+        hint = f"; position {value} is column {index[value]!r}"
+    raise ValueError(
+        f"{label} contains integer position {value}, but X has named columns: "
+        "integer positions are accepted only for ndarray input, and DataFrame "
+        f"entries must be column labels. Pass the column label in {label}{hint}"
+    ) from None
+
+
 def _names_for(indices: Sequence[int], names: Sequence[Any]) -> list[Any]:
     return [names[int(i)] for i in indices]
 
@@ -382,7 +440,11 @@ def _format_original_refs(
     names: Sequence[str],
     *,
     named: bool,
+    raw_names: Mapping[Any, Any] | None = None,
 ) -> str:
     if named and names:
-        return ", ".join(repr(names[int(i)]) for i in indices)
+        labels = [names[int(i)] for i in indices]
+        if raw_names is not None:
+            labels = list(dict.fromkeys(raw_names.get(name, name) for name in labels))
+        return ", ".join(repr(name) for name in labels)
     return ", ".join(str(int(i)) for i in indices)

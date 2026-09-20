@@ -10,8 +10,9 @@ Design:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -117,6 +118,8 @@ class BorutaResult:
     mean_importance : ndarray of shape (n_features,)
         Mean observed importance per feature over the iterations in which it
         was still active; ``NaN`` for a feature that never received one.
+    selector_metadata : dict or None
+        Captured run configuration used by the reproducibility manifest.
 
     See Also
     --------
@@ -159,6 +162,7 @@ class BorutaResult:
     n_iter: int
     shadow_thresholds: np.ndarray
     mean_importance: np.ndarray
+    selector_metadata: dict[str, Any] | None = None
 
     @property
     def accepted_mask(self) -> np.ndarray:
@@ -298,7 +302,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         allow_full_data_target_encoding=True, because tree learners can read a
         row's own target back out of them. Any supervised value is rejected
         with importance_data="test". ``ordinal`` / ``frequency`` are
-        target-blind 1:1 maps on ``importance_data='train'``; they are
+        target-blind numeric maps on ``importance_data='train'``; they are
         rejected with ``importance_data='test'`` because encoding currently
         runs before the split. sample_weight is consumed by
         "target_cv", "loo_logit", "ordinal", and "frequency".
@@ -444,13 +448,13 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     n_estimators=500,
                     max_depth=5,
                     n_jobs=-1,
-                    random_state=self.random_state,
+                    random_state=self._effective_random_state(),
                 )
             return RandomForestClassifier(
                 n_estimators=500,
                 max_depth=5,
                 n_jobs=-1,
-                random_state=self.random_state,
+                random_state=self._effective_random_state(),
             )
 
         try:
@@ -463,7 +467,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     learning_rate=0.05,
                     loss_function="RMSE",
                     verbose=False,
-                    random_seed=self.random_state,
+                    random_seed=self._effective_random_state(),
                     allow_writing_files=False,
                 )
             loss_function = "Logloss"
@@ -477,7 +481,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 learning_rate=0.05,
                 loss_function=loss_function,
                 verbose=False,
-                random_seed=self.random_state,
+                random_seed=self._effective_random_state(),
                 allow_writing_files=False,
             )
         except ImportError as exc:
@@ -798,9 +802,31 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
             "mean_importance_",
             "selected_features_",
             "_row_metadata_columns_",
+            "_actual_random_state_",
+            "_fit_configured_options_",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
+
+    def _effective_random_state(self):
+        """Seed actually used: ``random_state``, or what ``fit`` drew for None."""
+        return getattr(self, "_actual_random_state_", self.random_state)
+
+    def _snapshot_fit_configuration(self) -> None:
+        """Record the seed and constructor options this fit runs with."""
+        from sift.selection.reproducibility import snapshot_selector_kwargs
+
+        if self.random_state is None:
+            # Nothing documents random_state=None, but it used to make the
+            # whole run nondeterministic with no record of the entropy used.
+            self._actual_random_state_ = int(
+                np.random.SeedSequence().generate_state(1)[0]
+            )
+        else:
+            self._actual_random_state_ = self.random_state
+        self._fit_configured_options_ = snapshot_selector_kwargs(
+            self.get_params(deep=False)
+        )
 
     def _prepare_boruta_fit(self, X, y, sample_weight, groups, time):
         validate_target_cv_encoding_flags(
@@ -815,7 +841,16 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                 "backend if available."
             )
 
-        y_arr = np.asarray(y).reshape(-1)
+        y_raw = np.asarray(y)
+        if y_raw.ndim >= 2 and int(y_raw.shape[1]) > 1:
+            raise ValueError(
+                "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+                "and select_cached(method='cefsplus'); "
+                "Boruta needs a single target, so fit it once per column of y; "
+                f"got y with shape {tuple(y_raw.shape)}"
+            )
+        self._snapshot_fit_configuration()
+        y_arr = y_raw.reshape(-1)
         _validate_boruta_options(
             task=self.task,
             importance=self.importance,
@@ -1058,7 +1093,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         base_est = fit_data.base_estimator
         base_depth = fit_data.base_depth
         n, p = X_arr.shape
-        rng = np.random.default_rng(self.random_state)
+        rng = np.random.default_rng(self._effective_random_state())
 
         status = np.zeros(p, dtype=np.int8)
         hits = np.zeros(p, dtype=np.int32)
@@ -1278,6 +1313,32 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         self.selected_features_ = [feature_names[i] for i in np.where(status == 1)[0]]
 
 
+    def _result_selector_metadata(self) -> dict[str, Any]:
+        """Run configuration for the manifest. Never holds X, y, or weights."""
+        realized = self._effective_random_state()
+        configured = getattr(self, "_fit_configured_options_", None)
+        return {
+            "selector": "boruta",
+            "n_features": int(self.n_features_in_),
+            "n_iter": int(self.n_iter_),
+            "random_state": self.random_state,
+            "realized_random_state": (
+                int(realized)
+                if isinstance(realized, (int, np.integer))
+                and not isinstance(realized, (bool, np.bool_))
+                else None
+            ),
+            "configured_options": copy.deepcopy(configured)
+            if isinstance(configured, dict)
+            else {},
+            "effective_options": {
+                "n_iter": int(self.n_iter_),
+                "n_features": int(self.n_features_in_),
+                "n_features_selected": len(self.selected_features_),
+            },
+            "configuration_captured_at": "selection",
+        }
+
     def result_(self) -> BorutaResult:
         check_is_fitted(self, ["status_"])
         return BorutaResult(
@@ -1287,6 +1348,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
             n_iter=int(self.n_iter_),
             shadow_thresholds=self.shadow_thresholds_.copy(),
             mean_importance=self.mean_importance_.copy(),
+            selector_metadata=self._result_selector_metadata(),
         )
 
 
@@ -1410,7 +1472,7 @@ def select_boruta(
         ``allow_full_data_target_encoding=True``, because tree learners can
         read a row's own target back out of them. Any supervised value is
         rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
-        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        are target-blind numeric maps on ``importance_data='train'`` and are
         rejected with ``importance_data='test'``. ``sample_weight`` is
         consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5
@@ -1644,7 +1706,7 @@ def select_boruta_shap(
         encodings fit on the full dataset and therefore require
         ``allow_full_data_target_encoding=True``. Any supervised value is
         rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
-        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        are target-blind numeric maps on ``importance_data='train'`` and are
         rejected with ``importance_data='test'``. ``sample_weight`` is
         consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5

@@ -600,7 +600,16 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         ``GroupPurgedTimeSeriesSplit`` when both ``groups`` and ``time`` are
         given, ``PurgedTimeSeriesSplit`` when only ``time`` is given,
         ``GroupKFold`` when only ``groups`` is given, and shuffled ``KFold``
-        otherwise. An integer is that family's fold count. Precomputed
+        otherwise. The ``groups``-and-``time`` default holds out every
+        validation *entity* as well as every validation period, so it needs
+        entities whose lifespans do not span the validation boundary; on a
+        balanced panel, where every entity appears in every period, it
+        empties the training fold and raises with that guidance. For
+        entities that persist through time pass
+        ``cv=PurgedTimeSeriesSplit(...)`` or omit ``groups``. An integer is
+        that family's fold count; the splitter that actually ran, and the
+        fold count it produced, are recorded under ``cv_effective`` in the
+        fitted provenance alongside the requested ``cv``. Precomputed
         ``(train, validation)`` pairs must be integer, disjoint, in-range,
         and nonempty. Nested count search and ``method='stability'`` require
         a reusable splitter or integer fold count; precomputed pairs cannot
@@ -613,7 +622,11 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         fold, refit the chosen subset on that fold, and score only outer
         validation. Final full-data selection is separate.
     importance : {'auto', 'coef', 'feature_importances', 'permutation'} or callable, default 'auto'
-        Training-fold importance. ``'auto'`` uses ``feature_importances_`` or
+        Training-fold importance, used by ``method='rfe'`` and by the RFE
+        ranking inside ``method='stability'``. ``method='forward'`` scores
+        candidate columns with the estimator itself and never consults
+        importance, so a non-default ``importance`` is rejected there rather
+        than ignored. ``'auto'`` uses ``feature_importances_`` or
         mean absolute ``coef_``. ``'permutation'`` is permutation importance
         on the training fold. A callable is ``importance(fitted) -> ndarray``
         aligned to the current raw columns. Non-finite callable values are
@@ -631,9 +644,13 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         unknown naming is rejected rather than guessed; use
         ``importance='permutation'`` or a raw-aligned callable.
     threshold : float, default 0.6
-        Stability frequency cutoff in ``[0, 1]``. Ignored for RFE/forward.
+        Stability frequency cutoff in ``[0, 1]``. Rejected unless
+        ``method='stability'``: a non-default ``threshold`` with
+        ``method='rfe'`` or ``'forward'`` raises ``ValueError`` rather than
+        being quietly ignored.
     n_resamples : int, default 20
-        Stability row draws. Ignored for RFE/forward.
+        Stability row draws. Rejected unless ``method='stability'``, the
+        same way as ``threshold``.
     random_state : int, default 0
         Seed for shuffled KFold, permutation importance, and stability draws.
     parsimony_tolerance : float, default 0.0
@@ -851,6 +868,15 @@ class ModelSelector(SelectorMixin, BaseEstimator):
                 raise ValueError("threshold is only used with method='stability'")
             if self.n_resamples != 20:
                 raise ValueError("n_resamples is only used with method='stability'")
+        if self.method == "forward" and self.importance != "auto":
+            # Forward selection scores candidate columns with the estimator,
+            # so a supplied importance would never be called at all.
+            raise ValueError(
+                "importance is only used with method='rfe' or "
+                "method='stability'; method='forward' ranks columns by "
+                "estimator score and never calls importance. Omit importance "
+                "or switch method"
+            )
 
     def _describe_scoring(self) -> Any:
         scoring = self.scoring
@@ -863,6 +889,7 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         return "callable"
 
     def _describe_cv(self, *, precomputed_pairs) -> Any:
+        """Describe the ``cv`` that was *requested*, not the one that ran."""
         from sift.selection.reproducibility import describe_splitter
 
         if precomputed_pairs is not None:
@@ -888,6 +915,7 @@ class ModelSelector(SelectorMixin, BaseEstimator):
                 "step": int(self.step),
                 "scoring": self._describe_scoring(),
                 "cv": self._describe_cv(precomputed_pairs=precomputed_pairs),
+                "cv_effective": getattr(self, "_effective_cv_", None),
                 "nested": bool(self.nested),
                 "importance": self.importance
                 if not callable(self.importance)
@@ -1252,9 +1280,13 @@ class ModelSelector(SelectorMixin, BaseEstimator):
                     "precomputed cv does not consume groups/time/event_end; omit "
                     "unused metadata or pass a splitter that uses it"
                 )
-            return list(precomputed_pairs), consumed
+            pairs = list(precomputed_pairs)
+            self._record_effective_cv(None, n_folds=len(pairs), source="precomputed")
+            return pairs, consumed
+        from_default = False
         if cv is None:
             splitter = self._default_splitter(groups=groups, time=time, n_rows=n_rows)
+            from_default = True
         elif _is_precomputed_cv(cv):
             if not allow_precomputed:
                 raise ValueError(
@@ -1266,12 +1298,15 @@ class ModelSelector(SelectorMixin, BaseEstimator):
                     "precomputed cv does not consume groups/time/event_end; omit "
                     "unused metadata or pass a splitter that uses it"
                 )
-            return _validate_precomputed_cv(cv, n_rows), consumed
+            pairs = _validate_precomputed_cv(cv, n_rows)
+            self._record_effective_cv(None, n_folds=len(pairs), source="precomputed")
+            return pairs, consumed
         elif isinstance(cv, (int, np.integer)) and not isinstance(cv, (bool, np.bool_)):
             n_splits = _strict_int(cv, name="cv", minimum=2)
             splitter = self._default_splitter(
                 groups=groups, time=time, n_rows=n_rows, n_splits=n_splits
             )
+            from_default = True
         elif hasattr(cv, "split"):
             splitter = cv
         else:
@@ -1314,13 +1349,56 @@ class ModelSelector(SelectorMixin, BaseEstimator):
             raw = splitter.split(X, y, groups)
         else:
             raw = splitter.split(X, y)
-        pairs = [
-            _validate_index_pair(train, val, n_rows, fold=fold)
-            for fold, (train, val) in enumerate(raw)
-        ]
+        try:
+            pairs = [
+                _validate_index_pair(train, val, n_rows, fold=fold)
+                for fold, (train, val) in enumerate(raw)
+            ]
+        except ValueError as exc:
+            if from_default and isinstance(splitter, GroupPurgedTimeSeriesSplit):
+                # The caller never asked for this splitter, so say why it was
+                # chosen before repeating what it could not do.
+                raise ValueError(
+                    "ModelSelector defaulted to GroupPurgedTimeSeriesSplit "
+                    "because both groups and time were supplied, and that "
+                    f"splitter could not build folds here: {exc}"
+                ) from exc
+            raise
         if not pairs:
             raise ValueError(f"{purpose} produced no splits")
+        self._record_effective_cv(
+            splitter,
+            n_folds=len(pairs),
+            source="resolved" if from_default else "caller",
+        )
         return pairs, consumed
+
+    def _record_effective_cv(self, splitter, *, n_folds: int, source: str) -> None:
+        """Remember the splitter that actually ran, once per fit.
+
+        ``self.cv`` records what was *requested* (``5``, or ``None``); this
+        records what was resolved and how many folds it produced, so a
+        ``cv=5`` run that a three-group ``GroupKFold`` cut to three folds,
+        and a ``cv=None`` run that became a purged time-series splitter, are
+        distinguishable in the fitted provenance.
+        """
+        if getattr(self, "_effective_cv_", None) is not None:
+            return
+        if splitter is None:
+            self._effective_cv_ = {
+                "type": "precomputed",
+                "status": "params",
+                "params": {},
+                "source": source,
+                "n_splits_effective": int(n_folds),
+            }
+            return
+        from sift.selection.reproducibility import describe_splitter
+
+        described = dict(describe_splitter(splitter))
+        described["source"] = source
+        described["n_splits_effective"] = int(n_folds)
+        self._effective_cv_ = described
 
     def _default_splitter(self, *, groups, time, n_rows: int, n_splits: int | None = None):
         if n_splits is None:
@@ -1624,6 +1702,7 @@ class ModelSelector(SelectorMixin, BaseEstimator):
 
     def _clear_fit_state(self) -> None:
         for attr in (
+            "_effective_cv_",
             "_fit_configured_options_",
             "_fit_feature_names_generated_",
             "_fit_input_kind_",

@@ -26,12 +26,56 @@ _FORWARD = "forward"
 _PURGED_KFOLD = "purged_kfold"
 _VALID_MODES = (_FORWARD, _PURGED_KFOLD)
 
+#: numpy dtype kinds that can carry a timeline: signed/unsigned integers,
+#: floats, datetimes, and timedeltas.
+_TIMELINE_KINDS = frozenset({"i", "u", "f", "M", "m"})
+#: ``pandas.api.types.infer_dtype`` labels an object array may carry while
+#: still holding losslessly convertible timestamps (pandas ``Timestamp``,
+#: ``datetime.date``, Python ints/floats, ``Timedelta``).
+_TIMELINE_OBJECT_INFERENCES = frozenset(
+    {"integer", "floating", "datetime", "datetime64", "date", "timedelta", "timedelta64"}
+)
+_TIMELINE_KIND_TEXT = (
+    "integer, unsigned integer, float, datetime64, or timedelta64"
+)
+
 
 def _n_samples(X) -> int:
     (X_idx,) = indexable(X)
     if hasattr(X_idx, "shape") and len(getattr(X_idx, "shape", ())) >= 1:
         return int(X_idx.shape[0])
     return int(len(X_idx))
+
+
+def _reject_non_timeline_dtype(values, arr: np.ndarray, *, name: str) -> None:
+    """Reject dtypes that cannot carry an orderable timestamp.
+
+    Object arrays are accepted, unconverted, when pandas infers a supported
+    kind from their contents (``pd.Timestamp`` is the motivating case), so
+    inputs that already worked keep their exact fold layout. Everything else
+    -- strings, bytes, booleans, complex numbers, categoricals -- is refused
+    here instead of failing later inside a comparison ufunc.
+    """
+    if isinstance(getattr(values, "dtype", None), pd.CategoricalDtype):
+        raise ValueError(
+            f"{name} must be {_TIMELINE_KIND_TEXT}; got a pandas Categorical. "
+            f"Pass the underlying timestamps, for example "
+            f"{name}.astype('datetime64[ns]') or the integer codes"
+        )
+    if arr.dtype.kind in _TIMELINE_KINDS:
+        return
+    if arr.dtype.kind == "O":
+        inferred = pd.api.types.infer_dtype(arr, skipna=False)
+        if inferred in _TIMELINE_OBJECT_INFERENCES:
+            return
+        detail = f"an object array of {inferred} values"
+    else:
+        detail = f"dtype {arr.dtype!s}"
+    raise ValueError(
+        f"{name} must be {_TIMELINE_KIND_TEXT}; got {detail}. Convert {name} "
+        "to a numeric or datetime64 timeline; strings, bytes, booleans and "
+        "complex numbers are not orderable timestamps"
+    )
 
 
 def _as_1d(values, n_rows: int, *, name: str, role: str = "time") -> np.ndarray:
@@ -51,9 +95,27 @@ def _as_1d(values, n_rows: int, *, name: str, role: str = "time") -> np.ndarray:
         raise ValueError(f"{name} must not contain missing values") from exc
     if missing.any():
         raise ValueError(f"{name} must not contain missing values")
-    if role == "time" and arr.dtype.kind == "f" and int(arr.dtype.itemsize) < 8:
-        arr = np.asarray(arr, dtype=np.float64)
+    if role == "time":
+        _reject_non_timeline_dtype(values, arr, name=name)
+        if arr.dtype.kind == "f" and int(arr.dtype.itemsize) < 8:
+            arr = np.asarray(arr, dtype=np.float64)
     return arr
+
+
+def _promote_event_end(start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    """Cast ``event_end`` onto the common numeric dtype with ``time``.
+
+    Only ``event_end`` moves: the timeline keeps its own dtype so the
+    integer-versus-float embargo rules stay tied to ``time``. This just
+    makes the purge and embargo comparisons use one numeric type instead of
+    relying on per-comparison promotion.
+    """
+    if start.dtype.kind not in {"i", "u", "f"} or end.dtype.kind not in {"i", "u", "f"}:
+        return end
+    common = np.result_type(start.dtype, end.dtype)
+    if end.dtype == common:
+        return end
+    return np.asarray(end, dtype=common)
 
 
 def _is_zero_embargo(embargo) -> bool:
@@ -86,7 +148,7 @@ def _embargo_threshold(val_start_min, embargo):
     if kind == "M":
         if not isinstance(embargo, (np.timedelta64, pd.Timedelta, timedelta)):
             raise TypeError(
-                "datetime timestamps require a timedelta embargo; a numeric "
+                "datetime64 time requires a timedelta embargo; a numeric "
                 "embargo has no meaning on a datetime timeline"
             )
         return val_start_min - np.timedelta64(int(pd.Timedelta(embargo).value), "ns")
@@ -97,7 +159,7 @@ def _embargo_threshold(val_start_min, embargo):
         return _python_int(val_start_min) - _python_int(embargo)
     if kind == "f":
         if not isinstance(embargo, (int, float, np.integer, np.floating)):
-            raise TypeError("float timestamps require a numeric embargo")
+            raise TypeError("float time requires a numeric embargo")
         return val_start_min - np.asarray(embargo, dtype=np.float64)
     try:
         return val_start_min - embargo
@@ -108,18 +170,17 @@ def _embargo_threshold(val_start_min, embargo):
 
 
 def _require_integer_embargo(embargo) -> None:
+    message = (
+        "integer time requires a non-negative integer embargo so the "
+        "timeline is not cast to float; pass an integer embargo, or supply "
+        "time as float when the embargo is fractional"
+    )
     if isinstance(embargo, (np.timedelta64, pd.Timedelta, timedelta)):
-        raise TypeError(
-            "integer timestamps require a non-negative integer embargo so "
-            "the timeline is not cast to float"
-        )
+        raise TypeError(message)
     if not isinstance(embargo, (int, np.integer)) or isinstance(
         embargo, (bool, np.bool_)
     ):
-        raise TypeError(
-            "integer timestamps require a non-negative integer embargo so "
-            "the timeline is not cast to float"
-        )
+        raise TypeError(message)
 
 
 def _python_int(value) -> int:
@@ -233,6 +294,13 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
     duration dropped from train immediately before validation; it is not
     sklearn ``TimeSeriesSplit(gap=)`` sample skipping.
 
+    This embargo side deliberately deviates from López de Prado, whose
+    embargo removes training observations immediately *after* the test
+    block. In ``forward`` mode training never follows validation, so an
+    after-side embargo would remove nothing; SIFT applies it on the past
+    side of each validation block instead. ``purged_kfold`` mode, where
+    training rows can sit on either side, embargoes both sides.
+
     Parameters
     ----------
     n_splits : int, default 5
@@ -254,11 +322,16 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         leftover later timestamps stay in train.
     embargo : 0, number, or timedelta, default 0
         Extra exclusion in the same domain as ``time``. ``0`` is
-        purge-only. A datetime ``time`` requires a timedelta embargo;
-        integer ``time`` requires an integer embargo. Forward mode only
-        embargoes the past side of validation. ``purged_kfold`` keeps a
-        row if it lies wholly before *or* wholly after the embargoed
-        validation window.
+        purge-only. The integer-versus-float rule is read from ``time``,
+        not from ``event_end``: a datetime ``time`` requires a timedelta
+        embargo, an integer ``time`` requires an integer embargo, and a
+        float ``time`` takes any finite number even when ``event_end`` is
+        integer. Forward mode only embargoes the past side of validation,
+        which is the deliberate deviation from López de Prado's after-the-
+        test-block embargo (forward training never follows validation, so
+        an after-side embargo would drop nothing). ``purged_kfold`` keeps
+        a row if it lies wholly before *or* wholly after the embargoed
+        validation window, so there the embargo applies on both sides.
     mode : {'forward', 'purged_kfold'}, default 'forward'
         ``'forward'`` is chronological: train timestamps are strictly
         before validation. ``'purged_kfold'`` is opt-in bidirectional
@@ -364,11 +437,14 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
             Rejected on this class. Use ``GroupPurgedTimeSeriesSplit``.
         time : array-like
             Per-row start timestamps, keyword-only, aligned to original
-            rows of this ``X``. Numeric or datetime64. Not stored on the
+            rows of this ``X``. Integer, unsigned, float, datetime64, or
+            timedelta64 (or an object array of such values, for example
+            pandas ``Timestamp``); strings, bytes, booleans, complex
+            numbers, and categoricals are rejected. Not stored on the
             instance.
         event_end : array-like or None, default None
             Optional per-row information-interval ends, same length and
-            domain as ``time``. ``None`` means point observations.
+            dtype family as ``time``. ``None`` means point observations.
 
         Yields
         ------
@@ -393,6 +469,7 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
             end = start
         else:
             end = _as_1d(event_end, n, name="event_end")
+            end = _promote_event_end(start, end)
             try:
                 inverted = np.asarray(end < start, dtype=bool)
             except TypeError as exc:
@@ -488,7 +565,20 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
             )
             if group_arr is not None:
                 val_groups = group_arr[val_idx]
+                before_group_exclusion = train_idx
                 train_idx = train_idx[~np.isin(group_arr[train_idx], val_groups)]
+                if train_idx.size == 0 and before_group_exclusion.size > 0:
+                    raise ValueError(
+                        f"training fold {fold_i} is empty because every "
+                        "training row that survived purge and embargo belongs "
+                        "to a group that also appears in validation. "
+                        "GroupPurgedTimeSeriesSplit needs entities whose "
+                        "lifespans do not span the validation boundary; for "
+                        "entities that persist through time pass "
+                        "cv=PurgedTimeSeriesSplit(...) instead (entities are "
+                        "shared across folds and rows stay time-ordered), or "
+                        "omit groups"
+                    )
             if train_idx.size == 0:
                 raise ValueError(
                     f"training fold {fold_i} is empty after purge, embargo, "
@@ -575,15 +665,24 @@ def _apply_embargo(
 
 
 def _keep_before_embargo(end, val_start_min, embargo) -> np.ndarray:
-    kind = getattr(getattr(end, "dtype", None), "kind", None)
+    # Integer-versus-float embargo rules follow the TIMELINE dtype, which
+    # ``val_start_min`` carries, never ``event_end``: a float ``time`` with
+    # integer horizons still takes a fractional embargo.
+    kind = getattr(getattr(val_start_min, "dtype", None), "kind", None)
     if kind in {"i", "u"}:
         _require_integer_embargo(embargo)
-        return _int_lt_cutoff(end, _past_integer_cutoff(val_start_min, embargo))
+        cutoff = _past_integer_cutoff(val_start_min, embargo)
+        if getattr(getattr(end, "dtype", None), "kind", None) in {"i", "u"}:
+            return _int_lt_cutoff(end, cutoff)
+        return np.asarray(end < cutoff, dtype=bool)
     past_cut = _embargo_threshold(val_start_min, embargo)
-    return end < past_cut
+    return np.asarray(end < past_cut, dtype=bool)
 
 
 def _keep_after_embargo(start, val_end_max, embargo) -> np.ndarray:
+    # ``start`` is the timeline, so dispatching on it already reads the
+    # ``time`` dtype; ``val_end_max`` comes from ``event_end`` and only
+    # supplies the cutoff value.
     kind = getattr(getattr(start, "dtype", None), "kind", None)
     if kind in {"i", "u"}:
         _require_integer_embargo(embargo)
@@ -591,7 +690,7 @@ def _keep_after_embargo(start, val_end_max, embargo) -> np.ndarray:
     if kind == "M":
         if not isinstance(embargo, (np.timedelta64, pd.Timedelta, timedelta)):
             raise TypeError(
-                "datetime timestamps require a timedelta embargo; a numeric "
+                "datetime64 time requires a timedelta embargo; a numeric "
                 "embargo has no meaning on a datetime timeline"
             )
         future_cut = val_end_max + np.timedelta64(
@@ -600,8 +699,10 @@ def _keep_after_embargo(start, val_end_max, embargo) -> np.ndarray:
         return start > future_cut
     if kind == "f":
         if not isinstance(embargo, (int, float, np.integer, np.floating)):
-            raise TypeError("float timestamps require a numeric embargo")
-        return start > (val_end_max + np.asarray(embargo, dtype=np.float64))
+            raise TypeError("float time requires a numeric embargo")
+        return np.asarray(
+            start > (val_end_max + np.asarray(embargo, dtype=np.float64)), dtype=bool
+        )
     try:
         return start > (val_end_max + embargo)
     except TypeError as exc:
@@ -618,6 +719,13 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
     a time axis: a group that appears in validation is excluded from
     training entirely.
 
+    That makes this splitter usable only on panels whose entities enter and
+    leave: on a balanced panel, where every entity is present in every
+    period, the validation block contains every group, so group exclusion
+    empties the training fold and ``split`` raises. Persistent entities
+    belong in ``PurgedTimeSeriesSplit``, which shares entities across folds
+    and separates train from validation in time alone.
+
     Parameters
     ----------
     n_splits : int, default 5
@@ -628,7 +736,10 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
         Distinct timestamps in each validation block. See
         ``PurgedTimeSeriesSplit``.
     embargo : 0, number, or timedelta, default 0
-        Extra exclusion duration in the same domain as ``time``.
+        Extra exclusion duration in the same domain as ``time``. Forward
+        mode embargoes the past side of validation only, the same
+        deliberate deviation from López de Prado described on
+        ``PurgedTimeSeriesSplit``.
     mode : {'forward', 'purged_kfold'}, default 'forward'
         Chronological expanding windows, or opt-in bidirectional purged CV.
 

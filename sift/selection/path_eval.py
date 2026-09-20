@@ -250,6 +250,66 @@ def _resolve_k_grid(k_grid: Iterable[int], *, max_k: int) -> List[int]:
     return deduped
 
 
+def _n_rows_of(X) -> int:
+    """Row count of a DataFrame or array-like without coercing dtypes."""
+    shape = getattr(X, "shape", None)
+    if shape is not None and len(shape) >= 1:
+        return int(shape[0])
+    return int(len(X))
+
+
+def _reject_unusable_event_end(route: str) -> None:
+    """Refuse an ``event_end`` the chosen split route cannot consume."""
+    raise ValueError(
+        f"event_end was provided, but {route} cannot use it; pass a purged "
+        "time-series splitter that declares event_end, such as "
+        "PurgedTimeSeriesSplit or GroupPurgedTimeSeriesSplit, or omit "
+        "event_end"
+    )
+
+
+def _is_split_pair_iterable(obj: Any) -> bool:
+    """Return whether ``obj`` may be a one-shot iterable of index pairs."""
+    if isinstance(obj, (str, bytes, bytearray, dict, set, frozenset, np.ndarray)):
+        return False
+    return hasattr(obj, "__iter__")
+
+
+def resolve_event_end(X, event_end, *, time, n_rows: int):
+    """Resolve and align ``event_end`` exactly the way ``time`` is resolved.
+
+    A string is the same DataFrame column-name shorthand ``time`` accepts:
+    the column is extracted and dropped from ``X``, so it never reaches the
+    design matrix. Returns ``(X, event_end_array_or_None)``. Values are only
+    validated here; forwarding them to a splitter that cannot consume them
+    is rejected in `_build_splits`.
+    """
+    if event_end is None:
+        return X, None
+    if time is None:
+        raise ValueError(
+            "event_end requires time; pass the matching per-row start "
+            "timestamps through time, or omit event_end"
+        )
+    if isinstance(event_end, str):
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError(
+                "event_end requires X to be a pandas DataFrame when used as "
+                "column-name row metadata"
+            )
+        resolved = resolve_row_metadata(X, time=event_end)
+        X = resolved.X
+        event_end = resolved.time
+    arr = np.asarray(event_end)
+    if arr.ndim != 1:
+        raise ValueError("event_end must be a one-dimensional array")
+    if int(arr.shape[0]) != int(n_rows):
+        raise ValueError(
+            f"event_end has {int(arr.shape[0])} rows but expected {n_rows}"
+        )
+    return X, arr
+
+
 def _build_splits(
     n: int,
     splitter: Any,
@@ -265,7 +325,13 @@ def _build_splits(
 
     ``time`` and ``event_end`` are forwarded only when ``splitter.split``
     declares those keywords. An omitted ``time`` keeps the splitter's own
-    optional default. Purged time-series splitters still require ``time``.
+    optional default. Purged time-series splitters still require ``time``,
+    and an ``event_end`` a split route cannot consume is rejected rather
+    than dropped.
+
+    ``splitter`` may also be a one-shot iterable -- a generator, map object,
+    or iterator -- of ``(train_idx, val_idx)`` pairs. It is materialized
+    once before validation so the pairs are not consumed by the check.
     """
     def _coerce_split_pair(pair: Any) -> tuple[np.ndarray, np.ndarray]:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
@@ -294,7 +360,15 @@ def _build_splits(
             return False
         return first.ndim == 1 and second.ndim == 1
 
+    if event_end is not None and time is None:
+        raise ValueError(
+            "event_end requires time; pass the matching per-row start "
+            "timestamps through time, or omit event_end"
+        )
+
     if splitter is None:
+        if event_end is not None:
+            _reject_unusable_event_end("the default random holdout split")
         if not (0.0 < val_frac < 1.0):
             raise ValueError(f"val_frac must be in (0, 1), got {val_frac}")
         if n < 2:
@@ -306,9 +380,13 @@ def _build_splits(
         return [(order[:cut], order[cut:])]
 
     if _is_single_split_pair(splitter):
+        if event_end is not None:
+            _reject_unusable_event_end("precomputed split indices")
         return [_coerce_split_pair(splitter)]
 
     if isinstance(splitter, (list, tuple)):
+        if event_end is not None:
+            _reject_unusable_event_end("precomputed split indices")
         splits = [_coerce_split_pair(pair) for pair in splitter]
         if not splits:
             raise ValueError("splitter iterable must contain at least one split")
@@ -351,16 +429,26 @@ def _build_splits(
                     f"event_end has {end_arr.shape[0]} rows but expected {n}"
                 )
             if not _has_explicit_keyword(splitter.split, "event_end"):
-                raise TypeError(
-                    "event_end was provided, but splitter.split does not "
-                    "accept an event_end argument"
-                )
+                _reject_unusable_event_end(f"{type(splitter).__name__}.split")
             split_kwargs["event_end"] = end_arr
         raw_splits = splitter.split(data, y_split, **split_kwargs)
         splits = [_coerce_split_pair(pair) for pair in raw_splits]
         if not splits:
             raise ValueError("splitter object produced no splits")
         return splits
+
+    if _is_split_pair_iterable(splitter):
+        # A generator (or any other one-shot iterable) of index pairs can be
+        # consumed only once, so materialize before validating the pairs.
+        materialized = list(splitter)
+        if materialized and all(
+            _is_single_split_pair(item) for item in materialized
+        ):
+            if event_end is not None:
+                _reject_unusable_event_end("precomputed split indices")
+            return [_coerce_split_pair(pair) for pair in materialized]
+        if not materialized:
+            raise ValueError("splitter iterable must contain at least one split")
 
     raise TypeError(
         "splitter must be None, a splitter object with split(...), or (train_idx, val_idx)"
@@ -548,13 +636,21 @@ def evaluate_feature_path(
     sample_weight: np.ndarray | None = None,
     groups: np.ndarray | None = None,
     time=None,
+    event_end=None,
 ) -> FeaturePathEvaluationResult:
     """Evaluate an ordered feature path over an explicit k grid.
 
     Parameters
     ----------
     X : DataFrame or ndarray
-        Feature matrix.
+        Feature matrix. Missing values are mean-imputed per training fold --
+        each column's non-missing training mean fills that column in both
+        the training and the validation rows of the same fold, and an
+        all-missing training column is filled with ``0.0`` -- before the
+        estimator is fitted. The imputation is silent and unconditional;
+        pass an already-imputed matrix when a different policy is wanted.
+        An imputer inside an ``estimator`` pipeline sees these filled values,
+        so it cannot override this preprocessing step.
     y : array-like of shape (n_samples,) or (n_samples, n_targets)
         Regression target. A 2-D array is scored as multi-output RMSE/MAE
         with the same row weights on every target. The default estimator
@@ -590,6 +686,15 @@ def evaluate_feature_path(
         Forwarded to ``splitter.split`` when that splitter declares ``time``.
         Purged time-series splitters require it. Splitters that only declare
         optional ``time=None`` keep that default when ``time`` is omitted.
+    event_end : array-like or str, optional
+        Per-row information-interval ends forwarded to ``splitter.split``
+        when that splitter declares ``event_end``. This is what makes the
+        label-horizon purge of ``PurgedTimeSeriesSplit`` /
+        ``GroupPurgedTimeSeriesSplit`` reachable from here; without it those
+        splitters see point observations. Requires ``time``, takes the same
+        DataFrame column-name shorthand, and raises ``ValueError`` when the
+        chosen ``splitter`` (including the default holdout and precomputed
+        index pairs) cannot consume it.
 
     Returns
     -------
@@ -638,6 +743,9 @@ def evaluate_feature_path(
     groups = metadata.groups
     time = metadata.time
     sample_weight = metadata.sample_weight
+    X, event_end = resolve_event_end(
+        X, event_end, time=time, n_rows=_n_rows_of(X)
+    )
     if estimator is not None and estimator_factory is not None:
         raise ValueError("Pass either estimator or estimator_factory, not both")
     if not callable(scoring) and scoring not in {"rmse", "mae"}:
@@ -676,6 +784,7 @@ def evaluate_feature_path(
         groups=groups,
         y=y_arr,
         time=None if time is None else np.asarray(time).reshape(-1),
+        event_end=event_end,
     )
 
     raw_scores: dict[int, list[float]] = {k: [] for k in k_values}

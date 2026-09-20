@@ -96,6 +96,11 @@ For exact signatures, accepted values, and return types, use the
 [generated API reference](reference/index.md). For mathematical details, see
 the [algorithm guide](ALGORITHMS.md); for a worked first path, continue with the
 [tutorial](user-guide.md) and [advanced workflows](ADVANCED.md). Consult the
+[comparison workflow](user-guide.md#9-compare-selectors-without-scoring-a-full-sample-subset) to score several
+selector factories on paired held-out folds with `compare`. For label horizons,
+pass `time`, `event_end`, and `PurgedTimeSeriesSplit`; use
+`GroupPurgedTimeSeriesSplit` only when entities do not span validation
+boundaries. Consult the
 [runtime and scaling guide](runtime-scaling.md) for measured cost context, the
 [knockoff statistic bakeoff](knockoff-statistic-bakeoff.md) for the seeded
 relevance/ridge quality record, and

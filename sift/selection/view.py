@@ -6,9 +6,12 @@ import base64
 import copy
 import dataclasses
 import datetime
+import decimal
+import fractions
 import hashlib
 import json
 import math
+import uuid
 from collections.abc import Iterable, Mapping, Set
 from numbers import Real
 from pathlib import Path
@@ -98,10 +101,21 @@ def _label_token(value: Any) -> Any:
         payload = value.isoformat()
     elif isinstance(value, Path):
         payload = str(value)
+    elif isinstance(value, complex):
+        # ``repr`` of a float is its shortest round-tripping decimal form, so
+        # the pair is exact and identical in every process.  NumPy complex
+        # scalars reach this branch as their Python counterpart above.
+        payload = {"real": repr(value.real), "imag": repr(value.imag)}
+    elif isinstance(value, (decimal.Decimal, fractions.Fraction, uuid.UUID)):
+        # ``str`` is the canonical, process-independent spelling for all
+        # three: "1.50" keeps its trailing zero, Fractions arrive normalized,
+        # and a UUID prints its 36-character hex form.
+        payload = str(value)
     else:
         raise TypeError(
             f"{type_name} has no deterministic identity token; pass primitive, "
-            "datetime/timedelta, bytes, path, tuple, set, or frozenset values"
+            "datetime/timedelta, bytes, path, tuple, set, frozenset, Decimal, "
+            "Fraction, UUID, or complex values"
         )
     return {"type": type_name, "value": payload}
 
@@ -1029,12 +1043,7 @@ class SelectionView:
         >>> list(view.proxies("x0", r_min=0.9).columns)
         ['feature', 'selected_index', 'correlation']
         """
-        if self._proxy_correlations is None:
-            raise NotImplementedError(
-                "proxy correlations are unavailable for this selected set; rerun or "
-                "refit selection with store_proxies=True. If a threshold change added "
-                "features, refit to compute correlations for those newly selected features"
-            )
+        self._require_proxy_block()
         raw_names = self.raw_features
         if raw_names is None:
             names = self.features
@@ -1055,11 +1064,20 @@ class SelectionView:
             )
         return self.proxies_at(matches[0], r_min=r_min)
 
-    def proxies_at(self, selected_index: int, r_min: float = 0.8) -> pd.DataFrame:
-        """Return unselected proxy candidates for one selected raw position.
+    def proxies_at(
+        self,
+        selected_index: int,
+        r_min: float = 0.8,
+        *,
+        include_selected: bool = False,
+    ) -> pd.DataFrame:
+        """Return proxy candidates for one selected raw position.
 
         Positional form of ``proxies``, and the one to use when labels are
-        duplicated or absent.  Requires the selection to have run with
+        duplicated or absent.  Lists the unselected candidates correlated with
+        this anchor; ``include_selected=True`` adds the other selected
+        features correlated with it, which is what ``proxy_clusters`` merges
+        anchors on.  Requires the selection to have run with
         ``store_proxies=True``.
 
         Parameters
@@ -1069,13 +1087,18 @@ class SelectionView:
             not selected has no stored proxy column.
         r_min : float, default 0.8
             Minimum absolute correlation to report, in ``[0, 1]``.
+        include_selected : bool, default False
+            When True, other selected features are reported alongside the
+            unselected stand-ins.  The anchor itself is never reported.  The
+            default output is unchanged.
 
         Returns
         -------
         DataFrame
             Columns ``feature``, ``selected_index``, and ``correlation``,
             sorted by descending absolute correlation then raw position.
-            Selected features are excluded, so only genuine stand-ins appear.
+            Selected features are excluded unless ``include_selected``, so by
+            default only genuine stand-ins appear.
 
         Raises
         ------
@@ -1088,13 +1111,9 @@ class SelectionView:
         See Also
         --------
         SelectionView.proxies : The label-based form of this lookup.
+        SelectionView.redundancy_report : The same edges for every anchor.
         """
-        if self._proxy_correlations is None:
-            raise NotImplementedError(
-                "proxy correlations are unavailable for this selected set; rerun or "
-                "refit selection with store_proxies=True. If a threshold change added "
-                "features, refit to compute correlations for those newly selected features"
-            )
+        self._require_proxy_block()
         if isinstance(selected_index, (bool, np.bool_)) or not isinstance(
             selected_index,
             (int, np.integer),
@@ -1108,6 +1127,9 @@ class SelectionView:
         values = self._proxy_correlations[position]
         candidate_positions = np.asarray(values.index, dtype=np.int64)
         selected_positions = set(self._indices or ())
+        if include_selected:
+            # Keep every other selected feature, but never the anchor itself.
+            selected_positions = {position}
         correlations = values.to_numpy(dtype=np.float64)
         mask = np.asarray(
             [candidate not in selected_positions for candidate in candidate_positions],
@@ -1133,24 +1155,37 @@ class SelectionView:
             }
         )
 
-    def redundancy_report(self, r_min: float = 0.8) -> pd.DataFrame:
-        """Return every qualifying unselected-candidate ↔ selected-feature edge.
+    def redundancy_report(
+        self,
+        r_min: float = 0.8,
+        *,
+        include_selected: bool = False,
+    ) -> pd.DataFrame:
+        """Return every qualifying candidate ↔ selected-feature edge.
 
         This is the all-selected companion to ``proxies`` / ``proxies_at``:
         one row per stored copula correlation whose absolute value is at
-        least ``r_min``.  Selected features never appear as proxy
-        candidates.  Requires ``store_proxies=True``.
+        least ``r_min``.  By default it lists only *unselected* candidates,
+        so it answers "what could stand in for this selected feature".  Set
+        ``include_selected=True`` to also list the selected↔selected edges --
+        the edges ``proxy_clusters`` merges anchors on, and otherwise
+        reachable from no public method.  Requires ``store_proxies=True``.
 
         Parameters
         ----------
         r_min : float, default 0.8
             Minimum absolute correlation to report, in ``[0, 1]``.
+        include_selected : bool, default False
+            When True, candidates that are themselves selected are reported
+            too.  A selected pair appears once per anchor, that is in both
+            directions; a feature is never paired with itself.  The default
+            output is unchanged.
 
         Returns
         -------
         DataFrame
             Columns ``selected_feature``, ``selected_index`` (the selected
-            raw position), ``feature``, ``candidate_index`` (the unselected
+            raw position), ``feature``, ``candidate_index`` (the candidate
             raw position), and signed ``correlation``.  Sorted by selected
             path order, then descending absolute correlation, then candidate
             raw position.  Empty when nothing qualifies.
@@ -1161,6 +1196,10 @@ class SelectionView:
             If proxy correlations were not stored.
         ValueError
             If ``r_min`` is not a finite number in ``[0, 1]``.
+
+        See Also
+        --------
+        SelectionView.proxy_clusters : Components built from these edges.
         """
         block = self._require_proxy_block()
         threshold = validate_r_min(r_min)
@@ -1171,6 +1210,7 @@ class SelectionView:
             selected_indices=selected,
             raw_features=raw_names,
             r_min=threshold,
+            include_selected=bool(include_selected),
         )
 
     def proxy_clusters(self, r_min: float = 0.8) -> pd.DataFrame:
@@ -1183,6 +1223,12 @@ class SelectionView:
         clustering of unselected columns.  A candidate linked to two selected
         anchors joins those anchors, as does a direct selected-selected edge.
         Each selected feature is at least a singleton cluster.
+
+        The edge set used here is exactly the one
+        ``redundancy_report(r_min, include_selected=True)`` lists, so the
+        correlation behind any merge can be read off that report; the default
+        ``redundancy_report(r_min)`` omits the selected↔selected edges and so
+        covers only part of it.
 
         When the view carries completed-resample selection indicators,
         ``cluster_frequency`` is the fraction of those resamples in which
@@ -1226,8 +1272,10 @@ class SelectionView:
         if self._proxy_correlations is None:
             raise NotImplementedError(
                 "proxy correlations are unavailable for this selected set; rerun or "
-                "refit selection with store_proxies=True. If a threshold change added "
-                "features, refit to compute correlations for those newly selected features"
+                "refit selection with store_proxies=True. A stored proxy block holds "
+                "one column per feature selected when it was computed, so a threshold "
+                "change added features it cannot describe; refit with the lower "
+                "threshold and store_proxies=True"
             )
         return self._proxy_correlations
 

@@ -1,4 +1,131 @@
-"""JSON-safe reproducibility manifests for selection results and compare."""
+"""JSON-safe reproducibility manifests for selection results and compare.
+
+Schema version "1"
+------------------
+This section is the authoritative description of the manifest returned by
+``SelectionView.reproducibility_``, ``CompareResult.reproducibility_``, and the
+``reproducibility_()`` method on every result object.  ``MANIFEST_SCHEMA_KEYS``
+below lists exactly the same keys and is enforced on every export, so the two
+cannot drift apart.  A manifest is always ``json.dumps``-safe with
+``allow_nan=False``: non-finite floats become ``null``, and mappings with
+non-string keys become typed-key envelopes (see ``sift.selection.view``).
+
+Every hash is a SHA-256 over *typed tokens* rather than raw bytes: a label or
+object cell contributes its type name together with a canonical payload, so
+``1`` and ``"1"`` never collide and no token depends on process-local state
+such as ``PYTHONHASHSEED`` or an object's memory address.  Hashes are only
+comparable between manifests carrying the same ``schema_version``; token
+framing may change with the schema.
+
+Top level
+~~~~~~~~~
+``schema_version`` : str
+    ``"1"``.
+``kind`` : str
+    ``"selection"`` or ``"compare"``; it selects which blocks below apply.
+``environment`` : dict
+    Export-time facts (see below).
+``input`` : dict
+    Shape and fingerprints of the data.  The caller's matrix is never stored.
+``configuration`` : dict
+    Selector settings and seeds.
+``folds`` : list of dict
+    Per-fold bookkeeping.  Always ``[]`` for ``kind="selection"``; for
+    ``kind="compare"`` it is the compare-time fold record, including
+    ``train_index_sha256``/``test_index_sha256`` row-index digests.
+
+``environment``
+~~~~~~~~~~~~~~~
+Always describes the process that *exported* the manifest, never the one that
+ran the selection.
+``captured_at`` : str
+    Always ``"export"``.
+``sift``, ``python_version``, ``platform`` : str
+    ``sift.__version__``, ``platform.python_version()``, ``platform.platform()``.
+``numpy``, ``pandas``, ``scikit-learn``, ``scipy``, ``numba``, ``threadpoolctl`` : str or None
+    Installed versions; ``None`` when the package is absent or exposes no
+    ``__version__``.
+``blas`` : list of dict
+    ``threadpoolctl.threadpool_info()`` entries restricted to
+    ``user_api``, ``internal_api``, ``prefix``, ``version``, ``num_threads``,
+    ``threading_layer`` and ``architecture``.  The absolute ``filepath`` each
+    entry carries is dropped: it embeds the OS user name.  Empty list when
+    threadpoolctl cannot inspect the process.
+``git_commit`` : str or None
+    40-character commit of the tree the installed package lives in; ``None``
+    outside a git checkout or when git is unavailable.
+``git_commit_source`` : str
+    Always ``"sift_package"``: the commit is resolved from the package
+    directory, never from the caller's working directory.
+``git_dirty`` : bool or None
+    Whether that checkout has uncommitted changes *under the package
+    directory*.  ``None`` under the same conditions as ``git_commit``.
+
+``input``
+~~~~~~~~~
+``n_rows``, ``n_rows_used``, ``n_features`` : int or None
+    Original row count, rows actually used (after subsampling), and raw width.
+    ``None`` when unknown.
+``n_rows_source``, ``n_rows_used_source``, ``n_features_source`` : str
+    Provenance of the value beside them: ``"result"`` (recorded by the run),
+    ``"cache"`` (from cache provenance), ``"caller"`` (measured from an ``X``
+    passed to ``reproducibility_``) or ``"unknown"``.
+``columns_hash`` : str or None
+    Digest of the ordered, typed raw column labels.  ``None`` when the result
+    does not know its labels, or when a label has no deterministic token.
+``columns_hash_source`` : str
+    ``"result"``, ``"caller"`` or ``"unknown"``.
+``data_hash`` : str or None
+    Digest of ``X`` itself; ``None`` unless ``hash_data=True``.  With
+    ``hash_data=False`` no element of ``X`` is ever read.
+``data_hash_source`` : str or None
+    ``"caller"`` when ``data_hash`` is set, else ``None``.
+``y_hash``, ``sample_weight_hash``, ``groups_hash``, ``time_hash`` : str or None
+    Digests of the row context passed to ``reproducibility_``.  ``None`` when
+    the argument was not supplied or ``hash_data=False``.
+``y_hash_source``, ``sample_weight_hash_source``, ``groups_hash_source``,
+``time_hash_source`` : str or None
+    ``"caller"`` when hashed, ``"caller_unhashed"`` when supplied with
+    ``hash_data=False``, ``None`` when not supplied.
+``y_hash_complete``, ``sample_weight_hash_complete``, ``groups_hash_complete``,
+``time_hash_complete`` : bool or None
+    Whether that digest covers the whole vector; ``None`` when not supplied.
+``context_hashes_complete`` : bool
+    True only when all four context vectors were supplied and hashed.
+``context_hash_scope`` : str
+    Always ``"caller_only"``: context digests describe what the caller passed
+    to the export, not what the selection ran on.
+``context_selection_time_verified`` : bool
+    Always ``False`` for the same reason.
+``cache`` : dict
+    ``available`` (bool), ``n_rows_original`` (int or None) and
+    ``feature_names_are_synthetic`` (bool or None) from cache provenance.  For
+    ``kind="compare"`` the block is present but never populated.
+
+``configuration``
+~~~~~~~~~~~~~~~~~
+``captured_at`` : str
+    Where the snapshot beside it comes from.  ``"selection"``: recorded while
+    the selection ran.  ``"compare"``: recorded by ``compare`` while it ran.
+    ``"export"``: reconstructed at export time.  ``"unknown"``: the result
+    kept no run configuration, so ``configured``/``effective`` hold only what
+    the adapter could infer.
+``configured`` : dict
+    Options as requested, e.g. ``k_requested="auto"``.  Free-form and
+    selector-specific; estimators, splitters and caches appear as typed
+    descriptors (``{"type": ..., "status": "params", "params": {...}}``) and
+    never as live objects.
+``effective`` : dict
+    What the run actually resolved to, e.g. the chosen ``k``.
+``seeds`` : dict
+    For ``kind="selection"``: ``available`` (bool -- true only when some
+    integer seed is recorded), ``random_state`` (configured value, ``None``
+    when unseeded or unknown), ``auto_k_random_state``, ``realized_random_state``
+    (the entropy actually drawn when ``random_state=None``, so an unseeded run
+    can still be replayed) and ``base_seed_control``.
+    For ``kind="compare"``: ``available``, ``compare_random_state``,
+    ``split_random_state`` and ``compare_random_state_used_for_split``.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +133,7 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import platform
 import subprocess
 from datetime import timedelta
 from pathlib import Path
@@ -101,6 +229,144 @@ _DESCRIPTOR_STATUSES = {
     "varies",
     "partial",
 }
+# Descriptor-shaped mappings restart ``_sanitize_param``'s ``depth`` counter so
+# a nested estimator keeps its own parameters and seeds.  ``nesting`` is the
+# counter that is never reset, so a pathological (deep or self-referential)
+# descriptor chain degrades to the opaque marker instead of a RecursionError.
+# Twelve levels of nested estimators stay well inside this budget.
+_MAX_NESTING = 32
+_CAPTURED_AT_VALUES = ("selection", "compare", "export", "unknown")
+# Each ``threadpool_info()`` entry also carries an absolute ``filepath`` to the
+# loaded shared library, which commonly embeds the OS user name.  Only these
+# identity fields are exported.
+_BLAS_ENTRY_KEYS = (
+    "user_api",
+    "internal_api",
+    "prefix",
+    "version",
+    "num_threads",
+    "threading_layer",
+    "architecture",
+)
+
+_ENVIRONMENT_KEYS = (
+    "captured_at",
+    "sift",
+    "python_version",
+    "platform",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "numba",
+    "threadpoolctl",
+    "blas",
+    "git_commit",
+    "git_commit_source",
+    "git_dirty",
+)
+_INPUT_KEYS = (
+    "n_rows",
+    "n_rows_source",
+    "n_rows_used",
+    "n_rows_used_source",
+    "n_features",
+    "n_features_source",
+    "columns_hash",
+    "columns_hash_source",
+    "data_hash",
+    "data_hash_source",
+    "y_hash",
+    "y_hash_source",
+    "y_hash_complete",
+    "sample_weight_hash",
+    "sample_weight_hash_source",
+    "sample_weight_hash_complete",
+    "groups_hash",
+    "groups_hash_source",
+    "groups_hash_complete",
+    "time_hash",
+    "time_hash_source",
+    "time_hash_complete",
+    "context_hashes_complete",
+    "context_hash_scope",
+    "context_selection_time_verified",
+    "cache",
+)
+#: Authoritative key list for manifest ``schema_version`` ``"1"``, one entry
+#: per fixed block ("" is the top level).  The module docstring documents the
+#: same keys; ``_check_manifest_schema`` enforces this mapping on every export,
+#: so a new key has to be added in both places at once.
+MANIFEST_SCHEMA_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
+    "selection": {
+        "": ("schema_version", "kind", "environment", "input", "configuration", "folds"),
+        "environment": _ENVIRONMENT_KEYS,
+        "input": _INPUT_KEYS,
+        "input.cache": (
+            "available",
+            "n_rows_original",
+            "feature_names_are_synthetic",
+        ),
+        "configuration": ("captured_at", "configured", "effective", "seeds"),
+        "configuration.seeds": (
+            "available",
+            "random_state",
+            "auto_k_random_state",
+            "realized_random_state",
+            "base_seed_control",
+        ),
+    },
+    "compare": {
+        "": ("schema_version", "kind", "environment", "input", "configuration", "folds"),
+        "environment": _ENVIRONMENT_KEYS,
+        "input": _INPUT_KEYS,
+        "input.cache": (
+            "available",
+            "n_rows_original",
+            "feature_names_are_synthetic",
+        ),
+        "configuration": ("captured_at", "configured", "effective", "seeds"),
+        "configuration.seeds": (
+            "available",
+            "compare_random_state",
+            "split_random_state",
+            "compare_random_state_used_for_split",
+        ),
+    },
+}
+
+
+def manifest_key_map(payload: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Return the fixed-block key map of ``payload``, sorted within a block."""
+    out: dict[str, tuple[str, ...]] = {}
+    for path in MANIFEST_SCHEMA_KEYS[str(payload["kind"])]:
+        node: Any = payload
+        for part in filter(None, path.split(".")):
+            node = node[part]
+        out[path] = tuple(sorted(node))
+    return out
+
+
+def _check_manifest_schema(payload: Mapping[str, Any]) -> None:
+    expected = {
+        path: tuple(sorted(keys))
+        for path, keys in MANIFEST_SCHEMA_KEYS[str(payload["kind"])].items()
+    }
+    observed = manifest_key_map(payload)
+    if observed != expected:
+        drift = {
+            path: {
+                "added": sorted(set(observed[path]).difference(expected[path])),
+                "missing": sorted(set(expected[path]).difference(observed[path])),
+            }
+            for path in expected
+            if observed[path] != expected[path]
+        }
+        raise RuntimeError(
+            "manifest keys no longer match MANIFEST_SCHEMA_KEYS for "
+            f"schema_version {payload['schema_version']!r}: {drift}; update the "
+            "constant and the module docstring together with the exporter"
+        )
 
 
 def _module_version(module_name: str) -> str | None:
@@ -122,10 +388,11 @@ def _sift_source_root() -> Path:
     return path
 
 
-def _git_commit() -> str | None:
+def _git(*args: str) -> str | None:
+    """Run a short read-only git command in the package tree, or give up."""
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "--no-optional-locks", *args],
             cwd=str(_sift_source_root()),
             capture_output=True,
             text=True,
@@ -136,27 +403,69 @@ def _git_commit() -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    commit = proc.stdout.strip()
+    return proc.stdout
+
+
+def _git_commit() -> str | None:
+    output = _git("rev-parse", "HEAD")
+    if output is None:
+        return None
+    commit = output.strip()
     if len(commit) == 40 and all(char in "0123456789abcdef" for char in commit):
         return commit
     return None
 
 
+def _git_dirty() -> bool | None:
+    """Whether the installed package directory has uncommitted changes.
+
+    ``None`` when sift does not run from a git checkout, when git is missing,
+    or when the command fails for any other reason.  Only the package
+    directory is inspected, so unrelated edits elsewhere in the repository do
+    not flag the run.
+    """
+    import sift
+
+    package_dir = Path(sift.__file__).resolve().parent
+    output = _git("status", "--porcelain", "--", str(package_dir))
+    if output is None:
+        return None
+    return bool(output.strip())
+
+
+def _blas_identity() -> list[dict[str, Any]]:
+    from threadpoolctl import threadpool_info
+
+    try:
+        entries = threadpool_info()
+    except Exception:
+        return []
+    cleaned = [
+        {key: entry[key] for key in _BLAS_ENTRY_KEYS if key in entry}
+        for entry in entries
+        if isinstance(entry, Mapping)
+    ]
+    return sorted(cleaned, key=lambda entry: json.dumps(entry, sort_keys=True))
+
+
 def _export_environment() -> dict[str, Any]:
     import sift
-    from threadpoolctl import threadpool_info
 
     return {
         "captured_at": "export",
         "sift": str(sift.__version__),
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
         "numpy": _module_version("numpy"),
         "pandas": _module_version("pandas"),
         "scikit-learn": _module_version("sklearn"),
         "scipy": _module_version("scipy"),
         "numba": _module_version("numba"),
-        "blas": threadpool_info(),
+        "threadpoolctl": _module_version("threadpoolctl"),
+        "blas": _blas_identity(),
         "git_commit": _git_commit(),
         "git_commit_source": "sift_package",
+        "git_dirty": _git_dirty(),
     }
 
 
@@ -186,6 +495,23 @@ def _configured_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
                 configured.setdefault(key, metadata[key])
         return _sanitize_param(configured)
     return _sanitize_param(_subset(metadata, _CONFIGURED_KEYS))
+
+
+def _effective_from_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolved settings, from an adapter's own block or the shared key list.
+
+    ``_EFFECTIVE_KEYS`` is shared by every selector, so an adapter whose
+    resolved facts have selector-specific names supplies them directly as
+    ``effective_options`` instead of widening that list for everyone.
+    """
+    options = metadata.get("effective_options")
+    if isinstance(options, Mapping):
+        effective = dict(options)
+        for key in _EFFECTIVE_KEYS:
+            if key in metadata:
+                effective.setdefault(key, metadata[key])
+        return _sanitize_param(effective)
+    return _sanitize_param(_subset(metadata, _EFFECTIVE_KEYS))
 
 
 def _is_int(value: Any) -> bool:
@@ -301,8 +627,8 @@ def snapshot_selector_kwargs(
     return sanitized if isinstance(sanitized, dict) else {"status": "opaque"}
 
 
-def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
-    if depth > 3:
+def _sanitize_param(value: Any, *, depth: int = 0, nesting: int = 0) -> Any:
+    if depth > 3 or nesting > _MAX_NESTING:
         return {"status": "opaque"}
     if _is_feature_cache(value):
         return describe_feature_cache(value)
@@ -315,20 +641,24 @@ def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, (list, tuple)):
         if len(value) > 32:
             return _sequence_digest(value)
-        return [_sanitize_param(item, depth=depth + 1) for item in value]
+        return [
+            _sanitize_param(item, depth=depth + 1, nesting=nesting + 1)
+            for item in value
+        ]
     if isinstance(value, np.ndarray):
         if value.size > 32:
             return _array_digest(value)
-        return _sanitize_param(value.tolist(), depth=depth + 1)
+        return _sanitize_param(value.tolist(), depth=depth + 1, nesting=nesting + 1)
     if isinstance(value, Mapping):
         # ``describe_estimator`` already returns this shape.  Re-sanitizing
         # nested descriptors with the ordinary depth counter used to erase
-        # their inner estimator parameters and seeds.
+        # their inner estimator parameters and seeds, so ``depth`` restarts
+        # here while ``nesting`` keeps counting; see ``_MAX_NESTING``.
         if value.get("status") in _DESCRIPTOR_STATUSES and (
             "type" in value or value.get("status") in {"varies", "partial"}
         ):
             return {
-                key: _sanitize_param(item, depth=0)
+                key: _sanitize_param(item, depth=0, nesting=nesting + 1)
                 for key, item in value.items()
             }
         items = list(value.items())
@@ -338,16 +668,19 @@ def _sanitize_param(value: Any, *, depth: int = 0) -> Any:
                 "reason": "mapping_truncated",
                 "n_entries": len(items),
                 "params": {
-                    key: _sanitize_param(item, depth=depth + 1)
+                    key: _sanitize_param(item, depth=depth + 1, nesting=nesting + 1)
                     for key, item in items[:256]
                 },
             }
-        return {key: _sanitize_param(item, depth=depth + 1) for key, item in items}
+        return {
+            key: _sanitize_param(item, depth=depth + 1, nesting=nesting + 1)
+            for key, item in items
+        }
     getter = getattr(value, "get_params", None)
     if callable(getter):
-        return describe_estimator(value)
+        return describe_estimator(value, nesting=nesting + 1)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return describe_estimator(value)
+        return describe_estimator(value, nesting=nesting + 1)
     type_name = f"{type(value).__module__}.{type(value).__qualname__}"
     return {"status": "opaque", "type": type_name}
 
@@ -469,13 +802,15 @@ def describe_splitter(obj: Any) -> dict[str, Any]:
     return desc
 
 
-def describe_estimator(obj: Any) -> dict[str, Any]:
+def describe_estimator(obj: Any, *, nesting: int = 0) -> dict[str, Any]:
     """Compact JSON-safe constructor snapshot. Never retains a live object."""
     if obj is None:
         return {"status": "absent"}
     if _is_feature_cache(obj):
         return describe_feature_cache(obj)
     type_name = f"{type(obj).__module__}.{type(obj).__qualname__}"
+    if nesting > _MAX_NESTING:
+        return {"type": type_name, "status": "opaque"}
     getter = getattr(obj, "get_params", None)
     if callable(getter):
         try:
@@ -490,7 +825,10 @@ def describe_estimator(obj: Any) -> dict[str, Any]:
         return {
             "type": type_name,
             "status": "params",
-            "params": {key: _sanitize_param(item) for key, item in raw.items()},
+            "params": {
+                key: _sanitize_param(item, nesting=nesting + 1)
+                for key, item in raw.items()
+            },
         }
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         try:
@@ -501,7 +839,7 @@ def describe_estimator(obj: Any) -> dict[str, Any]:
             "type": type_name,
             "status": "params",
             "params": {
-                str(key): _sanitize_param(item)
+                str(key): _sanitize_param(item, nesting=nesting + 1)
                 for key, item in fields.items()
             },
         }
@@ -796,12 +1134,16 @@ def manifest_from_view(
         n_rows=rows["n_rows"],
     )
     configured = _configured_from_metadata(metadata)
-    effective = _sanitize_param(_subset(metadata, _EFFECTIVE_KEYS))
-    captured = (
-        "selection"
-        if configured or effective or _seed_block(metadata)["available"]
-        else "unknown"
-    )
+    effective = _effective_from_metadata(metadata)
+    declared = metadata.get("configuration_captured_at")
+    if declared in _CAPTURED_AT_VALUES:
+        # An adapter that knows whether the run itself recorded the snapshot
+        # says so; the fallback below can only see that something is present.
+        captured = str(declared)
+    elif configured or effective or _seed_block(metadata)["available"]:
+        captured = "selection"
+    else:
+        captured = "unknown"
     payload = {
         "schema_version": "1",
         "kind": "selection",
@@ -828,6 +1170,7 @@ def manifest_from_view(
         },
         "folds": [],
     }
+    _check_manifest_schema(payload)
     return _json_safe(payload)
 
 
@@ -963,4 +1306,5 @@ def manifest_from_compare(
         },
         "folds": [dict(item) for item in result.fold_bookkeeping],
     }
+    _check_manifest_schema(payload)
     return _json_safe(payload)

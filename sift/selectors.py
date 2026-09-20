@@ -553,6 +553,34 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             getattr(self, "allow_full_data_target_encoding", False),
         )
 
+    def _reject_one_shot_conditioning(self) -> None:
+        """Refuse a one-shot iterator before the first fit consumes it.
+
+        sklearn forbids rewriting constructor parameters in ``__init__``, so a
+        generator handed to ``include``/``exclude``/``candidates`` stays on
+        ``self``: the first fit is correct, a refit of the same estimator
+        silently sees an empty set, and ``clone`` fails with a pickling error.
+        Reject it while it is still unconsumed. The function APIs materialize
+        the same arguments once per call and keep accepting iterators.
+        """
+        for name in ("include", "exclude", "candidates"):
+            value = getattr(self, name, None)
+            if value is None or isinstance(value, (str, bytes)):
+                continue
+            try:
+                # An object that is its own iterator can be walked only once.
+                # ``iter`` consumes nothing, here or for lists and ndarrays.
+                one_shot = iter(value) is value
+            except TypeError:
+                continue
+            if one_shot:
+                raise TypeError(
+                    f"{self.__class__.__name__}: {name} is a one-shot iterator "
+                    f"({type(value).__name__}), which a refit would see empty "
+                    f"and sklearn clone cannot copy. Pass {name} as a list or "
+                    "tuple of feature names instead."
+                )
+
     def _would_fit_supervised_categoricals(self, X) -> bool:
         cat_encoding = getattr(self, "cat_encoding", "none")
         if cat_encoding not in _SUPERVISED_CLASS_ENCODINGS or not isinstance(X, pd.DataFrame):
@@ -614,9 +642,11 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             ),
         ):
             raise ValueError(
-                "sample_weight with selector-class categorical encoding is only "
-                "supported for cat_encoding='loo_logit'. category_encoders-backed "
-                "methods ('loo', 'target', 'james_stein') do not consume sample weights."
+                f"sample_weight cannot be combined with cat_encoding={cat_encoding!r}: "
+                "the category_encoders-backed methods ('loo', 'target', "
+                "'james_stein') do not consume row weights. Use cat_encoding in "
+                "('target_cv', 'loo_logit', 'onehot', 'ordinal', 'frequency'), "
+                "which do, or drop sample_weight."
             )
         y_enc = self._categorical_target(y)
         with suppress_category_encoder_pandas_warnings():
@@ -660,7 +690,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             return self.categorical_encoder_.transform(X)
 
     def _restore_deferred_unsupervised_encoder(self, X, sample_weight=None) -> bool:
-        """Fit the train-only 1:1 inference map after deferred auto-k scoring.
+        """Fit the train-only target-blind inference map after deferred auto-k.
 
         Returns True when this call created the encoder, so ``X_fit`` is still
         raw and must be encoded for captured training output. Fixed-k and
@@ -749,13 +779,28 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             self, call_params, feature_names
         )
 
-        result = self._selector_fn(
-            X_fit,
-            y,
-            k=k,
-            return_result=True,
-            **call_params,
-        )
+        try:
+            result = self._selector_fn(
+                X_fit,
+                y,
+                k=k,
+                return_result=True,
+                **call_params,
+            )
+        except ValueError as exc:
+            if (
+                isinstance(onehot_encoder, OneHotBlockEncoder)
+                and str(exc).startswith("include features were dropped as constant or non-finite")
+            ):
+                raw_include = list(dict.fromkeys(
+                    onehot_encoder.parent_of(name)
+                    for name in call_params.get("include", ())
+                ))
+                raise ValueError(
+                    "include features were dropped as constant or non-finite: "
+                    f"{raw_include!r}. Pass raw columns that vary on the retained rows"
+                ) from exc
+            raise
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         if hasattr(result, "selected_indices"):
@@ -847,6 +892,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     ):
         _require_2d_x(X)
         validate_output_order(self.output_order)
+        self._reject_one_shot_conditioning()
         self._validate_categorical_encoding_params()
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         resolved_auto_k = auto_k_config
@@ -1159,6 +1205,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         )
 
     def transform(self, X):
+        """Return the selected columns of ``X`` in the fitted container kind.
+
+        Under ``cat_encoding="onehot"`` a selected categorical comes back as
+        its dummy columns, so the transformed width can exceed
+        ``get_support().sum()``, which counts raw input columns.
+        """
         check_is_fitted(
             self,
             ["selected_indices_", "selected_features_", "feature_names_in_"],
@@ -1194,13 +1246,25 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         return X_arr[:, self._output_indices()]
 
     def get_support(self, indices: bool = False) -> np.ndarray:
-        """Return selected-feature mask (default) or indices (indices=True)."""
+        """Return selected-feature mask (default) or indices (indices=True).
+
+        Both forms stay in the raw input namespace: under
+        ``cat_encoding="onehot"`` a selected categorical is one ``True`` (one
+        index), while ``transform`` and ``get_feature_names_out`` return its
+        dummy columns, so ``get_support().sum()`` can be smaller than the
+        transformed width.
+        """
         if indices:
             return self._output_indices()
         return self._get_support_mask()
 
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
-        """Return names of selected features following sklearn's transformer API."""
+        """Return names of selected features following sklearn's transformer API.
+
+        These are the columns ``transform`` emits, so under
+        ``cat_encoding="onehot"`` they are the selected categoricals' dummy
+        names and can outnumber the ``True`` entries of ``get_support()``.
+        """
         check_is_fitted(self, ["selected_indices_", "feature_names_in_", "n_features_in_"])
         fitted_names = feature_names_array(self.feature_names_in_)
         if input_features is not None:
@@ -1290,11 +1354,28 @@ class MRMRSelector(_BaseSelector):
         to a centered zero and cannot identify its own fold. ``"target"``,
         ``"loo"`` and ``"james_stein"`` require the optional
         ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
-        leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
-        that also consume explicit ``sample_weight`` and ignore ``y``.
-        Any supervised encoding
+        leave-one-out logit encoder. ``"ordinal"`` and ``"frequency"`` are
+        target-blind numeric maps over the levels observed in positive-weight
+        training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
+        natural order -- an ordered ``Categorical`` keeps its declared
+        category order, otherwise bool, then numeric levels ascending by
+        value (ints and floats together), then datetime-like by value, then
+        strings in ordinary string order, then other types, with a fitted
+        missing level taking the last code -- while frequency emits the
+        level's share of training weight; declared-but-unobserved categories
+        are skipped and unknown levels map to ``-1`` / ``0``. At transform a
+        numeric level whose exact type is absent from the fitted vocabulary
+        matches the numerically equal fitted level (``1`` matches a fitted
+        ``1.0`` and vice versa), so a float training column (float because of
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
+        consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
+        ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
+        rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
+        take no weights and reject ``sample_weight``. Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1340,8 +1421,13 @@ class MRMRSelector(_BaseSelector):
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
         ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
-        order; a positional cache requires the matching ndarray. A cache cannot
-        be combined with a supervised ``cat_encoding``.
+        order; a positional cache requires the matching ndarray. Only the row
+        count and the column names are checked, never the row values, so a
+        cache must be used with exactly the rows it was built from. A cache
+        stores no encoding provenance, so every ``cat_encoding`` other than
+        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
+        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
+        with no column to encode passes as a no-op.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1349,21 +1435,38 @@ class MRMRSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning for five iterations. Regression only. Fixed-``k``
-        fits then require ``groups`` (and ``time`` for ``"two_way"``).
-        ``transform`` still returns selected raw columns.
+        and time demeaning until the relative change falls below ``1e-10``, at
+        most 200 passes. Regression only. Fixed-``k`` fits then require
+        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
+        validation row has a seen level raises before any path work -- always
+        the case for ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
+        estimators mean-impute first. ``transform`` still returns selected raw
+        columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Selector state is initialized from these features
         before step 1. They appear in the fitted selection in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. A
+        one-shot iterator -- a generator, ``map``, ``filter`` or
+        ``iter(list)`` -- raises ``TypeError`` at ``fit`` because a refit
+        would see it empty; pass a list or tuple. The function APIs
+        materialize such an iterator once per call instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. ``k`` counts additional blocks; selected
         blocks expand to raw member columns. ``"auto"`` uses the
@@ -1400,6 +1503,13 @@ class MRMRSelector(_BaseSelector):
     categorical_encoding_metadata_ : dict
         The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
         ``cat_encoding="target_cv"`` encoded at least one column.
+    selector_metadata_ : dict
+        The ``selector_metadata`` of the last fit's result. It carries
+        ``configured_options`` (every selector option as forwarded to the
+        function API, including ``include``/``exclude``/``candidates`` and
+        ``feature_blocks``), ``n_rows_original``, ``n_rows_used``,
+        ``random_state``, ``subsample``, the requested and resolved ``k``, and
+        the ``auto_k`` record when ``k="auto"``.
 
     Raises
     ------
@@ -1438,6 +1548,12 @@ class MRMRSelector(_BaseSelector):
     metadata routing every datum must be requested explicitly with
     ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
     refuses a ``groups``/``time`` request.
+
+    Under ``cat_encoding="onehot"`` the two namespaces differ: ``get_support()``
+    and ``get_support(indices=True)`` describe the raw input columns, where a
+    selected categorical is a single ``True``, while ``transform`` and
+    ``get_feature_names_out`` return that categorical's dummy columns. So
+    ``get_support().sum()`` can be smaller than the transformed width.
 
     Examples
     --------
@@ -1546,11 +1662,28 @@ class JMISelector(_BaseSelector):
         an unseen category maps to a centered zero and cannot identify its own
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
-        leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
-        that also consume explicit ``sample_weight`` and ignore ``y``.
-        Any supervised encoding
+        leave-one-out logit encoder. ``"ordinal"`` and ``"frequency"`` are
+        target-blind numeric maps over the levels observed in positive-weight
+        training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
+        natural order -- an ordered ``Categorical`` keeps its declared
+        category order, otherwise bool, then numeric levels ascending by
+        value (ints and floats together), then datetime-like by value, then
+        strings in ordinary string order, then other types, with a fitted
+        missing level taking the last code -- while frequency emits the
+        level's share of training weight; declared-but-unobserved categories
+        are skipped and unknown levels map to ``-1`` / ``0``. At transform a
+        numeric level whose exact type is absent from the fitted vocabulary
+        matches the numerically equal fitted level (``1`` matches a fitted
+        ``1.0`` and vice versa), so a float training column (float because of
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
+        consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
+        ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
+        rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
+        take no weights and reject ``sample_weight``. Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1589,8 +1722,13 @@ class JMISelector(_BaseSelector):
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
         ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
-        order; a positional cache requires the matching ndarray. A cache cannot
-        be combined with a supervised ``cat_encoding``.
+        order; a positional cache requires the matching ndarray. Only the row
+        count and the column names are checked, never the row values, so a
+        cache must be used with exactly the rows it was built from. A cache
+        stores no encoding provenance, so every ``cat_encoding`` other than
+        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
+        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
+        with no column to encode passes as a no-op.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1598,21 +1736,38 @@ class JMISelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning for five iterations. Regression only. Fixed-``k``
-        fits then require ``groups`` (and ``time`` for ``"two_way"``).
-        ``transform`` still returns selected raw columns.
+        and time demeaning until the relative change falls below ``1e-10``, at
+        most 200 passes. Regression only. Fixed-``k`` fits then require
+        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
+        validation row has a seen level raises before any path work -- always
+        the case for ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
+        estimators mean-impute first. ``transform`` still returns selected raw
+        columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Selector state is initialized from these features
         before step 1. They appear in the fitted selection in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. A
+        one-shot iterator -- a generator, ``map``, ``filter`` or
+        ``iter(list)`` -- raises ``TypeError`` at ``fit`` because a refit
+        would see it empty; pass a list or tuple. The function APIs
+        materialize such an iterator once per call instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. ``k`` counts additional blocks; selected
         blocks expand to raw member columns. ``"auto"`` uses the
@@ -1649,6 +1804,13 @@ class JMISelector(_BaseSelector):
     categorical_encoding_metadata_ : dict
         The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
         ``cat_encoding="target_cv"`` encoded at least one column.
+    selector_metadata_ : dict
+        The ``selector_metadata`` of the last fit's result. It carries
+        ``configured_options`` (every selector option as forwarded to the
+        function API, including ``include``/``exclude``/``candidates`` and
+        ``feature_blocks``), ``n_rows_original``, ``n_rows_used``,
+        ``random_state``, ``subsample``, the requested and resolved ``k``, and
+        the ``auto_k`` record when ``k="auto"``.
 
     Raises
     ------
@@ -1687,6 +1849,12 @@ class JMISelector(_BaseSelector):
     metadata routing every datum must be requested explicitly with
     ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
     refuses a ``groups``/``time`` request.
+
+    Under ``cat_encoding="onehot"`` the two namespaces differ: ``get_support()``
+    and ``get_support(indices=True)`` describe the raw input columns, where a
+    selected categorical is a single ``True``, while ``transform`` and
+    ``get_feature_names_out`` return that categorical's dummy columns. So
+    ``get_support().sum()`` can be smaller than the transformed width.
 
     Examples
     --------
@@ -1793,11 +1961,28 @@ class JMIMSelector(_BaseSelector):
         an unseen category maps to a centered zero and cannot identify its own
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
-        leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
-        that also consume explicit ``sample_weight`` and ignore ``y``.
-        Any supervised encoding
+        leave-one-out logit encoder. ``"ordinal"`` and ``"frequency"`` are
+        target-blind numeric maps over the levels observed in positive-weight
+        training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
+        natural order -- an ordered ``Categorical`` keeps its declared
+        category order, otherwise bool, then numeric levels ascending by
+        value (ints and floats together), then datetime-like by value, then
+        strings in ordinary string order, then other types, with a fitted
+        missing level taking the last code -- while frequency emits the
+        level's share of training weight; declared-but-unobserved categories
+        are skipped and unknown levels map to ``-1`` / ``0``. At transform a
+        numeric level whose exact type is absent from the fitted vocabulary
+        matches the numerically equal fitted level (``1`` matches a fitted
+        ``1.0`` and vice versa), so a float training column (float because of
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
+        consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
+        ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
+        rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
+        take no weights and reject ``sample_weight``. Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -1836,8 +2021,13 @@ class JMIMSelector(_BaseSelector):
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
         ``ClassicFeatureCache`` is for classic mRMR and non-Gaussian JMI/JMIM.
         A named cache requires a DataFrame with identical columns in identical
-        order; a positional cache requires the matching ndarray. A cache cannot
-        be combined with a supervised ``cat_encoding``.
+        order; a positional cache requires the matching ndarray. Only the row
+        count and the column names are checked, never the row values, so a
+        cache must be used with exactly the rows it was built from. A cache
+        stores no encoding provenance, so every ``cat_encoding`` other than
+        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
+        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
+        with no column to encode passes as a no-op.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1845,21 +2035,38 @@ class JMIMSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning for five iterations. Regression only. Fixed-``k``
-        fits then require ``groups`` (and ``time`` for ``"two_way"``).
-        ``transform`` still returns selected raw columns.
+        and time demeaning until the relative change falls below ``1e-10``, at
+        most 200 passes. Regression only. Fixed-``k`` fits then require
+        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
+        validation row has a seen level raises before any path work -- always
+        the case for ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
+        estimators mean-impute first. ``transform`` still returns selected raw
+        columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Selector state is initialized from these features
         before step 1. They appear in the fitted selection in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. A
+        one-shot iterator -- a generator, ``map``, ``filter`` or
+        ``iter(list)`` -- raises ``TypeError`` at ``fit`` because a refit
+        would see it empty; pass a list or tuple. The function APIs
+        materialize such an iterator once per call instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. ``k`` counts additional blocks; selected
         blocks expand to raw member columns. ``"auto"`` uses the
@@ -1896,6 +2103,13 @@ class JMIMSelector(_BaseSelector):
     categorical_encoding_metadata_ : dict
         The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
         ``cat_encoding="target_cv"`` encoded at least one column.
+    selector_metadata_ : dict
+        The ``selector_metadata`` of the last fit's result. It carries
+        ``configured_options`` (every selector option as forwarded to the
+        function API, including ``include``/``exclude``/``candidates`` and
+        ``feature_blocks``), ``n_rows_original``, ``n_rows_used``,
+        ``random_state``, ``subsample``, the requested and resolved ``k``, and
+        the ``auto_k`` record when ``k="auto"``.
 
     Raises
     ------
@@ -1934,6 +2148,12 @@ class JMIMSelector(_BaseSelector):
     metadata routing every datum must be requested explicitly with
     ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
     refuses a ``groups``/``time`` request.
+
+    Under ``cat_encoding="onehot"`` the two namespaces differ: ``get_support()``
+    and ``get_support(indices=True)`` describe the raw input columns, where a
+    selected categorical is a single ``True``, while ``transform`` and
+    ``get_feature_names_out`` return that categorical's dummy columns. So
+    ``get_support().sum()`` can be smaller than the transformed width.
 
     Examples
     --------
@@ -2036,11 +2256,28 @@ class CEFSPlusSelector(_BaseSelector):
         an unseen category maps to a centered zero and cannot identify its own
         fold. ``"target"``, ``"loo"`` and ``"james_stein"`` require the
         optional ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
-        leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
-        that also consume explicit ``sample_weight`` and ignore ``y``.
-        Any supervised encoding
+        leave-one-out logit encoder. ``"ordinal"`` and ``"frequency"`` are
+        target-blind numeric maps over the levels observed in positive-weight
+        training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
+        natural order -- an ordered ``Categorical`` keeps its declared
+        category order, otherwise bool, then numeric levels ascending by
+        value (ints and floats together), then datetime-like by value, then
+        strings in ordinary string order, then other types, with a fitted
+        missing level taking the last code -- while frequency emits the
+        level's share of training weight; declared-but-unobserved categories
+        are skipped and unknown levels map to ``-1`` / ``0``. At transform a
+        numeric level whose exact type is absent from the fitted vocabulary
+        matches the numerically equal fitted level (``1`` matches a fitted
+        ``1.0`` and vice versa), so a float training column (float because of
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
+        consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
+        ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
+        rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
+        take no weights and reject ``sample_weight``. Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -2078,9 +2315,14 @@ class CEFSPlusSelector(_BaseSelector):
     cache : FeatureCache or None, default=None
         Prebuilt Gaussian-copula cache to reuse. A named cache requires a
         DataFrame with identical columns in identical order; a positional cache
-        requires the matching ndarray. A cache carries its own row weights, so
-        it cannot be combined with ``sample_weight`` or with a supervised
-        ``cat_encoding``.
+        requires the matching ndarray. Only the row count and the column names
+        are checked, never the row values, so a cache must be used with exactly
+        the rows it was built from. A cache carries its own row weights, so it
+        cannot be combined with ``sample_weight``, and it stores no encoding
+        provenance, so every ``cat_encoding`` other than ``"none"`` is rejected
+        -- including the target-blind ``"onehot"``, ``"ordinal"`` and
+        ``"frequency"`` -- and only a supervised encoding with no column to
+        encode passes as a no-op.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -2088,21 +2330,38 @@ class CEFSPlusSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning for five iterations. Regression only. Fixed-``k``
-        fits then require ``groups`` (and ``time`` for ``"two_way"``).
-        ``transform`` still returns selected raw columns.
+        and time demeaning until the relative change falls below ``1e-10``, at
+        most 200 passes. Regression only. Fixed-``k`` fits then require
+        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
+        means on training folds only: unseen entity levels use the training
+        grand mean for that effect, while unseen time levels add no time effect.
+        One ``UserWarning`` counts affected rows, and a route on which no
+        validation row has a seen level raises before any path work -- always
+        the case for ``strategy="group_cv"``, and for ``"two_way"`` with
+        ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
+        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
+        estimators mean-impute first. ``transform`` still returns selected raw
+        columns.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Selector state is initialized from these features
         before step 1. They appear in the fitted selection in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. A
+        one-shot iterator -- a generator, ``map``, ``filter`` or
+        ``iter(list)`` -- raises ``TypeError`` at ``fit`` because a refit
+        would see it empty; pass a list or tuple. The function APIs
+        materialize such an iterator once per call instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. ``k`` counts additional blocks; selected
         blocks expand to raw member columns. ``"auto"`` uses the
@@ -2139,6 +2398,13 @@ class CEFSPlusSelector(_BaseSelector):
     categorical_encoding_metadata_ : dict
         The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
         ``cat_encoding="target_cv"`` encoded at least one column.
+    selector_metadata_ : dict
+        The ``selector_metadata`` of the last fit's result. It carries
+        ``configured_options`` (every selector option as forwarded to the
+        function API, including ``include``/``exclude``/``candidates`` and
+        ``feature_blocks``), ``n_rows_original``, ``n_rows_used``,
+        ``random_state``, ``subsample``, the requested and resolved ``k``, and
+        the ``auto_k`` record when ``k="auto"``.
 
     Raises
     ------
@@ -2178,6 +2444,19 @@ class CEFSPlusSelector(_BaseSelector):
     metadata routing every datum must be requested explicitly with
     ``set_fit_request(...)``, and a fixed-``k`` estimator without ``within``
     refuses a ``groups``/``time`` request.
+
+    Under ``cat_encoding="onehot"`` the two namespaces differ: ``get_support()``
+    and ``get_support(indices=True)`` describe the raw input columns, where a
+    selected categorical is a single ``True``, while ``transform`` and
+    ``get_feature_names_out`` return that categorical's dummy columns. So
+    ``get_support().sum()`` can be smaller than the transformed width.
+
+    With a 2-D ``y`` the selection path is rank-based and invariant to
+    per-target scaling, but ``k_method="evaluate"`` averages the per-target
+    held-out errors in raw target units, so rescaling one target column can
+    change the chosen ``k``; standardize the targets first when each should
+    count equally. With heavily skewed ``sample_weight`` the measured
+    ``k="auto"`` router uses the EBIC penalized objective for 2-D targets.
 
     Examples
     --------
@@ -2306,11 +2585,28 @@ class CEFSPlusBinarySelector(_BaseSelector):
         to a centered zero and cannot identify its own fold. ``"target"``,
         ``"loo"`` and ``"james_stein"`` require the optional
         ``category_encoders`` package; ``"loo_logit"`` is SIFT's own
-        leave-one-out logit encoder and the only one that accepts
-        ``sample_weight`` besides ``"target_cv"``. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps (unknown ``-1`` / ``0``)
-        that also consume explicit ``sample_weight`` and ignore ``y``.
-        Any supervised encoding
+        leave-one-out logit encoder. ``"ordinal"`` and ``"frequency"`` are
+        target-blind numeric maps over the levels observed in positive-weight
+        training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
+        natural order -- an ordered ``Categorical`` keeps its declared
+        category order, otherwise bool, then numeric levels ascending by
+        value (ints and floats together), then datetime-like by value, then
+        strings in ordinary string order, then other types, with a fitted
+        missing level taking the last code -- while frequency emits the
+        level's share of training weight; declared-but-unobserved categories
+        are skipped and unknown levels map to ``-1`` / ``0``. At transform a
+        numeric level whose exact type is absent from the fitted vocabulary
+        matches the numerically equal fitted level (``1`` matches a fitted
+        ``1.0`` and vice versa), so a float training column (float because of
+        NaN) and an int scoring column encode consistently. Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A perfectly balanced categorical
+        then becomes constant under frequency encoding; ordinal can turn an
+        identifier into an arbitrary permutation. ``sample_weight`` is
+        consumed by ``"target_cv"``, ``"loo_logit"``, ``"ordinal"``,
+        ``"frequency"`` and ``"onehot"`` (weights pick the vocabulary and
+        rank the kept levels); ``"target"``, ``"loo"`` and ``"james_stein"``
+        take no weights and reject ``sample_weight``. Any supervised encoding
         makes ``fit_transform`` return the y-aware encoded training block and
         makes ``inverse_transform`` unavailable.
     target_cv_n_splits : int, default=5
@@ -2356,15 +2652,22 @@ class CEFSPlusBinarySelector(_BaseSelector):
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed greedy
         step. Nested auto-k folds stay silent; only the final refit reports.
-    include : sequence of names or positions, optional
+    include : sequence of column labels, optional
         Conditioning set. Selector state is initialized from these features
         before step 1. They appear in the fitted selection in caller order
         but are not discoveries; ``k`` counts additional features.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        On a DataFrame all three take column labels and reject an integer
+        that is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for ndarray ``X``. A
+        one-shot iterator -- a generator, ``map``, ``filter`` or
+        ``iter(list)`` -- raises ``TypeError`` at ``fit`` because a refit
+        would see it empty; pass a list or tuple. The function APIs
+        materialize such an iterator once per call instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. ``k`` counts additional blocks; selected
         blocks expand to raw member columns. ``"auto"`` uses the
@@ -2402,6 +2705,13 @@ class CEFSPlusBinarySelector(_BaseSelector):
     categorical_encoding_metadata_ : dict
         The encoder's own ``{"kind": ..., "n_splits": ...}``, present only when
         ``cat_encoding="target_cv"`` encoded at least one column.
+    selector_metadata_ : dict
+        The ``selector_metadata`` of the last fit's result. It carries
+        ``configured_options`` (every selector option as forwarded to the
+        function API, including ``include``/``exclude``/``candidates`` and
+        ``feature_blocks``), ``n_rows_original``, ``n_rows_used``,
+        ``random_state``, ``subsample``, the requested and resolved ``k``, and
+        the ``auto_k`` record when ``k="auto"``.
 
     Raises
     ------
@@ -2443,6 +2753,12 @@ class CEFSPlusBinarySelector(_BaseSelector):
     ``set_fit_request(...)``, and a fixed-``k`` estimator refuses a
     ``groups``/``time`` request. The estimator declares itself binary-only to
     sklearn's tag APIs so the common estimator checks feed it two classes.
+
+    Under ``cat_encoding="onehot"`` the two namespaces differ: ``get_support()``
+    and ``get_support(indices=True)`` describe the raw input columns, where a
+    selected categorical is a single ``True``, while ``transform`` and
+    ``get_feature_names_out`` return that categorical's dummy columns. So
+    ``get_support().sum()`` can be smaller than the transformed width.
 
     Examples
     --------
@@ -2767,8 +3083,14 @@ class KnockoffSelector(_BaseSelector):
         and the aggregated result reports ``fdr_control="none"``. Opt-in
         ``aggregation="evalues"`` averages knockoff e-values instead.
     eta : float, default=0.5
-        Selection-frequency cut for derandomized runs, in ``(0, 1]``. Ignored
-        when ``aggregation="evalues"``.
+        Selection-frequency cut for derandomized runs, in ``(0, 1]``, applied
+        when ``n_draws > 1`` and ``aggregation`` is omitted or
+        ``"selection_frequency"``. Ignored for a single draw. With
+        ``aggregation="evalues"`` it does not affect the selection, which is
+        e-BH on the averaged e-values, but it still controls the reported
+        offset-zero frequency-vote counterfactual
+        (``n_discoveries_offset_0`` and its per-draw list); it never controls
+        e-BH.
     aggregation : {None, "evalues", "selection_frequency"}, default=None
         How to combine ``n_draws > 1``. ``None`` keeps the legacy frequency
         vote. ``"evalues"`` requires ``n_draws > 1`` and ``offset=1``.
@@ -2805,8 +3127,23 @@ class KnockoffSelector(_BaseSelector):
         One of ``"none"``, ``"ordinal"``, ``"frequency"``, ``"target"``,
         ``"loo"``, ``"james_stein"`` or ``"loo_logit"``. ``"target_cv"`` and
         ``"onehot"`` are rejected outright here. ``"ordinal"`` and
-        ``"frequency"`` are target-blind 1:1 maps and do not upgrade the
-        approximate-plugin FDR claim. ``"none"`` is the only value that
+        ``"frequency"`` are target-blind numeric maps over the levels
+        observed in positive-weight training rows and do not upgrade the
+        approximate-plugin FDR claim. Ordinal codes are ``0..C-1`` in natural
+        order -- an ordered ``Categorical`` keeps its declared category order,
+        otherwise bool, then numeric levels ascending by value (ints and
+        floats together), then datetime-like by value, then strings in
+        ordinary string order, then other types, with a fitted missing level
+        last -- while frequency emits the level's share of training weight;
+        unknown levels map to ``-1`` / ``0`` and a numeric level whose exact
+        type is absent from the fitted vocabulary matches the numerically
+        equal fitted level (``1`` matches a fitted ``1.0``). Ordinal assigns
+        distinct codes to fitted levels, while frequency can give levels of
+        equal training weight the same value. A balanced categorical then
+        becomes constant under frequency encoding; ordinal can permute an
+        identifier-like column arbitrarily. Both
+        consume ``sample_weight``; ``"target"``, ``"loo"`` and
+        ``"james_stein"`` reject it. ``"none"`` is the only value that
         preserves the Model-X FDR claim; the four legacy supervised encodings
         warn and downgrade the claim as described above. Note that
         ``sift.select_fdr`` itself has no ``cat_encoding`` parameter: the
@@ -2851,20 +3188,31 @@ class KnockoffSelector(_BaseSelector):
     cache : FeatureCache or None, default=None
         Prebuilt Gaussian-copula cache to reuse. A named cache requires a
         DataFrame with identical columns in identical order; a cache built from
-        positional features requires the matching ndarray. A cache already
-        stores row weights, so ``sample_weight`` is rejected beside it, and a
-        supervised ``cat_encoding`` is rejected too.
-    include : sequence of names or positions, optional
+        positional features requires the matching ndarray. Only the row count
+        and the column names are checked, never the row values, so a cache must
+        be used with exactly the rows it was built from. A cache already stores
+        row weights, so ``sample_weight`` is rejected beside it, and it stores
+        no encoding provenance, so every ``cat_encoding`` other than ``"none"``
+        is rejected too -- ``"ordinal"`` and ``"frequency"`` outright, a
+        supervised one as soon as it has a column to encode.
+    include : sequence of column labels, optional
         Conditioning set. These features are not tested by the knockoff
         filter; they are prepended to the selected set in caller order.
         Any of ``include``, ``exclude``, or ``candidates`` requires
         ``include_provenance``.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels, optional
         Features removed from the tested discovery universe. Requires
         ``include_provenance``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels, optional
         Hard allow-list for the tested discovery universe. Requires
-        ``include_provenance``.
+        ``include_provenance``. On a DataFrame all three take column labels
+        and reject an integer that is not itself a label; integer positions
+        (and the generated ``x0``..``x{p-1}`` names) are accepted only for
+        ndarray ``X``. A one-shot iterator -- a generator, ``map``,
+        ``filter`` or ``iter(list)`` -- raises ``TypeError`` at ``fit``
+        because a refit would see it empty; pass a list or tuple.
+        ``sift.select_fdr`` materializes such an iterator once per call
+        instead.
     feature_blocks : mapping, {"auto"} or None, default None
         Additive alias of ``feature_groups``. A mapping is converted to
         per-column labels (unlisted columns stay singletons). ``"auto"``
@@ -2903,6 +3251,12 @@ class KnockoffSelector(_BaseSelector):
         Categorical columns the fitted encoder covered.
     categorical_encoder_ : object or None
         The fitted encoder, reused target-blind by ``transform``.
+    selector_metadata_ : dict
+        ``result_.selector_metadata`` of the last fit: the validity keys
+        (``fdr_control`` and friends), ``q``, ``statistic``, ``n_draws``,
+        ``eta``, the tested-universe counts, ``n_rows_original``,
+        ``n_rows_used``, ``random_state`` and ``subsample``. Unlike the filter
+        wrappers it carries no ``configured_options`` entry.
 
     Raises
     ------
@@ -3067,6 +3421,7 @@ class KnockoffSelector(_BaseSelector):
     ):
         _require_2d_x(X)
         validate_output_order(self.output_order)
+        self._reject_one_shot_conditioning()
         if groups is not None:
             raise ValueError(
                 "KnockoffSelector does not support row groups. Use feature_groups "

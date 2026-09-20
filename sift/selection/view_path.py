@@ -192,6 +192,48 @@ def _resolve_path_positions(
     return positions
 
 
+def _path_scoring_label(diagnostics: pd.DataFrame) -> str | None:
+    """The single scoring label ``evaluate_feature_path`` recorded, if any."""
+    if "scoring" not in diagnostics.columns:
+        return None
+    labels = {
+        str(value) for value in diagnostics["scoring"] if isinstance(value, str)
+    }
+    return labels.pop() if len(labels) == 1 else None
+
+
+def _path_run_configuration(
+    diagnostics: pd.DataFrame,
+    *,
+    tested_k: list[int],
+    best_k: int,
+    best_score: float,
+    n_path_features: int,
+) -> dict[str, Any]:
+    """Protocol the evaluation itself recorded, for the manifest.
+
+    ``evaluate_feature_path`` does not retain its ``random_state``, estimator
+    factory or splitter object, so the manifest reports the protocol it can
+    prove -- the k grid, the metric and the split count -- rather than
+    inventing the rest.
+    """
+    n_splits = int(diagnostics["n_splits"].iloc[0]) if len(diagnostics) else None
+    return {
+        "configured_options": {
+            "k_grid": list(tested_k),
+            "scoring": _path_scoring_label(diagnostics),
+            "n_splits": n_splits,
+            "feature_path_length": int(n_path_features),
+        },
+        "effective_options": {
+            "k": int(best_k),
+            "best_score": float(best_score),
+            "n_splits": n_splits,
+        },
+        "configuration_captured_at": "selection",
+    }
+
+
 def _as_feature_path_result(result: Any, input_features: Any) -> SelectionView:
     feature_path = _coerce_feature_names(result.feature_path)
     selected = _coerce_feature_names(result.features)
@@ -327,6 +369,15 @@ def _as_feature_path_result(result: Any, input_features: Any) -> SelectionView:
         "input_kind": "unknown",
         "criterion_se_definition": "population_std/sqrt(n_finite-1)",
     }
+    metadata.update(
+        _path_run_configuration(
+            diagnostics,
+            tested_k=tested_k,
+            best_k=best_k,
+            best_score=expected_best_score,
+            n_path_features=len(feature_path),
+        )
+    )
     return SelectionView(
         features=selected,
         indices=selected_indices,

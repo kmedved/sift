@@ -124,11 +124,20 @@ class KnockoffSelectionResult:
         One row per valid cache feature with columns ``feature``,
         ``selected_index``, ``W`` (the mean statistic over draws),
         ``selected``, ``selection_frequency``, ``relevance``, ``selector``,
-        and one ``W_draw_<i>`` column per draw.  Grouped runs add
-        ``feature_group``, and ``feature_groups="auto"`` adds
+        and one ``W_draw_<i>`` column per draw.  ``selection_frequency`` is
+        NaN for every row on a single-draw run: frequencies are only
+        computed when ``n_draws > 1``, so a conditioned-in ``include``
+        feature reads NaN at ``n_draws=1`` and 1.0 above it.  Grouped runs
+        add ``feature_group``, and ``feature_groups="auto"`` adds
         ``is_representative``.  In e-value mode, cluster expansion also adds
-        ``representative_evalue``; the ``evalue`` field is missing for
-        non-representative members because they were not tested coordinates.
+        ``representative_evalue``, the cluster representative's e-value
+        copied onto every member, while ``evalue`` itself is NaN for
+        non-representative members because they were never tested
+        coordinates.  Those NaNs make the column unusable as-is: the e-BH
+        helpers reject NaN, so filter to the tested universe -- the rows
+        where ``is_representative`` is True, equivalently the columns in
+        ``selector_metadata["evalue_universe"]`` -- before calling
+        ``e_bh_threshold`` or ``e_bh_reject``.
     threshold : float or None
         The knockoff threshold for a single draw -- ``inf`` when no data-driven
         threshold exists -- and ``None`` for a derandomized ``n_draws > 1``
@@ -211,6 +220,12 @@ class KnockoffSelectionResult:
             ``selection_frequency``, ``selected_index``, ``relevance``, and
             ``selector``, with a fresh zero-based index.  The per-draw
             ``W_draw_<i>`` columns of ``W`` are not carried over.
+            ``selection_frequency`` is NaN throughout on a single-draw run,
+            including for conditioned-in ``include`` features, because
+            frequencies are only computed when ``n_draws > 1``.  ``evalue``
+            is NaN for non-representative cluster members of a grouped
+            e-value run and must be filtered to the tested universe before
+            it is fed back to ``e_bh_threshold`` / ``e_bh_reject``.
 
         See Also
         --------
@@ -614,12 +629,24 @@ def _validate_evidence(e: np.ndarray) -> np.ndarray:
     """Validate e-value evidence while allowing valid positive infinity."""
     e_arr = np.asarray(e, dtype=np.float64).ravel()
     if np.isnan(e_arr).any() or np.any(e_arr < 0.0):
-        raise ValueError("e-values must be non-negative and may not contain NaN")
+        raise ValueError(
+            "e-values must be non-negative and may not contain NaN. A grouped "
+            "knockoff result stores NaN in W['evalue'] for every "
+            "non-representative cluster member, because only the cluster "
+            "representative was a tested coordinate; pass the tested universe "
+            "alone, e.g. W.loc[W['is_representative'], 'evalue'] or the columns "
+            "named by selector_metadata['evalue_universe']"
+        )
     return e_arr
 
 
 def e_bh_threshold(e: np.ndarray, q: float, *, m: int | None = None) -> float:
-    """Return the e-BH cutoff over ``m`` hypotheses, or ``inf`` if none reject."""
+    """Return the e-BH cutoff over ``m`` hypotheses, or ``inf`` if none reject.
+
+    ``e`` must be the tested universe with no NaN. A grouped knockoff result's
+    ``W["evalue"]`` is NaN for non-representative cluster members and has to be
+    filtered to ``W["is_representative"]`` before it is passed here.
+    """
     e_arr = _validate_evidence(e)
     q_float = _validate_probability(q, "q")
     m_eff = int(e_arr.size if m is None else m)
@@ -638,7 +665,12 @@ def e_bh_threshold(e: np.ndarray, q: float, *, m: int | None = None) -> float:
 
 
 def e_bh_reject(e: np.ndarray, q: float, *, m: int | None = None) -> np.ndarray:
-    """Boolean e-BH rejection mask on the common tested universe."""
+    """Boolean e-BH rejection mask on the common tested universe.
+
+    Like ``e_bh_threshold``, ``e`` must hold the tested coordinates only: the
+    NaN entries a grouped result carries for non-representative cluster
+    members are rejected rather than skipped.
+    """
     e_arr = _validate_evidence(e)
     thresh = e_bh_threshold(e_arr, q, m=m)
     if not np.isfinite(thresh):
@@ -968,6 +1000,17 @@ def _validate_prebuilt_cache_structure(
     validate_rxx: bool = True,
 ) -> None:
     """Validate the structural contract of a prebuilt knockoff cache."""
+    from sift.estimators.classic_cache import is_classic_cache
+
+    # A classic cache has none of the Gaussian fields, so without this it fails
+    # as "missing required structural fields" and never names the real mistake.
+    if is_classic_cache(cache):
+        raise TypeError(
+            "cache is a ClassicFeatureCache, but this Gaussian entry point requires "
+            "a FeatureCache from sift.build_cache; rebuild it with "
+            "sift.build_cache(X, compute_Rxx=True), or pass the ClassicFeatureCache "
+            "to select_mrmr, select_jmi, or select_jmim"
+        )
     try:
         cache_vars = vars(cache)
     except TypeError:
@@ -1762,6 +1805,9 @@ def sample_knockoffs(
 
     Raises
     ------
+    TypeError
+        If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
+        ``FeatureCache`` from ``build_cache``.
     ValueError
         If the cache fails its structural or provenance checks, carries
         duplicate feature names, has weights that are non-finite, negative, or
@@ -2390,9 +2436,15 @@ def select_fdr(
     eta : float, default 0.5
         Selection-frequency threshold in ``(0, 1]`` applied when
         ``n_draws > 1`` and ``aggregation`` is omitted or
-        ``"selection_frequency"``.  Ignored for a single draw and for
-        ``aggregation="evalues"``.  With e-values it still controls the
-        offset-zero selection-frequency diagnostic; it never controls e-BH.
+        ``"selection_frequency"``.  Ignored for a single draw.  Under
+        ``aggregation="evalues"`` it never changes the selection, which is
+        e-BH over the averaged e-values; it only rescores the reported
+        offset-0 frequency-vote counterfactual
+        ``selector_metadata["n_discoveries_offset_0"]``, the number of
+        features an ``offset=0`` vote at this ``eta`` would have returned.
+        The per-draw counts ``n_discoveries_offset_0_per_draw`` and the
+        ``offset_zero_selection_sets`` diagnostic are per draw and do not
+        depend on ``eta``.
     aggregation : {None, "evalues", "selection_frequency"}, default None
         How to combine ``n_draws > 1``.  ``None`` keeps the legacy rule:
         one draw uses the knockoff threshold; several draws vote by
@@ -2500,6 +2552,9 @@ def select_fdr(
 
     Raises
     ------
+    TypeError
+        If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
+        ``FeatureCache`` from ``build_cache``.
     ValueError
         If neither or both of ``X`` and ``cache`` are given; if ``y`` is
         ``None``, non-finite, or has the wrong row count; if ``q`` or ``eta``
