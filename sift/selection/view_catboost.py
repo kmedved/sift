@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections.abc import Iterable, Mapping, Set
@@ -17,6 +18,55 @@ from sift.selection.view import (
     _label_token,
     _strict_integer,
 )
+
+
+# Seed keys read from a ``selector_metadata`` mapping if the result carries
+# one, mirroring ``sift.selection.view_boruta``.  ``CatBoostSelectionResult``
+# has no such field today, so the manifest normally records only the scoring
+# protocol its other fields prove.
+_RUN_CONFIGURATION_KEYS = (
+    "random_state",
+    "realized_random_state",
+    "configured_options",
+)
+
+
+def _catboost_run_configuration(
+    result: Any,
+    *,
+    metric: str,
+    higher_is_better: bool,
+    selection_patience: int,
+    k_grid: list[int],
+    best_k: int,
+    n_selected: int,
+) -> dict[str, Any]:
+    """Scoring protocol the run recorded, plus any seed it passed along."""
+    configured: dict[str, Any] = {
+        "metric": metric,
+        "higher_is_better": higher_is_better,
+        "selection_patience": selection_patience,
+        "k_grid": list(k_grid),
+    }
+    carried: dict[str, Any] = {}
+    snapshot = getattr(result, "selector_metadata", None)
+    if isinstance(snapshot, Mapping):
+        for key in _RUN_CONFIGURATION_KEYS:
+            if key not in snapshot:
+                continue
+            value = copy.deepcopy(snapshot[key])
+            if key == "configured_options" and isinstance(value, Mapping):
+                configured.update(dict(value))
+            else:
+                carried[key] = value
+    carried["configured_options"] = configured
+    carried["effective_options"] = {
+        "k": int(best_k),
+        "n_features_selected": int(n_selected),
+        "metric": metric,
+    }
+    carried["configuration_captured_at"] = "selection"
+    return carried
 
 
 def _catboost_label_key(value: Any) -> str:
@@ -458,6 +508,17 @@ def _as_catboost_result(result: Any, input_features: Any) -> SelectionView:
         "table_complete": table_complete,
         "input_kind": "unknown",
     }
+    metadata.update(
+        _catboost_run_configuration(
+            result,
+            metric=result.metric,
+            higher_is_better=higher_is_better,
+            selection_patience=selection_patience,
+            k_grid=sorted(scores_by_k),
+            best_k=best_k,
+            n_selected=len(selected),
+        )
+    )
     diagnostics = {
         "scores_std_by_k": scores_std_by_k,
         "all_scores": all_scores,

@@ -1061,11 +1061,15 @@ def test_boruta_legacy_shape_and_pickle_remain_unchanged():
         "n_iter",
         "shadow_thresholds",
         "mean_importance",
+        # Optional run configuration for the reproducibility manifest; it
+        # defaults to None, so the legacy positional shape is unchanged.
+        "selector_metadata",
     ]
     result = _boruta_result()
     restored = pickle.loads(pickle.dumps(result))
 
     assert [field.name for field in fields(sift.BorutaResult)] == expected_fields
+    assert restored.selector_metadata is None
     assert callable(result.selected_features)
     assert result.selected_features() == ["dup"]
     assert type(restored) is sift.BorutaResult

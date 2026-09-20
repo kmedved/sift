@@ -6,9 +6,12 @@ import base64
 import copy
 import dataclasses
 import datetime
+import decimal
+import fractions
 import hashlib
 import json
 import math
+import uuid
 from collections.abc import Iterable, Mapping, Set
 from numbers import Real
 from pathlib import Path
@@ -98,10 +101,21 @@ def _label_token(value: Any) -> Any:
         payload = value.isoformat()
     elif isinstance(value, Path):
         payload = str(value)
+    elif isinstance(value, complex):
+        # ``repr`` of a float is its shortest round-tripping decimal form, so
+        # the pair is exact and identical in every process.  NumPy complex
+        # scalars reach this branch as their Python counterpart above.
+        payload = {"real": repr(value.real), "imag": repr(value.imag)}
+    elif isinstance(value, (decimal.Decimal, fractions.Fraction, uuid.UUID)):
+        # ``str`` is the canonical, process-independent spelling for all
+        # three: "1.50" keeps its trailing zero, Fractions arrive normalized,
+        # and a UUID prints its 36-character hex form.
+        payload = str(value)
     else:
         raise TypeError(
             f"{type_name} has no deterministic identity token; pass primitive, "
-            "datetime/timedelta, bytes, path, tuple, set, or frozenset values"
+            "datetime/timedelta, bytes, path, tuple, set, frozenset, Decimal, "
+            "Fraction, UUID, or complex values"
         )
     return {"type": type_name, "value": payload}
 

@@ -504,6 +504,15 @@ def permutation_importance(
     parallel_backend = _validate_parallel_backend(parallel_backend)
     sample_weight_supplied = sample_weight is not None
 
+    y_arr = np.asarray(y)
+    if y_arr.ndim >= 2 and int(y_arr.shape[1]) > 1:
+        raise ValueError(
+            "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+            "and select_cached(method='cefsplus'); "
+            "permutation_importance needs a single target, so pass one column "
+            f"of y at a time; got y with shape {tuple(y_arr.shape)}"
+        )
+
     n = len(y)
     X_arr = None
     if isinstance(X, pd.DataFrame):
@@ -521,7 +530,12 @@ def permutation_importance(
     w = ensure_weights(sample_weight, n, normalize=True)
     if random_state is None:
         warn_random_state_none("permutation_importance")
-    rng = np.random.default_rng(random_state)
+        # Draw the entropy ourselves instead of letting the generator do it,
+        # so the run stays reproducible from its manifest.
+        resolved_random_state: Any = int(np.random.SeedSequence().generate_state(1)[0])
+    else:
+        resolved_random_state = random_state
+    rng = np.random.default_rng(resolved_random_state)
     seeds = rng.integers(0, 2**31, size=(n_features, n_repeats))
 
     requested_permute_method = permute_method
@@ -551,6 +565,32 @@ def permutation_importance(
                 "dataframe" if isinstance(X, pd.DataFrame) else "positional"
             ),
             "selection_semantics": "ranking_only",
+            "random_state": _metadata_scalar(random_state),
+            # The seed the permutations actually used: equal to random_state
+            # when one was given, otherwise the entropy drawn above.  Replaying
+            # the run with random_state set to it reproduces every drop.
+            "realized_random_state": (
+                int(resolved_random_state)
+                if isinstance(resolved_random_state, (int, np.integer))
+                and not isinstance(resolved_random_state, (bool, np.bool_))
+                else None
+            ),
+            # Only the settings that change the numbers; n_jobs and the
+            # backend are recorded above but do not belong to the identity of
+            # the run, which is seeded per (feature, repeat).
+            "configured_options": {
+                "n_repeats": n_repeats,
+                "scoring": _scoring_label(scoring),
+                "higher_is_better": score_higher_is_better,
+                "permute_method": requested_permute_method,
+                "block_size": _metadata_scalar(block_size),
+                "random_state": _metadata_scalar(random_state),
+            },
+            "effective_options": {
+                "permute_method": permute_method,
+                "n_repeats": n_repeats,
+            },
+            "configuration_captured_at": "selection",
         }
         if return_result
         else {}
