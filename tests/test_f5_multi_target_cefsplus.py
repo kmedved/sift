@@ -24,10 +24,37 @@ from sift.selection.auto_k_objective import _log_comb, _penalty_array
 from sift.selection.cefsplus_multi import (
     TARGET_CONDITION_CAP,
     _spd_inverse_middle,
-    joint_logdet_oracle,
     multivariate_ic_df,
 )
 from sift.selection.panel import build_candidate_panel
+
+_SHRINK = 1e-6
+
+
+def _joint_mi_oracle(R, C, Ryy, selected, shrink=_SHRINK):
+    """``log|Σ_Y| - log|Σ_{Y|S}|`` for a fixed set ``S``, in plain numpy.
+
+    Takes the cache-derived copula Gram blocks as given and evaluates the
+    Schur complement ``Σ_Y - Cᵀ G⁻¹ C`` with ``np.linalg`` only, so it shares
+    no code path with the greedy residual recursion it checks. ``shrink`` is
+    the documented off-diagonal shrink of the CEFS+ objective (unit
+    diagonals kept), not a helper import.
+    """
+    scale = 1.0 - float(shrink)
+    sigma_y = scale * np.asarray(Ryy, dtype=np.float64)
+    np.fill_diagonal(sigma_y, 1.0)
+    sign_y, logdet_y = np.linalg.slogdet(sigma_y)
+    assert sign_y > 0
+    idx = np.asarray(list(selected), dtype=np.int64)
+    if idx.size == 0:
+        return 0.0
+    g = scale * np.asarray(R, dtype=np.float64)[np.ix_(idx, idx)]
+    np.fill_diagonal(g, 1.0)
+    c = scale * np.asarray(C, dtype=np.float64)[idx]
+    resid = sigma_y - c.T @ np.linalg.solve(g, c)
+    sign_r, logdet_r = np.linalg.slogdet(resid)
+    assert sign_r > 0
+    return float(logdet_y - logdet_r)
 
 
 def _shared_signal_frame(n=240, p=12, q=3, seed=0):
@@ -82,7 +109,7 @@ def test_joint_gain_matches_direct_logdet_oracle():
     local = [
         int(np.flatnonzero(panel.original == idx)[0]) for idx in indices
     ]
-    oracle = joint_logdet_oracle(panel.R, panel.C, panel.Ryy, local)
+    oracle = _joint_mi_oracle(panel.R, panel.C, panel.Ryy, local)
     np.testing.assert_allclose(float(objective[-1]), float(oracle), rtol=1e-8, atol=1e-8)
 
 
@@ -163,10 +190,10 @@ def test_include_conditions_path_keeps_k_discoveries_and_conditional_objective()
     orig_to_local = {int(o): i for i, o in enumerate(panel.original)}
     include_local = [orig_to_local[int(X.columns.get_loc("f3"))]]
     disc_local = [orig_to_local[int(i)] for i in idx if int(i) != int(X.columns.get_loc("f3"))]
-    oracle_full = joint_logdet_oracle(
+    oracle_full = _joint_mi_oracle(
         panel.R, panel.C, panel.Ryy, include_local + disc_local
     )
-    oracle_inc = joint_logdet_oracle(panel.R, panel.C, panel.Ryy, include_local)
+    oracle_inc = _joint_mi_oracle(panel.R, panel.C, panel.Ryy, include_local)
     np.testing.assert_allclose(
         float(obj[-1]), float(oracle_full - oracle_inc), rtol=1e-8, atol=1e-8
     )
