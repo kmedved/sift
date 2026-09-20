@@ -35,7 +35,7 @@ python scripts/generate_data_type_matrix.py
 
 Enabling options used for `cond` cells:
 
-- categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra); `ordinal`/`frequency` are also in-library 1:1 maps
+- categorical filters/Boruta: `cat_encoding="target_cv"` (in-library; no extra); `ordinal`/`frequency` are also in-library target-blind numeric maps
 - `KnockoffSelector` categorical: `cat_encoding="loo_logit"` (warns; `fdr_control='none'`)
 - groups/time: `k="auto"` with `AutoKConfig(k_method="evaluate")` and the matching split strategy
 - `ModelSelector` categorical: width-preserving sklearn `OrdinalEncoder`
@@ -81,6 +81,20 @@ tests pin those post-install outcomes and do not rewrite the page.
 | `catboost_regression` | no | dep | dep | no | no | dep | dep | dep |
 | `catboost_classif` | no | dep | dep | no | no | dep | dep | dep |
 <!-- data-type-matrix:end -->
+
+## Comparison and time-aware splitters
+
+`compare` refits selector factories and a downstream estimator on each
+training fold. Its feature-type support therefore depends on both of
+those objects; it does not insert an imputer or categorical encoder.
+`PurgedTimeSeriesSplit` and `GroupPurgedTimeSeriesSplit` split rows
+using numeric or datetime-like `time`, optional `event_end`, and
+embargo. The grouped splitter also needs entities whose lifespans
+do not span each validation boundary; persistent entities should use
+`PurgedTimeSeriesSplit` if sharing entities across folds is intended.
+Pass a purged splitter with `time` and `event_end` to `compare` for
+label-horizon purging. These orchestration APIs are described here
+separately because they do not themselves select from a feature type.
 
 ## Observed non-baseline cells
 
@@ -250,7 +264,7 @@ copied onto this page.
   `cond` cells. Filter selectors also accept `cat_encoding="onehot"`
   (atomic `{column}__{level}` blocks; not a matrix enabling option and
   rejected on knockoffs/Boruta) and `cat_encoding="ordinal"` /
-  `"frequency"` (target-blind 1:1 maps; KnockoffSelector accepts
+  `"frequency"` (target-blind numeric maps; KnockoffSelector accepts
   them without an FDR upgrade; Boruta accepts train-importance only).
   `loo_logit` is also in-library (binary).
   `loo` / `target` /

@@ -1,6 +1,5 @@
 """Compare rejects unused overrides and reports the design actually scored."""
 
-from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -56,7 +55,7 @@ def test_requested_holdout_size_belongs_to_cv_splitter():
 def test_compare_allows_labels_without_optional_identity_hash(mode):
     rng = np.random.default_rng(23)
     X = pd.DataFrame(
-        rng.normal(size=(60, 4)), columns=[Decimal(i) for i in range(4)]
+        rng.normal(size=(60, 4)), columns=[object() for _ in range(4)]
     )
     y = X.iloc[:, 0].to_numpy() + rng.normal(size=60)
     result = compare(

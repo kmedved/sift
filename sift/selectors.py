@@ -779,13 +779,28 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             self, call_params, feature_names
         )
 
-        result = self._selector_fn(
-            X_fit,
-            y,
-            k=k,
-            return_result=True,
-            **call_params,
-        )
+        try:
+            result = self._selector_fn(
+                X_fit,
+                y,
+                k=k,
+                return_result=True,
+                **call_params,
+            )
+        except ValueError as exc:
+            if (
+                isinstance(onehot_encoder, OneHotBlockEncoder)
+                and str(exc).startswith("include features were dropped as constant or non-finite")
+            ):
+                raw_include = list(dict.fromkeys(
+                    onehot_encoder.parent_of(name)
+                    for name in call_params.get("include", ())
+                ))
+                raise ValueError(
+                    "include features were dropped as constant or non-finite: "
+                    f"{raw_include!r}. Pass raw columns that vary on the retained rows"
+                ) from exc
+            raise
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         if hasattr(result, "selected_indices"):

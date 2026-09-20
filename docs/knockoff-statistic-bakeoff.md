@@ -129,11 +129,19 @@ Paired `ridge - relevance` on shared seeds:
 **Recommendation for the 1.0 owner decision, on this evidence:** retain
 `statistic="relevance"`. Paired ridge-minus-relevance power is +0.0083
 (independent), −0.1167 (AR(1)), −0.5444 (block), +0.010 (dense-weak). Ridge
-reduces realized FDP but materially loses power on the correlated designs and
+selected at least one feature in 28/30 AR(1) and 14/30 block seeds, versus
+30/30 for relevance on both. Conditional on both firing, its power difference
+was −0.0536 (AR(1), 28 seeds) and −0.0774 (block, 14 seeds). CEFS+ fired in
+only 1/30 AR(1) and 0/30 block seeds. Ridge reduces realized FDP but loses
+power on the correlated designs and
 costs more here. Relevance FDP means are about 0.0073 / 0.0103 / 0.0606 /
 0.0215, all sampled below `q=0.1`. That is an empirical calibration check on
 these Gaussian draws, not a formal FDR certificate and not an upgrade of
 `approximate_plugin`.
+
+Cells displayed as `0.000 ± 0.000` are rounded to three decimals; inspect
+the committed CSV before treating them as exact zeros. A zero discovery count
+does represent an empty selection, distinct from a failed run.
 
 This does **not** claim universal dominance, suppressor or mixed-sign
 support, or `p ≫ n` coverage. Standard errors describe Monte Carlo sampling

@@ -180,10 +180,11 @@ selector.fit(X, y, groups=entity_ids)
 Regression filters accept `within="groups"` or `within="two_way"` so ranks see
 within-entity (and optionally within-time) variation. Weighted entity means
 are subtracted from `X` and `y` before ranks; `two_way` alternates entity and
-time demeaning for a fixed five iterations. Sklearn `transform` still returns
+time demeaning until convergence (at most 200 passes). Sklearn `transform` still returns
 the selected raw columns. Auto-k evaluate, Gaussian CV, and xfit-objective
-fit those means on training rows only; an entity unseen in training falls
-back to the training grand mean.
+fit those means on training rows only; partially unseen validation levels use
+the training grand mean with a warning. Routes where none can be seen are
+rejected up front.
 
 ```python
 import numpy as np

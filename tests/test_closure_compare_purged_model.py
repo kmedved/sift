@@ -271,15 +271,11 @@ def test_grouped_purged_cap_matches_oracle_on_staggered_panels():
     rng = np.random.default_rng(4242)
     compared = 0
     for _ in range(60):
-        entities = int(rng.integers(4, 8))
         periods = int(rng.integers(10, 20))
-        groups = np.tile(np.arange(entities), periods)
-        time = np.repeat(np.arange(periods, dtype=np.int64), entities)
-        # Stagger entity lifespans so group exclusion cannot empty training.
-        keep = rng.random(groups.size) < 0.7
-        keep[: entities * 2] = groups[: entities * 2] % 2 == 0
-        keep[-entities * 2 :] = groups[-entities * 2 :] % 2 == 1
-        groups, time = groups[keep], time[keep]
+        # Each entity spans two neighboring periods; later validation groups
+        # do not erase the entire earlier training history.
+        time = np.repeat(np.arange(periods, dtype=np.int64), 2)
+        groups = np.repeat(np.arange(periods) // 2, 2)
         n = groups.size
         cap = int(rng.integers(1, 7))
         embargo = int(rng.integers(0, 3))
@@ -713,14 +709,14 @@ def test_regression_and_grouped_and_time_routes_keep_the_unstratified_default():
         )
     ]
 
-    grouped = compare(_kbest(), X, y, groups=groups, task="classification")
+    y_cls = (np.asarray(y) > np.median(y)).astype(int)
+    grouped = compare(_kbest(), X, y_cls, groups=groups, task="classification")
     assert grouped.diagnostics["split"]["type"].endswith("GroupKFold")
     assert grouped.folds["val_index_sha256"].tolist() == [
         _index_sha(val)
         for _, val in GroupKFold(n_splits=5).split(np.empty((90, 1)), None, groups)
     ]
 
-    y_cls = (np.asarray(y) > np.median(y)).astype(int)
     timed = compare(
         {"kb": lambda: SelectKBest(f_classif, k=2)},
         X,

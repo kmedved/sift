@@ -1369,16 +1369,19 @@ compared.summary[["selector", "score_mean", "mean_k"]]
 ```
 
 `result.reproducibility_()`, `SelectionView.reproducibility_()`, and
-`CompareResult.reproducibility_()` export a JSON-safe provenance manifest.
-Package versions, BLAS identity, and git commit (looked up from the sift
-package tree) are labelled export-time. New runs retain known configuration
-and seeds, original vs used row counts measured from the cache or subsample,
+`CompareResult.reproducibility_()` export a schema-`"1"` JSON-safe provenance
+manifest. Its top-level blocks are `environment`, `input`, `configuration`,
+and `folds`; `configuration` separates `configured`, `effective`, and `seeds`
+and labels when they were captured. Hashes use typed tokens and are comparable
+within the same schema version. Package versions, Python, platform, BLAS
+identity without absolute library paths, git commit and package-tree dirty
+state are labelled export-time. New runs retain known configuration and
+realized seeds, original vs used row counts measured from the cache or subsample,
 requested non-data selector options separately from resolved metadata,
 routed/knockoff settings including AutoKConfig, and compare's instantiated
 selector, estimator (including empty Dummy fallback), and splitter snapshots.
 Prebuilt FeatureCache parameters are compact provenance, not copied arrays.
-Caller
-`X` is validated against known original rows and ordered typed columns when
+Caller `X` is validated against known original rows and ordered typed columns when
 those facts exist; data hashing is opt-in and never stores `X`. Legacy
 manually constructed results stay explicitly partial.
 
@@ -1638,7 +1641,9 @@ selector.set_threshold(best_threshold)
 sklearn-style selector or SIFT wrapper. It does not replace `StabilitySelector`.
 `resample="half"` draws without replacement, `resample="bootstrap"` draws with
 replacement, and `resample="blocks"` needs both `groups` and `time` at fit
-time. `aggregation="evalues"` is valid only for `KnockoffSelector` and reuses
+time. A block resample with an inner-CV base needs `sample_weight` support to
+preserve multiplicities on unique source rows; `half` ignores panel blocks.
+`aggregation="evalues"` is valid only for `KnockoffSelector` and reuses
 that class's native full-data e-value path; it is not a bootstrap average of
 e-values and does not create a new FDR claim for frequency voting.
 

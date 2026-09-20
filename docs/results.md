@@ -283,8 +283,9 @@ The proxy block is deliberately omitted from `to_dict()`; its presence, byte
 count, and candidate count are recorded in metadata. Without the explicit
 option, both proxy accessors raise with guidance to rerun selection.
 
-`view.redundancy_report(r_min=0.8)` lists every qualifying edge across the
-selected set, with raw positions next to labels so duplicate names stay
+`view.redundancy_report(r_min=0.8)` lists qualifying selected-to-candidate
+edges; pass `include_selected=True` to include selected-to-selected edges.
+Raw positions sit next to labels so duplicate names stay
 identifiable. `view.proxy_clusters(r_min=0.8)` groups selected features with
 their qualifying stand-ins by connected components on that same block: a
 candidate correlated with two selected anchors joins those anchors, and a

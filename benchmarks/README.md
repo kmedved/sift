@@ -73,7 +73,7 @@ promotion record in the shared JSON schema.
 
 The committed `runtime_scaling_2026-09-03` CSV and sidecar keep that stable
 basename. They were generated from clean implementation commit
-`3c6f9d1b3777211be86832c1b7e6f58b466faeaf` with `dirty=false` and are
+`06c569e` with `dirty=false` and are
 release-grade evidence for 0.9.1.
 
 `bench_auto_k.py --methods ...` accepts comma-separated methods including
@@ -96,7 +96,8 @@ promotion campaign. The full result files are committed under
   `auto_k_v2_catboost_summary.csv`: derived aggregate tables.
 - `auto_k_v2_d9_fixed_k_path_2026-08-31.csv` and
   `auto_k_v2_d9_fixed_k_path_2026-08-31.provenance.json`: fresh full-size
-  fixed-k path evidence from clean commit `88a8705`.
+  fixed-k path evidence from clean commit `88a8705` (reachable via
+  `refs/pull/72/head`; PR #72 was squash-merged).
 - `auto_k_v2_gates_mean_oracle_2026-08-31.csv`: dated canonical recomputation
   using the explicit mean-`k_oracle` convention and the fresh denominator.
 
@@ -152,7 +153,8 @@ The path-timing seeds must exactly match the D9 method-timing CSV. `mean` is the
 declared convention for the dated canonical recomputation. The clean full run
 recorded 0.1373203751 s for seed 0 and 0.1353520839 s for seed 1 (mean
 0.1363362295 s). Its sidecar binds those medians and all ten raw measured calls
-to commit `88a8705`, reports `dirty=false`, and verifies the CSV checksum. The
+to commit `88a8705` (fetched from `refs/pull/72/head` in CI), reports
+`dirty=false`, and verifies the CSV checksum. The
 resulting table is reproducible from its named inputs, but its G5 path-only
 ratios combine the legacy July method timings with a newly measured denominator;
 it is not a retroactive measurement of the missing July denominator or a

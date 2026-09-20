@@ -1513,6 +1513,8 @@ def _select_cached_impl(
             cache.valid_cols,
             feature_names=cache_names,
             label="include",
+            raw_names=getattr(cache, "_raw_name_by_encoded", None),
+            prebuilt_cache=not getattr(cache, "_built_for_filter_call", False),
         )
         pool_valid = map_original_to_valid(
             resolved.discovery,

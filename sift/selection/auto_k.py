@@ -455,7 +455,7 @@ def select_k_auto(
         ``'james_stein'`` require the optional ``category_encoders``
         dependency; ``'loo_logit'`` requires ``task='classification'``.
         ``'onehot'`` is in-library and encodes each fold's training rows only.
-        ``'ordinal'`` and ``'frequency'`` are target-blind 1:1 maps fitted on
+        ``'ordinal'`` and ``'frequency'`` are target-blind numeric maps fitted on
         the fold-train frame (unknown ``-1`` / ``0``). For time-holdout
         evaluate, the path map is also train-only. Other time-bearing auto-k
         is not implied. Prefix-only ranking on non-holdout splits may still
@@ -506,7 +506,8 @@ def select_k_auto(
     within : {'groups', 'two_way'} or None, default None
         Fold-local panel demeaning applied after encoding and before the
         prefix proxy model. Regression only. Means are fit on training rows
-        only; unseen entities fall back to the training grand mean.
+        only; partially unseen validation entities use the training grand mean
+        with a warning, while all-unseen routes raise before scoring.
         Datetime/timedelta path columns are rejected before conversion.
 
     Returns

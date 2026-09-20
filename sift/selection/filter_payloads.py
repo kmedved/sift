@@ -1279,15 +1279,19 @@ def _cache_for_gaussian(
                 "within demeaning removed all feature variation; "
                 "no within-entity signal remains"
             )
+    cache = build_cache(
+        X_encoded,
+        sample_weight=effective_weight,
+        subsample=_kw(ctx, "subsample", 50_000),
+        random_state=_kw(ctx, "random_state", 0),
+        n_jobs=ctx.n_jobs,
+        rank_backend=ctx.rank_backend,
+    )
+    cache._built_for_filter_call = True
+    if ctx.onehot_parents is not None:
+        cache._raw_name_by_encoded = dict(zip(ctx.feature_names, ctx.onehot_parents))
     return (
-        build_cache(
-            X_encoded,
-            sample_weight=effective_weight,
-            subsample=_kw(ctx, "subsample", 50_000),
-            random_state=_kw(ctx, "random_state", 0),
-            n_jobs=ctx.n_jobs,
-            rank_backend=ctx.rank_backend,
-        ),
+        cache,
         cat_features,
         effective_weight,
         target_cv_metadata,

@@ -93,7 +93,7 @@ the migration notes, and the deprecation ledger are in the
   normalized result view.
 - `cat_encoding="target_cv"` adds leakage-safe, fold-centered target encoding
   for DataFrames with string columns, with no optional dependency.
-  `cat_encoding="ordinal"` and `"frequency"` are target-blind 1:1 maps on the
+  `cat_encoding="ordinal"` and `"frequency"` are target-blind numeric maps on the
   same surfaces (unknown `-1` / `0`; no extra dependency).
 - Selector classes gain `output_order`, `inverse_transform`, sklearn's
   `feature_names_in_` contract, `set_output(transform="pandas")`, and explicit
@@ -250,12 +250,13 @@ importable from `sift` itself, warning-free, throughout 0.9.
 | Core filters | `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary` |
 | q-calibrated knockoffs | `select_fdr`, `KnockoffSelector`, `sample_knockoffs` |
 | Automatic `k` | `k="auto"` for measured CEFS+ auto-routing, `AutoKConfig` and its presets, `select_k_auto`, `select_k_elbow`, `select_k_penalized_objective`, `select_k_chi2_stop`, `select_k_perm_gap`, `select_k_gaussian_cv` |
-| Result objects and views | `as_result`, `SelectionView`, `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult` |
-| Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `BorutaSelector`, `StabilitySelector`, `Stabilized` |
-| Cache-backed Gaussian paths | `build_cache`, `select_cached`, `FeatureCache` |
+| Result objects and views | `as_result`, `SelectionView`, `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, `CompareResult` |
+| Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `BorutaSelector`, `StabilitySelector`, `Stabilized`, `ModelSelector` |
+| Cache-backed paths | `build_cache`, `select_cached`, `FeatureCache`, `build_classic_cache`, `ClassicFeatureCache` |
 | Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif`, `Stabilized` |
 | Model-based importance | `permutation_importance`, `BorutaSelector`, `select_boruta`, `select_boruta_shap`, CatBoost helpers |
-| Diagnostics | `set_verbosity`, `evaluate_feature_path`, `sift.experimental` |
+| Diagnostics and comparison | `set_verbosity`, `evaluate_feature_path`, `compare`, `sift.experimental` |
+| Time-aware splits | `PurgedTimeSeriesSplit`, `GroupPurgedTimeSeriesSplit` |
 
 ## Choosing a Selector
 

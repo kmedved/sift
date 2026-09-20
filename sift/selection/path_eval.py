@@ -282,7 +282,7 @@ def resolve_event_end(X, event_end, *, time, n_rows: int):
     the column is extracted and dropped from ``X``, so it never reaches the
     design matrix. Returns ``(X, event_end_array_or_None)``. Values are only
     validated here; forwarding them to a splitter that cannot consume them
-    is rejected in :func:`_build_splits`.
+    is rejected in `_build_splits`.
     """
     if event_end is None:
         return X, None

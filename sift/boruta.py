@@ -118,6 +118,8 @@ class BorutaResult:
     mean_importance : ndarray of shape (n_features,)
         Mean observed importance per feature over the iterations in which it
         was still active; ``NaN`` for a feature that never received one.
+    selector_metadata : dict or None
+        Captured run configuration used by the reproducibility manifest.
 
     See Also
     --------
@@ -300,7 +302,7 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         allow_full_data_target_encoding=True, because tree learners can read a
         row's own target back out of them. Any supervised value is rejected
         with importance_data="test". ``ordinal`` / ``frequency`` are
-        target-blind 1:1 maps on ``importance_data='train'``; they are
+        target-blind numeric maps on ``importance_data='train'``; they are
         rejected with ``importance_data='test'`` because encoding currently
         runs before the split. sample_weight is consumed by
         "target_cv", "loo_logit", "ordinal", and "frequency".
@@ -1470,7 +1472,7 @@ def select_boruta(
         ``allow_full_data_target_encoding=True``, because tree learners can
         read a row's own target back out of them. Any supervised value is
         rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
-        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        are target-blind numeric maps on ``importance_data='train'`` and are
         rejected with ``importance_data='test'``. ``sample_weight`` is
         consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5
@@ -1704,7 +1706,7 @@ def select_boruta_shap(
         encodings fit on the full dataset and therefore require
         ``allow_full_data_target_encoding=True``. Any supervised value is
         rejected with ``importance_data="test"``. ``ordinal`` / ``frequency``
-        are target-blind 1:1 maps on ``importance_data='train'`` and are
+        are target-blind numeric maps on ``importance_data='train'`` and are
         rejected with ``importance_data='test'``. ``sample_weight`` is
         consumed by "target_cv", "loo_logit", "ordinal", and "frequency".
     target_cv_n_splits : int, default=5

@@ -290,7 +290,7 @@ def test_integer_entries_are_labels_on_a_dataframe_and_positions_on_ndarray(para
     X, y = _frame()
     values = [0] if param != "candidates" else [0, 1]
 
-    with pytest.raises(ValueError, match="unknown feature"):
+    with pytest.raises(ValueError, match="integer positions are accepted only for ndarray"):
         CEFSPlusSelector(k=1, verbose=False, **{param: values}).fit(X, y)
 
     positional = CEFSPlusSelector(k=1, verbose=False, **{param: values})
@@ -300,6 +300,27 @@ def test_integer_entries_are_labels_on_a_dataframe_and_positions_on_ndarray(para
     labelled = pd.DataFrame(X.to_numpy(), columns=[0, 1, 2, 3, 4])
     by_label = CEFSPlusSelector(k=1, verbose=False, **{param: values}).fit(labelled, y)
     assert by_label.selected_features_  # integers that ARE labels resolve
+
+
+def test_onehot_unusable_include_reports_the_raw_column():
+    rng = np.random.default_rng(12)
+    X = pd.DataFrame({
+        "constant_category": ["only"] * 80,
+        "signal": rng.normal(size=80),
+        "noise": rng.normal(size=80),
+    })
+    y = X["signal"].to_numpy() + 0.1 * rng.normal(size=80)
+    common = {"cat_features": ["constant_category"], "cat_encoding": "onehot",
+              "include": ["constant_category"], "verbose": False}
+    for run in (
+        lambda: select_cefsplus(X, y, 1, **common),
+        lambda: select_cefsplus(X, y, "auto", **common),
+        lambda: CEFSPlusSelector(k=1, **common).fit(X, y),
+    ):
+        with pytest.raises(ValueError, match="constant_category") as caught:
+            run()
+        assert "constant_category__only" not in str(caught.value)
+        assert "cache" not in str(caught.value)
 
 
 @pytest.mark.parametrize("encoding", ["onehot", "ordinal", "frequency"])

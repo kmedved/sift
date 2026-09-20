@@ -1,24 +1,11 @@
-# SIFT Python 3.11 floor and audited branch cleanup — complete
+# SIFT 0.9.1 closure — in progress
 
-## Objective and authority
+Objective: complete Fable's paused closure fixes on a local integration branch, verify them, refresh clean-source runtime evidence, and hand Astra a reviewable result. No push, PR, main merge, tag, release or version bump; the owner version-name decision remains open.
 
-Raise the minimum supported Python to 3.11, add PyArrow to the Python 3.12 CI test job, land the changes, close superseded PRs #43 and #51, delete the exact audited allowlist of 27 local and 85 origin feature branches, prune four stale worktree registrations, and finish clean and synchronized on main. No tags, releases, PyPI publication, unrelated cleanup, stashes, archive branches, or backup worktrees.
+State: main clean at c72900c. Integration branch audit/0.9.1-closure-fixes contains Fable's CI provenance fix and seven merge commits preserving all closure branches. Known compare and manifest failures were repaired; one-hot conditioning reports raw names for function and wrapper routes; remaining code/docstring gaps and Markdown pass are integrated. Frozen knockoff bakeoff artifacts are unchanged.
 
-## Completed work
+Decisive checks: integrated suite 2760 passed, 41 skipped, 1 runtime-binding test deselected pending evidence refresh; 272 focused docs tests passed with 15 skips; strict MkDocs, Ruff, API generator and data-type generator passed. The 12-case compare and 4-case path-evaluation A/B matched c72900c except intended classification stratification. Local CatBoost environment: 75 marked tests and 41 adapter/view tests passed. CI provenance fix was validated in a fresh clone by Fable; local workflow-dispatch confirmation requires later PR/merge.
 
-- PR #95 merged with merge commit 5a9b4f0ad5634d3df8cc5ee93c5bc3c622056de8. Package metadata now requires Python 3.11; CI tests Python 3.11 and 3.12, runs minimum pins on 3.11, and installs PyArrow in the 3.12 job.
-- Historical runtime evidence remains unchanged. Its binding test now excludes packaging metadata because the provenance records the actual measured package versions.
-- Superseded PRs #43 and #51 are closed.
-- All 27 audited local feature branches and 85 audited origin feature branches were deleted against their expected tip SHAs. The temporary delivery branch was also deleted locally and remotely.
-- The four audited nonexistent scratch worktree registrations were pruned. Only the primary main worktree remains.
+Next: commit the integrated code/docs to make the source clean, run the full runtime-scaling benchmark with frozen configuration, verify 18 data/selection fingerprints against existing sidecar, update CSV/sidecar/documented table and checksum, run the previously deselected binding test and final checks, then send review callback to Astra. Report any deferred test-quality-only items honestly.
 
-## Decisive verification
-
-- Required PR checks passed on exact head 5dbd0961fb31afeb2c4ea2b63270d5e0adb2a449: Python 3.11, Python 3.12 with PyArrow and strict docs build, minimum pins, CatBoost, and clean-wheel smoke.
-- Local focused docs, Arrow, and runtime-evidence slice: 9 passed. Ruff, generated API reference, wheel metadata (`Requires-Python: >=3.11`), and diff checks passed.
-- Post-cleanup live verification found all 27 audited local and 85 audited origin refs absent, both delivery refs absent, PRs #43/#51 closed, PR #95 merged, one local branch (`main`), one origin head (`main`), no stale worktree registrations, and no stashes.
-- Main is clean and synchronized with origin after this closeout commit is pushed.
-
-## Blockers
-
-None.
+Blockers: none. The version name remains an owner decision.
