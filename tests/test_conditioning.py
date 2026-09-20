@@ -518,12 +518,15 @@ def test_constant_include_rejected_consistently():
     X, y = _small_regression()
     X = X.copy()
     X["f0"] = 1.0
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    # The Gaussian cache drops the constant column before conditioning, so the
+    # message says so; the classic path reports it as unusable variation.
+    dead = "usable variation|dropped as constant|not present|not a valid"
+    with pytest.raises(ValueError, match=dead):
         select_mrmr(X, y, k=1, task="regression", include=["f0"], verbose=False)
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    with pytest.raises(ValueError, match=dead):
         select_cefsplus(X, y, k=1, include=["f0"], verbose=False, subsample=None)
     y_bin = (y > np.median(y)).astype(int)
-    with pytest.raises(ValueError, match="usable variation|not present|not a valid"):
+    with pytest.raises(ValueError, match=dead):
         select_cefsplus_binary(X, y_bin, k=1, include=["f0"], verbose=False, subsample=None)
 
 
