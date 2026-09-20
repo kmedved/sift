@@ -1,22 +1,27 @@
 """Weighted panel within-transforms applied before filter ranks.
 
 ``within="groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-``within="two_way"`` alternates entity and time demeaning for a fixed
-iteration count (``TWO_WAY_ITERATIONS``). The five-pass result is exact for
-balanced, unweighted panels up to floating-point error, but is an
-approximation for unbalanced or weighted panels; ``n_iterations`` reports
-the fixed pass count. Unseen entity ids at transform time fall back to the
-training grand mean; unseen time ids add no extra time effect (time effects
-are residual after entity demeaning). The transform itself requires finite
-numeric ``X`` and ``y``; callers using paths with their own preprocessing
-should make the path's missing-data policy explicit. In particular, classic
-filter entry points may impute feature values before this helper, whereas the
-helper itself never imputes.
+``within="two_way"`` alternates entity and time demeaning until the largest
+weighted entity-mean and time-mean residual, scaled by the column's weighted
+standard deviation, drops below ``TWO_WAY_TOLERANCE`` (cap
+``TWO_WAY_MAX_ITERATIONS`` passes). Balanced, unweighted panels reproduce the
+closed form ``x - mean_i - mean_t + grand`` in very few passes; unbalanced or
+weighted panels keep sweeping until the projection converges, so the result
+no longer depends on the sweep order. ``n_iterations`` reports the passes
+actually used, ``converged`` whether the tolerance was met, and
+``max_residual`` the final scaled residual. Unseen entity ids at transform
+time fall back to the training grand mean; unseen time ids add no extra time
+effect (time effects are residual after entity demeaning). The transform
+itself requires finite numeric ``X`` and ``y``; callers using paths with their
+own preprocessing should make the path's missing-data policy explicit. In
+particular, classic filter entry points may impute feature values before this
+helper, whereas the helper itself never imputes.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -26,7 +31,14 @@ from sift._preprocess import reject_datetime_like_features
 
 WithinMode = Literal["groups", "two_way"]
 
+#: Legacy fixed pass count.  The two-way solver now iterates to convergence;
+#: this constant is retained only for the ``within_two_way_iterations``
+#: metadata key published by ``sift.selection.filter_api``.
 TWO_WAY_ITERATIONS = 5
+#: Scaled residual below which the alternating projection is called converged.
+TWO_WAY_TOLERANCE = 1e-10
+#: Hard cap on alternating passes; hitting it emits a ``UserWarning``.
+TWO_WAY_MAX_ITERATIONS = 200
 _VALID_WITHIN = frozenset({"groups", "two_way"})
 
 
@@ -65,10 +77,90 @@ def require_within_context(
 
 
 def _require_finite_xy(X: np.ndarray, y: np.ndarray) -> None:
-    if not np.isfinite(X).all() or not np.isfinite(y).all():
-        raise ValueError(
-            "within demeaning requires finite X and y; impute missing values first"
+    bad_X = not np.isfinite(X).all()
+    bad_y = not np.isfinite(y).all()
+    if not (bad_X or bad_y):
+        return
+    if bad_X and bad_y:
+        offender = "X and y contain"
+    elif bad_X:
+        offender = "X contains"
+    else:
+        offender = "y contains"
+    raise ValueError(
+        f"within demeaning requires finite X and y, but {offender} NaN or "
+        "infinite values; this path never imputes. Impute or drop the "
+        "non-finite rows before selecting (classic estimators mean-impute "
+        "features automatically before demeaning, so estimator='classic' "
+        "accepts missing X; missing y is never imputed)"
+    )
+
+
+#: (k_method, strategy) pairs whose splits can never leave a within level
+#: seen in training, keyed by the within mode they break.
+_IMPOSSIBLE_WITHIN_SPLITS: dict[str, dict[str, str]] = {
+    "groups": {
+        "group_cv": (
+            "strategy='group_cv' holds out whole entities, so no validation "
+            "entity is ever seen in the training fold"
+        ),
+    },
+    "two_way": {
+        "group_cv": (
+            "strategy='group_cv' holds out whole entities, so no validation "
+            "entity is ever seen in the training fold"
+        ),
+        "time_holdout": (
+            "strategy='time_holdout' puts every validation period after the "
+            "split, so no validation time level is ever seen in the training "
+            "fold"
+        ),
+    },
+}
+
+
+def within_split_guidance(mode: str) -> str:
+    """Name the auto-k combinations that can satisfy the within guard.
+
+    Kept in one place so the up-front rejection, the fold guard and the
+    ``AutoKConfig`` validator all quote the same working routes.
+    """
+    if mode == "two_way":
+        return (
+            "within='two_way' scores only under k_method='gaussian_cv' or "
+            "'xfit_objective' with strategy='kfold', which keeps entity and "
+            "time levels on both sides of every split"
         )
+    return (
+        "within='groups' scores under k_method='gaussian_cv' or "
+        "'xfit_objective' with strategy='kfold', or under k_method='evaluate' "
+        "with strategy='time_holdout' when entities persist across the "
+        "holdout boundary"
+    )
+
+
+def reject_impossible_within_split(
+    within: str | None,
+    *,
+    k_method: str,
+    strategy: str,
+) -> None:
+    """Reject split schemes that can never satisfy the within guard.
+
+    ``group_cv`` holds out whole entities and ``time_holdout`` holds out whole
+    periods, so those splits leave the demeaned dimension with no overlap by
+    construction.  Raising here keeps the user from paying for a full feature
+    path before the fold guard fails.
+    """
+    if within is None:
+        return
+    reason = _IMPOSSIBLE_WITHIN_SPLITS.get(str(within), {}).get(str(strategy))
+    if reason is None:
+        return
+    raise ValueError(
+        f"within={within!r} cannot be validated with k_method={k_method!r} and "
+        f"strategy={strategy!r}: {reason}. {within_split_guidance(str(within))}"
+    )
 
 
 def _positive_weights(sample_weight: np.ndarray, n_rows: int) -> np.ndarray:
@@ -91,38 +183,105 @@ def _factorize(ids: np.ndarray, *, label: str) -> tuple[pd.Index, np.ndarray]:
     return pd.Index(uniques), codes
 
 
+@dataclass
+class UnseenWithinLevelTally:
+    """Running count of validation rows whose within level was unseen.
+
+    One tally spans a whole auto-k call so the partial-overlap warning is
+    emitted once, not once per fold.
+    """
+
+    mode: str | None = None
+    n_rows: int = 0
+    entity_unseen: int = 0
+    time_unseen: int = 0
+    _dimensions: list[str] = field(default_factory=list)
+
+    def add(self, *, mode: str, n_rows: int, entity_unseen: int, time_unseen: int) -> None:
+        self.mode = mode
+        self.n_rows += int(n_rows)
+        self.entity_unseen += int(entity_unseen)
+        self.time_unseen += int(time_unseen)
+
+
+def _unseen_clause(dimension: str, unseen: int, n_rows: int) -> str:
+    fraction = float(unseen) / float(n_rows) if n_rows else 0.0
+    return f"{unseen} of {n_rows} validation rows ({fraction:.1%}) had an unseen {dimension} level"
+
+
+def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None") -> None:
+    """Emit one warning per auto-k call for partially unseen validation levels.
+
+    ``require_seen_within_validation_levels`` only rejects folds in which *no*
+    level overlaps training.  Rows whose own level is unseen still score, but
+    they are centred on the training grand mean and therefore carry no within
+    information; say so once instead of silently mixing the two kinds of row.
+    """
+    if tally is None or tally.n_rows <= 0:
+        return
+    clauses = []
+    if tally.entity_unseen:
+        clauses.append(_unseen_clause("entity", tally.entity_unseen, tally.n_rows))
+    if tally.time_unseen:
+        clauses.append(_unseen_clause("time", tally.time_unseen, tally.n_rows))
+    if not clauses:
+        return
+    mode = tally.mode or "groups"
+    warnings.warn(
+        f"within={mode!r} auto-k scoring: {' and '.join(clauses)}, so their "
+        "demeaning fell back to the training grand mean instead of a fitted "
+        "level effect. Those rows carry no within information and the chosen k "
+        "is based on a mixture of demeaned and grand-mean-centred rows. Drop or "
+        "otherwise handle late-entering or early-exiting entities, or choose a "
+        f"split that keeps levels overlapping: {within_split_guidance(mode)}",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def require_seen_within_validation_levels(
     fitted: "WithinTransform",
     groups: np.ndarray,
     time: np.ndarray | None = None,
+    *,
+    tally: "UnseenWithinLevelTally | None" = None,
 ) -> None:
     """Require each scored demeaned dimension to overlap training levels.
 
     This guard is for fold-based validation only.  ``WithinTransform.transform``
     intentionally keeps its causal fallback for ordinary transforms of rows
-    containing unseen entity or time ids.
+    containing unseen entity or time ids.  Partial overlap still scores; pass a
+    ``tally`` to collect the fallback row counts and report them once through
+    ``warn_unseen_within_validation_levels``.
     """
     group_codes = fitted.group_index.get_indexer(np.asarray(groups).reshape(-1))
     if not np.any(group_codes >= 0):
         raise ValueError(
             "within validation requires at least one entity level seen in the "
             "training fold; no validation entity can be demeaned from training "
-            "effects. Use overlapping-level splits or omit within when validating "
-            "between-entity effects"
+            f"effects. {within_split_guidance(fitted.mode)}, or omit within when "
+            "validating between-entity effects"
         )
-    if fitted.mode != "two_way":
-        return
-    if fitted.time_index is None:
-        raise RuntimeError("two-way within transform is missing time effects")
-    if time is None:
-        raise ValueError("within='two_way' requires validation time")
-    time_codes = fitted.time_index.get_indexer(np.asarray(time).reshape(-1))
-    if not np.any(time_codes >= 0):
-        raise ValueError(
-            "within validation requires at least one time level seen in the "
-            "training fold; no validation time can be demeaned from training "
-            "effects. Use overlapping-level splits or omit within when validating "
-            "between-time effects"
+    time_codes = None
+    if fitted.mode == "two_way":
+        if fitted.time_index is None:
+            raise RuntimeError("two-way within transform is missing time effects")
+        if time is None:
+            raise ValueError("within='two_way' requires validation time")
+        time_codes = fitted.time_index.get_indexer(np.asarray(time).reshape(-1))
+        if not np.any(time_codes >= 0):
+            raise ValueError(
+                "within validation requires at least one time level seen in the "
+                "training fold; no validation time can be demeaned from training "
+                f"effects. {within_split_guidance(fitted.mode)}, or omit within "
+                "when validating between-time effects"
+            )
+    if tally is not None:
+        tally.add(
+            mode=fitted.mode,
+            n_rows=int(group_codes.shape[0]),
+            entity_unseen=int(np.count_nonzero(group_codes < 0)),
+            time_unseen=0 if time_codes is None else int(np.count_nonzero(time_codes < 0)),
         )
 
 
@@ -178,6 +337,29 @@ def _level_means(
     return means
 
 
+def _weighted_sd_columns(
+    values: np.ndarray,
+    weights: np.ndarray,
+    means: np.ndarray,
+) -> np.ndarray:
+    """Per-column weighted standard deviation, with zero-sd columns set to 1."""
+    values = np.asarray(values, dtype=np.float64)
+    centered = values - np.asarray(means, dtype=np.float64).reshape(1, -1)
+    w_sum = float(np.asarray(weights, dtype=np.float64).sum())
+    variance = (np.asarray(weights, dtype=np.float64) @ (centered * centered)) / w_sum
+    sd = np.sqrt(np.maximum(variance, 0.0))
+    # A constant column has no scale to measure a residual against; its level
+    # means are already exactly zero, so any positive divisor works.
+    return np.where(sd > 0.0, sd, 1.0)
+
+
+def _scaled_max(level_means: np.ndarray, scale: np.ndarray) -> float:
+    """Largest absolute level mean measured in column standard deviations."""
+    if level_means.size == 0:
+        return 0.0
+    return float(np.max(np.abs(level_means) / scale.reshape(1, -1)))
+
+
 @dataclass(frozen=True)
 class WithinTransform:
     """Fitted within-demeaning map, reusable on validation rows."""
@@ -192,6 +374,8 @@ class WithinTransform:
     time_effects_X: np.ndarray | None = None
     time_effects_y: np.ndarray | None = None
     n_iterations: int = 1
+    converged: bool = True
+    max_residual: float = 0.0
 
     def transform(
         self,
@@ -253,9 +437,12 @@ def fit_within_transform(
 ) -> WithinTransform:
     """Fit finite-input demeaning parameters on training rows only.
 
-    ``within="two_way"`` uses the documented fixed five alternating passes;
-    on unbalanced or weighted panels this is an approximate residualization,
-    not an unconstrained convergence solve.
+    ``within="two_way"`` alternates entity and time demeaning until the
+    largest weighted level-mean residual, scaled by each column's weighted
+    standard deviation, falls below ``TWO_WAY_TOLERANCE``, capped at
+    ``TWO_WAY_MAX_ITERATIONS`` passes.  Balanced, unweighted panels reach the
+    closed form in a couple of passes; unbalanced or weighted panels keep
+    sweeping, so the fitted effects no longer depend on the sweep order.
     """
     resolved = validate_within(mode)
     if resolved is None:
@@ -298,11 +485,17 @@ def fit_within_transform(
     time_index, t_codes = _factorize(time_fit, label="time")
     X_work = np.array(X_fit, dtype=np.float64, copy=True)
     y_work = np.array(y_fit, dtype=np.float64, copy=True)
+    scale_X = _weighted_sd_columns(X_fit, w_fit, grand_X)
+    scale_y = _weighted_sd_columns(
+        y_fit.reshape(-1, 1), w_fit, np.asarray([grand_y], dtype=np.float64)
+    )
     group_X = np.zeros((len(group_index), X_work.shape[1]), dtype=np.float64)
     group_y = np.zeros(len(group_index), dtype=np.float64)
     time_X = np.zeros((len(time_index), X_work.shape[1]), dtype=np.float64)
     time_y = np.zeros(len(time_index), dtype=np.float64)
-    for _ in range(TWO_WAY_ITERATIONS):
+    residual = np.inf
+    n_iterations = 0
+    for n_iterations in range(1, TWO_WAY_MAX_ITERATIONS + 1):
         gX = _level_means(X_work, g_codes, len(group_index), w_fit)
         gY = _level_means(y_work, g_codes, len(group_index), w_fit)
         X_work -= gX[g_codes]
@@ -315,6 +508,26 @@ def fit_within_transform(
         y_work -= tY[t_codes]
         time_X += tX
         time_y += tY
+        residual = max(
+            _scaled_max(gX, scale_X),
+            _scaled_max(tX, scale_X),
+            _scaled_max(gY.reshape(-1, 1), scale_y),
+            _scaled_max(tY.reshape(-1, 1), scale_y),
+        )
+        if residual < TWO_WAY_TOLERANCE:
+            break
+    converged = bool(residual < TWO_WAY_TOLERANCE)
+    if not converged:
+        warnings.warn(
+            f"within='two_way' demeaning stopped at the {TWO_WAY_MAX_ITERATIONS}-pass "
+            f"cap with a scaled level-mean residual of {residual:.3e}, above the "
+            f"{TWO_WAY_TOLERANCE:.0e} tolerance; the entity and time effects are not "
+            "fully separated. This usually means the panel splits into weakly "
+            "connected entity/time components -- check for entities or periods that "
+            "barely overlap the rest of the panel, or use within='groups'",
+            UserWarning,
+            stacklevel=2,
+        )
     return WithinTransform(
         mode="two_way",
         group_index=group_index,
@@ -325,7 +538,9 @@ def fit_within_transform(
         time_index=time_index,
         time_effects_X=np.ascontiguousarray(time_X, dtype=np.float64),
         time_effects_y=np.ascontiguousarray(time_y, dtype=np.float64),
-        n_iterations=TWO_WAY_ITERATIONS,
+        n_iterations=int(n_iterations),
+        converged=converged,
+        max_residual=float(residual),
     )
 
 

@@ -536,42 +536,41 @@ def test_proxy_clusters_union_direct_selected_selected_edges():
 
 
 def _oracle_cluster_members(block, selected, r_min):
-    parent = {int(pos): int(pos) for pos in selected}
+    """Components of the thresholded candidate-by-selected graph, via scipy.
 
-    def find(node):
-        parent.setdefault(node, node)
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
-        return node
-
-    def union(left, right):
-        root_left, root_right = find(left), find(right)
-        if root_left != root_right:
-            parent[root_right] = root_left
+    Independent of the implementation's union-find: build the adjacency matrix
+    of qualifying edges and let ``scipy.sparse.csgraph`` label the components.
+    Only components containing a selected anchor are reported, matching the
+    selected-anchored contract of ``proxy_clusters``.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
 
     selected_list = [int(i) for i in selected]
+    nodes = sorted({int(pos) for pos in block.index} | set(selected_list))
+    index_of = {node: i for i, node in enumerate(nodes)}
+    rows, cols = [], []
     for selected_pos in selected_list:
-        values = block[selected_pos]
+        values = block[selected_pos].to_numpy(dtype=np.float64)
         for candidate_pos, correlation in zip(
-            np.asarray(block.index, dtype=np.int64),
-            values.to_numpy(dtype=np.float64),
+            np.asarray(block.index, dtype=np.int64), values
         ):
             candidate_pos = int(candidate_pos)
             if candidate_pos == selected_pos:
                 continue
             if abs(float(correlation)) >= r_min:
-                union(selected_pos, candidate_pos)
-    groups = {}
-    for selected_pos in selected_list:
-        groups.setdefault(find(selected_pos), set()).add(selected_pos)
-    for node in parent:
-        if node in set(selected_list):
-            continue
-        root = find(node)
-        if root in groups:
-            groups[root].add(node)
-    return {frozenset(members) for members in groups.values()}
+                rows.append(index_of[selected_pos])
+                cols.append(index_of[candidate_pos])
+    data = np.ones(len(rows), dtype=np.int8)
+    graph = coo_matrix(
+        (data, (rows, cols)), shape=(len(nodes), len(nodes)), dtype=np.int8
+    )
+    _n, labels = connected_components(graph, directed=False)
+    members: dict[int, set[int]] = {}
+    for node, label in zip(nodes, labels.tolist()):
+        members.setdefault(int(label), set()).add(int(node))
+    anchored = {int(labels[index_of[pos]]) for pos in selected_list}
+    return {frozenset(members[label]) for label in anchored}
 
 
 def test_proxy_clusters_match_independent_graph_oracle():

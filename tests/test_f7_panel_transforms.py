@@ -108,9 +108,17 @@ def test_ranking_exposes_within_and_between_columns():
         "selector",
     ]
     assert result.selector_metadata["within"] == "groups"
-    within_row = ranking.set_index("feature").loc["within_signal"]
-    between_row = ranking.set_index("feature").loc["between_only"]
-    assert within_row["within_relevance"] == pytest.approx(within_row["relevance"])
+    indexed = ranking.set_index("feature")
+    within_row = indexed.loc["within_signal"]
+    between_row = indexed.loc["between_only"]
+    noise_row = indexed.loc["noise"]
+    # ``between_only`` is exactly constant inside each entity, so entity
+    # demeaning annihilates it and no within association can survive; the
+    # within-varying feature keeps a large one.  ``noise`` is within-varying
+    # but unrelated to y, which separates "demeaned away" from "just weak".
+    assert between_row["within_relevance"] == pytest.approx(0.0, abs=1e-9)
+    assert noise_row["within_relevance"] > 0.0
+    assert within_row["within_relevance"] > 1.0
     assert between_row["between_relevance"] > within_row["between_relevance"]
     assert within_row["within_relevance"] > between_row["within_relevance"]
     view = sift.as_result(result, input_features=list(X.columns))
@@ -170,7 +178,10 @@ def test_unseen_group_falls_back_to_training_grand_mean():
     assert y_va == pytest.approx([100.0 - grand_y, 102.0 - grand_y])
 
 
-def test_two_way_uses_documented_iteration_count():
+def test_two_way_and_groups_modes_both_isolate_within_variation():
+    # TWO_WAY_ITERATIONS is the legacy fixed pass count kept only for the
+    # published metadata key; the solver now iterates to convergence and the
+    # real contract is pinned in tests/test_closure_panel_proxies.py.
     assert TWO_WAY_ITERATIONS == 5
     X, y, groups, time = _panel(n_groups=6, n_time=5, seed=3)
     result = sift.select_cefsplus(
@@ -184,13 +195,22 @@ def test_two_way_uses_documented_iteration_count():
         return_result=True,
     )
     assert result.selector_metadata["within"] == "two_way"
-    assert result.selector_metadata["within_two_way_iterations"] == 5
+    assert result.selector_metadata["within_two_way_iterations"] == TWO_WAY_ITERATIONS
     groups_only = sift.select_cefsplus(
         X, y, k=1, groups=groups, within="groups", verbose=False
     )
-    two_way = result.selected_features
-    assert isinstance(two_way, list)
-    assert groups_only or two_way
+    # Both modes are actually exercised and both must recover the same
+    # within-varying feature rather than the entity-level one.
+    assert groups_only == ["within_signal"]
+    assert result.selected_features == ["within_signal"]
+    indexed = result.ranking_.set_index("feature")
+    # Entity+time demeaning annihilates a purely between-entity column.
+    assert indexed.loc["between_only", "within_relevance"] == pytest.approx(0.0, abs=1e-9)
+    assert indexed.loc["between_only", "between_relevance"] > 1.0
+    assert (
+        indexed.loc["within_signal", "within_relevance"]
+        > 10.0 * indexed.loc["noise", "within_relevance"]
+    )
 
 
 def test_evaluate_rejects_all_unseen_validation_groups():
@@ -214,7 +234,7 @@ def test_evaluate_rejects_all_unseen_validation_groups():
         max_k=2,
         selection_rule="best",
     )
-    with pytest.raises(ValueError, match="no validation entity can be demeaned"):
+    with pytest.raises(ValueError, match="no validation entity is ever seen in the training fold"):
         select_k_auto(
             X,
             np.asarray(y, dtype=np.float64),
@@ -235,7 +255,7 @@ def test_gaussian_cv_with_within_does_not_require_cache():
         max_k=2,
         selection_rule="best",
     )
-    with pytest.raises(ValueError, match="no validation entity can be demeaned"):
+    with pytest.raises(ValueError, match="no validation entity is ever seen in the training fold"):
         sift.select_cefsplus(
             X,
             y,

@@ -34,6 +34,11 @@ from sift.selection.cefsplus import (
     cefsplus_loop_with_objective,
 )
 from sift.selection.conditioning import omitted_conditioning
+from sift.selection.within import (
+    UnseenWithinLevelTally,
+    reject_impossible_within_split,
+    warn_unseen_within_validation_levels,
+)
 
 
 def _reject_curve_conditioning(include, exclude, candidates, *, name: str) -> None:
@@ -384,9 +389,17 @@ def _fold_score_arrays(
     zy = _cache_target_ranks(cache, y)
     groups_cache = _cache_aligned_metadata(cache, groups, "groups")
     time_cache = _cache_aligned_metadata(cache, time, "time")
+    reject_impossible_within_split(
+        within,
+        k_method=config.k_method,
+        strategy=config.strategy,
+    )
     splits = _fold_splits(Z.shape[0], config, groups=groups_cache, time=time_cache)
     X_fold = None
     y_fold = None
+    # One tally for the whole call so partial level overlap warns once, not
+    # once per fold.
+    within_tally = None if within is None else UnseenWithinLevelTally()
     if within is not None:
         if within_X is None or within_y is None:
             raise ValueError("within fold scoring requires the encoded pre-rank matrix")
@@ -469,7 +482,9 @@ def _fold_score_arrays(
                 t_va = None if time_cache is None else time_cache[val_idx]
                 fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
                 X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
-                require_seen_within_validation_levels(fitted, g_va, t_va)
+                require_seen_within_validation_levels(
+                    fitted, g_va, t_va, tally=within_tally
+                )
                 X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
             valid_cols = np.asarray(cache.valid_cols, dtype=np.int64)
             if valid_cols.size:
@@ -552,7 +567,7 @@ def _fold_score_arrays(
             t_va = None if time_cache is None else time_cache[val_idx]
             fitted = fit_within_transform(within, X_tr, y_tr, g_tr, t_tr, w_train)
             X_tr, y_tr = fitted.transform(X_tr, y_tr, g_tr, t_tr)
-            require_seen_within_validation_levels(fitted, g_va, t_va)
+            require_seen_within_validation_levels(fitted, g_va, t_va, tally=within_tally)
             X_va, y_va = fitted.transform(X_va, y_va, g_va, t_va)
             Z_train = weighted_rank_gauss_2d(X_tr, w_train, n_jobs=1, rank_backend="serial")
             zy_train = weighted_rank_gauss_1d(y_tr, w_train)
@@ -657,6 +672,8 @@ def _fold_score_arrays(
         fold_scores.append(scores)
         fold_limits.append(int(len(scores)))
         fold_n_eff.append(n_eff_val)
+
+    warn_unseen_within_validation_levels(within_tally)
 
     extra = {
         "xfit_mode": config.xfit_mode,

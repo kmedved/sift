@@ -116,12 +116,19 @@ def reject_unavailable_proxy_positions(
     *,
     available_original: Iterable[int],
     feature_names: Iterable[object] | None = None,
+    blocks_in_play: bool = True,
 ) -> None:
     """Reject proxy retention when selected raw columns have no correlations.
 
     This covers ordinary selected constants as well as atomic blocks that
     expand to cache-dropped constant members. Those columns stay in the
     selection; they cannot appear in a finite copula proxy block.
+
+    ``blocks_in_play`` selects the remedy. Callers that can force a column
+    into the selection through an atomic ``feature_blocks`` entry keep the
+    default True so the message points at the block. Callers with no block
+    concept -- stability selection, ``Stabilized`` -- pass False and are told
+    to drop the constant columns or fit without ``store_proxies`` instead.
     """
     selected = _positions(selected_indices, label="selected_indices")
     available = {int(i) for i in _positions(available_original, label="available_original")}
@@ -135,12 +142,19 @@ def reject_unavailable_proxy_positions(
             refs.append(names[position])
         else:
             refs.append(position)
+    if blocks_in_play:
+        raise ValueError(
+            "store_proxies=True cannot retain finite copula correlations for "
+            f"selected constant features or cache-dropped constant or otherwise "
+            f"unavailable block members: {refs} (positions {missing}). "
+            "Atomic selection still expands those raw columns; omit store_proxies "
+            "or drop unavailable members from the block"
+        )
     raise ValueError(
         "store_proxies=True cannot retain finite copula correlations for "
-        f"selected constant features or cache-dropped constant or otherwise "
-        f"unavailable block members: {refs} (positions {missing}). "
-        "Atomic selection still expands those raw columns; omit store_proxies "
-        "or drop unavailable members from the block"
+        f"selected constant features: {refs} (positions {missing}). Those "
+        "columns stay in the selection but have no finite copula correlation "
+        "to store; drop them from X or fit without store_proxies"
     )
 
 
@@ -280,8 +294,16 @@ def redundancy_report_frame(
     selected_indices: list[int],
     raw_features: list[object] | None,
     r_min: float,
+    include_selected: bool = False,
 ) -> pd.DataFrame:
-    """Every qualifying unselected-candidate ↔ selected-feature edge."""
+    """Every qualifying candidate ↔ selected-feature edge.
+
+    ``include_selected=False`` (the default) lists only unselected candidates,
+    the stand-in view.  ``include_selected=True`` also lists the
+    selected↔selected edges that ``proxy_cluster_frame`` merges on, so the
+    correlation behind a merged cluster is reachable.  A selected pair appears
+    under each of its two anchors; a feature is never paired with itself.
+    """
     columns = {
         "selected_feature": pd.Series(dtype=object),
         "selected_index": pd.Series(dtype="int64"),
@@ -303,7 +325,9 @@ def redundancy_report_frame(
             values.to_numpy(dtype=np.float64),
         ):
             candidate_pos = int(candidate_pos)
-            if candidate_pos in selected_set:
+            if candidate_pos == int(selected_pos):
+                continue
+            if not include_selected and candidate_pos in selected_set:
                 continue
             if abs(float(correlation)) < r_min:
                 continue
