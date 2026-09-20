@@ -150,7 +150,7 @@ def test_public_xfit_methods_reject_group_cv_with_unseen_entities(method):
         max_k=2,
     )
 
-    with pytest.raises(ValueError, match="Use overlapping-level splits"):
+    with pytest.raises(ValueError, match="no validation entity is ever seen in the training fold"):
         sift.select_cefsplus(
             X,
             y,
@@ -174,7 +174,7 @@ def test_public_xfit_methods_reject_two_way_time_holdout_without_seen_time(metho
         max_k=2,
     )
 
-    with pytest.raises(ValueError, match="no validation time can be demeaned"):
+    with pytest.raises(ValueError, match="no validation time level is ever seen in the training fold"):
         sift.select_cefsplus(
             X,
             y,

@@ -61,6 +61,14 @@ class AutoKConfig:
         ``'rmse'`` (regression) or ``'logloss'`` (classification); the other
         SIFT names are ``'mae'`` and ``'error'``. Estimator-style sklearn
         scorer objects are negated into the lower-is-better curve.
+
+        With a 2-D target the held-out ``evaluate`` metric averages the
+        per-target errors in **raw target units**, so a target measured on a
+        larger scale dominates the curve and rescaling one target column can
+        change the chosen k. The selection path itself is rank-based and
+        therefore scale-invariant; only this held-out metric is not.
+        Standardize the target columns first when every target should carry
+        equal weight.
     max_k : int, default 100
         Largest k any rule may return; positive integer. Every rule clamps it
         to the realized path or curve length.
@@ -532,8 +540,15 @@ def validate_auto_k_config(
     config: AutoKConfig,
     *,
     warn_unused: bool = True,
+    within: str | None = None,
 ) -> None:
-    """Validate runtime values on an AutoKConfig instance."""
+    """Validate runtime values on an AutoKConfig instance.
+
+    ``within`` is the caller's resolved panel mode, when known.  It only
+    changes the guidance attached to the ``evaluate``/``kfold`` rejection:
+    without it that message recommends ``time_holdout`` or ``group_cv``, and
+    ``group_cv`` can never satisfy the within fold guard.
+    """
     if config.k_method not in _VALID_K_METHODS:
         raise ValueError(
             "AutoKConfig.k_method must be one of "
@@ -546,6 +561,17 @@ def validate_auto_k_config(
             f"{sorted(_VALID_STRATEGIES)}; got {config.strategy!r}"
         )
     if config.k_method == "evaluate" and config.strategy == "kfold":
+        if within is not None:
+            # Do not send within users round in a circle: group_cv (and, for
+            # two_way, time_holdout) can never satisfy the within fold guard.
+            from sift.selection.within import within_split_guidance
+
+            raise ValueError(
+                "AutoKConfig.strategy='kfold' is only supported by gaussian_cv "
+                f"and xfit_objective, and with within={within!r} the remaining "
+                "evaluate strategies cannot all be validated. "
+                f"{within_split_guidance(str(within))}"
+            )
         raise ValueError(
             "AutoKConfig.strategy='kfold' is only supported by gaussian_cv and "
             "xfit_objective; use time_holdout or group_cv for k_method='evaluate'"
@@ -921,9 +947,10 @@ def _ensure_supported_auto_k_mode(
     *,
     allow_nested: bool = False,
     warn_unused: bool = True,
+    within: str | None = None,
 ) -> None:
     """Validate path-selection semantics for the current implementation."""
-    validate_auto_k_config(config, warn_unused=warn_unused)
+    validate_auto_k_config(config, warn_unused=warn_unused, within=within)
     if config.auto_k_mode == "prefix_only":
         return
     if config.auto_k_mode == "nested":
@@ -953,13 +980,19 @@ def resolve_auto_k_config(
     groups: Optional[np.ndarray],
     *,
     allow_nested: bool = False,
+    within: str | None = None,
 ) -> AutoKConfig:
-    """Resolve auto-k config, inferring strategy from supplied split context."""
+    """Resolve auto-k config, inferring strategy from supplied split context.
+
+    ``within`` only sharpens the guidance on the ``evaluate``/``kfold``
+    rejection; it does not change which configs are accepted.
+    """
     if auto_k_config is not None:
         _ensure_supported_auto_k_mode(
             auto_k_config,
             allow_nested=allow_nested,
             warn_unused=False,
+            within=within,
         )
         return auto_k_config
     if time is not None:

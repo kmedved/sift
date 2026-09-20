@@ -104,6 +104,28 @@ def _exact_column_positions(columns, required_names) -> np.ndarray:
     return available.get_indexer(required)
 
 
+def _reject_multi_target_y(y) -> None:
+    """Reject a 2-D target before the bootstrap loop reaches numpy.
+
+    Stability selection fits one target per bootstrap run; a wide ``y`` used
+    to die deep inside the weighted-average call with a bare numpy
+    ``TypeError``. Mirrors the filter guard in
+    ``sift.selection.filter_payloads._reject_multi_target_unless_cefsplus``.
+    A single-column ``y`` is left alone so its behaviour is unchanged.
+    """
+    try:
+        arr = np.asarray(y)
+    except (TypeError, ValueError):
+        return
+    if arr.ndim >= 2 and int(arr.shape[1]) > 1:
+        raise ValueError(
+            "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
+            "and select_cached(method='cefsplus'); stability selection fits "
+            f"one target per bootstrap run, but y has shape {tuple(arr.shape)}. "
+            "Pass a 1-D y and run the selector once per target column"
+        )
+
+
 # =============================================================================
 # Stability Selector
 # =============================================================================
@@ -370,6 +392,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         """
         self._clear_fit_state()
         try:
+            _reject_multi_target_y(y)
             metadata = resolve_row_metadata(X, groups=groups, time=time)
             X = metadata.X
             # Smart-sampler group/time columns live in X but are not candidate
@@ -802,6 +825,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             selected,
             available_original=varying_raw,
             feature_names=getattr(self, "feature_names_in_", None),
+            # Stability selection has no atomic-block concept: the remedy is to
+            # drop the constant column or fit without store_proxies.
+            blocks_in_play=False,
         )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))

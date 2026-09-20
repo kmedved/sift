@@ -19,7 +19,13 @@ from sift._preprocess import (
     reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
 )
-from sift.selection.within import require_within_context
+from sift.selection.within import (
+    UnseenWithinLevelTally,
+    reject_impossible_within_split,
+    require_within_context,
+    validate_within,
+    warn_unseen_within_validation_levels,
+)
 from sift.selection.auto_k_config import (
     AutoKConfig as AutoKConfig,
     _NONNEGATIVE_INT_FIELDS as _NONNEGATIVE_INT_FIELDS,
@@ -197,6 +203,7 @@ def _evaluate_prefix_split(
     time: Optional[np.ndarray],
     encoding_weight_arr: Optional[np.ndarray],
     within: str | None = None,
+    within_tally=None,
 ) -> dict:
     """Evaluate all k values for one train/validation split."""
     Xtr_df = X_path_df.iloc[train_idx]
@@ -338,7 +345,7 @@ def _evaluate_prefix_split(
         t_va = None if time is None else time[val_idx]
         fitted = fit_within_transform(within, Xtr_num, ytr, g_tr, t_tr, wtr)
         Xtr_num, ytr = fitted.transform(Xtr_num, ytr, g_tr, t_tr)
-        require_seen_within_validation_levels(fitted, g_va, t_va)
+        require_seen_within_validation_levels(fitted, g_va, t_va, tally=within_tally)
         Xva_num, yva = fitted.transform(Xva_num, yva, g_va, t_va)
         Xtr_df = restore_feature_matrix(tr_template, Xtr_num)
         Xva_df = restore_feature_matrix(va_template, Xva_num)
@@ -597,7 +604,7 @@ def select_k_auto(
     groups = metadata.groups
     time = metadata.time
     sample_weight = metadata.sample_weight
-    _ensure_supported_auto_k_mode(config)
+    _ensure_supported_auto_k_mode(config, within=validate_within(within))
     if config.k_method != "evaluate":
         raise ValueError(
             "select_k_auto supports only AutoKConfig(k_method='evaluate'). "
@@ -708,8 +715,18 @@ def select_k_auto(
     X_path_df = X[base_valid + valid_features]
     if resolved_within is not None:
         reject_datetime_like_features(X_path_df)
+        # Splits that can never leave a within level seen in training fail the
+        # fold guard anyway; say so before any fold is scored.
+        reject_impossible_within_split(
+            resolved_within,
+            k_method=config.k_method,
+            strategy=config.strategy,
+        )
 
     metric = resolve_metric(config.metric, task)
+    # One tally for the whole call so partial level overlap warns once, not
+    # once per fold.
+    within_tally = None if resolved_within is None else UnseenWithinLevelTally()
     eval_kwargs = {
         "X_path_df": X_path_df,
         "valid_features": valid_features,
@@ -733,6 +750,7 @@ def select_k_auto(
         "time": time,
         "encoding_weight_arr": encoding_weight_arr,
         "within": within,
+        "within_tally": within_tally,
     }
 
     if config.strategy == "time_holdout":
@@ -781,6 +799,8 @@ def select_k_auto(
 
     else:
         raise ValueError(f"Unknown strategy: {config.strategy}")
+
+    warn_unseen_within_validation_levels(within_tally)
 
     def _features_for_k(step: int) -> List[str]:
         if int(step) <= 0:

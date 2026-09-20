@@ -93,6 +93,7 @@ from sift.selection.within import (
     as_float_feature_matrix,
     fit_transform_within,
     group_level_design,
+    reject_impossible_within_split,
     restore_feature_matrix,
 )
 
@@ -408,6 +409,13 @@ def make_auto_gaussian(
         cache, cat_features, effective_weight, target_cv_metadata, y_sel, X_pre = (
             _cache_for_gaussian(ctx)
         )
+        # Splits that can never leave a within level seen in training fail the
+        # fold guard anyway; say so before building the feature path.
+        reject_impossible_within_split(
+            ctx.within,
+            k_method=ctx.auto_k_config.k_method,
+            strategy=ctx.auto_k_config.strategy,
+        )
         top_m = _default_top_m(_kw(ctx, "top_m"), int(ctx.auto_k_config.max_k))
         if _kw(ctx, "verbose"):
             logger.info(
@@ -605,6 +613,7 @@ def _gaussian_proxy_correlations(
         selected_indices,
         available_original=cache.valid_cols,
         feature_names=cache.feature_names,
+        blocks_in_play=getattr(ctx, "feature_blocks", None) is not None,
     )
     panel = build_candidate_panel(
         cache,
@@ -1655,6 +1664,19 @@ def _within_relevance(ctx: "FilterContext", relevance: np.ndarray) -> np.ndarray
     return np.asarray(relevance, dtype=np.float64)
 
 
+#: Fewer entity-level rows than this makes every between-entity association
+#: degenerate: with one or two points any monotone score saturates, so the
+#: estimators return one huge identical number for every feature.
+_MIN_BETWEEN_ENTITIES = 3
+
+
+def _degenerate_between_relevance(n_entities: int, n_features: int) -> np.ndarray | None:
+    """Return an all-NaN column when the entity-level table cannot support a score."""
+    if int(n_entities) >= _MIN_BETWEEN_ENTITIES:
+        return None
+    return np.full(int(n_features), np.nan, dtype=np.float64)
+
+
 def _between_relevance_classic(ctx: "FilterContext", prep: ClassicPrepared) -> np.ndarray | None:
     if ctx.within is None or prep.X_pre_within is None or prep.y_pre_within is None:
         return None
@@ -1664,6 +1686,9 @@ def _between_relevance_classic(ctx: "FilterContext", prep: ClassicPrepared) -> n
         prep.groups_sub if prep.groups_sub is not None else ctx.groups[prep.row_idx],
         prep.w,
     )
+    degenerate = _degenerate_between_relevance(X_g.shape[0], X_g.shape[1])
+    if degenerate is not None:
+        return degenerate
     return _compute_relevance(
         X_g,
         y_g,
@@ -1690,6 +1715,9 @@ def _between_relevance_gaussian(
         ctx.groups[row_idx],
         weights,
     )
+    degenerate = _degenerate_between_relevance(X_g.shape[0], ctx.n_features_input)
+    if degenerate is not None:
+        return degenerate
     zy = weighted_rank_gauss_1d(y_g, w_g)
     Z_g = weighted_rank_gauss_2d(X_g, w_g, n_jobs=1, rank_backend="serial")
     rel_valid = gaussian_mi_from_corr(weighted_corr_with_vector(Z_g, zy, w_g))
