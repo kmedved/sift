@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -15,6 +17,40 @@ from sift.selection.view import (
     _strict_integer,
     _strict_integer_vector,
 )
+
+
+# Keys a fitted BorutaSelector records on the result; a hand-assembled
+# BorutaResult carries none of them, and then the manifest must not pretend
+# the configuration was captured while the selection ran.
+_RUN_CONFIGURATION_KEYS = (
+    "random_state",
+    "realized_random_state",
+    "configured_options",
+    "effective_options",
+)
+
+
+def _boruta_run_configuration(result: Any, *, n_features: int) -> dict[str, Any]:
+    snapshot = getattr(result, "selector_metadata", None)
+    if not isinstance(snapshot, Mapping):
+        return {"configuration_captured_at": "unknown"}
+    carried = {
+        key: copy.deepcopy(snapshot[key])
+        for key in _RUN_CONFIGURATION_KEYS
+        if key in snapshot
+    }
+    if not carried:
+        return {"configuration_captured_at": "unknown"}
+    recorded_features = snapshot.get("n_features")
+    if isinstance(recorded_features, (int, np.integer)) and not isinstance(
+        recorded_features, (bool, np.bool_)
+    ):
+        if int(recorded_features) != n_features:
+            raise ValueError(
+                "BorutaResult selector_metadata n_features must match feature_names"
+            )
+    carried["configuration_captured_at"] = "selection"
+    return carried
 
 
 def _as_boruta_result(result: Any, input_features: Any) -> SelectionView:
@@ -96,6 +132,7 @@ def _as_boruta_result(result: Any, input_features: Any) -> SelectionView:
         "input_kind": "unknown",
         "n_iter": n_iter,
     }
+    metadata.update(_boruta_run_configuration(result, n_features=n_features))
     diagnostics = {
         "n_iter": n_iter,
         "shadow_thresholds": shadow_thresholds.copy(),
