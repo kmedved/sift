@@ -296,6 +296,52 @@ def test_classic_cache_pickle_and_provenance():
     assert type(build_cache(X, subsample=None)) is FeatureCache
 
 
+@pytest.mark.parametrize("select_fn", [select_mrmr, select_jmi, select_jmim])
+def test_subsampled_cache_matches_the_same_uncached_draw(select_fn):
+    """A cache built with subsample/random_state reproduces the uncached run.
+
+    The cache freezes one without-replacement draw of 20 of the 80 rows under
+    seed 7, so the only correct answer is the one the very same call makes
+    when it draws those rows itself.
+    """
+    X, y1, _ = _regression_frame()
+    drawn = build_classic_cache(X, subsample=20, random_state=7)
+    assert drawn.subsample_applied is True
+    assert drawn.X.shape == (20, X.shape[1])
+    for k in (1, 3):
+        cached = select_fn(
+            X, y1, k=k, task="regression", cache=drawn, verbose=False,
+            return_result=True,
+        )
+        plain = select_fn(
+            X, y1, k=k, task="regression", verbose=False, return_result=True,
+            subsample=20, random_state=7,
+        )
+        assert cached.selected_features == plain.selected_features
+        assert cached.selected_indices == plain.selected_indices
+        cached_rank = cached.get_feature_ranking()
+        plain_rank = plain.get_feature_ranking()
+        assert list(cached_rank["feature"]) == list(plain_rank["feature"])
+        assert list(cached_rank["rank"]) == list(plain_rank["rank"])
+        assert list(cached_rank["selected"]) == list(plain_rank["selected"])
+        np.testing.assert_allclose(cached_rank["relevance"], plain_rank["relevance"])
+        pd.testing.assert_frame_equal(cached.ranking_, plain.ranking_)
+    # The frozen draw is a real subsample, not the whole matrix: selecting on
+    # all 80 rows is a different computation.
+    full = select_fn(
+        X, y1, k=3, task="regression", verbose=False, subsample=None,
+        return_result=True,
+    )
+    np.testing.assert_array_equal(
+        np.sort(np.asarray(drawn.row_idx)),
+        np.sort(np.random.default_rng(7).choice(len(X), size=20, replace=False)),
+    )
+    assert not np.allclose(
+        full.get_feature_ranking()["relevance"].to_numpy(),
+        plain_rank["relevance"].to_numpy(),
+    )
+
+
 def test_classic_cache_rejects_duplicate_and_nan_labels():
     rng = np.random.default_rng(0)
     values = rng.normal(size=(40, 6))

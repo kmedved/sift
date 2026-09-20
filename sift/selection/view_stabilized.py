@@ -270,7 +270,11 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
             metadata["n_rows_original"] = int(n_rows)
     row_counts = getattr(selector, "_resample_row_counts_", None)
     unique_counts = getattr(selector, "_resample_unique_counts_", None)
+    fitted_counts = getattr(selector, "_resample_fitted_row_counts_", None)
     diagnostics = {
+        # ``fit_context`` records the caller-supplied row context only. The
+        # wrapper can still hand the base synthesized multiplicity weights,
+        # which ``multiplicity_weights_synthesized`` reports separately.
         "fit_context": {
             "sample_weight": bool(getattr(selector, "_fit_used_sample_weight_", False)),
             "groups": bool(getattr(selector, "_fit_used_groups_", False)),
@@ -278,6 +282,9 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
         },
         "aggregation_mode": mode,
         "resample_fit_policy": getattr(selector, "_resample_fit_policy_", None),
+        "multiplicity_weights_synthesized": bool(
+            getattr(selector, "_multiplicity_weights_synthesized_", False)
+        ),
         "n_completed_resamples": int(
             getattr(selector, "_n_completed_resamples_", n_resamples_requested)
         ),
@@ -288,10 +295,17 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
         ),
     }
     if row_counts is not None:
+        # ``resample_n_rows`` is what the draw produced; ``resample_n_rows_fitted``
+        # is what the base was fitted on, which is smaller whenever duplicate
+        # draws were collapsed to weighted unique rows.
         diagnostics["resample_n_rows"] = [int(value) for value in np.asarray(row_counts)]
     if unique_counts is not None:
         diagnostics["resample_n_unique"] = [
             int(value) for value in np.asarray(unique_counts)
+        ]
+    if fitted_counts is not None:
+        diagnostics["resample_n_rows_fitted"] = [
+            int(value) for value in np.asarray(fitted_counts)
         ]
     return SelectionView(
         features=view_selected,

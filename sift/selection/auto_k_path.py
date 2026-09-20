@@ -72,6 +72,9 @@ def compute_objective_for_path(
 
     Raises
     ------
+    TypeError
+        If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
+        ``FeatureCache`` from ``build_cache``.
     ValueError
         If ``y`` does not have ``cache.n_rows_original`` rows, if the cache
         fails its structural contract (missing provenance marker, non-finite
