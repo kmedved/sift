@@ -27,7 +27,6 @@ from sift import (
     select_mrmr,
 )
 from sift.selection.blocks import ONEHOT_PREFIX_SEP, resolve_feature_blocks
-from sift.selection.cefsplus import _chol_logdet
 
 
 @contextmanager
@@ -44,16 +43,17 @@ def _regression_frame(n=120, p=6, seed=0):
     return X, y
 
 
-def _joint_gain_oracle(R, r, members, shrink=1e-6, eps=1e-12):
+def _joint_gain_oracle(R, r, members, shrink=1e-6):
     scale = 1.0 - shrink
     idx = np.asarray(members, dtype=np.int64)
     g = scale * np.asarray(R, dtype=np.float64)[np.ix_(idx, idx)]
     np.fill_diagonal(g, 1.0)
     c = scale * np.asarray(r, dtype=np.float64)[idx]
     g_y = g - np.outer(c, c)
-    return _chol_logdet(g, shrink=shrink, eps=eps) - _chol_logdet(
-        g_y, shrink=shrink, eps=eps
-    )
+    sign_g, logdet_g = np.linalg.slogdet(g)
+    sign_y, logdet_y = np.linalg.slogdet(g_y)
+    assert sign_g > 0 and sign_y > 0
+    return float(logdet_g - logdet_y)
 
 
 def test_auto_prefix_does_not_split_ordinary_underscores():
@@ -114,6 +114,27 @@ def test_cefsplus_joint_block_gain_beats_representative():
     assert set(selected) == {"sig__a", "sig__b"}
     column_only = select_cefsplus(X, y, k=1, verbose=False, subsample=None)
     assert set(column_only) != {"sig__a", "sig__b"}
+
+    weights = np.linspace(0.5, 1.5, n)
+    weighted_cache = build_cache(
+        X, sample_weight=weights, compute_Rxx=True, subsample=None
+    )
+    weighted_y = weighted_rank_gauss_1d(np.asarray(y), weighted_cache.sample_weight)
+    weighted_r = weighted_corr_with_vector(
+        weighted_cache.Z, weighted_y, weighted_cache.sample_weight
+    )
+    expected_gain = _joint_gain_oracle(
+        weighted_cache.Rxx, weighted_r, [2, 0, 1]
+    ) - _joint_gain_oracle(weighted_cache.Rxx, weighted_r, [2])
+    conditioned = select_cefsplus(
+        X, y, k=1, feature_blocks="auto", include=["decoy"],
+        sample_weight=weights, subsample=None, verbose=False,
+        return_result=True,
+    )
+    assert conditioned.selected_features == ["decoy", "sig__a", "sig__b"]
+    assert conditioned.diagnostics_["objective_path"][0] == pytest.approx(
+        expected_gain, rel=1e-4, abs=1e-6
+    )
 
 
 def test_unequal_blocks_k_metadata_and_transform():
@@ -221,9 +242,7 @@ def test_classic_estimator_identity_and_split_restriction():
         estimator="classic",
         relevance="f",
     )
-    assert set(classic) <= {"f0", "f1", "f2"}
-    if set(classic) & {"f0", "f1"}:
-        assert set(classic) >= {"f0", "f1"}
+    assert classic == ["f0", "f1"]
     with pytest.raises(ValueError, match="split"):
         select_mrmr(
             X,
@@ -245,7 +264,7 @@ def test_classic_estimator_identity_and_split_restriction():
         feature_blocks=blocks,
         subsample=None,
     )
-    assert isinstance(r2, list)
+    assert r2 == ["f0", "f1"]
 
 
 def test_k_auto_and_binary_logloss_rejected():
@@ -254,9 +273,7 @@ def test_k_auto_and_binary_logloss_rejected():
     auto = select_cefsplus(
         X, y, k="auto", verbose=False, feature_blocks=blocks, subsample=None
     )
-    assert isinstance(auto, list)
-    if "f0" in auto or "f1" in auto:
-        assert {"f0", "f1"} <= set(auto)
+    assert auto == ["f0", "f1"]
     with pytest.raises(ValueError, match="scalar column steps"):
         select_cefsplus(
             X,
@@ -277,9 +294,7 @@ def test_k_auto_and_binary_logloss_rejected():
         feature_blocks=blocks,
         subsample=None,
     )
-    assert isinstance(selected, list)
-    if "f0" in selected or "f1" in selected:
-        assert {"f0", "f1"} <= set(selected)
+    assert selected == ["f0", "f1"]
     with pytest.raises(ValueError, match="binary log-loss"):
         select_cefsplus_binary(
             X,
