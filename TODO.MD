@@ -4,8 +4,8 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v0.9.0` is the previous GitHub release at `94bae05`; this source prepares
-  `v0.10.0`. The GitHub Release is the publication record.
+- `v0.10.0` is published at `b97e94d` with verified wheel and source
+  distributions attached. Development has moved to `0.10.1.dev0`.
 - PR #96 merged the 0.10.0 closure at `bd13aed` after all five PR-gated jobs
   passed. PR #97 enabled manual execution of the existing latest-dependency
   job; run 35546467408 passed that job and all other active jobs on `f155725`.
