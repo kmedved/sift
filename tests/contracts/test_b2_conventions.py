@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -457,30 +458,35 @@ def test_metadata_sugar_rejects_missing_ambiguous_and_positional_names(b2_data):
         )
 
 
-def test_none_random_state_warnings_are_caller_facing(b2_data):
+def test_explicit_none_random_state_remains_supported_without_future_warning(b2_data):
     X, y, _groups, _time, _weights = b2_data
     features = X[["signal", "weak", "noise"]]
     model = LinearRegression().fit(features, y)
-    with pytest.warns(FutureWarning, match="SIFT 1.0") as importance_warning:
+    with warnings.catch_warnings(record=True) as importance_warnings:
+        warnings.simplefilter("always")
         sift.permutation_importance(
             model,
             features,
             y,
             n_repeats=1,
             n_jobs=1,
+            random_state=None,
         )
-    assert importance_warning[0].filename == __file__
+    assert not [w for w in importance_warnings if w.category is FutureWarning]
 
-    with pytest.warns(FutureWarning, match="SIFT 1.0") as stability_warning:
+    with warnings.catch_warnings(record=True) as stability_warnings:
+        warnings.simplefilter("always")
         sift.StabilitySelector(
             n_bootstrap=2,
             alpha=0.2,
             n_jobs=1,
+            random_state=None,
             verbose=False,
         ).fit(features, y)
-    assert stability_warning[0].filename == __file__
+    assert not [w for w in stability_warnings if w.category is FutureWarning]
 
-    with pytest.warns(FutureWarning, match="SIFT 1.0") as wrapper_warning:
+    with warnings.catch_warnings(record=True) as wrapper_warnings:
+        warnings.simplefilter("always")
         sift.stability_regression(
             features,
             y,
@@ -488,6 +494,7 @@ def test_none_random_state_warnings_are_caller_facing(b2_data):
             n_bootstrap=2,
             alpha=0.2,
             n_jobs=1,
+            random_state=None,
             verbose=False,
         )
-    assert wrapper_warning[0].filename == __file__
+    assert not [w for w in wrapper_warnings if w.category is FutureWarning]

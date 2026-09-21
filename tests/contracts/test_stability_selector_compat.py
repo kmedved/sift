@@ -40,9 +40,6 @@ def stability_contract_data():
 STABILITY_FIXED_OPTIONS = {
     "n_bootstrap": 6,
     "alpha": 0.5,
-    "n_jobs": 1,
-    "random_state": 0,
-    "verbose": False,
 }
 
 STABILITY_EXPLICIT_DEFAULTS = {
@@ -58,8 +55,11 @@ STABILITY_EXPLICIT_DEFAULTS = {
     "sampler_config": None,
     "store_coefs": True,
     "coef_threshold": 1e-8,
+    "n_jobs": 1,
     "parallel_backend": "threads",
-    "output_order": "legacy",
+    "random_state": 0,
+    "verbose": False,
+    "output_order": "original",
 }
 
 

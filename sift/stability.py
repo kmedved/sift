@@ -31,7 +31,6 @@ from sklearn.utils.metadata_routing import UNUSED
 from joblib import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
-from sift._deprecate import warn_random_state_none
 from sift._logging import logger
 from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
@@ -228,19 +227,17 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         retained bool bytes (default 16 MiB).
     coef_threshold : float, default=1e-8
         Threshold for considering a coefficient as non-zero.
-    n_jobs : int, default=-1
-        Number of parallel jobs (-1 = all cores).
+    n_jobs : int, default=1
+        Number of parallel jobs. Pass ``-1`` to use all cores.
     parallel_backend : str, default='threads'
         Joblib backend preference. 'threads' has lower memory overhead,
         'processes' is more isolated. Set to None for joblib default.
-    random_state : int, optional
-        Random seed for reproducibility. The 0.9 default is None, which draws
-        nondeterministic entropy and makes ``fit`` emit a ``FutureWarning``;
-        SIFT 1.0 will default to seed 0. Pass an integer to silence it.
-        Each unseeded fit records its realized integer root in the result
+    random_state : int or None, default=0
+        Random seed for reproducibility. Explicit ``None`` draws
+        nondeterministic entropy. Each unseeded fit records its realized integer root in the result
         view and manifest, without changing the configured ``None``. Refit
         with that integer and the same inputs/options to replay its streams.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit the bootstrap scheme, the per-fit selection summary and any
         ``tune_threshold`` table at INFO on the ``sift`` logger. Use
         ``sift.set_verbosity`` for a process-wide default.
@@ -252,7 +249,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Permanent alias for ``alpha``, kept beside it rather than deprecated.
         Set one or the other; equal values are accepted and unequal
         simultaneous values raise.
-    output_order : {'legacy', 'original'}, default='legacy'
+    output_order : {'legacy', 'original'}, default='original'
         Order used by transform, selected support indices, feature names, and
         inverse transform. Legacy is descending selection frequency; original
         is ascending fitted feature position.
@@ -326,13 +323,13 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         sampler_config: Optional[SmartSamplerConfig] = None,
         store_coefs: bool = True,
         coef_threshold: float = 1e-8,
-        n_jobs: int = -1,
+        n_jobs: int = 1,
         parallel_backend: str = 'threads',
-        random_state: Optional[int] = None,
-        verbose: bool = True,
+        random_state: Optional[int] = 0,
+        verbose: bool = False,
         callback: ProgressCallback | None = None,
         penalty: Optional[float] = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
         store_proxies: bool = False,
     ):
         self.n_bootstrap = n_bootstrap
@@ -517,7 +514,6 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         # Input validation
         self._validate_runtime_params()
         if self.random_state is None:
-            warn_random_state_none("StabilitySelector.fit")
             self._actual_random_state_ = int(np.random.SeedSequence().generate_state(1)[0])
         else:
             self._actual_random_state_ = self.random_state
@@ -1940,7 +1936,7 @@ def stability_regression(
         regularization strength; unequal simultaneous values raise),
         ``alpha_rule`` (default ``"one_se"``, the strongest alpha within one
         standard error of the CV best, versus ``"best"``), ``l1_ratio``,
-        ``n_jobs`` (default -1, all cores) and ``random_state``.
+        ``n_jobs`` (default 1; pass -1 for all cores) and ``random_state``.
 
     Returns
     -------
@@ -1958,12 +1954,6 @@ def stability_regression(
     ValueError
         From the underlying estimator, for example when ``groups``/``time``
         accompany ``use_smart_sampler=True`` or an option is out of range.
-
-    Warns
-    -----
-    FutureWarning
-        When ``random_state`` is left at its ``None`` default: 0.9 stays
-        nondeterministic, while SIFT 1.0 will default to seed 0.
 
     See Also
     --------
@@ -2041,7 +2031,7 @@ def stability_classif(
         regularization strength; unequal simultaneous values raise),
         ``alpha_rule`` (default ``"one_se"``, the strongest alpha within one
         standard error of the CV best, versus ``"best"``), ``n_jobs``
-        (default -1, all cores) and ``random_state``. ``l1_ratio`` applies to
+        (default 1; pass -1 for all cores) and ``random_state``. ``l1_ratio`` applies to
         regression only.
 
     Returns
@@ -2060,12 +2050,6 @@ def stability_classif(
     ValueError
         From the underlying estimator, for example when ``groups``/``time``
         accompany ``use_smart_sampler=True`` or an option is out of range.
-
-    Warns
-    -----
-    FutureWarning
-        When ``random_state`` is left at its ``None`` default: 0.9 stays
-        nondeterministic, while SIFT 1.0 will default to seed 0.
 
     See Also
     --------

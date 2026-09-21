@@ -63,9 +63,9 @@ def __getattr__(name: str) -> Any:
     except KeyError as exc:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     warn_external(
-        f"sift.experimental.{name} is an experimental SIFT 0.9 API and may "
-        "change before 1.0. The existing top-level import remains available "
-        "through 0.9 for compatibility.",
+        f"sift.experimental.{name} is a research-oriented API. Both this "
+        "namespace and the existing top-level import remain available in 1.0; "
+        "behavior may evolve in later releases.",
         FutureWarning,
     )
     return value

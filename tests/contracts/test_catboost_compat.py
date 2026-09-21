@@ -77,9 +77,9 @@ def test_catboost_public_defaults_are_pinned() -> None:
     assert defaults["algorithm"] == "shap"
     assert defaults["n_splits"] == 3
     assert defaults["n_estimators"] == 500
-    assert defaults["random_state"] is None
-    assert defaults["n_jobs"] == -1
-    assert defaults["verbose"] is True
+    assert defaults["random_state"] == 0
+    assert defaults["n_jobs"] == 1
+    assert defaults["verbose"] is False
     assert defaults["groups"] is None
     assert defaults["time"] is None
     assert defaults["sample_weight"] is None
@@ -274,7 +274,7 @@ def test_catboost_params_collision_warns_and_dictionary_still_wins(
     catboost_contract_data: tuple[pd.DataFrame, pd.Series, pd.Series],
 ) -> None:
     _X, y_reg, _ = catboost_contract_data
-    with pytest.warns(UserWarning, match="depth.*iterations"):
+    with pytest.warns(UserWarning, match="depth.*iterations.*random_seed.*thread_count"):
         params, metric, higher_is_better = _build_catboost_model_params(
             task="regression",
             y=y_reg,
@@ -283,7 +283,12 @@ def test_catboost_params_collision_warns_and_dictionary_still_wins(
             max_depth=6,
             eval_metric=None,
             loss_function=None,
-            catboost_params={"iterations": 7, "depth": 2},
+            catboost_params={
+                "iterations": 7,
+                "depth": 2,
+                "random_seed": 19,
+                "thread_count": 3,
+            },
             higher_is_better=None,
             random_state=0,
             gpu=False,
@@ -291,6 +296,8 @@ def test_catboost_params_collision_warns_and_dictionary_still_wins(
         )
     assert params["iterations"] == 7
     assert params["depth"] == 2
+    assert params["random_seed"] == 19
+    assert params["thread_count"] == 3
     assert metric == "RMSE"
     assert higher_is_better is False
 
@@ -311,17 +318,37 @@ def test_catboost_collision_warning_is_caller_facing_through_wrapper(
     assert caught[0].filename == __file__
 
 
-def test_catboost_none_random_state_warning_is_caller_facing(
+def test_catboost_explicit_none_random_state_remains_supported(
     catboost_contract_data: tuple[pd.DataFrame, pd.Series, pd.Series],
     bounded_catboost_kwargs: dict[str, object],
 ) -> None:
     X, y_reg, _ = catboost_contract_data
     options = dict(bounded_catboost_kwargs)
-    options.pop("random_state")
-    with pytest.warns(FutureWarning, match="SIFT 1.0") as caught:
+    options["random_state"] = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         catboost_select(X, y_reg, k=2, **options)
-    assert caught[0].filename == __file__
+    assert not [warning for warning in caught if warning.category is FutureWarning]
 
-    with pytest.warns(FutureWarning, match="SIFT 1.0") as wrapper_caught:
+    with warnings.catch_warnings(record=True) as wrapper_caught:
+        warnings.simplefilter("always")
         catboost_regression(X, y_reg, k=2, **options)
-    assert wrapper_caught[0].filename == __file__
+    assert not [warning for warning in wrapper_caught if warning.category is FutureWarning]
+
+
+def test_catboost_omitted_defaults_match_explicit_seed_threads_and_quiet(
+    catboost_contract_data: tuple[pd.DataFrame, pd.Series, pd.Series],
+    bounded_catboost_kwargs: dict[str, object],
+) -> None:
+    X, y_reg, _ = catboost_contract_data
+    omitted = dict(bounded_catboost_kwargs)
+    for name in ("random_state", "n_jobs", "verbose"):
+        omitted.pop(name)
+
+    implicit = catboost_select(X, y_reg, k=2, **omitted)
+    explicit = catboost_select(X, y_reg, k=2, **bounded_catboost_kwargs)
+
+    assert implicit.selected_features == explicit.selected_features
+    assert implicit.best_k == explicit.best_k
+    assert implicit.scores_by_k == explicit.scores_by_k
+    assert implicit.all_scores == explicit.all_scores

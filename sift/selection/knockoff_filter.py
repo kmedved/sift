@@ -2400,7 +2400,7 @@ def select_fdr(
     cache: FeatureCache | None = None,
     random_state: int = 0,
     n_jobs: int = 1,
-    verbose: bool = True,
+    verbose: bool = False,
     include=None,
     exclude=None,
     candidates=None,
@@ -2543,7 +2543,7 @@ def select_fdr(
         Worker count for cache construction and for statistics that fit
         sklearn models.  Building a cache from ``X`` rejects ``0``; the
         analytic statistics never spawn workers, so it does not reach them.
-    verbose : bool, default True
+    verbose : bool, default False
         Log the threshold, selected count, and ``s_mean`` at INFO on the
         ``"sift"`` logger.
     include : sequence of names or positions, optional

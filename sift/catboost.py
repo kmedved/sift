@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit, StratifiedShuffleSplit
 
-from sift._deprecate import warn_external, warn_random_state_none
+from sift._deprecate import warn_external
 from sift._logging import logger
 from sift._metadata import resolve_row_metadata
 from sift._progress import ProgressCallback, report_progress
@@ -205,8 +205,9 @@ def _build_catboost_model_params(
         if collisions:
             warn_external(
                 "catboost_params overrides translated SIFT arguments for: "
-                f"{collisions}. The catboost_params values continue to win in "
-                "SIFT 0.9; conflicting values will be rejected in SIFT 1.0.",
+                f"{collisions}. The catboost_params values win. Defaults for "
+                "random_seed and thread_count are translated like explicit SIFT "
+                "arguments, so overriding either also emits this warning.",
                 UserWarning,
             )
         model_params.update(catboost_params)
@@ -753,8 +754,6 @@ class _CatBoostNativePreset(SelectionBackend):
             groups,
             time_values,
         )
-        if options["random_state"] is None:
-            warn_random_state_none("catboost_select")
         all_features = list(X_work.columns)
 
         model_params, resolved_metric, resolved_hib = _build_catboost_model_params(
@@ -993,11 +992,11 @@ def catboost_select(
     treat_object_as_categorical: bool = True,
     train_early_stopping_rounds: int = 20,
     gpu: bool = False,
-    n_jobs: int = -1,
+    n_jobs: int = 1,
     # Meta parameters
     higher_is_better: Optional[bool] = None,
-    random_state: Optional[int] = None,
-    verbose: bool = True,
+    random_state: Optional[int] = 0,
+    verbose: bool = False,
     callback: ProgressCallback | None = None,
     groups: Any = None,
     time: Any = None,
@@ -1094,8 +1093,8 @@ def catboost_select(
     catboost_params : dict or None, default=None
         Raw CatBoost parameters merged last. Keys that collide with the
         translated SIFT arguments emit one ``UserWarning`` and keep the
-        historical ``catboost_params``-wins precedence; SIFT 1.0 will reject
-        conflicting values instead. An ``eval_metric`` supplied here also
+        historical ``catboost_params``-wins precedence. This includes
+        translated default seed/thread values. An ``eval_metric`` supplied here also
         redefines the reported metric and, unless ``higher_is_better`` is
         explicit, its direction.
     algorithm : str, default="shap"
@@ -1125,16 +1124,15 @@ def catboost_select(
     gpu : bool, default=False
         Run CatBoost with ``task_type="GPU"`` on device 0. GPU execution
         ignores ``n_jobs``.
-    n_jobs : int, default=-1
+    n_jobs : int, default=1
         Thread count for CPU CatBoost fits and for the pre-filter. Positive
         values become CatBoost's ``thread_count``.
     higher_is_better : bool or None, default=None
         Metric direction. ``None`` infers it from the resolved metric name.
-    random_state : int or None, default=None
+    random_state : int or None, default=0
         Seed for splits, bootstraps, pre-filtering and CatBoost's
-        ``random_seed``. Leaving it ``None`` emits a ``FutureWarning``: 0.9
-        stays nondeterministic while SIFT 1.0 will default to seed 0.
-    verbose : bool, default=True
+        ``random_seed``. Explicit ``None`` delegates seed selection to CatBoost.
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     callback : ProgressCallback or None, default=None
         ``callback(step, total, info)`` called after each completed split.
@@ -1187,9 +1185,6 @@ def catboost_select(
         auto-treated orphan object columns, a requested ``k`` above the largest
         evaluated count, a failed ``select_features`` call that falls back to
         importance ranking, and a failed final importance computation.
-    FutureWarning
-        When ``random_state`` is left at ``None``.
-
     See Also
     --------
     catboost_regression : Regression wrapper returning only the feature names.

@@ -476,7 +476,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
         block and, in frequency mode, per-resample boolean indicators for
         ``SelectionView`` proxy/cluster reports. Storage is capped; X is not
         retained. Default False.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Transform order. ``"legacy"`` is descending frequency then original
         index in frequency mode, or the base discovery order for e-values.
         ``"original"`` is ascending fitted position.
@@ -487,7 +487,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
         Block length for ``resample="blocks"``. Overrides raise in other modes.
     block_method : {"moving", "circular", "stationary"}, default="moving"
         Block-bootstrap flavor for ``resample="blocks"``.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit the resample scheme and selected count at INFO on the ``sift``
         logger.
 
@@ -579,11 +579,11 @@ class Stabilized(SelectorMixin, BaseEstimator):
         aggregation: str | None = None,
         random_state: int = 0,
         store_proxies: bool = False,
-        output_order: str = "legacy",
+        output_order: str = "original",
         n_jobs: int = 1,
         block_size: int | str = "auto",
         block_method: str = "moving",
-        verbose: bool = True,
+        verbose: bool = False,
     ):
         self.selector = selector
         self.n_resamples = n_resamples

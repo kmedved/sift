@@ -425,9 +425,9 @@ Both spellings are permanent: neither is deprecated and neither warns.
 Threshold tuning accepts sklearn scorer objects as well as scorer names.
 `selector.get_feature_names_out()` is the sklearn-compatible equivalent for
 retrieving the selected names after fitting.
-Set `output_order="legacy"` (the default) to keep descending stability-frequency
-order, or `output_order="original"` to emit selected columns in fitted input
-order. The same order is used by `transform`, `get_support(indices=True)`,
+The default `output_order="original"` emits selected columns in fitted input
+order. Set `output_order="legacy"` to keep descending stability-frequency order. The
+same order is used by `transform`, `get_support(indices=True)`,
 `get_feature_names_out`, and dense `inverse_transform`; inverse output
 zero-fills unselected columns.
 Block draws honor `sample_frac`; the rounded panel-wide draw budget is allocated
@@ -638,10 +638,9 @@ exclusive with the legacy `return_objective` and `return_indices` tuple flags.
 Measured cost context for large `n`/`p`, including when a cache pays off, is
 the [runtime and scaling guide](runtime-scaling.md).
 
-Leaving `random_state=None` on StabilitySelector, permutation importance, or
-CatBoost emits a `FutureWarning`: 0.9 remains nondeterministic, while 1.0 will
-default to seed 0. Their existing `n_jobs=-1` defaults are also unchanged in
-0.9.
+StabilitySelector, permutation importance, and CatBoost default to
+`random_state=0` and `n_jobs=1`. Pass explicit `None` to request entropy where
+supported, or an explicit supported worker count to opt into parallel work.
 
 ### When selection should follow a CatBoost model
 

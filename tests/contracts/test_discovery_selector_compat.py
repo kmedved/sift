@@ -116,7 +116,7 @@ BORUTA_EXPLICIT_DEFAULTS = {
     "test_size": 0.3,
     "shap_sample_size": 2000,
     "early_stop_rounds": 5,
-    "output_order": "legacy",
+    "output_order": "original",
 }
 
 
@@ -247,7 +247,7 @@ KNOCKOFF_EXPLICIT_DEFAULTS = {
     "subsample": 50_000,
     "n_jobs": 1,
     "cache": None,
-    "output_order": "legacy",
+    "output_order": "original",
 }
 
 KNOCKOFF_METADATA_KEYS = {
@@ -335,6 +335,8 @@ def test_knockoff_default_explicit_result_metadata_and_transform_contract(
     )
     expected_indices = [0, 2, 1, 3] if weighted else [0, 2, 1, 3, 5]
     expected_names = [all_names[index] for index in expected_indices]
+    expected_output_indices = sorted(expected_indices)
+    expected_output_names = [all_names[index] for index in expected_output_indices]
     expected_ranking = [all_names[index] for index in [0, 2, 1, 3, 5, 4]]
 
     for fitted in (implicit, explicit):
@@ -352,22 +354,22 @@ def test_knockoff_default_explicit_result_metadata_and_transform_contract(
         )
         np.testing.assert_array_equal(
             fitted.get_support(indices=True),
-            np.array(expected_indices, dtype=np.int64),
+            np.array(expected_output_indices, dtype=np.int64),
         )
-        assert fitted.get_feature_names_out().tolist() == expected_names
+        assert fitted.get_feature_names_out().tolist() == expected_output_names
 
         transformed = fitted.transform(X.copy())
         if input_kind == "dataframe":
             assert type(transformed) is pd.DataFrame
-            assert transformed.columns.tolist() == expected_names
+            assert transformed.columns.tolist() == expected_output_names
             np.testing.assert_array_equal(
-                transformed.to_numpy(), data.X.iloc[:, expected_indices].to_numpy()
+                transformed.to_numpy(), data.X.iloc[:, expected_output_indices].to_numpy()
             )
         else:
             assert type(transformed) is np.ndarray
             assert transformed.shape == (len(data.y), len(expected_indices))
             np.testing.assert_array_equal(
-                transformed, data.X.to_numpy()[:, expected_indices]
+                transformed, data.X.to_numpy()[:, expected_output_indices]
             )
 
         assert type(fitted.result_) is sift.KnockoffSelectionResult

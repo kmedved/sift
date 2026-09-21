@@ -328,7 +328,7 @@ selected = select_mrmr(
     random_state=0,
     n_jobs=1,
     mrmr_backend="auto",      # "auto", "serial", "blas", or "processes"
-    verbose=False,            # the library default is True
+    verbose=False,            # quiet; also the library default
 )
 ```
 
@@ -510,7 +510,7 @@ selected = select_jmi(
     relevance="f",            # ignored by estimator="gaussian"
     top_m=None,               # resolves to max(5*k, 250)
     sample_weight=None,
-    verbose=False,            # the library default is True
+    verbose=False,            # quiet; also the library default
 )
 ```
 
@@ -547,7 +547,7 @@ selected = select_jmim(
     k=8,                      # required
     task="classification",    # required
     estimator="binned",
-    verbose=False,            # the library default is True
+    verbose=False,            # quiet; also the library default
 )
 ```
 
@@ -573,7 +573,7 @@ selected = select_cefsplus(
     sample_weight=None,
     subsample=50_000,
     random_state=0,
-    verbose=False,            # the library default is True
+    verbose=False,            # quiet; also the library default
 )
 ```
 
@@ -614,7 +614,7 @@ result = select_fdr(
     sample_weight=None,
     subsample=50_000,
     random_state=0,
-    verbose=False,            # the library default is True
+    verbose=False,            # quiet; also the library default
 )
 
 selected = result.selected_features
@@ -747,7 +747,7 @@ selected = select_cefsplus_binary(
     ridge=1e-4,
     refit_every=1,
     subsample=None,
-    verbose=False,        # the library default is True
+    verbose=False,        # quiet; also the library default
 )
 ```
 
@@ -853,11 +853,11 @@ dense `inverse_transform`. After fitting, the selectors expose:
   `StabilitySelector` alone. `as_result` rejects a fitted filter or Boruta
   selector class; pass its result object instead.
 
-All eight public selector classes, including Boruta and Stability, accept
-`output_order="legacy"` (default) to preserve each family's historical
-order: filter and knockoff path order, Boruta input order, and Stability
-descending selection-frequency order with stable input-position ties. Set
-`output_order="original"` for ascending fitted-column order. `transform`,
+All ten public selector transformers accept `output_order="legacy"` to preserve
+each family's historical order: filter and knockoff path order, Boruta input
+order, and Stability descending selection-frequency order with stable
+input-position ties. The default `output_order="original"` emits ascending
+fitted-column order. `transform`,
 `get_support(indices=True)`, and `get_feature_names_out()` follow that order;
 the boolean mask remains positional. `inverse_transform` returns a dense,
 full-width array with unselected columns filled with zero and is unavailable
@@ -1588,8 +1588,8 @@ selected_names_out = selector.get_feature_names_out()
 view = selector.result_view_
 ```
 
-`output_order="legacy"` preserves descending selection-frequency order;
-`output_order="original"` emits selected columns in fitted input order. The
+`output_order="original"` (the default) emits selected columns in fitted input
+order; `output_order="legacy"` preserves descending selection-frequency order. The
 same order governs transform, selected support indices, feature names, and
 dense inverse transformation. The fitted selector can invert a reduced dense
 matrix by zero-filling unselected columns; its frozen result view cannot.
@@ -2929,16 +2929,15 @@ Set `random_state` wherever available:
 For exact comparisons, also keep `subsample`, `top_m`, `n_bootstrap`,
 `feature_counts`, and CV splitters fixed.
 
-In 0.9, omitted/`None` `random_state` values on `StabilitySelector`,
-`permutation_importance`, and CatBoost selectors emit a `FutureWarning` but
-remain nondeterministic. SIFT 1.0 will resolve those defaults to seed 0. The
-literal-42 defaults on `AutoKConfig`, `SmartSamplerConfig`, and
-`evaluate_feature_path` remain unchanged and warning-free in 0.9.
+The 1.0 contract defaults `random_state` to seed 0 on `StabilitySelector`,
+`permutation_importance`, and CatBoost selectors. Explicit `None` still requests
+entropy where supported. The literal-42 defaults on `AutoKConfig`,
+`SmartSamplerConfig`, and `evaluate_feature_path` remain unchanged, as do the
+filter omission sentinels and wrapper `random_state="auto"` cache semantics.
 
-Parallel defaults also remain unchanged in 0.9: filter/cache entry points use
-`n_jobs=1`, while Stability, permutation importance, and CatBoost use
-`n_jobs=-1`. CatBoost GPU execution does not translate `n_jobs` into a CPU
-thread count.
+Public worker-count defaults are `n_jobs=1`; pass an explicit supported value,
+including `-1` where documented, to opt into parallel work. CatBoost GPU
+execution does not translate `n_jobs` into a CPU thread count.
 
 ## Development
 

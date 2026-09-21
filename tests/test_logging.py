@@ -45,10 +45,14 @@ def _run_mrmr(*, verbose: bool | None = None) -> None:
     )
 
 
-def test_default_verbose_selector_emits_info_record(caplog):
+def test_default_selector_is_quiet_and_explicit_verbose_emits_info(caplog):
     caplog.set_level(logging.INFO)
 
     _run_mrmr()
+
+    assert not [record for record in caplog.records if record.name == "sift"]
+
+    _run_mrmr(verbose=True)
 
     progress = [
         record
@@ -59,7 +63,7 @@ def test_default_verbose_selector_emits_info_record(caplog):
     assert progress[0].levelno == logging.INFO
 
 
-def test_default_progress_is_visible_and_none_suppresses_it_without_logging_config():
+def test_explicit_progress_is_visible_and_none_suppresses_it_without_logging_config():
     script = textwrap.dedent(
         """
         import numpy as np
@@ -77,6 +81,7 @@ def test_default_progress_is_visible_and_none_suppresses_it_without_logging_conf
             estimator="classic",
             mrmr_backend="serial",
             subsample=None,
+            verbose=True,
         )
         sift.set_verbosity(None)
         sift.select_mrmr(
@@ -87,6 +92,7 @@ def test_default_progress_is_visible_and_none_suppresses_it_without_logging_conf
             estimator="classic",
             mrmr_backend="serial",
             subsample=None,
+            verbose=True,
         )
         """
     )

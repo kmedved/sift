@@ -509,7 +509,7 @@ def test_deferred_auto_k_wrapper_inference_is_numeric_and_fixed():
         unseen["cat"] = "UNSEEN"
         uout = selector.transform(unseen)
         if "cat" in list(selector.selected_features_):
-            col = list(selector.selected_features_).index("cat")
+            col = list(selector.get_feature_names_out()).index("cat")
             np.testing.assert_array_equal(
                 np.asarray(uout, dtype=np.float64)[:, col],
                 np.full(len(X), -1.0),

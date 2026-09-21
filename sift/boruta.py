@@ -331,12 +331,12 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         Stop if no decisions made for this many consecutive rounds.
     random_state : int
         Random seed.
-    verbose : bool
+    verbose : bool, default=False
         Emit per-iteration progress at INFO on the ``sift`` logger.
     callback : callable, optional
         Called after each completed Boruta iteration as
         ``callback(step, total, info)``.
-    output_order : {'legacy', 'original'}, default='legacy'
+    output_order : {'legacy', 'original'}, default='original'
         Order used by transform, selected support indices, feature names, and
         inverse transform. Boruta's legacy order is already input order.
 
@@ -405,9 +405,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
         shap_sample_size: int | None = 2000,
         early_stop_rounds: int = 5,
         random_state: int = 0,
-        verbose: bool = True,
+        verbose: bool = False,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self.estimator = estimator
         self.n_estimators = n_estimators
@@ -1390,7 +1390,7 @@ def select_boruta(
     shap_sample_size: int | None = 2000,
     early_stop_rounds: int = 5,
     random_state: int = 0,
-    verbose: bool = True,
+    verbose: bool = False,
     return_result: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
@@ -1499,7 +1499,7 @@ def select_boruta(
         Stop after this many consecutive iterations that decide nothing.
     random_state : int, default=0
         Seed for the estimator clones and the shadow permutations.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit per-iteration progress at INFO on the ``sift`` logger.
     return_result : bool, default=False
         If True, return BorutaResult instead of feature list.
@@ -1630,7 +1630,7 @@ def select_boruta_shap(
     shap_sample_size: int | None = 2000,
     early_stop_rounds: int = 5,
     random_state: int = 0,
-    verbose: bool = True,
+    verbose: bool = False,
     return_result: bool = False,
     callback: ProgressCallback | None = None,
 ) -> list[str] | BorutaResult:
@@ -1735,7 +1735,7 @@ def select_boruta_shap(
     random_state : int, default=0
         Seed for the estimator clones, the shadow permutations and the SHAP
         row subsample.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit per-iteration progress at INFO on the ``sift`` logger.
     return_result : bool, default=False
         If True, return BorutaResult instead of feature list.

@@ -173,9 +173,17 @@ def test_selector_mixin_default_and_pinned_green_checks(selector_cls):
     """Pin the deliberately supported common sklearn estimator checks."""
     assert issubclass(selector_cls, SelectorMixin)
     selector = selector_cls()
-    assert selector.output_order == "legacy"
+    assert selector.output_order == "original"
     for check in PINNED_GREEN_CHECKS:
         check(selector_cls.__name__, selector)
+
+
+def test_nested_path_clone_keeps_learned_prefix_order():
+    selector = sift.MRMRSelector(output_order="original", verbose=False)
+    nested = selector._clone_for_nested_path(k=3)
+
+    assert selector.output_order == "original"
+    assert nested.output_order == "legacy"
 
 
 @pytest.mark.parametrize("selector_cls", SELECTOR_CLASSES)

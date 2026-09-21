@@ -268,11 +268,10 @@ def test_unseeded_permutation_importance_records_a_replayable_seed():
     realized = []
     importances = []
     for _ in range(2):
-        with pytest.warns(FutureWarning, match="random_state=None"):
-            result = permutation_importance(
-                model, X, y, n_repeats=3, n_jobs=1, random_state=None,
-                return_result=True,
-            )
+        result = permutation_importance(
+            model, X, y, n_repeats=3, n_jobs=1, random_state=None,
+            return_result=True,
+        )
         seeds = result.reproducibility_()["configuration"]["seeds"]
         assert seeds["available"] is True
         assert seeds["random_state"] is None
