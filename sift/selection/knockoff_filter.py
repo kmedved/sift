@@ -203,6 +203,29 @@ class KnockoffSelectionResult:
     selection_frequency: Optional[pd.Series]
     diagnostics_: Optional[dict[str, Any]] = None
 
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        # Tuple comparison keeps the identity fast path for shared pandas fields
+        # that the generated dataclass equality lost on Python 3.13.
+        return (
+            self.selected_features,
+            self.selected_indices,
+            self.selector_metadata,
+            self.W,
+            self.threshold,
+            self.selection_frequency,
+            self.diagnostics_,
+        ) == (
+            other.selected_features,
+            other.selected_indices,
+            other.selector_metadata,
+            other.W,
+            other.threshold,
+            other.selection_frequency,
+            other.diagnostics_,
+        )
+
     def get_feature_ranking(self) -> pd.DataFrame:
         """Return the ``W`` table sorted into a stable feature ranking.
 
