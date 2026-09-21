@@ -4,11 +4,12 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v0.10.0` is the previous GitHub release at `b97e94d`; this source prepares
-  `v0.10.1` with Python 3.13 support and the advance 1.0 migration notice.
-- PR #100 merged the Python 3.13 compatibility work at `612368e` after all six
-  PR-gated jobs passed. The 1.0 default changes remain on their separate branch
-  and are not part of this 0.10.1 release.
+- `v0.10.1` is published at `96a38f1` with verified wheel and source
+  distributions attached. Development is moving to `1.0.0.dev0` through
+  reviewed PR #101; final 1.0.0 remains a separate release decision.
+- PR #102 delivered Python 3.13 support and the advance migration notice while
+  retaining the 0.10 defaults. PR #101 implements only the approved 1.0
+  default changes and preserves the announced compatibility boundaries.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
   and attaches the artifacts; tagging `v` + `sift.__version__` and creating the
