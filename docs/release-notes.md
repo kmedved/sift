@@ -14,7 +14,13 @@
   input order. Seed-42 and cache-aware defaults, all 66 exports, existing
   result forms, permanent aliases, selector mathematics and the scikit-learn
   1.3 floor remain unchanged. The flips are reserved for 1.0, with no new
-  per-call default warnings. Explicit legacy settings remain available.
+  per-call deprecation warnings merely for omitted options. Explicit legacy
+  settings remain available. CatBoost dictionaries still override translated
+  SIFT options; because seed `0` and worker count `1` are now translated
+  defaults, an existing `catboost_params` `random_seed` or `thread_count`
+  override starts emitting the existing collision `UserWarning` while its
+  dictionary value continues to win. Warnings-as-errors callers using those
+  overrides may need to handle that notice.
 
 ## 0.10.0 (2026-09-20)
 
