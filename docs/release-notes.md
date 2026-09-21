@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-09-21)
 
 ### Compatibility
 
@@ -13,8 +13,7 @@
 - Existing seed-42 and cache-aware defaults, all 66 exports, result forms,
   permanent aliases, selector mathematics and the scikit-learn 1.3 floor are
   unchanged. CatBoost dictionaries retain override precedence and their
-  corrected collision warning. This development version does not publish the
-  final 1.0.0 release.
+  corrected collision warning.
 
 ## 0.10.1 (2026-09-21)
 
