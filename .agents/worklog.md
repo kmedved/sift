@@ -1,7 +1,7 @@
-# SIFT 0.10.0 release and development bump — in progress
+# Python 3.13 CI support — in progress
 
-Objective: finish the approved GitHub-only 0.10.0 release with source and wheel assets, then set main to 0.10.1.dev0. PyPI publication is excluded.
+Objective: add Python 3.13 to the existing SIFT CI, fix only demonstrated compatibility failures, and update current support documentation. Deliver a scoped PR with all required checks green; Astra reviews before merge. No 1.0 API/default changes, version bump, tag, release, or PyPI action.
 
-Current state: PR #97 enabled manual latest-dependency CI; run 35546467408 passed all seven jobs. PR #98 prepared 0.10.0 and all five exact-head PR gates passed; it merged as b97e94d with an identical tree. Tag v0.10.0 points to b97e94d; the GitHub Release is published with wheel and sdist assets. Release packaging run 35547707092 passed every step. This branch sets the development version to 0.10.1.dev0 and opens its unreleased notes section. Runtime evidence was refreshed from clean source commit 8c1e303: all 18 data and selection fingerprints match the release artifact and only `sift/__init__.py` changed among bound source hashes. Focused version, runtime-binding, release-note and docs checks passed 123/123.
+State: topic branch `codex/python313-ci` starts from clean main `3617060092512cd917e984f2cd7745da3846637d` (version 0.10.1.dev0). Existing test matrix now includes 3.13 and preinstalls `numba>=0.61` only there, matching the repository's documented wheel constraint. The new job inherits the matrix's full-suite and provenance steps. Historical deferral comments were removed. No source or runtime artifact changed.
 
-Next: commit the refreshed evidence, push the separate dev-bump PR, await exact-head CI, merge with a merge commit, and leave primary main clean and synchronized. Preserve frozen bakeoff artifacts.
+Next: commit and push this CI-only first head, read the actual Python 3.13 and existing PR checks, repair only demonstrated failures, then update current support docs/metadata from the observed result and rerun exact-head CI. Callback to Astra with the green PR for review before merge.
