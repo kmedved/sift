@@ -72,21 +72,3 @@ def warn_external(message: str, category: type[Warning]) -> None:
         category,
         stacklevel=_external_warning_stacklevel(),
     )
-
-
-def warn_random_state_none(
-    entry_point: str,
-    *,
-    stacklevel: int | None = None,
-) -> None:
-    """Warn about a nondeterministic default scheduled to change in 1.0."""
-
-    message = (
-        f"{entry_point} currently uses nondeterministic entropy when "
-        "random_state=None; SIFT 1.0 will default to random_state=0. Pass an "
-        "integer seed to make this call reproducible and silence this warning."
-    )
-    if stacklevel is None:
-        warn_external(message, FutureWarning)
-        return
-    warnings.warn(message, FutureWarning, stacklevel=stacklevel)

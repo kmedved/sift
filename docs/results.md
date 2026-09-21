@@ -129,9 +129,8 @@ metric columns are omitted rather than synthesized.
 A fitted stability view follows the selector's own `output_order`. `features`,
 `indices`, the table's `path_rank`, and the frozen `transform` all use the order
 that `get_feature_names_out()`, `get_support(indices=True)`, and `transform`
-already use, and `metadata["output_order"]` records which one applied. With the
-default `output_order="legacy"` that is descending selection frequency; with
-`output_order="original"` it is ascending fitted position.
+already use, and `metadata["output_order"]` records which one applied. With the default `output_order="original"` that is
+ascending fitted position; with `output_order="legacy"` it is descending selection frequency.
 
 Stability tables retain fitted candidate order, bootstrap selection frequency,
 mean absolute coefficient, and that same coefficient magnitude as `gain`.

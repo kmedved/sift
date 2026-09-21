@@ -15,9 +15,14 @@ def test_stability_none_seed_can_be_replayed_without_changing_configured_none():
     rng = np.random.default_rng(170)
     X = rng.normal(size=(80, 6))
     y = X[:, 0] + 0.5 * rng.normal(size=80)
-    base = StabilitySelector(n_bootstrap=5, n_jobs=1, verbose=False, store_coefs=True)
-    with pytest.warns(FutureWarning, match="random_state=None"):
-        fitted = base.fit(X, y)
+    base = StabilitySelector(
+        n_bootstrap=5,
+        n_jobs=1,
+        random_state=None,
+        verbose=False,
+        store_coefs=True,
+    )
+    fitted = base.fit(X, y)
     assert fitted.get_params()["random_state"] is None
     realized = fitted._actual_random_state_
     assert isinstance(realized, int)

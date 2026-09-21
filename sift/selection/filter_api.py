@@ -369,7 +369,7 @@ def select_mrmr(
     onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT, n_jobs: int = 1,
     mrmr_backend: MrmrBackend = "auto",
-    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    verbose: bool = False, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
@@ -586,7 +586,7 @@ def select_mrmr(
         regardless of ``n_jobs``, because the BLAS matvec update avoids
         process start-up and pickling costs; pass ``"processes"`` explicitly
         to opt into joblib workers.
-    verbose : bool, default True
+    verbose : bool, default False
         Log progress at INFO on the ``"sift"`` logger.  Use
         ``sift.set_verbosity`` for a process-wide default.
     return_result : bool, default False
@@ -733,7 +733,7 @@ def select_jmi(
     allow_full_data_target_encoding: bool = False,
     onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    verbose: bool = False, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
@@ -878,7 +878,7 @@ def select_jmi(
     random_state : int, default 0
         Seed for subsampling and for the ``relevance="rf"`` forest.  Cannot be
         passed with ``cache``.
-    verbose : bool, default True
+    verbose : bool, default False
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
         Return a ``sift.selection.result.FilterSelectionResult`` instead
@@ -1013,7 +1013,7 @@ def select_jmim(
     allow_full_data_target_encoding: bool = False,
     onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    verbose: bool = False, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
@@ -1155,7 +1155,7 @@ def select_jmim(
     random_state : int, default 0
         Seed for subsampling and for the ``relevance="rf"`` forest.  Cannot be
         passed with ``cache``.
-    verbose : bool, default True
+    verbose : bool, default False
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
         Return a ``sift.selection.result.FilterSelectionResult`` instead
@@ -1291,7 +1291,7 @@ def select_cefsplus(
     allow_full_data_target_encoding: bool = False,
     onehot_max_levels: int = 32,
     subsample: Optional[int] = _SUBSAMPLE_DEFAULT, random_state: int = _RANDOM_STATE_DEFAULT,
-    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    verbose: bool = False, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
@@ -1454,7 +1454,7 @@ def select_cefsplus(
         Seed for that subsampling draw and for stochastic auto-k methods.
         Cannot be passed with ``cache``; rebuild the cache with the seed you
         want.
-    verbose : bool, default True
+    verbose : bool, default False
         Log progress at INFO on the ``"sift"`` logger.  Use
         ``sift.set_verbosity`` for a process-wide default.
     return_result : bool, default False
@@ -1607,7 +1607,7 @@ def select_cefsplus_binary(
     allow_full_data_target_encoding: bool = False,
     onehot_max_levels: int = 32,
     subsample: Optional[int] = None, random_state: int = 0,
-    verbose: bool = True, return_result: bool = False, store_proxies: bool = False,
+    verbose: bool = False, return_result: bool = False, store_proxies: bool = False,
     include=None, exclude=None, candidates=None, feature_blocks=None,
     callback: ProgressCallback | None = None,
 ) -> list[str] | FilterSelectionResult:
@@ -1745,7 +1745,7 @@ def select_cefsplus_binary(
         the other filters this defaults to ``None``, meaning every row.
     random_state : int, default 0
         Seed for the subsampling draw and for stochastic auto-k methods.
-    verbose : bool, default True
+    verbose : bool, default False
         Log progress at INFO on the ``"sift"`` logger.
     return_result : bool, default False
         Return a ``sift.selection.result.FilterSelectionResult`` instead

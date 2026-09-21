@@ -140,7 +140,7 @@ class SmartSamplerConfig:
         Maximum share of per-group quota for anchors.
     random_state : int, optional
         Random seed.
-    verbose : bool
+    verbose : bool, default=False
         Emit sampler progress at INFO on the ``sift`` logger.
 
     See Also
@@ -179,7 +179,7 @@ class SmartSamplerConfig:
     anchor_fn: Optional[Callable] = None
     anchor_max_share: float = 0.4
     random_state: Optional[int] = 42
-    verbose: bool = True
+    verbose: bool = False
 
     def __post_init__(self) -> None:
         _validate_smart_sampler_config(self)

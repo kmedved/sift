@@ -24,7 +24,7 @@ EXPECTED_DEFAULTS = {
     "anchor_fn": None,
     "anchor_max_share": 0.4,
     "random_state": 42,
-    "verbose": True,
+    "verbose": False,
 }
 
 

@@ -658,7 +658,7 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         count tied with the best score.
     selection_patience : int, default 1
         Consecutive misses allowed while walking down from the best count.
-    output_order : {'legacy', 'original'}, default 'legacy'
+    output_order : {'legacy', 'original'}, default 'original'
         ``'legacy'`` is discovery order (RFE/forward path, or frequency then
         index for stability). ``'original'`` is ascending fitted position.
     verbose : bool, default False
@@ -752,7 +752,7 @@ class ModelSelector(SelectorMixin, BaseEstimator):
         random_state: int = 0,
         parsimony_tolerance: float = 0.0,
         selection_patience: int = 1,
-        output_order: str = "legacy",
+        output_order: str = "original",
         verbose: bool = False,
     ):
         self.estimator = estimator

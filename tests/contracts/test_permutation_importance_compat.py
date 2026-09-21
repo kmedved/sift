@@ -47,7 +47,7 @@ def importance_contract_data():
 
 
 def _importance_without_warnings(X, y, sample_weight, *, explicit):
-    options = {"n_jobs": 1, "random_state": 7}
+    options = {}
     if explicit:
         options.update(
             {
@@ -56,7 +56,9 @@ def _importance_without_warnings(X, y, sample_weight, *, explicit):
                 "n_repeats": 10,
                 "permute_method": "global",
                 "block_size": "auto",
+                "n_jobs": 1,
                 "parallel_backend": "threads",
+                "random_state": 0,
             }
         )
     with warnings.catch_warnings(record=True) as caught:

@@ -87,7 +87,7 @@ def _default(callable_, name):
 
 
 def test_version_and_ordered_public_exports():
-    assert sift.__version__ == "0.10.1"
+    assert sift.__version__ == "1.0.0.dev0"
     assert sift.__all__ == EXPECTED_ALL
     assert sift.__all__[:55] == LEGACY_EXPECTED_ALL
     assert sift.__all__[55:] == [
@@ -114,21 +114,22 @@ def test_every_public_export_resolves(name):
 def test_high_risk_function_defaults():
     assert _default(sift.select_cefsplus, "k") == 75
     assert _default(sift.permutation_importance, "n_repeats") == 10
-    assert _default(sift.permutation_importance, "n_jobs") == -1
-    assert _default(sift.permutation_importance, "random_state") is None
+    assert _default(sift.permutation_importance, "n_jobs") == 1
+    assert _default(sift.permutation_importance, "random_state") == 0
     assert _default(sift.permutation_importance, "return_result") is False
     assert _default(sift.select_cached, "method") == "cefsplus"
     assert _default(sift.select_cached, "corr_prune") == "auto"
     assert _default(sift.select_cached, "return_objective") is False
     assert _default(sift.select_cached, "return_indices") is False
     assert _default(sift.select_cached, "return_result") is False
+    assert _default(sift.evaluate_feature_path, "random_state") == 42
 
     stability_defaults = inspect.signature(sift.StabilitySelector).parameters
     assert stability_defaults["n_bootstrap"].default == 50
     assert stability_defaults["threshold"].default == 0.6
-    assert stability_defaults["n_jobs"].default == -1
-    assert stability_defaults["random_state"].default is None
-    assert stability_defaults["verbose"].default is True
+    assert stability_defaults["n_jobs"].default == 1
+    assert stability_defaults["random_state"].default == 0
+    assert stability_defaults["verbose"].default is False
     assert stability_defaults["penalty"].default is None
 
     stabilized_defaults = inspect.signature(sift.Stabilized).parameters
@@ -140,7 +141,7 @@ def test_high_risk_function_defaults():
     assert stabilized_defaults["random_state"].default == 0
     assert stabilized_defaults["store_proxies"].default is False
     assert stabilized_defaults["n_jobs"].default == 1
-    assert stabilized_defaults["verbose"].default is True
+    assert stabilized_defaults["verbose"].default is False
 
     defaults = {field.name: field.default for field in fields(sift.AutoKConfig)}
     assert {
@@ -154,6 +155,47 @@ def test_high_risk_function_defaults():
         "max_k": 100,
         "random_state": 42,
     }
+
+    verbose_apis = (
+        sift.select_mrmr,
+        sift.select_jmi,
+        sift.select_jmim,
+        sift.select_cefsplus,
+        sift.select_cefsplus_binary,
+        sift.select_fdr,
+        sift.select_boruta,
+        sift.select_boruta_shap,
+        sift.BorutaSelector,
+        sift.MRMRSelector,
+        sift.JMISelector,
+        sift.JMIMSelector,
+        sift.CEFSPlusSelector,
+        sift.CEFSPlusBinarySelector,
+        sift.KnockoffSelector,
+        sift.SmartSamplerConfig,
+        sift.StabilitySelector,
+        sift.catboost_select,
+        sift.Stabilized,
+        sift.ModelSelector,
+    )
+    assert all(_default(api, "verbose") is False for api in verbose_apis)
+
+    ordered_transformers = (
+        sift.MRMRSelector,
+        sift.JMISelector,
+        sift.JMIMSelector,
+        sift.CEFSPlusSelector,
+        sift.CEFSPlusBinarySelector,
+        sift.KnockoffSelector,
+        sift.BorutaSelector,
+        sift.StabilitySelector,
+        sift.ModelSelector,
+        sift.Stabilized,
+    )
+    assert all(
+        _default(selector, "output_order") == "original"
+        for selector in ordered_transformers
+    )
 
 
 METHODS = (

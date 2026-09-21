@@ -1,5 +1,21 @@
 # Release Notes
 
+## 1.0.0 (unreleased)
+
+### Compatibility
+
+- Implemented the defaults announced in 0.10.1 for 1.0 development. Omitted
+  `random_state=None` defaults in stability, permutation importance and
+  CatBoost are now `0`; public progress defaults are quiet; existing public
+  `n_jobs=-1` defaults are now `1`; and the ten selector transformers default
+  to original input order. Explicit `None`, `verbose=True`, parallel worker
+  settings and `output_order="legacy"` remain supported.
+- Existing seed-42 and cache-aware defaults, all 66 exports, result forms,
+  permanent aliases, selector mathematics and the scikit-learn 1.3 floor are
+  unchanged. CatBoost dictionaries retain override precedence and their
+  corrected collision warning. This development version does not publish the
+  final 1.0.0 release.
+
 ## 0.10.1 (2026-09-21)
 
 ### Compatibility

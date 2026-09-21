@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed, effective_n_jobs
 
-from sift._deprecate import warn_random_state_none
 from sift._metadata import resolve_row_metadata
 from sift._permute import (
     PermutationMethod,
@@ -337,9 +336,9 @@ def permutation_importance(
     n_repeats: int = 10,
     permute_method: PermutationMethod = "auto",
     block_size: int | str = "auto",
-    n_jobs: int = -1,
+    n_jobs: int = 1,
     parallel_backend: ParallelBackend = "threads",
-    random_state: int | None = None,
+    random_state: int | None = 0,
     return_result: bool = False,
 ) -> pd.DataFrame | ImportanceResult:
     """
@@ -352,8 +351,8 @@ def permutation_importance(
     ``"ranking_only"``.  The permutation strategy is what makes it usable on
     dependent data -- supply ``groups`` or ``time`` and the shuffle is
     restricted so it cannot destroy the dependence structure it should
-    preserve.  By default it uses negative MSE, 10 repeats, all cores, thread
-    parallelism, a nondeterministic seed, and returns the historical
+    preserve. By default it uses negative MSE, 10 repeats, one job, thread
+    parallelism, seed 0, and returns the historical
     four-column DataFrame sorted by descending mean importance.
 
     Parameters
@@ -395,19 +394,16 @@ def permutation_importance(
         For block method. ``"auto"`` uses ``int(sqrt(n_samples))``. Ignored by
         every other ``permute_method``.
     n_jobs : int
-        Number of parallel jobs. The default ``-1`` uses all cores; features
+        Number of parallel jobs. The default is ``1``; ``-1`` uses all cores. Features
         are split into contiguous chunks, one per worker.
     parallel_backend : {"threads", "processes"}
         Joblib backend preference. "threads" avoids inter-process copies for
         many estimators; "processes" isolates workers when process parallelism
         is preferred.
-    random_state : int or None, default None
+    random_state : int or None, default 0
         Seed for the permutation draws. One seed per (feature, repeat) is
         derived from it, so a given seed reproduces the run exactly, including
-        under parallelism. The ``None`` default draws nondeterministic entropy
-        and emits a ``FutureWarning``: SIFT 1.0 will resolve it to
-        ``random_state=0``. Pass an integer to make the call reproducible and
-        silence that warning.
+        under parallelism. Explicit ``None`` draws nondeterministic entropy.
     return_result : bool
         If ``False`` (default), return the historical four-column DataFrame.
         If ``True``, return ``ImportanceResult``, including the
@@ -439,12 +435,6 @@ def permutation_importance(
     TypeError
         If ``scoring`` is neither a scorer name, a ``ScoringSpec``, nor a
         callable.
-
-    Warns
-    -----
-    FutureWarning
-        When ``random_state`` is left at ``None``, because the run is then
-        nondeterministic and the default will change in SIFT 1.0.
 
     See Also
     --------
@@ -529,7 +519,6 @@ def permutation_importance(
 
     w = ensure_weights(sample_weight, n, normalize=True)
     if random_state is None:
-        warn_random_state_none("permutation_importance")
         # Draw the entropy ourselves instead of letting the generator do it,
         # so the run stays reproducible from its manifest.
         resolved_random_state: Any = int(np.random.SeedSequence().generate_state(1)[0])

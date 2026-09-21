@@ -1415,7 +1415,7 @@ class MRMRSelector(_BaseSelector):
         regardless of ``n_jobs``, because the BLAS matvec update avoids
         process start-up and pickling costs; pass ``"processes"`` explicitly
         to opt into joblib workers.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or ClassicFeatureCache or None, default=None
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
@@ -1474,7 +1474,7 @@ class MRMRSelector(_BaseSelector):
         split. ``k="auto"`` counts additional blocks on evaluate, elbow,
         penalized_objective, gaussian_cv, xfit_objective, and auto routing;
         calibrated column-step rules raise.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         selection-path order; ``"original"`` emits ascending fitted column
@@ -1593,7 +1593,7 @@ class MRMRSelector(_BaseSelector):
         random_state: int | Literal["auto"] = "auto",
         n_jobs: int = 1,
         mrmr_backend: str = "auto",
-        verbose: bool = True,
+        verbose: bool = False,
         cache=None,
         auto_k_config=None,
         within: str | None = None,
@@ -1602,7 +1602,7 @@ class MRMRSelector(_BaseSelector):
         candidates=None,
         feature_blocks=None,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_mrmr, locals())
 
@@ -1716,7 +1716,7 @@ class JMISelector(_BaseSelector):
         Seed for that row sampling and for uncached cache construction.
         ``"auto"`` is the omitted default and resolves to seed 0 when fitting
         from ``X``. An explicit value beside a ``cache`` raises.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or ClassicFeatureCache or None, default=None
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
@@ -1775,7 +1775,7 @@ class JMISelector(_BaseSelector):
         split. ``k="auto"`` counts additional blocks on evaluate, elbow,
         penalized_objective, gaussian_cv, xfit_objective, and auto routing;
         calibrated column-step rules raise.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         selection-path order; ``"original"`` emits ascending fitted column
@@ -1891,7 +1891,7 @@ class JMISelector(_BaseSelector):
         onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
-        verbose: bool = True,
+        verbose: bool = False,
         cache=None,
         auto_k_config=None,
         within: str | None = None,
@@ -1900,7 +1900,7 @@ class JMISelector(_BaseSelector):
         candidates=None,
         feature_blocks=None,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_jmi, locals())
 
@@ -2015,7 +2015,7 @@ class JMIMSelector(_BaseSelector):
         Seed for that row sampling and for uncached cache construction.
         ``"auto"`` is the omitted default and resolves to seed 0 when fitting
         from ``X``. An explicit value beside a ``cache`` raises.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or ClassicFeatureCache or None, default=None
         Prebuilt cache. ``FeatureCache`` is for ``estimator="gaussian"``.
@@ -2074,7 +2074,7 @@ class JMIMSelector(_BaseSelector):
         split. ``k="auto"`` counts additional blocks on evaluate, elbow,
         penalized_objective, gaussian_cv, xfit_objective, and auto routing;
         calibrated column-step rules raise.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         selection-path order; ``"original"`` emits ascending fitted column
@@ -2191,7 +2191,7 @@ class JMIMSelector(_BaseSelector):
         onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
-        verbose: bool = True,
+        verbose: bool = False,
         cache=None,
         auto_k_config=None,
         within: str | None = None,
@@ -2200,7 +2200,7 @@ class JMIMSelector(_BaseSelector):
         candidates=None,
         feature_blocks=None,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_jmim, locals())
 
@@ -2310,7 +2310,7 @@ class CEFSPlusSelector(_BaseSelector):
         Seed for that row sampling and cache construction. ``"auto"`` is the
         omitted default and resolves to seed 0 when fitting from ``X``. An
         explicit value beside a ``cache`` raises.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or None, default=None
         Prebuilt Gaussian-copula cache to reuse. A named cache requires a
@@ -2369,7 +2369,7 @@ class CEFSPlusSelector(_BaseSelector):
         split. ``k="auto"`` counts additional blocks on evaluate, elbow,
         penalized_objective, gaussian_cv, xfit_objective, and auto routing;
         calibrated column-step rules raise.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         selection-path order; ``"original"`` emits ascending fitted column
@@ -2490,7 +2490,7 @@ class CEFSPlusSelector(_BaseSelector):
         onehot_max_levels: int = 32,
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int | Literal["auto"] = "auto",
-        verbose: bool = True,
+        verbose: bool = False,
         cache=None,
         auto_k_config=None,
         within: str | None = None,
@@ -2499,7 +2499,7 @@ class CEFSPlusSelector(_BaseSelector):
         candidates=None,
         feature_blocks=None,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_cefsplus, locals())
 
@@ -2643,7 +2643,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         default needs no ``"auto"`` sentinel.
     random_state : int, default=0
         Seed for that row sampling.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
@@ -2676,7 +2676,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         penalized_objective, and auto (EBIC). Joint logistic block scores
         are used; Gaussian CV/xfit and calibrated column-step rules raise.
         ``loss="brier"`` delegates to Gaussian CEFS+ blocks.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         selection-path order; ``"original"`` emits ascending fitted column
@@ -2798,14 +2798,14 @@ class CEFSPlusBinarySelector(_BaseSelector):
         onehot_max_levels: int = 32,
         subsample: int | None = None,
         random_state: int = 0,
-        verbose: bool = True,
+        verbose: bool = False,
         auto_k_config=None,
         include=None,
         exclude=None,
         candidates=None,
         feature_blocks=None,
         callback: ProgressCallback | None = None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_cefsplus_binary, locals())
 
@@ -3183,7 +3183,7 @@ class KnockoffSelector(_BaseSelector):
         numeric, because it seeds a fresh draw even when a cache is reused.
     n_jobs : int, default=1
         Worker count for cache construction and statistic evaluation.
-    verbose : bool, default=True
+    verbose : bool, default=False
         Emit progress at INFO on the ``sift`` logger.
     cache : FeatureCache or None, default=None
         Prebuilt Gaussian-copula cache to reuse. A named cache requires a
@@ -3225,7 +3225,7 @@ class KnockoffSelector(_BaseSelector):
         provided. FDR-compatible wording is allowed only for
         ``prespecified`` and ``sample_split``. ``data_derived`` is labeled
         exploratory and reports ``fdr_control="none"``.
-    output_order : {"legacy", "original"}, default="legacy"
+    output_order : {"legacy", "original"}, default="original"
         Order used by ``transform``, ``get_support(indices=True)``,
         ``get_feature_names_out`` and ``inverse_transform``. ``"legacy"`` keeps
         discovery order; ``"original"`` emits ascending fitted column position.
@@ -3354,14 +3354,14 @@ class KnockoffSelector(_BaseSelector):
         subsample: int | None | Literal["auto"] = "auto",
         random_state: int = 0,
         n_jobs: int = 1,
-        verbose: bool = True,
+        verbose: bool = False,
         cache=None,
         include=None,
         exclude=None,
         candidates=None,
         include_provenance=None,
         feature_blocks=None,
-        output_order: str = "legacy",
+        output_order: str = "original",
     ):
         self._init_selector(select_fdr, locals())
 
