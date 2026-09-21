@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.9.1 (unreleased)
+## 0.10.0 (2026-09-20)
 
 ### Compatibility
 
@@ -22,7 +22,7 @@
   datasets or claim FDR for ordinary frequency voting. Opt-in F2 proxy storage
   and an additive `SelectionView` / reproducibility manifest are included.
   `StabilitySelector` and KnockoffSelector defaults are unchanged. The public
-  surface grows to 66 names in the current 0.9.1 development line. Not a 1.0
+  surface grows to 66 names in this 0.10.0 release. Not a 1.0
   preset rewrite.
 - Added additive `sift.compare` for leakage-safe selector comparison. Factories
   refit inside each training fold; a fresh downstream estimator is scored on
