@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.0.1 (unreleased)
+
+Development resumed after v1.0.0. No additional changes have shipped yet.
+
 ## 1.0.0 (2026-09-21)
 
 ### Compatibility

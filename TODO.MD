@@ -4,11 +4,13 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v0.10.1` is the previous GitHub release at `96a38f1`; this source prepares
-  final `v1.0.0` with the approved and previously announced default changes.
-- PR #101 merged the reviewed 1.0 implementation as `a68695a` after all six
-  exact-head and merged-main jobs passed. Seed-42/cache defaults, all 66
-  exports, returns, permanent aliases and the scikit-learn 1.3 floor remain.
+- `v1.0.0` is the latest GitHub release at `42c1e6d`; its wheel and source
+  distribution passed the release workflow, Twine metadata checks and a clean
+  installed-wheel smoke. Development is now `1.0.1.dev0`.
+- PR #101 merged the reviewed 1.0 implementation as `a68695a`, and PR #103
+  merged the release source as `42c1e6d`, after their exact-head and
+  merged-main jobs passed. Seed-42/cache defaults, all 66 exports, returns,
+  permanent aliases and the scikit-learn 1.3 floor remain.
 - Releases are GitHub Releases with the built sdist and wheel attached. **No
   PyPI publication, ever.** The workflow builds, metadata-checks, clean-installs
   and attaches the artifacts; tagging `v` + `sift.__version__` and creating the
