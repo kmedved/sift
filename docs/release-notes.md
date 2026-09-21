@@ -1,5 +1,9 @@
 # Release Notes
 
+## 0.10.1 (unreleased)
+
+No changes yet.
+
 ## 0.10.0 (2026-09-20)
 
 ### Compatibility
