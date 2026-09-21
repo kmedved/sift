@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,6 +74,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          if [[ "${{ matrix.python-version }}" == "3.13" ]]; then
+            pip install "numba>=0.61"
+          fi
           pip install -e ".[test]"
           pip install -e ".[categorical]"
           if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
@@ -91,27 +94,6 @@ jobs:
         run: |
           python scripts/generate_api_reference.py --check
           mkdocs build --strict
-
-  # A Python 3.13 job is DEFERRED, and the reason is now only that it has never
-  # been run in CI -- not that it cannot pass.
-  #
-  # The dependency blockers are gone. The newest resolution `pyproject.toml`
-  # allows -- numpy 2.5.2 / pandas 3.0.5 / scikit-learn 1.9.0 / scipy 1.18.1 /
-  # numba 0.67.0 -- is green at 1,680 passed / 30 skipped. The `test (3.12)` job
-  # above resolves to that band on every run (numpy 2.5 ships no cp311
-  # wheels, so 3.11 resolves slightly older versions), and `min-pins` covers
-  # the floors, so the declared range is exercised end to end. See
-  # docs/development.md ("Verified dependency band").
-  #
-  # The interpreter is not a blocker either: numba ships cp313 wheels from
-  # 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local 3.13.15 run with
-  # numba 0.67 reached 1,565 passed / 3 failed -- those 3 were the numpy 2.5
-  # failures, now closed. `numba>=0.61` is the only 3.13-specific pin the job
-  # needs, because pip otherwise resolves an older numba with no cp313 wheel.
-  #
-  # What is missing is evidence, so the job stays out until someone enables it
-  # and reads its first run rather than assuming it is green. The ready-to-paste
-  # definition is in docs/development.md ("Enabling a Python 3.13 job").
 
   # The advertised dependency floors, actually executed. Every direct runtime
   # requirement is pinned to its declared minimum; `--no-deps` keeps pip from
