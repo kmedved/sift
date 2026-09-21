@@ -73,7 +73,7 @@ promotion record in the shared JSON schema.
 
 The committed `runtime_scaling_2026-09-03` CSV and sidecar keep that stable
 basename. They were generated from clean implementation commit
-`e6021bd0a064ea7698687f38838657ce96281feb` with `dirty=false` and are
+`7ee073d755a9ab2fac349083c0ed82b830d526e2` with `dirty=false` and are
 clean-source development evidence following v0.10.0.
 
 `bench_auto_k.py --methods ...` accepts comma-separated methods including
