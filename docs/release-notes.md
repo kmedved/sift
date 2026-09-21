@@ -1,12 +1,26 @@
 # Release Notes
 
-## 0.10.1 (unreleased)
+## 0.10.1 (2026-09-21)
 
 ### Compatibility
 
 - Added Python 3.13 to the full-suite CI matrix. `KnockoffSelectionResult`
   equality again handles a shared pandas payload without evaluating the
   DataFrame as a boolean, preserving its behavior from earlier Python versions.
+- Announced the approved 1.0 compatibility defaults in advance. Omitted
+  `random_state=None` defaults in stability, permutation importance and
+  CatBoost become `0`; public progress defaults become quiet; existing
+  `n_jobs=-1` defaults become `1`; and selector transforms default to original
+  input order. Seed-42 and cache-aware defaults, all 66 exports, existing
+  result forms, permanent aliases, selector mathematics and the scikit-learn
+  1.3 floor remain unchanged. The flips are reserved for 1.0, with no new
+  per-call deprecation warnings merely for omitted options. Explicit legacy
+  settings remain available. CatBoost dictionaries still override translated
+  SIFT options; because seed `0` and worker count `1` are now translated
+  defaults, an existing `catboost_params` `random_seed` or `thread_count`
+  override starts emitting the existing collision `UserWarning` while its
+  dictionary value continues to win. Warnings-as-errors callers using those
+  overrides may need to handle that notice.
 
 ## 0.10.0 (2026-09-20)
 
@@ -933,23 +947,26 @@ was added to `pyproject.toml`.
 
 ### Deprecation ledger (flips in 1.0)
 
-Reproduced verbatim from §4 of `docs/specs/0.9-product-layer.md`. Nothing in this table
-changes in 0.9; it is the complete list of what 1.0 may flip.
+Reproduced verbatim from §4 of `docs/specs/0.9-product-layer.md`. The table
+started as a 0.9 proposal; its 1.0 column now records the narrower contract
+approved on 2026-09-21. The changes are announced in 0.10.x and take effect only
+in 1.0.
 
 | item | 0.9 state | 1.0 state |
 | --- | --- | --- |
-| `random_state` defaults (`None`/`42` sites) | `None` sites warn on default use; `42` sites remain literal `42` with no sentinel or omission warning | `0` everywhere |
+| `random_state=None` defaults | Stability, permutation importance and CatBoost families warn on omitted/default `None` use | default to `0`; retain explicit `None` where supported and remove the obsolete future-default warning |
+| existing seed-42 and cache-aware defaults | `AutoKConfig`, path evaluation and smart sampling use `42`; filter functions use omission sentinels and wrappers use `"auto"` | unchanged |
 | `verbose` default | `True`, logging-backed; logging formatting/routing may differ, but selection/returns/default progress behavior does not | `False` |
 | `n_jobs=-1` defaults (stability, permutation, CatBoost) | unchanged, documented | `1` |
 | `transform` output order | `"legacy"` default: filter path/selection order, Boruta original order, Stability descending selection frequency with stable original-index ties; `"original"` opt-in | `"original"` default |
-| `sift.__all__` | 66 current 0.9.1 exports: the 0.9.0 baseline remains 58, with later additions explicitly counted; current additions include `compare`/`CompareResult`, `Stabilized`, `ModelSelector`, `PurgedTimeSeriesSplit`/`GroupPurgedTimeSeriesSplit`, and `ClassicFeatureCache`/`build_classic_cache` | §2.C exact 42-name allowlist plus the originally named landed workstream-F additions (`compare`, `Stabilized`, `ModelSelector`, `PurgedTimeSeriesSplit`/`GroupPurgedTimeSeriesSplit`); placement of `CompareResult`, `ClassicFeatureCache`, and `build_classic_cache` remains an owner decision |
-| `select_cached` tuple returns | unchanged + `return_result=True` added | tuples deprecated |
+| `sift.__all__` | 66 exports | retain all 66 exports and the existing `sift.experimental` access path |
+| list/tuple/result returns | `select_cached` keeps list/tuple forms and offers `return_result=True`; `as_result` is additive | unchanged; result objects remain opt-in |
 | CatBoost `group_col`/`sample_weight_col` | aliases beside arrays | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
 | stability `alpha` | joined by `penalty=` alias | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
-| overlapping `AutoKConfig` fields | audited + documented in 0.9; no deprecation | consolidated only where the audit proves equivalence |
-| `AutoKConfig` option groups | flat dataclass fields are canonical; group objects are builders/read-only views and are not simultaneous constructor fields | same storage contract unless a separately versioned API is approved |
+| overlapping `AutoKConfig` fields | audited + documented in 0.9; no deprecation | unchanged |
+| `AutoKConfig` option groups | flat dataclass fields are canonical; group objects are builders/read-only views and are not simultaneous constructor fields | unchanged |
 | `StabilitySelector.selected_features_` index/name asymmetry | unchanged, documented; `view.features` is the unified accessor | unchanged unless separately decided — **not** auto-flipped |
-| sklearn floor | 1.3 | 1.4 |
+| sklearn floor | 1.3 | retain 1.3 |
 
 ## 0.8.0 (never published; folded into 0.9.0)
 
