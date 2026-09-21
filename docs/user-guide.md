@@ -641,6 +641,10 @@ the [runtime and scaling guide](runtime-scaling.md).
 StabilitySelector, permutation importance, and CatBoost default to
 `random_state=0` and `n_jobs=1`. Pass explicit `None` to request entropy where
 supported, or an explicit supported worker count to opt into parallel work.
+CatBoost dictionaries retain precedence over translated SIFT options. An
+explicit `catboost_params` `random_seed` or `thread_count` therefore still
+wins, but now collides with the translated defaults and emits the existing
+`UserWarning`; warnings-as-errors callers may need to handle it.
 
 ### When selection should follow a CatBoost model
 

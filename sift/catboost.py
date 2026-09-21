@@ -1344,8 +1344,6 @@ def catboost_regression(
     UserWarning
         Propagated from ``catboost_select``, notably the
         ``catboost_params``-wins collision notice.
-    FutureWarning
-        When ``random_state`` is left at ``None``.
 
     See Also
     --------
@@ -1428,8 +1426,6 @@ def catboost_classif(
     UserWarning
         Propagated from ``catboost_select``, notably the
         ``catboost_params``-wins collision notice.
-    FutureWarning
-        When ``random_state`` is left at ``None``.
 
     See Also
     --------

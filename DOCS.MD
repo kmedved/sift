@@ -2938,6 +2938,10 @@ filter omission sentinels and wrapper `random_state="auto"` cache semantics.
 Public worker-count defaults are `n_jobs=1`; pass an explicit supported value,
 including `-1` where documented, to opt into parallel work. CatBoost GPU
 execution does not translate `n_jobs` into a CPU thread count.
+Raw `catboost_params` keep precedence over translated SIFT options. A
+`random_seed` or `thread_count` entry still wins, but now collides with the
+translated default seed or worker count and emits the existing `UserWarning`;
+warnings-as-errors callers may need to handle that notice.
 
 ## Development
 

@@ -225,7 +225,7 @@ def panel_config(
         ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
         ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
         ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
-        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=True``.
+        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=False``.
         The returned config is a mutable dataclass, so override any of those
         in place or through ``dataclasses.replace``.
 
@@ -296,7 +296,7 @@ def cross_section_config(sample_frac: float = 0.15) -> SmartSamplerConfig:
         ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
         ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
         ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
-        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=True``.
+        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=False``.
         The returned config is a mutable dataclass, so override any of those
         in place or through ``dataclasses.replace``.
 
