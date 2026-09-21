@@ -2,7 +2,11 @@
 
 ## 0.10.1 (unreleased)
 
-No changes yet.
+### Compatibility
+
+- Added Python 3.13 to the full-suite CI matrix. `KnockoffSelectionResult`
+  equality again handles a shared pandas payload without evaluating the
+  DataFrame as a boolean, preserving its behavior from earlier Python versions.
 
 ## 0.10.0 (2026-09-20)
 

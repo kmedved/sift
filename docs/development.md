@@ -264,7 +264,7 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.11 and 3.12, plus a `min-pins` job on
+GitHub Actions run tests on Python 3.11, 3.12, and 3.13, plus a `min-pins` job on
 the declared dependency floors, optional CatBoost coverage, a clean-wheel
 installation smoke test, a scheduled latest-dependency canary, and a scheduled
 quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
@@ -300,14 +300,14 @@ and `matplotlib` is not a declared dependency, so the one plotting test skips.
 
 ### Python 3.13
 
-Still not enabled, but the reason it was deferred is gone. numba ships cp313
-wheels from 0.61.0 (llvmlite 0.44.0), above the 0.59 floor, and a local Python
-3.13.15 run with numba 0.67 reached 1,565 passed / 3 failed. Those three were
-dependency versions rather than the interpreter — they broke the 3.11/3.12
-matrix identically, because `scikit-learn>=1.3,<2` and `numpy>=1.24,<3` resolve
-straight to them — and they are the numpy 2.5 failures now fixed. A 3.13 run has
-not been repeated since, so enable the job below and read its first result
-rather than assuming it is green.
+Python 3.13 runs the full suite in the same CI matrix as 3.11 and 3.12. Its
+install step first selects `numba>=0.61`, the first Numba line with cp313 wheels;
+the package's declared `numba>=0.59` floor and the separate Python 3.11
+`min-pins` job are unchanged. The first passing GitHub runner used Python
+3.13.15, NumPy 2.5.3, pandas 3.0.6, scikit-learn 1.9.1, SciPy 1.18.1,
+and Numba 0.67.0: [2,792 passed, 34 skipped](https://github.com/kmedved/sift/actions/runs/35549323358).
+The Python 3.12 job still owns the optional PyArrow and generated-reference
+checks, so the 3.13 result does not claim those optional paths.
 
 ### Verified dependency band
 
@@ -322,12 +322,12 @@ warnings-as-errors policy:
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
+| Python 3.13 CI — numpy 2.5.3 / pandas 3.0.6 / sklearn 1.9.1 / scipy 1.18.1 / numba 0.67.0 | green — 2,792 passed / 34 skipped |
 
 Only the base row is re-measured every time this page is touched; it is the
-current count on this tree. The other rows were measured at earlier commits in
-the 0.9 campaign and are not re-run per commit, so their absolute counts trail
-the suite. Read them as green/not-green, and re-measure a row before quoting its
-number.
+current count on this tree. Other rows are dated snapshots rather than counts
+re-measured per commit, so their absolute counts may trail the suite. Re-measure
+a row before quoting its number as current.
 
 The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
 13 failures are closed and described in `docs/release-notes.md` under
@@ -357,31 +357,6 @@ float32 goldens derived from LAPACK plus float32 BLAS are only reproducible to
 about one ulp across NumPy/SciPy builds, so compare them with a tolerance;
 same-seed determinism inside one interpreter is exact and should stay pinned
 exactly.
-
-### Enabling a Python 3.13 job
-
-Now that the newer set is supported, this job can be added to
-`.github/workflows/test.yml`:
-
-```yaml
-  test-python313:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-          cache: pip
-      - run: |
-          python -m pip install --upgrade pip
-          pip install "numba>=0.61"
-          pip install -e ".[test]"
-      - run: pytest
-```
-
-`numba>=0.61` is the only 3.13-specific pin required. This is a support job on
-the supported dependency set, not a 3.13/min-pins combination.
 
 ### Auto-K gate summarizer
 

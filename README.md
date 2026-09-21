@@ -11,7 +11,8 @@ The package is a single Python library. Public entry points are exported from
 
 ## Quickstart
 
-SIFT is not published to PyPI. Install it from a repository checkout:
+SIFT is not published to PyPI. Python 3.11, 3.12, and 3.13 are tested in CI.
+Install it from a repository checkout:
 
 ```bash
 python -m pip install .
