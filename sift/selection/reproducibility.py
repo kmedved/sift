@@ -1008,12 +1008,21 @@ def _context_hash(value: Any, *, label: str, n_rows: int | None) -> str:
 def row_context_digest(values: Any, *, label: str, n_rows: int) -> Any:
     """Digest run-shaping row metadata (``time``, ``event_end``) for a run record.
 
-    ``None`` when the values were not supplied.  Values without a
-    deterministic token (a pandas ``Period``, say) give an opaque marker
+    ``None`` when the values were not supplied.  A single column (an
+    ``(n, 1)`` array or a one-column DataFrame) is the 1-D values it holds,
+    as for the fold construction, and gets the same digest.  Values without
+    a deterministic token (a pandas ``Interval``, say) give an opaque marker
     instead of failing the selection that is being recorded.
     """
     if values is None:
         return None
+    if isinstance(values, pd.DataFrame):
+        if values.shape[1] == 1:
+            values = values.iloc[:, 0]
+    elif not isinstance(values, (pd.Series, pd.Index)):
+        array = np.asarray(values)
+        if array.ndim == 2 and array.shape[1] == 1:
+            values = array[:, 0]
     try:
         return _context_hash(values, label=label, n_rows=int(n_rows))
     except TypeError:

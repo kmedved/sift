@@ -110,7 +110,11 @@ class FeaturePathEvaluationResult:
     recorded while it ran: estimator and splitter snapshots, ``time`` /
     ``event_end`` digests, and ``random_state`` when it seeded the default
     holdout. A hand-assembled instance has no such record, so its manifest
-    says ``captured_at="unknown"``.
+    says ``captured_at="unknown"``. The digests sit in the splitter record
+    as ``time_sha256`` / ``event_end_sha256``: a SHA-256 hex string,
+    ``None`` when not supplied, or ``{"status": "opaque", "reason":
+    "no_deterministic_token"}`` for values with no deterministic token (a
+    pandas ``Interval``, say).
 
     Examples
     --------

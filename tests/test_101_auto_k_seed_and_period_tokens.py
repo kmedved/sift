@@ -1,4 +1,4 @@
-"""1.0.1: auto-k seed validation and pandas Period row metadata in manifests."""
+"""1.0.1: auto-k seed validation and row metadata (Period, one-column time) in manifests."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import TimeSeriesSplit
 
 from sift import (
     AutoKConfig,
     MRMRSelector,
+    PurgedTimeSeriesSplit,
     build_cache,
     compare,
+    evaluate_feature_path,
     gaussian_cv_curves,
     select_cefsplus,
     select_cefsplus_binary,
@@ -496,3 +499,52 @@ def test_compare_row_metadata_without_a_token_is_recorded_as_opaque():
         "status": "opaque",
         "reason": "no_deterministic_token",
     }
+
+
+@pytest.mark.parametrize("shape", ["column", "frame", "datetime-frame"])
+@pytest.mark.parametrize("splitter", ["default", "time_series", "purged"])
+def test_compare_digests_a_single_column_time_like_its_1d_values(shape, splitter):
+    X, y = _regression_data()
+    flat = np.arange(len(y))
+    if shape == "datetime-frame":
+        flat = pd.date_range("2020-01-01", periods=len(y), freq="D").to_numpy()
+    wrapped = flat.reshape(-1, 1) if shape == "column" else pd.DataFrame({"date": flat})
+    cv = {
+        "default": None,
+        "time_series": TimeSeriesSplit(3),
+        "purged": PurgedTimeSeriesSplit(3),
+    }[splitter]
+    factories = {"mrmr": lambda: MRMRSelector(k=2, task="regression")}
+    one_d = compare(factories, X, y, time=flat, cv=cv)
+    single_column = compare(factories, X, y, time=wrapped, cv=cv)
+    digest = one_d.diagnostics["split"]["time_sha256"]
+    assert isinstance(digest, str) and len(digest) == 64
+    assert single_column.diagnostics["split"]["time_sha256"] == digest
+    assert single_column.fold_bookkeeping == one_d.fold_bookkeeping
+    # evaluate_feature_path, which flattens time before splitting, agrees.
+    path = evaluate_feature_path(
+        X, y, ["f0", "f1"], [1, 2], time=wrapped, splitter=PurgedTimeSeriesSplit(3)
+    )
+    splitter_record = path.reproducibility_()["configuration"]["configured"]["splitter"]
+    assert splitter_record["time_sha256"] == digest
+
+
+def test_compare_still_rejects_a_multi_column_time():
+    X, y = _regression_data()
+    time = np.column_stack([np.arange(len(y)), np.arange(len(y))])
+    with pytest.raises(ValueError) as excinfo:
+        compare({"mrmr": lambda: MRMRSelector(k=2, task="regression")}, X, y, time=time)
+    assert str(excinfo.value) == "time must be 1-D when supplied for hashing"
+
+
+def test_path_row_metadata_without_a_token_is_recorded_as_opaque():
+    X, y = _regression_data()
+    result = evaluate_feature_path(
+        X, y, ["f0", "f1"], [1, 2], time=pd.interval_range(0, len(y))
+    )
+    splitter_record = result.reproducibility_()["configuration"]["configured"]["splitter"]
+    assert splitter_record["time_sha256"] == {
+        "status": "opaque",
+        "reason": "no_deterministic_token",
+    }
+    assert splitter_record["event_end_sha256"] is None

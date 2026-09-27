@@ -1385,6 +1385,12 @@ realized seeds, original vs used row counts measured from the cache or subsample
 requested non-data selector options separately from resolved metadata,
 routed/knockoff settings including AutoKConfig, and compare's instantiated
 selector, estimator (including empty Dummy fallback), and splitter snapshots.
+Row metadata that shaped the splits is recorded as `time_sha256` /
+`event_end_sha256` (compare's `diagnostics["split"]`, the
+`evaluate_feature_path` splitter record, and CatBoost's `time_sha256`): a
+SHA-256 hex string, `None` when not supplied, or
+`{"status": "opaque", "reason": "no_deterministic_token"}` for values with no
+deterministic token, such as a pandas `Interval`.
 Prebuilt FeatureCache parameters are compact provenance, not copied arrays.
 Caller `X` is validated against known original rows and ordered typed columns when
 those facts exist; data hashing is opt-in and never stores `X`. Legacy
