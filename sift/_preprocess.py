@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Container, List, Literal, Optional, Sequence, Tuple, get_args
 import warnings
 
@@ -443,6 +444,21 @@ def subsample_xy(
 # --- Categorical encoding ---
 
 
+def _category_missing_mask(series: pd.Series) -> np.ndarray:
+    """``series.isna()`` that also reads a signaling-NaN ``Decimal`` as missing.
+
+    pandas finds a NaN ``Decimal`` by comparing it with itself, which raises
+    for a signaling NaN; only then is each value checked on its own.
+    """
+    try:
+        return series.isna().to_numpy()
+    except InvalidOperation:
+        values = series.to_numpy(dtype=object)
+        return np.fromiter(
+            (_is_onehot_missing(value) for value in values), dtype=bool, count=len(values)
+        )
+
+
 @contextmanager
 def suppress_category_encoder_pandas_warnings():
     """Hide narrow pandas 3.0 deprecation warnings emitted by category_encoders."""
@@ -495,10 +511,11 @@ class LeaveOneOutLogitEncoder:
     @staticmethod
     def _series_with_missing_sentinel(series: pd.Series) -> pd.Series:
         sentinel = "__SIFT_MISSING_CATEGORY__"
-        values = set(series.dropna().astype(object).tolist())
+        missing = _category_missing_mask(series)
+        values = set(series[~missing].astype(object).tolist())
         while sentinel in values:
             sentinel += "_"
-        return series.astype(object).where(~series.isna(), sentinel)
+        return series.astype(object).where(~missing, sentinel)
 
     @staticmethod
     def _get_column_series(X: pd.DataFrame, col: str) -> pd.Series:
@@ -798,7 +815,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
     @staticmethod
     def _normalized_series(series: pd.Series) -> pd.Series:
-        return series.astype(object).where(~series.isna(), np.nan)
+        return series.astype(object).where(~_category_missing_mask(series), np.nan)
 
     @staticmethod
     def _centered_targets(
@@ -1269,6 +1286,9 @@ def _is_onehot_missing(value: Any) -> bool:
         return True
     if isinstance(value, (bytes, bytearray, str, list, dict, tuple, set)):
         return False
+    if isinstance(value, Decimal):
+        # Quiet or signaling; pd.isna raises on a signaling NaN.
+        return value.is_nan()
     try:
         missing = pd.isna(value)
     except (TypeError, ValueError):

@@ -236,6 +236,50 @@ def test_decimal_and_fraction_levels_order_as_numbers():
     assert _codes([Decimal("NaN"), Decimal(1), "a"]) == [2.0, 0.0, 1.0]
 
 
+@pytest.mark.parametrize("signaling", [Decimal("sNaN"), Decimal("-sNaN"), Decimal("sNaN12")])
+def test_signaling_nan_decimal_is_missing_like_a_quiet_nan(signaling):
+    from sift._preprocess import LeaveOneOutLogitEncoder, TargetCVEncoder
+
+    rng = np.random.default_rng(4)
+    n = 60
+    levels = [Decimal(i % 3) for i in range(n)]
+    x = rng.normal(size=n)
+    y = x + rng.normal(size=n)
+    y_binary = (y > np.median(y)).astype(int)
+
+    def frame(nan):
+        values = list(levels)
+        values[5] = values[17] = nan
+        return pd.DataFrame({"c": pd.Series(values, dtype=object), "x": x})
+
+    quiet, loud = frame(Decimal("NaN")), frame(signaling)
+    # pd.isna raises InvalidOperation on a signaling NaN; it used to crash
+    # every encoder SIFT implements.
+    encoders = (
+        lambda: UnsupervisedCatEncoder(["c"], method="ordinal"),
+        lambda: UnsupervisedCatEncoder(["c"], method="frequency"),
+        lambda: OneHotBlockEncoder(["c"]),
+    )
+    for make in encoders:
+        pd.testing.assert_frame_equal(
+            make().fit_transform(loud), make().fit_transform(quiet)
+        )
+    assert _codes(loud["c"])[5] == 3.0
+    pd.testing.assert_frame_equal(
+        TargetCVEncoder(["c"], cv=3).fit_transform(loud, y),
+        TargetCVEncoder(["c"], cv=3).fit_transform(quiet, y),
+    )
+    pd.testing.assert_frame_equal(
+        LeaveOneOutLogitEncoder(["c"]).fit_transform(loud, y_binary),
+        LeaveOneOutLogitEncoder(["c"]).fit_transform(quiet, y_binary),
+    )
+    for encoding in ("target_cv", "ordinal"):
+        kw = {"cat_features": ["c"], "cat_encoding": encoding, "verbose": False}
+        loud_result = select_cefsplus(loud, y, 2, return_result=True, **kw)
+        quiet_result = select_cefsplus(quiet, y, 2, return_result=True, **kw)
+        pd.testing.assert_frame_equal(loud_result.ranking_, quiet_result.ranking_)
+
+
 def test_numpy_timedelta_scalars_in_an_object_column_encode_as_durations():
     # np.timedelta64 subclasses np.integer, so these used to crash in int().
     raw = [
