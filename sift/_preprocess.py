@@ -1279,6 +1279,15 @@ def _onehot_level_identity(value: Any) -> tuple:
         return ("bytes", bytes(value))
     if isinstance(value, str):
         return ("str", value)
+    if isinstance(value, np.timedelta64):
+        # np.timedelta64 subclasses np.integer, and int() of one fails for
+        # most units. Identify it as the pd.Timedelta a timedelta64 column
+        # yields; a unit pandas cannot hold (years, months) stays as is.
+        try:
+            value = pd.Timedelta(value)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return ("hashable", type(value).__name__, value)
     if isinstance(value, (int, np.integer)):
         return ("int", int(value))
     if isinstance(value, (float, np.floating)):

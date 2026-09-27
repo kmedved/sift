@@ -88,6 +88,34 @@ def test_decimal_and_fraction_levels_order_as_numbers():
     assert _codes([Decimal("NaN"), Decimal(1), "a"]) == [2.0, 0.0, 1.0]
 
 
+def test_numpy_timedelta_scalars_in_an_object_column_encode_as_durations():
+    # np.timedelta64 subclasses np.integer, so these used to crash in int().
+    raw = [
+        np.timedelta64(3, "D"),
+        np.timedelta64(36, "h"),
+        np.timedelta64(1, "D"),
+        np.timedelta64(24, "h"),
+        np.timedelta64("NaT"),
+    ]
+    values = pd.Series(raw, dtype=object)
+    # One day and 24 hours are one level; NaT is missing and takes the last code.
+    assert _codes(values) == [2.0, 1.0, 0.0, 0.0, 3.0]
+    typed = pd.Series(raw, dtype="timedelta64[ns]")
+    assert _codes(typed) == _codes(values)
+
+    frame = pd.DataFrame({"c": values})
+    freq = UnsupervisedCatEncoder(["c"], method="frequency").fit(frame)
+    assert freq.transform(frame)["c"].tolist() == [0.2, 0.2, 0.4, 0.4, 0.2]
+    onehot = OneHotBlockEncoder(["c"]).fit(frame)
+    dummies = onehot.transform(frame)
+    assert dummies.shape == (5, 4)
+    assert dummies.to_numpy().sum() == 5
+    # The object column and the typed column share one vocabulary.
+    np.testing.assert_array_equal(
+        onehot.transform(pd.DataFrame({"c": typed})).to_numpy(), dummies.to_numpy()
+    )
+
+
 def test_ordered_categorical_uses_declared_order():
     ordered = pd.Categorical(
         ["mid", "low", "high", "mid"],
