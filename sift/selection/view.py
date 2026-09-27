@@ -91,6 +91,10 @@ def _label_token(value: Any) -> Any:
         payload = tokens
     elif isinstance(value, (pd.Timestamp, pd.Timedelta)):
         payload = value.isoformat()
+    elif isinstance(value, pd.Period):
+        # The frequency and ordinal identify a period exactly; ``str`` alone
+        # would conflate, say, a monthly and a business-monthly period.
+        payload = {"freq": value.freqstr, "ordinal": int(value.ordinal)}
     elif isinstance(value, datetime.timedelta):
         payload = {
             "days": value.days,
@@ -114,8 +118,8 @@ def _label_token(value: Any) -> Any:
     else:
         raise TypeError(
             f"{type_name} has no deterministic identity token; pass primitive, "
-            "datetime/timedelta, bytes, path, tuple, set, frozenset, Decimal, "
-            "Fraction, UUID, or complex values"
+            "datetime/timedelta, pandas Period, bytes, path, tuple, set, "
+            "frozenset, Decimal, Fraction, UUID, or complex values"
         )
     return {"type": type_name, "value": payload}
 

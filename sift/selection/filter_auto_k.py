@@ -12,6 +12,7 @@ import pandas as pd
 
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.auto_k_knockoff import select_k_knockoff_path
 from sift.selection.auto_k_resample import (
     bootstrap_paths,
@@ -1247,6 +1248,7 @@ def select_gaussian_auto_path(
                 f"k_method={route['chosen']!r}. Use an explicit conditioned "
                 f"method such as {remedy}, or omit the conditioning keywords."
             ) from None
+    check_auto_k_seed(routed_config, auto_route=reason)
     runner_kwargs = {
         "cache": cache,
         "y": y,

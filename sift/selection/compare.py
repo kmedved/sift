@@ -23,10 +23,10 @@ from sift.scoring import (
     sklearn_scorer_label,
 )
 from sift.selection.reproducibility import (
-    _context_hash,
     collapse_fold_snapshots,
     describe_estimator,
     describe_splitter,
+    row_context_digest,
 )
 from sift.selection.view import _columns_hash, _json_safe
 from sift.selection.path_eval import (
@@ -140,13 +140,6 @@ _REPR_SUMMARY_ROWS = 5
 def _fingerprint_indices(idx: np.ndarray) -> str:
     arr = np.ascontiguousarray(np.asarray(idx, dtype=np.int64).reshape(-1))
     return hashlib.sha256(arr.tobytes()).hexdigest()
-
-
-def _row_context_digest(values, *, label: str, n_rows: int) -> str | None:
-    """Digest fold-shaping row metadata; never retain the values themselves."""
-    if values is None:
-        return None
-    return _context_hash(values, label=label, n_rows=int(n_rows))
 
 
 def _as_2d(X) -> np.ndarray:
@@ -1177,8 +1170,11 @@ def compare(
     )
     # Row metadata that shaped the folds, recorded as a digest only: the
     # timestamps themselves are never retained on the result.
-    split_desc["time_sha256"] = _row_context_digest(time, label="time", n_rows=n)
-    split_desc["event_end_sha256"] = _row_context_digest(
+    # Digest fold-shaping row metadata; never retain the values themselves.
+    # A value with no deterministic token gets an opaque marker rather than
+    # failing the comparison it describes.
+    split_desc["time_sha256"] = row_context_digest(time, label="time", n_rows=n)
+    split_desc["event_end_sha256"] = row_context_digest(
         event_end, label="event_end", n_rows=n
     )
     splits = _build_splits(

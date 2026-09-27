@@ -86,7 +86,9 @@ class AutoKConfig:
     random_state : int, default 42
         Seed for the resampling rules (``'perm_gap'``, ``'knockoff_path'``,
         ``'stability'``) and for the shuffled ``strategy='kfold'`` splits used
-        by the cross-fitted rules.
+        by the cross-fitted rules. Those rules (and a ``'consensus'`` that runs
+        one of them) require a non-negative integer and raise ``ValueError``
+        for ``None`` or any other value; the other rules never read it.
     elbow_min_rel_gain : float, default 0.02
         Relative-gain threshold for ``k_method='elbow'``; finite and >= 0.
     elbow_patience : int, default 3
@@ -814,8 +816,38 @@ def validate_auto_k_config(
             f"{sorted(_VALID_BINARY_OBJECTIVE_MODES)}; got {config.binary_objective_mode!r}"
         )
 
+    check_auto_k_seed(config)
+
     if warn_unused and _WARN_UNUSED_METHOD_FIELDS.get():
         _warn_unused_method_fields(config)
+
+
+#: Method tags (see ``_auto_k_method_tags``) whose rule consumes
+#: ``random_state``; the same set as ``random_state`` in the unused-field table.
+_SEEDED_METHOD_TAGS = frozenset({"perm_gap", "knockoff_path", "xfit_kfold_split", "stability"})
+
+
+def check_auto_k_seed(config: AutoKConfig, *, auto_route: str | None = None) -> None:
+    """Reject a seed that a seeded rule cannot use (``None``, a float, a negative).
+
+    Rules that never read ``random_state`` accept any value, as before.
+    ``auto_route`` is the router's reason when ``k_method='auto'`` chose the
+    rule, so the message says why a seeded rule is running at all.
+    """
+    if not _auto_k_method_tags(config) & _SEEDED_METHOD_TAGS:
+        return
+    seed = config.random_state
+    if (
+        isinstance(seed, (bool, np.bool_))
+        or not isinstance(seed, (int, np.integer))
+        or int(seed) < 0
+    ):
+        routed = "" if auto_route is None else f" (chosen by k_method='auto': {auto_route})"
+        raise ValueError(
+            "AutoKConfig.random_state must be a non-negative integer for "
+            f"k_method={config.k_method!r}{routed}, which draws seeded resamples "
+            f"or shuffled folds; got {seed!r}"
+        )
 
 
 def _warn_unused_method_fields(config: AutoKConfig) -> None:
@@ -830,12 +862,7 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         "metric": {"evaluate"},
         "val_frac": {"evaluate", "gaussian_cv", "xfit_objective"},
         "n_splits": {"evaluate"},
-        "random_state": {
-            "perm_gap",
-            "knockoff_path",
-            "xfit_kfold_split",
-            "stability",
-        },
+        "random_state": _SEEDED_METHOD_TAGS,
         "elbow_min_rel_gain": {"elbow"},
         "elbow_patience": {"elbow"},
         "selection_rule": {"evaluate", "gaussian_cv", "xfit_objective"},
