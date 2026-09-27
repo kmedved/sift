@@ -816,9 +816,11 @@ def select_jmi(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a
@@ -1095,9 +1097,11 @@ def select_jmim(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a

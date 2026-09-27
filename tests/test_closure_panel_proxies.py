@@ -1379,6 +1379,8 @@ def test_select_k_auto_non_evaluate_without_within_keeps_its_message():
 
 _WITHIN_DOCSTRING_ENTRIES = [
     "select_mrmr",
+    "select_jmi",
+    "select_jmim",
     "select_cefsplus",
     "MRMRSelector",
     "JMISelector",
@@ -1396,6 +1398,24 @@ def test_within_docstrings_state_the_two_way_convergence_criterion(entry):
         "the column's weighted standard deviation, falls below ``1e-10``, at "
         "most 200 passes"
     ) in doc
+
+
+def test_every_export_that_describes_two_way_sweeps_is_pinned():
+    # Any public docstring that describes the two-way alternation must be in
+    # the pinned list above, so a new or missed one cannot keep stale text.
+    describing = sorted(
+        name
+        for name in sift.__all__
+        if "alternates entity and time demeaning"
+        in " ".join((getattr(sift, name).__doc__ or "").split())
+    )
+    assert describing == sorted(_WITHIN_DOCSTRING_ENTRIES)
+    stale = sorted(
+        name
+        for name in sift.__all__
+        if "relative change" in " ".join((getattr(sift, name).__doc__ or "").split())
+    )
+    assert stale == []
 
 
 # ---------------------------------------------------------------------------
