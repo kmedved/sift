@@ -751,6 +751,47 @@ def test_git_fields_report_the_checkout_that_tracks_the_package(
     assert _git_fields() == (head, "sift_package", True)
 
 
+@pytest.mark.parametrize(
+    "exported",
+    ["GIT_DIR", "GIT_DIR+GIT_WORK_TREE", "GIT_INDEX_FILE"],
+)
+def test_git_fields_ignore_repository_variables_the_caller_exported(
+    tmp_path, monkeypatch, exported
+):
+    # Tooling that exports an absolute GIT_DIR (or another repository
+    # selector) must not redirect the manifest to its own repository.
+    package = _tiny_git_package(tmp_path / "sift_checkout")
+    head = _git_head(package.parent)
+    other = _tiny_git_package(tmp_path / "user_project").parent
+    (other / "elsewhere.txt").write_text("a different history\n")
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qam", "second"],
+        cwd=other,
+        check=True,
+        capture_output=True,
+    )
+    assert _git_head(other) != head
+    loose = tmp_path / "loose" / "fakepkg"
+    loose.mkdir(parents=True)
+    (loose / "__init__.py").write_text("")
+
+    values = {
+        "GIT_DIR": {"GIT_DIR": str(other / ".git")},
+        "GIT_DIR+GIT_WORK_TREE": {
+            "GIT_DIR": str(other / ".git"),
+            "GIT_WORK_TREE": str(other),
+        },
+        "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(tmp_path / "missing.index")},
+    }[exported]
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setattr(sift, "__file__", str(package / "__init__.py"))
+    assert _git_fields() == (head, "sift_package", False)
+    monkeypatch.setattr(sift, "__file__", str(loose / "__init__.py"))
+    assert _git_fields() == (None, "sift_package", None)
+
+
 def test_git_fields_follow_a_linked_worktree(tmp_path, monkeypatch):
     package = _tiny_git_package(tmp_path)
     repo = package.parent

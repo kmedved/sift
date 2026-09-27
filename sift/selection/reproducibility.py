@@ -135,6 +135,7 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import os
 import platform
 import subprocess
 from datetime import timedelta
@@ -391,16 +392,49 @@ def _sift_package_dir() -> Path:
     return Path(sift.__file__).resolve().parent
 
 
+#: The repository-selecting variables git exports to hooks and subcommands
+#: (what ``git rev-parse --local-env-vars`` prints).  Inherited from the
+#: caller, an absolute ``GIT_DIR`` would point every command at that
+#: repository, with the package directory as its work tree.
+_GIT_LOCAL_ENV_VARS = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    }
+)
+
+
 def _git(*args: str) -> str | None:
     """Run a short read-only git command in the package directory, or give up.
 
     git itself finds the enclosing repository, including the ``.git`` file of
-    a linked worktree or submodule.
+    a linked worktree or submodule.  Repository-selecting variables in the
+    caller's environment (``GIT_DIR`` and friends) are dropped so that
+    discovery always starts from the package directory.
     """
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCAL_ENV_VARS
+    }
     try:
         proc = subprocess.run(
             ["git", "--no-optional-locks", *args],
             cwd=str(_sift_package_dir()),
+            env=env,
             capture_output=True,
             text=True,
             timeout=2,
