@@ -2119,3 +2119,95 @@ def test_append_rows_like_keeps_float_dtype_for_mentioned_missing_values():
     assert np.isnan(appended["gain"].iloc[-1])
     assert appended["flag"].dtype == bool
     assert appended["feature"].tolist() == ["a", "b", "c"]
+
+
+def _pair_by_first_equal(features, rows):
+    """The previous fallback: pair each feature with the first equal row left."""
+    from sift.selection.view import _labels_equal
+
+    unmatched = list(rows)
+    for feature in features:
+        position = next(
+            (i for i, row in enumerate(unmatched) if _labels_equal(feature, row)), None
+        )
+        if position is None:
+            return False
+        del unmatched[position]
+    return not unmatched
+
+
+def _equality_label_pool():
+    """Labels on every branch of _labels_equal, with equal and near-equal pairs."""
+    import collections
+    import decimal
+    import fractions
+
+    point = collections.namedtuple("Point", "x y")
+    return [
+        pd.Interval(0, 1), pd.Interval(0, 1), pd.Interval(0, 1, closed="left"),
+        pd.Interval(0.0, 1.0), (pd.Interval(0, 1), 2),
+        pd.Period("2020-01", "M"), pd.Period("2020-01", "D"),
+        decimal.Decimal("1.50"), decimal.Decimal("1.5"), decimal.Decimal("NaN"),
+        decimal.Decimal("NaN"), decimal.Decimal("sNaN"), fractions.Fraction(3, 2),
+        1.5, np.float64(1.5), 0.0, -0.0, float("nan"), np.float64("nan"),
+        complex(float("nan"), 1.0), complex(float("nan"), 1.0), complex(0.0, 1.0),
+        complex(-0.0, 1.0), np.complex128(1j), 1, True, np.int64(1), np.bool_(True),
+        "a", np.str_("a"), b"a", (1, "a"), (1.0, "a"), (np.int64(1), "a"),
+        point(1, "a"), pd.Timestamp("2020-01-01"), datetime.datetime(2020, 1, 1),
+        np.datetime64("2020-01-01"), np.datetime64("2020-01-01T00:00", "ns"),
+        None, pd.NA, pd.NaT, frozenset({1, 2}), frozenset({2, 1}),
+    ]
+
+
+def test_equality_fallback_pairs_labels_exactly_like_pairwise_matching():
+    from sift.selection.view import _labels_match_as_multisets
+
+    pool = _equality_label_pool()
+    rng = np.random.default_rng(11)
+    outcomes = []
+    for _ in range(3000):
+        features = [pool[i] for i in rng.integers(len(pool), size=int(rng.integers(1, 7)))]
+        rows = [features[i] for i in rng.permutation(len(features))]
+        if rng.random() < 0.5:
+            rows[int(rng.integers(len(rows)))] = pool[int(rng.integers(len(pool)))]
+        expected = _pair_by_first_equal(features, rows)
+        assert _labels_match_as_multisets(features, rows) is expected, (features, rows)
+        outcomes.append(expected)
+    assert 0.2 < np.mean(outcomes) < 0.9
+
+
+def test_untokenizable_table_labels_pair_without_pairwise_comparison(monkeypatch):
+    from sift.selection import view as view_module
+
+    calls = []
+    original = view_module._labels_equal
+
+    def counting(left, right):
+        calls.append(1)
+        return original(left, right)
+
+    monkeypatch.setattr(view_module, "_labels_equal", counting)
+    labels = list(pd.interval_range(0, 400))
+    table = pd.DataFrame(
+        {
+            "feature": pd.Series(labels[::-1], dtype=object),
+            "selected_index": pd.array([pd.NA] * 400, dtype="Int64"),
+            "path_rank": pd.array(range(1, 401), dtype="Int64"),
+            "selected": [True] * 400,
+        }
+    )
+    view = sift.SelectionView(
+        features=labels, indices=None, raw_features=None, n_raw_features=None,
+        raw_table=table,
+    )
+    assert view.features == labels
+    # Counting match keys is linear; the pairwise loop compared about 80,000
+    # label pairs here.
+    assert calls == []
+    with pytest.raises(ValueError) as excinfo:
+        sift.SelectionView(
+            features=labels, indices=None, raw_features=None, n_raw_features=None,
+            raw_table=table.assign(feature=[pd.Interval(-1, 0)] + labels[:-1][::-1]),
+        )
+    assert str(excinfo.value) == "raw_table selected feature identities do not match features"
+    assert calls == []

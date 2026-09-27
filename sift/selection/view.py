@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Mapping, Set
 from numbers import Real
 from pathlib import Path
@@ -134,15 +135,31 @@ def _columns_hash(features: Iterable[Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+#: Label types compared by their identity token rather than by ``==``.
+_TOKEN_COMPARED_LABELS = (
+    bool,
+    int,
+    float,
+    str,
+    bytes,
+    pd.Timestamp,
+    pd.Timedelta,
+    np.datetime64,
+    np.timedelta64,
+)
+
+
+def _scalar_label(value: Any) -> Any:
+    if isinstance(value, np.generic) and not isinstance(
+        value, (np.datetime64, np.timedelta64)
+    ):
+        return value.item()
+    return value
+
+
 def _labels_equal(left: Any, right: Any) -> bool:
-    if isinstance(left, np.generic) and not isinstance(
-        left, (np.datetime64, np.timedelta64)
-    ):
-        left = left.item()
-    if isinstance(right, np.generic) and not isinstance(
-        right, (np.datetime64, np.timedelta64)
-    ):
-        right = right.item()
+    left = _scalar_label(left)
+    right = _scalar_label(right)
     if type(left) is not type(right):
         return False
     if isinstance(left, tuple):
@@ -150,20 +167,7 @@ def _labels_equal(left: Any, right: Any) -> bool:
             _labels_equal(left_item, right_item)
             for left_item, right_item in zip(left, right)
         )
-    if left is None or isinstance(
-        left,
-        (
-            bool,
-            int,
-            float,
-            str,
-            bytes,
-            pd.Timestamp,
-            pd.Timedelta,
-            np.datetime64,
-            np.timedelta64,
-        ),
-    ):
+    if left is None or isinstance(left, _TOKEN_COMPARED_LABELS):
         return _label_token(left) == _label_token(right)
     values = np.empty(2, dtype=object)
     values[:] = [left, right]
@@ -172,6 +176,62 @@ def _labels_equal(left: Any, right: Any) -> bool:
         return bool(index.duplicated()[1])
     except (TypeError, ValueError):
         return _label_token(left) == _label_token(right)
+
+
+def _frozen_token(token: Any) -> Any:
+    if isinstance(token, Mapping):
+        return tuple(sorted((key, _frozen_token(item)) for key, item in token.items()))
+    if isinstance(token, list):
+        return tuple(_frozen_token(item) for item in token)
+    return token
+
+
+def _nan_or_part(part: float) -> Any:
+    return "nan" if math.isnan(part) else part
+
+
+def _label_match_key(value: Any) -> Any:
+    """A hashable key that two labels share exactly when ``_labels_equal`` holds.
+
+    It follows ``_labels_equal`` branch by branch: the exact type, tuples item
+    by item, the frozen identity token for the token-compared types, and
+    otherwise the value itself, which a dict compares with ``hash`` and
+    ``==`` as the pandas hash table does; for an exact ``complex`` that table
+    also matches NaN parts, so the key does too.
+    """
+    value = _scalar_label(value)
+    kind = type(value)
+    if isinstance(value, tuple):
+        return (kind, "tuple", tuple(_label_match_key(item) for item in value))
+    if value is None or isinstance(value, _TOKEN_COMPARED_LABELS):
+        return (kind, "token", _frozen_token(_label_token(value)))
+    if kind is complex:
+        return (kind, "complex", _nan_or_part(value.real), _nan_or_part(value.imag))
+    return (kind, "value", value)
+
+
+def _labels_match_as_multisets(features: list[Any], rows: list[Any]) -> bool:
+    """Whether ``rows`` pair one to one with ``features`` under ``_labels_equal``.
+
+    Counting ``_label_match_key`` keys is linear.  Labels that cannot be
+    hashed fall back to pairing each feature with the first equal row.
+    """
+    try:
+        return Counter(map(_label_match_key, features)) == Counter(
+            map(_label_match_key, rows)
+        )
+    except (TypeError, ValueError):
+        pass
+    unmatched = list(rows)
+    for feature in features:
+        position = next(
+            (i for i, row in enumerate(unmatched) if _labels_equal(feature, row)),
+            None,
+        )
+        if position is None:
+            return False
+        del unmatched[position]
+    return not unmatched
 
 
 def _coerce_feature_names(input_features: Any) -> list[Any] | None:
@@ -471,17 +531,10 @@ def _validate_table_selection(
     except TypeError:
         # Labels without a deterministic token (a pandas Interval, say) are
         # paired by equality instead; only the manifest's hash needs tokens.
-        unmatched = list(selected_rows["feature"])
-        for feature in features:
-            position = next(
-                (i for i, row in enumerate(unmatched) if _labels_equal(feature, row)),
-                None,
-            )
-            if position is None:
-                raise ValueError(
-                    "raw_table selected feature identities do not match features"
-                ) from None
-            del unmatched[position]
+        if not _labels_match_as_multisets(features, list(selected_rows["feature"])):
+            raise ValueError(
+                "raw_table selected feature identities do not match features"
+            ) from None
         return
     if observed != expected:
         raise ValueError("raw_table selected feature identities do not match features")
