@@ -330,6 +330,322 @@ def test_numpy_calendar_durations_equal_in_numpy_are_one_level():
     assert _codes(mixed) == [2.0, 1.0, 0.0, 3.0]
 
 
+def _encodings(values):
+    """Ordinal codes, frequencies and one-hot column names of a raw object column."""
+    frame = pd.DataFrame({"c": pd.Series(values, dtype=object)})
+    ordinal = UnsupervisedCatEncoder(["c"], method="ordinal").fit_transform(frame)
+    frequency = UnsupervisedCatEncoder(["c"], method="frequency").fit_transform(frame)
+    onehot = OneHotBlockEncoder(["c"]).fit(frame).transform(frame)
+    return ordinal["c"].tolist(), frequency["c"].tolist(), list(onehot.columns)
+
+
+def _scalar(count, dtype):
+    """A numpy scalar with a count multiplier, e.g. one tick of ``m8[3D]``."""
+    return np.array([count], dtype=dtype)[0]
+
+
+def test_numpy_durations_are_one_level_per_exact_length():
+    td = np.timedelta64
+    # A count multiplier is part of the length: one tick of m8[3D] is three
+    # days (it used to merge with one day), of m8[15m] fifteen minutes.
+    assert _encodings([_scalar(1, "m8[3D]"), td(1, "D"), td(3, "D"), td(2, "D")]) == (
+        [2.0, 0.0, 2.0, 1.0],
+        [0.5, 0.25, 0.5, 0.25],
+        ["c__3 days 00:00:00", "c__1 days 00:00:00", "c__2 days 00:00:00"],
+    )
+    assert _codes(pd.Series([_scalar(3, "m8[15m]"), td(3, "m"), td(45, "m")], dtype=object)) == [
+        1.0, 0.0, 1.0,
+    ]
+    assert _codes(pd.Series([_scalar(1, "m8[2Y]"), td(24, "M"), td(1, "Y")], dtype=object)) == [
+        1.0, 1.0, 0.0,
+    ]
+    # Equal lengths below a nanosecond, or beyond pandas' range, are one
+    # level too; they used to stay apart as raw numpy scalars.
+    assert _encodings([td(5000, "ps"), td(5, "ns")]) == (
+        [0.0, 0.0], [1.0, 1.0], ["c__0 days 00:00:00.000000005"],
+    )
+    assert _encodings([td(1, "ns"), td(1000, "ps"), td(1001, "ps")]) == (
+        [0.0, 0.0, 1.0],
+        [2 / 3, 2 / 3, 1 / 3],
+        ["c__0 days 00:00:00.000000001", "c__1001 picoseconds"],
+    )
+    assert _encodings([td(2, "ps"), td(2000, "fs")]) == ([0.0, 0.0], [1.0, 1.0], ["c__2 picoseconds"])
+    assert _encodings([td(2**47, "D"), td(2**47 * 24, "h"), td(2**47 * 24 + 1, "h")]) == (
+        [0.0, 0.0, 1.0],
+        [2 / 3, 2 / 3, 1 / 3],
+        ["c__140737488355328 days", "c__3377699720527873 hours"],
+    )
+    # A calendar duration never meets a fixed one of the same raw count: this
+    # mix used to raise numpy's "Cannot get a common metadata divisor".
+    assert _encodings([td(12, "fs"), td(1, "Y"), td(12, "M")]) == (
+        [0.0, 1.0, 1.0],
+        [1 / 3, 2 / 3, 2 / 3],
+        ["c__12 months", "c__12 femtoseconds"],
+    )
+    assert _encodings([td(60, "as"), td(5, "Y"), _scalar(1, "m8[5Y]")]) == (
+        [0.0, 1.0, 1.0],
+        [1 / 3, 2 / 3, 2 / 3],
+        ["c__60 months", "c__60 attoseconds"],
+    )
+
+
+@pytest.mark.parametrize("resolution", ["s", "ms", "us", "ns"])
+def test_typed_timedelta_columns_share_levels_with_numpy_durations(resolution):
+    # A typed column hands over pd.Timedelta values in its own resolution; a
+    # numpy duration of the same length, in any unit, is the same level.
+    rng = np.random.default_rng(11)
+    td = np.timedelta64
+    for _ in range(50):
+        raw = [int(v) for v in rng.integers(-(2**62), 2**62, size=3)]
+        raw += [int(v) for v in rng.integers(-50, 50, size=3)]
+        typed = pd.Series(np.array(raw, dtype=f"m8[{resolution}]"))
+        per = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}[resolution]
+        spelled = []
+        for value in raw:
+            nanoseconds = value * per
+            if abs(nanoseconds * 1000) < 2**63 and rng.random() < 0.5:
+                spelled.append(td(nanoseconds * 1000, "ps"))
+                continue
+            # The same length in the coarsest unit that holds it exactly.
+            for unit, unit_ns in (("D", 86_400 * 10**9), ("h", 3_600 * 10**9), ("s", 10**9),
+                                  ("ms", 10**6), ("us", 10**3), ("ns", 1)):
+                if nanoseconds % unit_ns == 0 and abs(nanoseconds // unit_ns) < 2**63:
+                    spelled.append(td(nanoseconds // unit_ns, unit))
+                    break
+        typed_frame = pd.DataFrame({"c": typed})
+        numpy_frame = pd.DataFrame({"c": pd.Series(spelled, dtype=object)})
+        for method in ("ordinal", "frequency"):
+            fitted = UnsupervisedCatEncoder(["c"], method=method).fit(typed_frame)
+            pd.testing.assert_frame_equal(
+                fitted.transform(numpy_frame), fitted.transform(typed_frame)
+            )
+        onehot = OneHotBlockEncoder(["c"]).fit(typed_frame)
+        assert list(OneHotBlockEncoder(["c"]).fit(numpy_frame).transform(numpy_frame).columns) == list(
+            onehot.transform(typed_frame).columns
+        )
+        np.testing.assert_array_equal(
+            onehot.transform(numpy_frame).to_numpy(), onehot.transform(typed_frame).to_numpy()
+        )
+
+
+def test_numpy_datetimes_of_different_units_never_compare():
+    dt = np.datetime64
+    # numpy hashes a datetime as its raw count and overflows converting years
+    # to attoseconds, so these crashed every encoder with OverflowError.
+    assert _encodings([dt("1975", "Y"), dt(5, "as")]) == (
+        [1.0, 0.0],
+        [0.5, 0.5],
+        ["c__1970-01-01T00:00:00.000000000000000005", "c__1975"],
+    )
+    assert _encodings([dt(-6, "ps"), dt("1969-12-26")]) == (
+        [1.0, 0.0], [0.5, 0.5], ["c__1969-12-26", "c__1969-12-31T23:59:59.999999999994"],
+    )
+    # Each unit stays its own level with numpy's own text, as in 1.0, and
+    # equal-weight levels keep 1.0's one-hot order.
+    assert _encodings([_scalar(1, "M8[3D]"), dt("1970-01-02"), dt("1970-01-04"), dt("1970-01-04")]) == (
+        [2.0, 0.0, 1.0, 1.0],
+        [0.25, 0.25, 0.5, 0.5],
+        ["c__1970-01-04", "c__1970-01-02", "c__1970-01-04__2"],
+    )
+    assert _encodings([dt("2021-01-01"), dt("2020-06-01T00:00:00"), dt("2020-06-01T00:00:00")]) == (
+        [1.0, 0.0, 0.0], [1 / 3, 2 / 3, 2 / 3], ["c__2020-06-01T00:00:00", "c__2021-01-01"],
+    )
+    assert _encodings([dt("2021-01-01"), dt("2020-06-01T00:00:00"), 7]) == (
+        [2.0, 1.0, 0.0], [1 / 3, 1 / 3, 1 / 3], ["c__2020-06-01T00:00:00", "c__2021-01-01", "c__7"],
+    )
+
+
+def test_aware_timestamp_beyond_python_years_encodes():
+    # pandas cannot repr an aware non-nanosecond Timestamp after year 9999,
+    # which the level tie-break used, so every encoder raised
+    # NotImplementedError; its str still works.
+    late = pd.Timestamp(np.datetime64("12000-01-01T05:06:07", "s")).tz_localize("UTC")
+    ahead = late.tz_convert("America/New_York")
+    early = pd.Timestamp(np.datetime64("0500-01-01", "s")).tz_localize("UTC")
+    assert _encodings([late, "x", early, late]) == (
+        [1.0, 2.0, 0.0, 1.0],
+        [0.5, 0.25, 0.25, 0.5],
+        ["c__12000-01-01 05:06:07+00:00", "c__0500-01-01 00:00:00+00:00", "c__x"],
+    )
+    # One instant in two zones: equal Timestamps, one level, as in 1.0.
+    ordinal, _, names = _encodings([late, ahead])
+    assert ordinal == [0.0, 0.0]
+    assert names == ["c__12000-01-01 05:06:07+00:00"]
+
+
+def test_repeated_wall_clock_hour_is_two_levels_in_any_row_order():
+    from zoneinfo import ZoneInfo
+
+    new_york = ZoneInfo("America/New_York")
+    first = datetime(2021, 11, 7, 1, 30, tzinfo=new_york)  # 05:30 UTC
+    second = first.replace(fold=1)  # 06:30 UTC
+    between = datetime(2021, 11, 7, 6, tzinfo=timezone.utc)
+    # Python calls the two readings equal, so they used to merge into one
+    # level whose instant (and so code) came from whichever row was first.
+    assert first == second
+    names = [
+        "c__2021-11-07 01:30:00-05:00",
+        "c__2021-11-07 01:30:00-04:00",
+        "c__2021-11-07 06:00:00+00:00",
+    ]
+    assert _encodings([first, between, second]) == ([0.0, 1.0, 2.0], [1 / 3] * 3, names)
+    assert _encodings([second, between, first]) == ([2.0, 1.0, 0.0], [1 / 3] * 3, names)
+    # Across zones the levels are as in 1.0: a reading inside the fold never
+    # equals another zone's value (PEP 495), an unambiguous one merges with
+    # the same instant elsewhere.
+    same_instant = datetime(2021, 11, 7, 5, 30, tzinfo=timezone.utc)
+    assert _encodings([first, same_instant]) == (
+        [0.0, 1.0], [0.5, 0.5], ["c__2021-11-07 01:30:00-04:00", "c__2021-11-07 05:30:00+00:00"],
+    )
+    summer = datetime(2021, 6, 1, 8, tzinfo=new_york)
+    assert _encodings([summer, summer.astimezone(timezone.utc)]) == (
+        [0.0, 0.0], [1.0, 1.0], ["c__2021-06-01 08:00:00-04:00"],
+    )
+
+
+_MICRO = timedelta(microseconds=1)
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _instant_truth(value):
+    """Seconds since the epoch, exactly, from numpy's and pandas' own conversions.
+
+    Nothing here multiplies raw ticks by unit sizes or counts calendar days:
+    numpy casts a datetime of any unit and count multiplier to microseconds
+    (or to attoseconds near the epoch), and Python measures its own values.
+    """
+    if isinstance(value, pd.Timestamp):
+        return Fraction(value.value, 10**9)
+    if isinstance(value, datetime):
+        return Fraction((value - _EPOCH) // _MICRO, 10**6)
+    if np.datetime_data(value.dtype)[0] in ("ns", "ps", "fs", "as"):
+        return Fraction(int(value.astype("M8[as]").astype(np.int64)), 10**18)
+    return Fraction(int(value.astype("M8[us]").astype(np.int64)), 10**6)
+
+
+def _anchored_datetimes(rng):
+    """numpy datetimes of many units near calendar edges, and their neighbours."""
+    anchors = [
+        date(1970, 1, 1), date(1969, 12, 31), date(1969, 11, 1), date(1968, 3, 1),
+        date(2000, 2, 29), date(2000, 3, 1), date(2020, 2, 29), date(2020, 3, 1),
+        date(1900, 2, 28), date(1900, 3, 1), date(2100, 2, 28), date(2100, 3, 1),
+        date(1600, 3, 1), date(4, 3, 1), date(1, 3, 1), date(9999, 12, 1),
+        date(1583, 1, 1), date(2400, 3, 1),
+    ]
+    anchor = anchors[int(rng.integers(len(anchors)))]
+    day = np.datetime64(anchor.isoformat(), "D")
+    month = np.datetime64(anchor.isoformat()[:7], "M")
+    hours = int(rng.integers(-60, 61))
+    choices = [
+        lambda: day,
+        lambda: month,
+        lambda: np.datetime64(anchor.isoformat()[:4], "Y"),
+        lambda: day.astype("M8[W]"),
+        lambda: day.astype("M8[3D]"),
+        lambda: month.astype("M8[2M]"),
+        lambda: month.astype("M8[5Y]"),
+        lambda: day.astype("M8[h]") + np.timedelta64(hours, "h"),
+        lambda: day.astype("M8[m]") + np.timedelta64(hours * 60 + 7, "m"),
+        lambda: (day.astype("M8[h]") + np.timedelta64(hours, "h")).astype("M8[7h]"),
+        lambda: datetime.combine(anchor, datetime.min.time()) + timedelta(hours=hours),
+    ]
+    return choices[int(rng.integers(len(choices)))]()
+
+
+def _subnanosecond_datetime(rng):
+    """A value within a few nanoseconds of the epoch, in ns and finer units."""
+    kind = int(rng.integers(4))
+    if kind == 0:
+        return pd.Timestamp(int(rng.integers(-4, 5)))
+    unit, per_ns = [("ps", 10**3), ("fs", 10**6), ("as", 10**9)][kind - 1]
+    return np.datetime64(int(rng.integers(-4 * per_ns, 4 * per_ns + 1)), unit)
+
+
+def _assert_ordinal_matches_truth(values, truth, same_level):
+    codes = _codes(pd.Series(values, dtype=object))
+    for i, a in enumerate(values):
+        for j, b in enumerate(values):
+            if truth[i] < truth[j]:
+                assert codes[i] < codes[j], (a, b)
+            if same_level(a, b, truth[i] == truth[j]):
+                assert codes[i] == codes[j], (a, b)
+            else:
+                assert codes[i] != codes[j], (a, b)
+
+
+def _same_datetime_level(a, b, equal):
+    # One level per type and numpy unit (count included), as in 1.0.
+    return equal and type(a) is type(b) and getattr(a, "dtype", None) == getattr(b, "dtype", None)
+
+
+def test_numpy_datetimes_order_like_numpy_calendar_on_random_mixes():
+    rng = np.random.default_rng(20260928)
+    for _ in range(400):
+        values = [_anchored_datetimes(rng) for _ in range(int(rng.integers(2, 9)))]
+        truth = [_instant_truth(value) for value in values]
+        _assert_ordinal_matches_truth(values, truth, _same_datetime_level)
+    for _ in range(200):
+        values = [_subnanosecond_datetime(rng) for _ in range(int(rng.integers(2, 9)))]
+        truth = [_instant_truth(value) for value in values]
+        _assert_ordinal_matches_truth(values, truth, _same_datetime_level)
+
+
+def _length_truth(value):
+    """``(is calendar, seconds)`` from numpy's and pandas' own conversions."""
+    if isinstance(value, pd.Timedelta):
+        return False, Fraction(value.value, 10**9)
+    unit = np.datetime_data(value.dtype)[0]
+    if unit in ("Y", "M"):
+        # numpy's own average month (365.2425 / 12 days).
+        return True, Fraction(int(value.astype("m8[s]").astype(np.int64)))
+    if unit in ("ns", "ps", "fs", "as"):
+        return False, Fraction(int(value.astype("m8[as]").astype(np.int64)), 10**18)
+    return False, Fraction(value.astype("m8[us]").item() // _MICRO, 10**6)
+
+
+def _random_duration(rng):
+    td = np.timedelta64
+    month = 2_629_746  # numpy's average month in seconds
+    choices = [
+        lambda: td(int(rng.integers(-3, 4)), ["Y", "M"][int(rng.integers(2))]),
+        lambda: _scalar(int(rng.integers(-2, 3)), ["m8[2Y]", "m8[5M]"][int(rng.integers(2))]),
+        lambda: td(int(rng.integers(-3, 4)) * month + int(rng.integers(-2, 3)), "s"),
+        lambda: td(int(rng.integers(-3, 4)) * 30 + int(rng.integers(-1, 2)), "D"),
+        lambda: td(int(rng.integers(-3, 4)) * 365 + int(rng.integers(-1, 2)), "D"),
+        lambda: td(int(rng.integers(-20, 21)), ["W", "D"][int(rng.integers(2))]),
+        lambda: _scalar(int(rng.integers(-7, 8)), ["m8[3D]", "m8[7D]", "m8[2W]"][int(rng.integers(3))]),
+        lambda: td(int(rng.integers(-6, 7)) * 12, ["h", "m"][int(rng.integers(2))]),
+        lambda: pd.Timedelta(int(rng.integers(-3, 4)), "D"),
+        lambda: td(int(rng.integers(-3000, 3001)), "ps"),
+        lambda: td(int(rng.integers(-3 * 10**6, 3 * 10**6 + 1)), "fs"),
+        lambda: td(int(rng.integers(-3, 4)), "ns"),
+        lambda: _scalar(int(rng.integers(-6, 7)), ["m8[500ps]", "m8[250fs]"][int(rng.integers(2))]),
+    ]
+    return choices[int(rng.integers(len(choices)))]()
+
+
+def test_numpy_duration_levels_match_numpy_lengths_on_random_mixes():
+    rng = np.random.default_rng(20260929)
+
+    def same_level(a, b, equal):
+        # Equal lengths are one level in any unit; calendar and fixed
+        # durations never are, even at numpy's average month.
+        return equal and _length_truth(a)[0] == _length_truth(b)[0]
+
+    for _ in range(600):
+        values = [_random_duration(rng) for _ in range(int(rng.integers(2, 9)))]
+        truth = [_length_truth(value)[1] for value in values]
+        _assert_ordinal_matches_truth(values, truth, same_level)
+    # Tie-sensitive month and sub-nanosecond neighbours, pinned.
+    td = np.timedelta64
+    assert _codes(pd.Series(
+        [td(2_629_747, "s"), td(1, "M"), td(2_629_745, "s"), td(30, "D"), td(31, "D")], dtype=object
+    )) == [3.0, 2.0, 1.0, 0.0, 4.0]
+    assert _codes(pd.Series(
+        [td(1200, "ps"), td(1_100_000, "fs"), td(1, "ns"), td(-1500, "ps"), td(-1, "ns")], dtype=object
+    )) == [4.0, 3.0, 2.0, 0.0, 1.0]
+
+
 def test_ordered_categorical_uses_declared_order():
     ordered = pd.Categorical(
         ["mid", "low", "high", "mid"],

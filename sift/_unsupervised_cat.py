@@ -20,7 +20,10 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 from sift._preprocess import (
+    _DAY_NS,
+    _UNIT_NS,
     _fitted_level_identity,
+    _level_sort_text,
     _onehot_level_identity,
     ensure_weights,
     require_unique_encoding_columns,
@@ -91,23 +94,6 @@ def _positive_mass(series: pd.Series, weights: np.ndarray) -> dict[tuple, float]
 
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 _MICROSECOND = timedelta(microseconds=1)
-_DAY_NS = 86_400 * 10**9
-# Nanoseconds per numpy datetime unit. Units below a nanosecond stay exact as
-# fractions; a generic unit counts nanoseconds, as pandas reads it.
-_UNIT_NS: dict[str, int | Fraction] = {
-    "W": 7 * _DAY_NS,
-    "D": _DAY_NS,
-    "h": 3_600 * 10**9,
-    "m": 60 * 10**9,
-    "s": 10**9,
-    "ms": 10**6,
-    "us": 10**3,
-    "ns": 1,
-    "ps": Fraction(1, 10**3),
-    "fs": Fraction(1, 10**6),
-    "as": Fraction(1, 10**9),
-    "generic": 1,
-}
 # A calendar duration (years, months) has no fixed length; numpy converts one
 # at the average Gregorian month of 365.2425 / 12 days.
 _MONTH_NS = 2_629_746 * 10**9
@@ -207,9 +193,10 @@ def _natural_order_key(identity: tuple) -> tuple:
     by value (exactly, without a float cast); numerically equal levels order
     int, then float, then the other real types. Datetime-likes compare by
     instant and durations by length, exactly and at any magnitude, with every
-    datetime before every duration. The trailing ``repr`` only breaks ties
-    between identities a kind cannot separate, for example two timestamps
-    that denote the same instant in different time zones.
+    datetime before every duration; a calendar duration counts numpy's
+    average month. The trailing ``repr`` only breaks ties between identities
+    a kind cannot separate, for example two timestamps that denote the same
+    instant in different time zones.
     """
     kind = identity[0]
     if kind == "bool":
@@ -220,6 +207,10 @@ def _natural_order_key(identity: tuple) -> tuple:
         primary = (3, identity[1])
     elif kind == "bytes":
         primary = (4, identity[1])
+    elif kind == "duration":
+        primary = (2, 1, identity[1])
+    elif kind == "calendar_duration":
+        primary = (2, 1, identity[1] * _MONTH_NS)
     else:
         # Datetime-likes first: numpy registers np.timedelta64 as an integer.
         moment = _datetime_like_value(identity[2])
@@ -230,7 +221,7 @@ def _natural_order_key(identity: tuple) -> tuple:
             primary = (1, real, 2)
         else:
             primary = (5, identity[1])
-    return primary + (repr(identity),)
+    return primary + (_level_sort_text(identity),)
 
 
 def _declared_order(series: pd.Series) -> dict[tuple, int] | None:
@@ -268,7 +259,10 @@ class UnsupervisedCatEncoder(BaseEstimator, TransformerMixin):
     with any strictly positive weight is kept, however small). Identities reuse
     one-hot level identity (missing is ``("missing",)`` when observed in that
     positive-weight mass), so ``1``, ``1.0``, ``"1"`` and ``True`` stay four
-    levels. Declared-but-unobserved pandas Categorical levels are ignored.
+    levels. Equal durations are one level in any unit (a ``np.timedelta64``
+    shares the level of the ``pd.Timedelta`` a typed column holds; years and
+    months count as months), while a ``np.datetime64`` is a level of its own
+    unit. Declared-but-unobserved pandas Categorical levels are ignored.
 
     Ordinal codes are ``0..C-1`` in natural level order, independent of row
     order: an ordered Categorical uses its declared category order, otherwise
