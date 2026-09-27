@@ -66,7 +66,7 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 from sift.selection.within import validate_within, within_split_guidance
-from sift.selection.conditioning import UnusableIncludeError, omitted_conditioning
+from sift.selection.conditioning import UnusableIncludeError
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset(
     {"target_cv", "loo", "target", "james_stein", "loo_logit"}
@@ -973,16 +973,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 # config use the measured Auto-K router instead of the legacy
                 # evaluate/time_holdout inference.
                 resolved_auto_k = AutoKConfig(k_method="auto")
-            _blocks, include, exclude, candidates = (
-                _effective_nested_blocks_and_conditioning(self, fit_params)
-            )
             effective_auto_k = resolve_auto_k_config(
                 resolved_auto_k,
                 time,
                 groups,
                 allow_nested=True,
                 within=validate_within(getattr(self, "within", None)),
-                conditioning=not omitted_conditioning(include, exclude, candidates),
             )
             if (
                 has_supervised_categoricals

@@ -163,9 +163,16 @@ def reject_conditioned_within_auto_k(
     ``xfit_objective`` rebuild an unconditioned path.  Those two are the only
     methods that validate ``within='two_way'``, so no auto-k method serves
     both; under ``within='groups'`` only ``evaluate`` with ``time_holdout``
-    does.  Saying so here keeps the conditioning and within rejections from
+    does.  Saying so keeps the conditioning and within rejections from
     sending the caller back and forth.  ``config`` is the resolved
     ``AutoKConfig``.
+
+    Callers run this only where the within or conditioning rejection it
+    replaces would fire, after every structural, config, cache, encoding and
+    conditioning check, so an input with a more basic problem keeps that
+    error.  Each exit it names works as written: a fixed ``k`` under
+    ``groups`` takes no ``time``, and the two methods that validate
+    ``two_way`` exist only on the Gaussian path.
     """
     if within is None or not conditioning:
         return
@@ -175,7 +182,8 @@ def reject_conditioned_within_auto_k(
             f"include/exclude/candidates: only {_KFOLD_WITHIN_ROUTE} can validate "
             "within='two_way', and those methods rebuild an unconditioned path, "
             "so they cannot honor exact conditioning. Pass a fixed integer k, or "
-            "omit include, exclude and candidates"
+            "omit include, exclude and candidates and use one of those methods "
+            f"on {_GAUSSIAN_PATH}"
         )
     k_method = str(config.k_method)
     strategy = str(config.strategy)
@@ -191,8 +199,10 @@ def reject_conditioned_within_auto_k(
         f"holdout boundary); got {got}. k_method='gaussian_cv' and "
         "'xfit_objective' rebuild an unconditioned path, so they cannot honor "
         "exact conditioning, and the other auto-k methods cannot validate "
-        "within. Use that evaluate route, pass a fixed integer k, or omit "
-        "include, exclude and candidates"
+        "within. Use that evaluate route, pass a fixed integer k (and drop "
+        "time), or omit include, exclude and candidates and use k_method="
+        "'gaussian_cv' or 'xfit_objective' with strategy='kfold' or "
+        f"'time_holdout' on {_GAUSSIAN_PATH}"
     )
 
 

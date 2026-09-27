@@ -551,17 +551,13 @@ def validate_auto_k_config(
     *,
     warn_unused: bool = True,
     within: str | None = None,
-    conditioning: bool = False,
 ) -> None:
     """Validate runtime values on an AutoKConfig instance.
 
-    ``within`` is the caller's resolved panel mode, when known.  It changes
-    the guidance attached to the ``evaluate``/``kfold`` rejection: without it
-    that message recommends ``time_holdout`` or ``group_cv``, and
-    ``group_cv`` can never satisfy the within fold guard.  ``conditioning``
-    says whether any of include/exclude/candidates was given; together with
-    ``within`` it rejects every config that cannot serve both, before either
-    rejection sends the caller to the other.
+    ``within`` is the caller's resolved panel mode, when known.  It only
+    changes the guidance attached to the ``evaluate``/``kfold`` rejection:
+    without it that message recommends ``time_holdout`` or ``group_cv``, and
+    ``group_cv`` can never satisfy the within fold guard.
     """
     if config.k_method not in _VALID_K_METHODS:
         raise ValueError(
@@ -574,10 +570,6 @@ def validate_auto_k_config(
             "AutoKConfig.strategy must be one of "
             f"{sorted(_VALID_STRATEGIES)}; got {config.strategy!r}"
         )
-    if within is not None and conditioning:
-        from sift.selection.within import reject_conditioned_within_auto_k
-
-        reject_conditioned_within_auto_k(within, config, conditioning=True)
     if config.k_method == "evaluate" and config.strategy == "kfold":
         if within is not None:
             # Do not send within users round in a circle: group_cv (and, for
@@ -1051,12 +1043,9 @@ def _ensure_supported_auto_k_mode(
     allow_nested: bool = False,
     warn_unused: bool = True,
     within: str | None = None,
-    conditioning: bool = False,
 ) -> None:
     """Validate path-selection semantics for the current implementation."""
-    validate_auto_k_config(
-        config, warn_unused=warn_unused, within=within, conditioning=conditioning
-    )
+    validate_auto_k_config(config, warn_unused=warn_unused, within=within)
     if config.auto_k_mode == "prefix_only":
         return
     if config.auto_k_mode == "nested":
@@ -1087,13 +1076,11 @@ def resolve_auto_k_config(
     *,
     allow_nested: bool = False,
     within: str | None = None,
-    conditioning: bool = False,
 ) -> AutoKConfig:
     """Resolve auto-k config, inferring strategy from supplied split context.
 
-    ``within`` (and ``conditioning``, whether any of include/exclude/candidates
-    was given) only move rejections earlier and sharpen their guidance: every
-    config they reject would fail later in the same call anyway.
+    ``within`` only sharpens the guidance on the ``evaluate``/``kfold``
+    rejection; it does not change which configs are accepted.
     """
     if auto_k_config is not None:
         _ensure_supported_auto_k_mode(
@@ -1101,7 +1088,6 @@ def resolve_auto_k_config(
             allow_nested=allow_nested,
             warn_unused=False,
             within=within,
-            conditioning=conditioning,
         )
         return auto_k_config
     if time is not None:
@@ -1110,8 +1096,6 @@ def resolve_auto_k_config(
             config,
             allow_nested=allow_nested,
             warn_unused=False,
-            within=within,
-            conditioning=conditioning,
         )
         return config
     if groups is not None:
@@ -1120,8 +1104,6 @@ def resolve_auto_k_config(
             config,
             allow_nested=allow_nested,
             warn_unused=False,
-            within=within,
-            conditioning=conditioning,
         )
         return config
     raise ValueError(

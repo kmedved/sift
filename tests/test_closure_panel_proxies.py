@@ -989,7 +989,9 @@ _TWO_WAY_CONDITIONED_AUTO_K = (
     "'xfit_objective' with strategy='kfold' can validate within='two_way', and "
     "those methods rebuild an unconditioned path, so they cannot honor exact "
     "conditioning. Pass a fixed integer k, or omit include, exclude and "
-    "candidates"
+    "candidates and use one of those methods on the Gaussian path "
+    "(select_cefsplus / CEFSPlusSelector, or estimator='gaussian' for mRMR, "
+    "JMI and JMIM)"
 )
 
 
@@ -1001,8 +1003,11 @@ def _groups_conditioned_auto_k(got):
         f"holdout boundary); got {got}. k_method='gaussian_cv' and "
         "'xfit_objective' rebuild an unconditioned path, so they cannot honor "
         "exact conditioning, and the other auto-k methods cannot validate "
-        "within. Use that evaluate route, pass a fixed integer k, or omit "
-        "include, exclude and candidates"
+        "within. Use that evaluate route, pass a fixed integer k (and drop "
+        "time), or omit include, exclude and candidates and use "
+        "k_method='gaussian_cv' or 'xfit_objective' with strategy='kfold' or "
+        "'time_holdout' on the Gaussian path (select_cefsplus / "
+        "CEFSPlusSelector, or estimator='gaussian' for mRMR, JMI and JMIM)"
     )
 
 
@@ -1011,32 +1016,44 @@ _CONDITIONING_CASES = [
     {"exclude": ["noise"]},
     {"candidates": ["within_signal", "noise"]},
 ]
-_CONDITIONED_ROUTES = [
-    "select_cefsplus",
-    "select_mrmr",
-    "select_mrmr+gaussian",
-    "CEFSPlusSelector",
-    "MRMRSelector",
-]
+#: Routes whose estimator offers every auto-k method, and classic routes,
+#: which score only ``evaluate`` and reject any other method first.
+_GAUSSIAN_CONDITIONED_ROUTES = ["select_cefsplus", "select_mrmr+gaussian", "CEFSPlusSelector"]
+_CLASSIC_CONDITIONED_ROUTES = ["select_mrmr", "MRMRSelector"]
+_CONDITIONED_ROUTES = _GAUSSIAN_CONDITIONED_ROUTES + _CLASSIC_CONDITIONED_ROUTES
 
 
-@pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
+def _conditioned_cases(gaussian_configs, classic_configs):
+    return [
+        (route, config)
+        for routes, configs in (
+            (_GAUSSIAN_CONDITIONED_ROUTES, gaussian_configs),
+            (_CLASSIC_CONDITIONED_ROUTES, classic_configs),
+        )
+        for route in routes
+        for config in configs
+    ]
+
+
 @pytest.mark.parametrize("conditioning", _CONDITIONING_CASES)
 @pytest.mark.parametrize(
-    "k_method,strategy",
-    [
-        ("gaussian_cv", "kfold"),
-        ("xfit_objective", "kfold"),
-        ("evaluate", "time_holdout"),
-        ("evaluate", "kfold"),
-        ("elbow", "time_holdout"),
-        (None, None),
-    ],
+    "route,k_method_strategy",
+    _conditioned_cases(
+        [
+            ("gaussian_cv", "kfold"),
+            ("xfit_objective", "kfold"),
+            ("evaluate", "time_holdout"),
+            ("elbow", "time_holdout"),
+            (None, None),
+        ],
+        [("evaluate", "time_holdout"), (None, None)],
+    ),
 )
 def test_two_way_auto_k_with_conditioning_says_no_method_can_serve_both(
-    route, conditioning, k_method, strategy
+    route, k_method_strategy, conditioning
 ):
     X, y, g, t = _balanced_panel()
+    k_method, strategy = k_method_strategy
     config = (
         None
         if k_method is None
@@ -1049,21 +1066,21 @@ def test_two_way_auto_k_with_conditioning_says_no_method_can_serve_both(
     assert str(excinfo.value) == _TWO_WAY_CONDITIONED_AUTO_K
 
 
-@pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
 @pytest.mark.parametrize(
-    "k_method,strategy,got",
-    [
-        ("gaussian_cv", "kfold", "k_method='gaussian_cv'"),
-        ("xfit_objective", "time_holdout", "k_method='xfit_objective'"),
-        ("evaluate", "kfold", "k_method='evaluate' with strategy='kfold'"),
-        ("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'"),
-        ("elbow", "time_holdout", "k_method='elbow'"),
-    ],
+    "route,case",
+    _conditioned_cases(
+        [
+            ("gaussian_cv", "kfold", "k_method='gaussian_cv'"),
+            ("xfit_objective", "time_holdout", "k_method='xfit_objective'"),
+            ("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'"),
+            ("elbow", "time_holdout", "k_method='elbow'"),
+        ],
+        [("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'")],
+    ),
 )
-def test_groups_auto_k_with_conditioning_names_the_evaluate_holdout_route(
-    route, k_method, strategy, got
-):
+def test_groups_auto_k_with_conditioning_names_the_evaluate_holdout_route(route, case):
     X, y, g, t = _balanced_panel()
+    k_method, strategy, got = case
     config = AutoKConfig(k_method=k_method, strategy=strategy, min_k=1, max_k=2)
     with pytest.raises(ValueError) as excinfo:
         _run_within_route(
@@ -1082,23 +1099,61 @@ def test_zero_config_groups_router_with_conditioning_names_the_evaluate_route(ro
     assert str(excinfo.value) == _groups_conditioned_auto_k("k_method='auto'")
 
 
+def _gaussian_counterpart(route):
+    if route in {"select_cefsplus", "CEFSPlusSelector"} or "+" in route:
+        return route
+    return f"{route}+gaussian"
+
+
 @pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
 def test_conditioned_within_exits_named_by_the_rejection_work(route):
     X, y, g, t = _balanced_panel()
-    # Fixed k keeps the include under both modes (groups takes no time here).
+    gaussian = _gaussian_counterpart(route)
+    kfold = AutoKConfig(
+        k_method="gaussian_cv", strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+    )
+    # two_way: a fixed k keeps the include (two_way needs its time) ...
     assert _run_within_route(
         route, X, y, g, t, within="two_way", config=None, k=2, include=["noise"]
     ) == ["noise", "within_signal"]
+    # ... and without the keywords a kfold method runs on the Gaussian path,
+    # which a classic route reaches through estimator='gaussian'.
     assert _run_within_route(
-        route, X, y, g, None, within="groups", config=None, k=2, include=["noise"]
-    ) == ["noise", "within_signal"]
+        gaussian, X, y, g, t, within="two_way", config=kfold
+    ) == ["within_signal"]
     # groups: evaluate with time_holdout honors the conditioning.
     evaluate = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=2)
     assert _run_within_route(
         route, X, y, g, t, within="groups", config=evaluate, include=["noise"]
     ) == ["noise", "within_signal"]
-    # two_way: dropping the conditioning keywords reopens the kfold route
-    # (checked on every Gaussian route by the guidance test above).
+    # A fixed k works once time is dropped; keeping it is the error the
+    # message's "(and drop time)" steers around.
+    assert _run_within_route(
+        route, X, y, g, None, within="groups", config=None, k=2, include=["noise"]
+    ) == ["noise", "within_signal"]
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(
+            route, X, y, g, t, within="groups", config=None, k=2, include=["noise"]
+        )
+    assert str(excinfo.value) == (
+        "time is only used with within='two_way' or auto-k evaluation; omit "
+        "time for a fixed-k within='groups' call"
+    )
+    # Without the keywords both fold methods run on the Gaussian path under
+    # kfold and time_holdout.
+    for k_method in ("gaussian_cv", "xfit_objective"):
+        assert _run_within_route(
+            gaussian, X, y, g, t, within="groups",
+            config=AutoKConfig(
+                k_method=k_method, strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+            ),
+        ) == ["within_signal"]
+    assert _run_within_route(
+        gaussian, X, y, g, t, within="groups",
+        config=AutoKConfig(
+            k_method="gaussian_cv", strategy="time_holdout", min_k=1, max_k=2
+        ),
+    ) == ["within_signal", "noise"]
 
 
 @pytest.mark.parametrize("route", ["select_cefsplus", "CEFSPlusSelector"])
@@ -1122,6 +1177,170 @@ def test_empty_conditioning_keywords_count_as_conditioning_under_within(route):
     assert _run_within_route(
         route, X, y, g, t, within="groups", config=evaluate, include=[]
     ) == ["within_signal"]
+
+
+_GROUPS_KFOLD = AutoKConfig(
+    k_method="gaussian_cv", strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+)
+
+
+def _conditioned_within_call(route, *, within="groups", config=_GROUPS_KFOLD, **overrides):
+    """One conditioned within auto-k call; ``overrides`` edit its inputs."""
+    X, y, g, t = _balanced_panel()
+    call = {
+        "X": X, "y": y, "groups": g, "time": t, "within": within,
+        "config": config, "conditioning": {"include": ["noise"]},
+        "options": {}, "fit": {},
+    }
+    call.update(overrides)
+    name, _, variant = route.partition("+")
+    options = {"verbose": False, **call["options"]}
+    if name != "CEFSPlusSelector" and name != "select_cefsplus":
+        options.setdefault("task", "regression")
+    if variant == "gaussian":
+        options["estimator"] = "gaussian"
+    context = {"groups": call["groups"], "time": call["time"], **call["fit"]}
+    if name.startswith("select_"):
+        getattr(sift, name)(
+            call["X"], call["y"], k="auto", within=call["within"],
+            auto_k_config=call["config"], **context, **options,
+            **call["conditioning"],
+        )
+        return
+    getattr(sift, name)(
+        k="auto", within=call["within"], auto_k_config=call["config"],
+        **options, **call["conditioning"],
+    ).fit(call["X"], call["y"], **context)
+
+
+def _with_category():
+    X, _y, _g, _t = _balanced_panel()
+    return X.assign(cat=pd.Categorical(np.tile(["p", "q"], len(X) // 2)))
+
+
+#: Inputs with a more basic problem than within + conditioning, and the
+#: 1.0.0 error each one keeps (the text the same call raises without
+#: include/exclude/candidates).
+_MORE_BASIC_WITHIN_ERRORS = {
+    "empty candidates": (
+        {"conditioning": {"candidates": []}},
+        "conditioning leaves no eligible features for discovery; include, "
+        "exclude, and candidates produce an empty candidate pool",
+    ),
+    "unknown include": (
+        {"conditioning": {"include": ["typo"]}},
+        "include contains unknown feature 'typo'",
+    ),
+    "include/exclude overlap": (
+        {"conditioning": {"include": ["noise"], "exclude": ["noise"]}},
+        "include and exclude overlap: 'noise'",
+    ),
+    "missing groups": (
+        {"groups": None},
+        "within='groups' requires groups",
+    ),
+    "two_way without time": (
+        {"within": "two_way", "time": None},
+        "within='two_way' requires groups and time",
+    ),
+    "min_k > max_k": (
+        {"config": AutoKConfig(k_method="gaussian_cv", strategy="kfold", min_k=3, max_k=2)},
+        "AutoKConfig.min_k must be <= AutoKConfig.max_k",
+    ),
+    "classification": (
+        {
+            "config": AutoKConfig(k_method="evaluate", strategy="time_holdout"),
+            "options": {"task": "classification"},
+            "y": (np.arange(120) % 2),
+        },
+        "within is only supported for task='regression'",
+    ),
+    "holdout without time": (
+        {
+            "config": AutoKConfig(k_method="evaluate", strategy="time_holdout"),
+            "time": None,
+        },
+        "auto-k evaluate with strategy='time_holdout' requires time parameter",
+    ),
+    "one-hot": (
+        {
+            "X": _with_category(),
+            "options": {"cat_features": ["cat"], "cat_encoding": "onehot"},
+        },
+        "cat_encoding='onehot' is not supported with within panel demeaning",
+    ),
+    "evaluate with kfold": (
+        {"config": AutoKConfig(k_method="evaluate", strategy="kfold")},
+        "AutoKConfig.strategy='kfold' is only supported by gaussian_cv and "
+        "xfit_objective, and with within='groups' the remaining evaluate "
+        f"strategies cannot all be validated. {_EXPECTED_GUIDANCE['groups']}",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "route,case",
+    [
+        (route, case)
+        for case in sorted(_MORE_BASIC_WITHIN_ERRORS)
+        for route in _GAUSSIAN_CONDITIONED_ROUTES
+        # CEFS+ has no task parameter.
+        if case != "classification" or route == "select_mrmr+gaussian"
+    ],
+)
+def test_conditioned_within_auto_k_keeps_the_more_basic_error(route, case):
+    overrides, expected = _MORE_BASIC_WITHIN_ERRORS[case]
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, **overrides)
+    assert str(excinfo.value) == expected
+
+
+@pytest.mark.parametrize("route", ["select_cefsplus", "CEFSPlusSelector"])
+def test_conditioned_within_auto_k_keeps_the_prebuilt_cache_error(route):
+    X, _y, _g, _t = _balanced_panel()
+    cache = sift.build_cache(X)
+    overrides = (
+        {"options": {"cache": cache}} if route == "select_cefsplus"
+        else {"fit": {"cache": cache}}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, **overrides)
+    assert str(excinfo.value) == (
+        "within cannot be combined with a prebuilt cache; demeaning must "
+        "precede the rank transform, so rebuild without cache"
+    )
+
+
+@pytest.mark.parametrize("route", _CLASSIC_CONDITIONED_ROUTES)
+@pytest.mark.parametrize("within", ["groups", "two_way"])
+@pytest.mark.parametrize("k_method", ["gaussian_cv", "xfit_objective", "elbow"])
+def test_classic_conditioned_within_keeps_the_unsupported_method_error(
+    route, within, k_method
+):
+    # A classic estimator scores only evaluate; that is the first thing wrong
+    # with these calls, as in 1.0.0.
+    config = AutoKConfig(k_method=k_method, strategy="kfold", xfit_folds=3)
+    if k_method == "elbow":
+        config = AutoKConfig(k_method="elbow")
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, within=within, config=config)
+    assert str(excinfo.value) == f"mRMR does not support k_method={k_method!r}"
+
+
+def test_nested_conditioned_within_keeps_the_nested_error():
+    X, y, g, t = _balanced_panel()
+    config = AutoKConfig(auto_k_mode="nested", k_method="evaluate", strategy="time_holdout")
+    selector = sift.CEFSPlusSelector(
+        k="auto", within="groups", include=["noise"], auto_k_config=config,
+        verbose=False,
+    )
+    with pytest.raises(ValueError) as excinfo:
+        selector.fit(X, y, groups=g, time=t)
+    assert str(excinfo.value) == (
+        "within is not supported with auto_k_mode='nested'; use "
+        "auto_k_mode='prefix_only' so demeaning stays fold-local. "
+        f"{_EXPECTED_GUIDANCE['groups']}"
+    )
 
 
 @pytest.mark.parametrize("within", ["groups", "two_way"])
