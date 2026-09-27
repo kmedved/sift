@@ -9,6 +9,8 @@ the two-way solver, the closed form for balanced panels, and
 from __future__ import annotations
 
 import re
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -2086,6 +2088,36 @@ def test_stabilized_over_a_categorical_frame_says_how_to_store_proxies(encoding)
     numeric_view = sift.as_result(fit(codes))
     assert "proxy_input_numeric" not in numeric_view.metadata
     assert _proxy_message(numeric_view.redundancy_report) == _NEVER_STORED_PROXY_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "huge", [10**400, Fraction(10**400, 3), Decimal("sNaN")], ids=["int", "fraction", "snan"]
+)
+def test_stabilized_fit_survives_levels_that_do_not_convert_to_float(huge):
+    # The numeric-input check behind the proxy advice only shapes a message;
+    # a level float() cannot take (OverflowError, InvalidOperation) must not
+    # fail a default fit that 1.0.0 completed.
+    X, y = _proxy_source_frame()
+    levels = pd.Series(
+        [huge if i % 3 == 0 else i % 4 for i in range(len(X))], dtype=object
+    )
+    # The same ordered partition with plain codes (the odd level sorts last).
+    codes = pd.Series([99 if i % 3 == 0 else i % 4 for i in range(len(X))])
+
+    def fit(cat):
+        return sift.Stabilized(
+            sift.CEFSPlusSelector(
+                k=2, cat_features=["cat"], cat_encoding="ordinal", verbose=False
+            ),
+            n_resamples=3, random_state=0, verbose=False,
+        ).fit(X.assign(cat=cat), y)
+
+    fitted = fit(levels)
+    view = sift.as_result(fitted)
+    assert view.metadata["proxy_input_numeric"] is False
+    assert list(fitted.get_feature_names_out()) == list(
+        fit(codes).get_feature_names_out()
+    )
 
 
 def _supported_proxy_sources():

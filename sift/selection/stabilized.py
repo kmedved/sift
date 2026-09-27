@@ -438,7 +438,11 @@ def _proxy_matrix_is_numeric(X: Any) -> bool:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             np.asarray(X, dtype=np.float64)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ArithmeticError):
+        # ArithmeticError covers an int beyond float range (OverflowError)
+        # and a signaling-NaN Decimal (InvalidOperation); the payload's own
+        # conversion fails on those too. This check only shapes a message, so
+        # it must never fail the fit.
         return False
     return True
 
