@@ -29,9 +29,10 @@ compares with 1.0.0.
     one-hot, ordinal and frequency on the filter selector classes, ordinal and
     frequency on `KnockoffSelector`, one-hot on the function APIs, any encoding
     with a classic cache, and any call whose `cat_features` names no column (a
-    misspelt name, an out-of-range position). On an ndarray, a one-hot call of
-    the last kind now reaches one-hot's own `TypeError` ("requires a pandas
-    DataFrame") instead of the cache `ValueError`.
+    misspelt name, an out-of-range position). For one-hot, a call of the last
+    kind instead reaches one-hot's own error: "onehot cat_features are not
+    columns of X" on a DataFrame, and a `TypeError` ("requires a pandas
+    DataFrame") instead of the cache `ValueError` on an ndarray.
 - `cat_encoding="target_cv"` encodes a column with a single positive-weight
   level in its fitting rows (for example a constant or all-missing
   categorical) as exactly zero, in every fold and at inference. It used to
@@ -51,8 +52,10 @@ compares with 1.0.0.
   `ValueError` naming the rule; they used to raise a bare or wrapped
   `TypeError` (`None`) or be truncated by `int()` (`1.5`, `"7"`). A 1-d array,
   which worked with NumPy's deprecation warning, raises too. The
-  `auto_dense_check=True` cross-check still skips itself with its warning for
-  such a seed, now naming the reason. Out-of-range integers that NumPy
+  `auto_dense_check=True` cross-check skips itself with its warning for such a
+  seed, naming the reason; 1.0.0 skipped it for `None` but ran it on the
+  truncated seed for `1.5` or `"7"`. The dense check is diagnostic, so the
+  selection is the same either way. Out-of-range integers that NumPy
   rejected get a message naming the range. Rules that never read the seed
   accept any value, and a `consensus` with a `gaussian_cv` / `xfit_objective`
   member no longer warns that `random_state` is unused.
@@ -63,18 +66,19 @@ compares with 1.0.0.
     (before 1677 or after 2262, aware values included), `np.datetime64` /
     `np.timedelta64` values beyond about ±292,000 years, large
     non-nanosecond durations and count-multiplied units such as `m8[3D]` used
-    to rank after strings, wrap or misorder. `Decimal` and `Fraction` levels
-    used to sort by their text and now sort numerically with ints and floats.
-    Values that pandas holds in nanoseconds, and every other level type, keep
-    their codes.
+    to rank after strings, wrap or misorder, as did `np.datetime64` values
+    with a count multiplier or in `ps` / `fs` / `as`. `Decimal` and `Fraction`
+    levels used to sort by their text and now sort numerically with ints and
+    floats. Other datetime and duration values, and every other level type,
+    keep their codes.
   - An `np.timedelta64` in an object column is identified by its exact
     length. Most units (`W`, `D`, `h`, `m`, `s`, `ms`, `us`) used to crash in
     `int()`; nanosecond, generic, year, month and sub-nanosecond values used to
     merge with the integer of the same count (`np.timedelta64(5, "ns")` and `5`
     were one level). Equal lengths are one level in any unit (`5000 ps` and
     `5 ns`), years and months count in months (one year is `...__12 months`),
-    and a count multiplier counts (one tick of `m8[3D]` is three days, no
-    longer one).
+    and a count multiplier counts (one tick of `m8[2Y]` is 24 months, no longer
+    one year; one tick of `m8[3D]` is three days).
   - An object column mixing `np.datetime64` units such as years and
     attoseconds no longer raises `OverflowError`; each unit stays its own
     level, and equal instants in two units, which 1.0.0 merged only when
@@ -88,9 +92,10 @@ compares with 1.0.0.
   column that contains an infinity or whose finite values sum past the float
   range (both used to be filled with `0.0`).
 - Several error and warning messages are reworded (listed under Fixes), and
-  `CEFSPlusBinarySelector` with a non-binary target and a category_encoders
-  encoding reports the target error instead of a missing-package
-  `ImportError`. View metadata gains `proxy_correlations_stale`
+  some calls that fail for more than one reason report a different reason
+  first: `CEFSPlusBinarySelector` with a non-binary target reports the target
+  error before a category_encoders `ImportError` or a weight error, and an
+  invalid `within` value is reported before nested auto-k errors. View metadata gains `proxy_correlations_stale`
   (`StabilitySelector`, `Stabilized`) and `proxy_input_numeric` (`Stabilized`
   over non-numeric input), two-way results gain `within_two_way_converged` /
   `within_two_way_max_residual`, and CatBoost manifests gain their resolved
@@ -171,8 +176,10 @@ compares with 1.0.0.
     message now says no auto-k method serves both under `"two_way"` (use a
     fixed `k`, or drop the keywords on the Gaussian path) and names the one
     route that does under `"groups"` (`k_method="evaluate"` with
-    `strategy="time_holdout"`, or a fixed `k` without `time`). Every other
-    input keeps its specific error.
+    `strategy="time_holdout"`, or a fixed `k` without `time`). Structural,
+    configuration, cache and conditioning errors still come first; errors
+    found while preparing the data (y length, non-finite y, negative weights,
+    non-numeric X) now follow this message.
 - `SelectionView.table` keeps `within_relevance` and `between_relevance`
   whenever the filter ranking has them, so `view.table["between_relevance"]`
   no longer raises `KeyError` when the score is NaN (two or fewer entities).
