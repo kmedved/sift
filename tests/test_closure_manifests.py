@@ -948,25 +948,83 @@ _DETERMINISM_SCRIPT = """
     import json
     import numpy as np
     import pandas as pd
-    from sift import select_cefsplus
+    from sklearn.linear_model import Ridge
+    from sift import (
+        CEFSPlusSelector,
+        KnockoffSelector,
+        MRMRSelector,
+        StabilitySelector,
+        Stabilized,
+        compare,
+        evaluate_feature_path,
+        select_cefsplus,
+    )
 
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.normal(size=(60, 5)), columns=[f"x{i}" for i in range(5)])
     y = 2.0 * X["x0"].to_numpy() + 0.1 * rng.normal(size=60)
-    result = select_cefsplus(
-        X, y, k=2, random_state=7, verbose=False, return_result=True
-    )
-    payload = result.reproducibility_(X=X, y=y, hash_data=True)
-    print(json.dumps(payload, sort_keys=True, allow_nan=False))
+    context = dict(X=X, y=y, hash_data=True)
+    manifests = {
+        "select_cefsplus": select_cefsplus(
+            X, y, k=2, random_state=7, verbose=False, return_result=True
+        ).reproducibility_(**context),
+        # Filter wrapper classes keep no result object; KnockoffSelector's
+        # result_ and StabilitySelector's result_view_ are the wrapper routes.
+        "KnockoffSelector": KnockoffSelector(q=0.5, n_draws=2, random_state=7)
+        .fit(X, y)
+        .result_.reproducibility_(**context),
+        "StabilitySelector": StabilitySelector(n_bootstrap=4, random_state=7)
+        .fit(X, y)
+        .result_view_.reproducibility_(**context),
+        "Stabilized": Stabilized(MRMRSelector(k=2), n_resamples=4, random_state=7)
+        .fit(X, y)
+        .result_view_.reproducibility_(**context),
+        "compare": compare(
+            {
+                "mrmr": lambda: MRMRSelector(k=2, random_state=7),
+                "cefsplus": lambda: CEFSPlusSelector(k=2, random_state=7),
+            },
+            X,
+            y,
+            estimator=Ridge(),
+            cv=3,
+            random_state=7,
+        ).reproducibility_(**context),
+        "evaluate_feature_path": evaluate_feature_path(
+            X, y, ["x0", "x1", "x2"], [1, 2, 3], random_state=7
+        ).reproducibility_(**context),
+    }
+    print(json.dumps(manifests, sort_keys=True, allow_nan=False))
 """
 
 
 def test_identical_runs_give_byte_identical_manifests_across_processes():
     left = _subprocess_json(_DETERMINISM_SCRIPT, hash_seed="0")
     right = _subprocess_json(_DETERMINISM_SCRIPT, hash_seed="424242")
-    assert json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
-    assert left["input"]["data_hash"] and left["input"]["y_hash"]
-    assert left["configuration"]["seeds"]["random_state"] == 7
+    assert sorted(left) == [
+        "KnockoffSelector",
+        "StabilitySelector",
+        "Stabilized",
+        "compare",
+        "evaluate_feature_path",
+        "select_cefsplus",
+    ]
+    for name in left:
+        assert json.dumps(left[name], sort_keys=True) == json.dumps(
+            right[name], sort_keys=True
+        ), name
+        assert left[name]["input"]["data_hash"], name
+        assert left[name]["input"]["y_hash"], name
+    for name in (
+        "select_cefsplus",
+        "KnockoffSelector",
+        "StabilitySelector",
+        "Stabilized",
+        "evaluate_feature_path",
+    ):
+        assert left[name]["configuration"]["seeds"]["random_state"] == 7, name
+    assert left["compare"]["configuration"]["seeds"]["compare_random_state"] == 7
+    assert len(left["compare"]["folds"]) == 3
 
 
 # --------------------------------------------------------------------------
