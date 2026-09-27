@@ -715,17 +715,93 @@ def test_stability_entries_reject_wide_2d_targets(entry):
     )
 
 
-def test_stability_single_column_2d_target_behaviour_is_unchanged():
+def _single_column_problem(task):
     rng = np.random.default_rng(9)
-    X = rng.normal(size=(60, 4))
-    y = rng.normal(size=(60, 1))
-    # A single-column y is not caught by the multi-target guard; whatever it
-    # did before, it must not now raise the 2-D ValueError.
-    with pytest.raises(Exception) as excinfo:
-        sift.StabilitySelector(
-            n_bootstrap=4, random_state=0, n_jobs=1, verbose=False
-        ).fit(X, y)
-    assert not str(excinfo.value).startswith("2-D y is only supported")
+    X = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
+    signal = X["a"].to_numpy() + 0.5 * X["b"].to_numpy() + 0.3 * rng.normal(size=80)
+    if task == "classification":
+        y = np.where(signal > 0.0, "up", "down")
+    else:
+        y = signal
+    return X, y
+
+
+def _as_single_column(y, shape):
+    if shape == "frame":
+        return pd.DataFrame({"target": y})
+    return np.asarray(y).reshape(-1, 1)
+
+
+@pytest.mark.parametrize("use_smart_sampler", [False, True], ids=["plain", "smart"])
+@pytest.mark.parametrize("shape", ["column", "frame"])
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_stability_single_column_2d_target_fits_exactly_like_1d(
+    task, shape, use_smart_sampler
+):
+    X, y = _single_column_problem(task)
+    kwargs = dict(
+        task=task,
+        n_bootstrap=6,
+        random_state=0,
+        n_jobs=1,
+        verbose=False,
+        threshold=0.5,
+        use_smart_sampler=use_smart_sampler,
+        sampler_config=(
+            sift.SmartSamplerConfig(sample_frac=0.8) if use_smart_sampler else None
+        ),
+    )
+    flat = sift.StabilitySelector(**kwargs).fit(X, y)
+    column = sift.StabilitySelector(**kwargs).fit(X, _as_single_column(y, shape))
+
+    np.testing.assert_array_equal(
+        column.selection_frequencies_, flat.selection_frequencies_
+    )
+    np.testing.assert_array_equal(column.mean_abs_coef_, flat.mean_abs_coef_)
+    np.testing.assert_array_equal(column.selected_features_, flat.selected_features_)
+    assert column.alpha_ == flat.alpha_
+    assert column.selected_feature_names_ == flat.selected_feature_names_
+    assert flat.selected_feature_names_[0] == "a"
+    if task == "classification":
+        np.testing.assert_array_equal(column.classes_, ["down", "up"])
+
+
+@pytest.mark.parametrize("shape", ["column", "frame"])
+@pytest.mark.parametrize(
+    "entry", ["stability_regression", "stability_classif", "stability_select"]
+)
+def test_stability_functions_accept_a_single_column_target(entry, shape):
+    task = "classification" if entry == "stability_classif" else "regression"
+    X, y = _single_column_problem(task)
+    kwargs = dict(n_bootstrap=6, random_state=0, n_jobs=1, verbose=False)
+    if entry == "stability_select":
+        from sift.stability import stability_select
+
+        flat = stability_select(X, y, threshold=0.5, **kwargs)
+        column = stability_select(
+            X, _as_single_column(y, shape), threshold=0.5, **kwargs
+        )
+        np.testing.assert_array_equal(column[0], flat[0])
+        np.testing.assert_array_equal(column[1], flat[1])
+        return
+    function = getattr(sift, entry)
+    flat = function(X, y, k=2, threshold=0.5, **kwargs)
+    column = function(X, _as_single_column(y, shape), k=2, threshold=0.5, **kwargs)
+    assert column == flat
+    assert flat[0] == "a"
+
+
+def test_stability_tune_threshold_rejects_a_wide_target_clearly():
+    X, y = _single_column_problem("regression")
+    selector = sift.StabilitySelector(
+        n_bootstrap=4, random_state=0, n_jobs=1, verbose=False
+    ).fit(X, y)
+    with pytest.raises(ValueError) as excinfo:
+        selector.tune_threshold(X, np.column_stack([y, y]), cv=2)
+    assert str(excinfo.value).startswith(
+        "2-D y is only supported for select_cefsplus / CEFSPlusSelector"
+    )
+    assert "y has shape (80, 2)" in str(excinfo.value)
 
 
 def test_stability_one_dimensional_target_still_fits():
