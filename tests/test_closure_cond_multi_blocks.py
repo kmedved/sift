@@ -45,23 +45,27 @@ def test_elbow_uses_block_units_after_dead_member_is_removed(selector, extra, de
     options = {"task": "regression", "estimator": "gaussian", "k": "auto",
                "auto_k_config": AutoKConfig(k_method="elbow", max_k=4, min_k=0),
                "verbose": False, "return_result": True, "subsample": None, **extra}
+    # Three two-column blocks: six discovery columns exceed max_k=4, so a
+    # curve in column units would run to k=6 while block units stop at 3.
     clean = selector(
-        X, y, feature_blocks={"g": ["f0", "f1"], "h": ["f2", "f3"]},
-        candidates=["f0", "f1", "f2", "f3"], **options,
+        X, y, feature_blocks={"g": ["f0", "f1"], "h": ["f2", "f3"], "i": ["f4", "f5"]},
+        candidates=["f0", "f1", "f2", "f3", "f4", "f5"], **options,
     )
     dropped = selector(
-        X, y, feature_blocks={"g": ["f0", "f1", "dead"], "h": ["f2", "f3"]},
-        candidates=["f0", "f1", "dead", "f2", "f3"], **options,
+        X, y,
+        feature_blocks={"g": ["f0", "f1", "dead"], "h": ["f2", "f3"], "i": ["f4", "f5"]},
+        candidates=["f0", "f1", "dead", "f2", "f3", "f4", "f5"], **options,
     )
     clean_curve = clean.diagnostics_["auto_k_curve"]["curve"]
     dropped_curve = dropped.diagnostics_["auto_k_curve"]["curve"]
-    assert clean_curve["k"].tolist() == dropped_curve["k"].tolist()
-    assert max(clean_curve["k"]) <= 4
+    assert clean_curve["k"].tolist() == [1, 2, 3]
+    assert dropped_curve["k"].tolist() == [1, 2, 3]
     np.testing.assert_allclose(
         clean_curve["criterion"], dropped_curve["criterion"],
         rtol=0.0, atol=1e-12,
     )
-    assert clean.selector_metadata["selected_blocks"] == dropped.selector_metadata["selected_blocks"]
+    assert clean.selector_metadata["selected_blocks"] == ["g", "h", "i"]
+    assert dropped.selector_metadata["selected_blocks"] == ["g", "h", "i"]
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
+from statistics import NormalDist
 import warnings
 
 import numpy as np
@@ -41,6 +42,37 @@ def _regression_frame(n=120, p=6, seed=0):
     X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
     y = X["f0"] + 0.8 * X["f1"] + 0.1 * rng.normal(size=n)
     return X, y
+
+
+def _copula_scores(x, w):
+    """Weighted rank-Gaussian scores written from scratch (numpy + stdlib).
+
+    Weighted mid-rank over the total weight, clipped away from 0 and 1,
+    through the standard normal quantile, then weighted-standardized.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    order = np.argsort(x, kind="mergesort")
+    assert np.all(np.diff(x[order]) > 0), "oracle assumes untied columns"
+    w_sorted = w[order]
+    u = (np.cumsum(w_sorted) - 0.5 * w_sorted) / w_sorted.sum()
+    u = np.clip(u, 1e-6, 1.0 - 1e-6)
+    quantile = NormalDist().inv_cdf
+    z = np.empty_like(x)
+    z[order] = [quantile(float(value)) for value in u]
+    z -= np.dot(w, z) / w.sum()
+    z /= np.sqrt(np.dot(w, z * z) / w.sum())
+    return z
+
+
+def _copula_moments(X, y, w):
+    """Feature correlation matrix and target correlations of the scores."""
+    w = np.asarray(w, dtype=np.float64)
+    Z = np.column_stack([_copula_scores(X[column], w) for column in X.columns])
+    zy = _copula_scores(y, w)
+    R = (Z * w[:, None]).T @ Z / w.sum()
+    r = Z.T @ (w * zy) / w.sum()
+    return R, r
 
 
 def _joint_gain_oracle(R, r, members, shrink=1e-6):
@@ -97,12 +129,7 @@ def test_cefsplus_joint_block_gain_beats_representative():
         }
     )
     y = z1 + z2 + 0.05 * noise
-    cache = build_cache(X, compute_Rxx=True, subsample=None)
-    panel_r = cache.Rxx
-    from sift.estimators.copula import weighted_corr_with_vector, weighted_rank_gauss_1d
-
-    zy = weighted_rank_gauss_1d(np.asarray(y), cache.sample_weight)
-    r = weighted_corr_with_vector(cache.Z, zy, cache.sample_weight)
+    panel_r, r = _copula_moments(X, y, np.ones(n))
     joint = _joint_gain_oracle(panel_r, r, [0, 1])
     one_a = _joint_gain_oracle(panel_r, r, [0])
     one_b = _joint_gain_oracle(panel_r, r, [1])
@@ -116,16 +143,10 @@ def test_cefsplus_joint_block_gain_beats_representative():
     assert set(column_only) != {"sig__a", "sig__b"}
 
     weights = np.linspace(0.5, 1.5, n)
-    weighted_cache = build_cache(
-        X, sample_weight=weights, compute_Rxx=True, subsample=None
-    )
-    weighted_y = weighted_rank_gauss_1d(np.asarray(y), weighted_cache.sample_weight)
-    weighted_r = weighted_corr_with_vector(
-        weighted_cache.Z, weighted_y, weighted_cache.sample_weight
-    )
+    weighted_R, weighted_r = _copula_moments(X, y, weights)
     expected_gain = _joint_gain_oracle(
-        weighted_cache.Rxx, weighted_r, [2, 0, 1]
-    ) - _joint_gain_oracle(weighted_cache.Rxx, weighted_r, [2])
+        weighted_R, weighted_r, [2, 0, 1]
+    ) - _joint_gain_oracle(weighted_R, weighted_r, [2])
     conditioned = select_cefsplus(
         X, y, k=1, feature_blocks="auto", include=["decoy"],
         sample_weight=weights, subsample=None, verbose=False,
@@ -133,8 +154,63 @@ def test_cefsplus_joint_block_gain_beats_representative():
     )
     assert conditioned.selected_features == ["decoy", "sig__a", "sig__b"]
     assert conditioned.diagnostics_["objective_path"][0] == pytest.approx(
-        expected_gain, rel=1e-4, abs=1e-6
+        expected_gain, rel=1e-5
     )
+
+
+def test_block_objective_path_matches_oracle_after_include_block_and_free_step():
+    rng = np.random.default_rng(4)
+    n = 400
+    z1, z2, z3, z4 = (rng.normal(size=n) for _ in range(4))
+    X = pd.DataFrame(
+        {
+            "ctl__a": z4 + 0.3 * rng.normal(size=n),
+            "ctl__b": z1 + 0.8 * rng.normal(size=n),
+            "sig__a": z1 + 0.05 * rng.normal(size=n),
+            "sig__b": z2 + 0.05 * rng.normal(size=n),
+            "sec__a": z3 + 0.2 * rng.normal(size=n),
+            "sec__b": z3 + 0.6 * rng.normal(size=n),
+            "decoy": z1 + 0.4 * rng.normal(size=n),
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = z1 + z2 + 0.6 * z3 + 0.3 * z4 + 0.1 * rng.normal(size=n)
+    weights = np.linspace(0.5, 1.5, n)
+    R, r = _copula_moments(X, y, weights)
+    include = [0, 1]
+    blocks = {"sig": [2, 3], "sec": [4, 5], "decoy": [6], "noise": [7]}
+
+    # Independent greedy replay: at each step add the block with the largest
+    # joint objective over the include block plus everything chosen so far.
+    chosen: list[int] = list(include)
+    expected_path = []
+    base = _joint_gain_oracle(R, r, include)
+    for _step in range(2):
+        totals = {
+            label: _joint_gain_oracle(R, r, chosen + members)
+            for label, members in blocks.items()
+            if not set(members) & set(chosen)
+        }
+        best = max(totals, key=totals.get)
+        runner_up = max(value for label, value in totals.items() if label != best)
+        assert totals[best] > runner_up + 1e-3
+        chosen += blocks[best]
+        expected_path.append(totals[best] - base)
+
+    result = select_cefsplus(
+        X, y, k=2, feature_blocks="auto", include=["ctl__a", "ctl__b"],
+        sample_weight=weights, subsample=None, verbose=False,
+        return_result=True,
+    )
+    assert result.selected_features == [X.columns[j] for j in chosen]
+    assert result.selected_features == [
+        "ctl__a", "ctl__b", "sig__a", "sig__b", "sec__a", "sec__b"
+    ]
+    # Step 0 conditions on the include block; step 1 is a free step t > 0
+    # conditioned on the include block and the first discovery block.
+    path = result.diagnostics_["objective_path"]
+    assert len(path) == 2
+    assert path == pytest.approx(expected_path, rel=1e-5)
 
 
 def test_unequal_blocks_k_metadata_and_transform():

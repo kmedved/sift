@@ -260,6 +260,8 @@ def test_gaussian_elbow_keeps_additional_block_units_with_dropped_member():
     )
     clean_curve = clean.diagnostics_["auto_k_curve"]["curve"]
     dropped_curve = dropped.diagnostics_["auto_k_curve"]["curve"]
+    # Two blocks, four columns: the curve is in additional-block units.
+    assert list(clean_curve["k"].astype(int)) == [1, 2]
     assert list(clean_curve["k"].astype(int)) == list(dropped_curve["k"].astype(int))
     np.testing.assert_allclose(
         clean_curve["criterion"].to_numpy(dtype=float),
