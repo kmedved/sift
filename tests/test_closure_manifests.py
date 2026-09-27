@@ -753,7 +753,13 @@ def test_git_fields_report_the_checkout_that_tracks_the_package(
 
 @pytest.mark.parametrize(
     "exported",
-    ["GIT_DIR", "GIT_DIR+GIT_WORK_TREE", "GIT_INDEX_FILE"],
+    [
+        "GIT_DIR",
+        "GIT_DIR+GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+    ],
 )
 def test_git_fields_ignore_repository_variables_the_caller_exported(
     tmp_path, monkeypatch, exported
@@ -762,15 +768,26 @@ def test_git_fields_ignore_repository_variables_the_caller_exported(
     # selector) must not redirect the manifest to its own repository.
     package = _tiny_git_package(tmp_path / "sift_checkout")
     head = _git_head(package.parent)
-    other = _tiny_git_package(tmp_path / "user_project").parent
-    (other / "elsewhere.txt").write_text("a different history\n")
-    subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", "commit", "-qam", "second"],
+    # A project that shares no object with the checkout: a copy of the
+    # checkout's first commit would be found through its object store too.
+    other = tmp_path / "user_project"
+    other.mkdir()
+    (other / "app.py").write_text("print('another project')\n")
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "other"],
+    ):
+        subprocess.run(command, cwd=other, check=True, capture_output=True)
+    assert _git_head(other) != head
+    objects = subprocess.run(
+        ["git", "cat-file", "-e", head],
         cwd=other,
-        check=True,
         capture_output=True,
     )
-    assert _git_head(other) != head
+    assert objects.returncode != 0
     loose = tmp_path / "loose" / "fakepkg"
     loose.mkdir(parents=True)
     (loose / "__init__.py").write_text("")
@@ -782,6 +799,9 @@ def test_git_fields_ignore_repository_variables_the_caller_exported(
             "GIT_WORK_TREE": str(other),
         },
         "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(tmp_path / "missing.index")},
+        # Another repository's refs and objects in place of the checkout's.
+        "GIT_COMMON_DIR": {"GIT_COMMON_DIR": str(other / ".git")},
+        "GIT_OBJECT_DIRECTORY": {"GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects")},
     }[exported]
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -790,6 +810,68 @@ def test_git_fields_ignore_repository_variables_the_caller_exported(
     assert _git_fields() == (head, "sift_package", False)
     monkeypatch.setattr(sift, "__file__", str(loose / "__init__.py"))
     assert _git_fields() == (None, "sift_package", None)
+
+
+def _isolate_git_config(tmp_path, monkeypatch) -> None:
+    """Keep the machine's global and system git config out of a test."""
+    empty = tmp_path / "empty.gitconfig"
+    empty.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("supplied", ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"])
+def test_git_fields_honor_a_safe_directory_the_environment_supplies(
+    tmp_path, monkeypatch, supplied
+):
+    # A checkout owned by another user (a container bind mount, say) is
+    # refused by git unless safe.directory allows it; containers commonly
+    # pass that setting through the environment. git's own test switch
+    # simulates the other owner.
+    _isolate_git_config(tmp_path, monkeypatch)
+    package = _tiny_git_package(tmp_path)
+    head = _git_head(package.parent)
+    monkeypatch.setattr(sift, "__file__", str(package / "__init__.py"))
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assert _git_fields() == (None, "sift_package", None)
+
+    if supplied == "GIT_CONFIG_COUNT":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    else:
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'safe.directory'='*'")
+    assert _git_fields() == (head, "sift_package", False)
+    (package / "__init__.py").write_text("__version__ = '0'  # edited\n")
+    assert _git_fields() == (head, "sift_package", True)
+
+
+@pytest.mark.parametrize("scope", ["repository", "global"])
+def test_git_dirty_sees_a_new_module_despite_hidden_untracked_files(
+    tmp_path, monkeypatch, scope
+):
+    _isolate_git_config(tmp_path, monkeypatch)
+    package = _tiny_git_package(tmp_path)
+    head = _git_head(package.parent)
+    if scope == "repository":
+        subprocess.run(
+            ["git", "config", "status.showUntrackedFiles", "no"],
+            cwd=package.parent,
+            check=True,
+            capture_output=True,
+        )
+    else:
+        (tmp_path / "empty.gitconfig").write_text(
+            "[status]\n\tshowUntrackedFiles = no\n"
+        )
+    monkeypatch.setattr(sift, "__file__", str(package / "__init__.py"))
+    assert _git_fields() == (head, "sift_package", False)
+
+    # An untracked module changes what the package imports.
+    (package / "new_module.py").write_text("x = 1\n")
+    assert _git_fields() == (head, "sift_package", True)
 
 
 def test_git_fields_follow_a_linked_worktree(tmp_path, monkeypatch):

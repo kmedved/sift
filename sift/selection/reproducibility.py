@@ -392,16 +392,18 @@ def _sift_package_dir() -> Path:
     return Path(sift.__file__).resolve().parent
 
 
-#: The repository-selecting variables git exports to hooks and subcommands
-#: (what ``git rev-parse --local-env-vars`` prints).  Inherited from the
-#: caller, an absolute ``GIT_DIR`` would point every command at that
-#: repository, with the package directory as its work tree.
+#: The repository-local variables git exports to hooks and subcommands (what
+#: ``git rev-parse --local-env-vars`` prints), less its configuration
+#: variables.  Inherited from the caller, an absolute ``GIT_DIR`` would point
+#: every command at that repository, with the package directory as its work
+#: tree.  ``GIT_CONFIG_PARAMETERS`` / ``GIT_CONFIG_COUNT`` (``git -c`` and the
+#: ``GIT_CONFIG_KEY_<n>`` pairs) never select a repository and are how a
+#: container supplies ``safe.directory``, so they pass through, as git itself
+#: keeps them when it runs a command in a submodule; ``GIT_CONFIG`` is read only
+#: by ``git config``.
 _GIT_LOCAL_ENV_VARS = frozenset(
     {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_COUNT",
         "GIT_OBJECT_DIRECTORY",
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -467,7 +469,9 @@ def _git_state() -> dict[str, Any]:
     commit = "" if output is None else output.strip()
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
         return unavailable
-    status = _git("status", "--porcelain", "--", package_dir)
+    # An explicit mode, so a status.showUntrackedFiles=no setting cannot
+    # hide a new module in the package.
+    status = _git("status", "--porcelain", "--untracked-files=normal", "--", package_dir)
     return {
         "git_commit": commit,
         "git_dirty": None if status is None else bool(status.strip()),
