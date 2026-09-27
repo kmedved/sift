@@ -81,9 +81,20 @@ def _catboost_run_configuration(
     return carried
 
 
-def _catboost_label_key(value: Any) -> str:
+def _catboost_label_key(value: Any) -> Any:
+    """Identity key that matches one feature label across the result's fields.
+
+    A label with no deterministic token (a pandas ``Interval``, say) is
+    matched by equality instead.  The key never leaves this adapter, and such
+    labels leave the manifest's ``columns_hash`` null, as for the filter
+    views.
+    """
+    try:
+        token = _label_token(value)
+    except TypeError:
+        return ("untokenized", type(value), value)
     return json.dumps(
-        _label_token(value),
+        token,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

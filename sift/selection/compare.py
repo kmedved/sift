@@ -1004,6 +1004,12 @@ def compare(
         Selector ``fit`` time when accepted, and forwarded to ``cv.split``
         when that splitter declares a ``time`` argument (purged time-series
         splitters require it). Not used to invent a time-series splitter.
+        A single column (an ``(n, 1)`` array or one-column DataFrame) is
+        used as its 1-D values. Only a SHA-256 digest reaches
+        ``diagnostics["split"]["time_sha256"]``; values with no
+        deterministic token (a pandas ``Interval``, say) are recorded as
+        ``{"status": "opaque", "reason": "no_deterministic_token"}``
+        instead of a digest string.
     sample_weight : array-like, optional
         Row weights sliced per train/validation fold and consumed by
         selectors, estimators, and scorers that accept them.
@@ -1033,8 +1039,9 @@ def compare(
         ``time``, accepts the same DataFrame column-name shorthand, and
         raises ``ValueError`` when the chosen ``cv`` cannot consume it.
         Only a SHA-256 digest of the values reaches
-        ``diagnostics["split"]["event_end_sha256"]``; the values themselves
-        are never retained. Not passed to selectors.
+        ``diagnostics["split"]["event_end_sha256"]`` (or the same opaque
+        marker as ``time_sha256``); the values themselves are never
+        retained. Not passed to selectors.
 
     Returns
     -------

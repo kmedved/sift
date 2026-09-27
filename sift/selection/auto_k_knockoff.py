@@ -17,6 +17,7 @@ from sift.estimators.knockoffs import (
     sample_gaussian_knockoffs,
 )
 from sift.selection.auto_k import AutoKConfig, validate_auto_k_config
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.knockoff_filter import (
     _build_active_rxx,
     _reject_duplicate_feature_names,
@@ -452,6 +453,7 @@ def select_k_knockoff_path(
         raise ValueError("select_k_knockoff_path requires AutoKConfig(k_method='knockoff_path')")
 
     draw_state = _prepare_knockoff_draw_state(cache, config)
+    check_auto_k_seed(config)
     seeds = np.random.SeedSequence(int(config.random_state)).spawn(int(config.knockoff_draws))
     selected_sets: list[np.ndarray] = []
     frames = []

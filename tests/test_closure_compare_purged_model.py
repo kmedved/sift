@@ -22,6 +22,7 @@ from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold
 from sift import (
     GroupPurgedTimeSeriesSplit,
     ModelSelector,
+    MRMRSelector,
     PurgedTimeSeriesSplit,
     compare,
 )
@@ -396,6 +397,125 @@ def test_supported_time_dtypes_still_build_folds():
         assert np.array_equal(a_tr, b_tr) and np.array_equal(a_va, b_va)
     deltas = (stamps - stamps[0]).to_numpy()
     assert len(list(PurgedTimeSeriesSplit(n_splits=2).split(np.zeros((n, 1)), time=deltas))) == 2
+
+
+def _fold_lists(splitter, **kwargs):
+    return [
+        (train.tolist(), val.tolist())
+        for train, val in splitter.split(np.zeros((24, 1)), **kwargs)
+    ]
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda p: p, pd.Series, np.asarray, list, lambda p: p.array],
+    ids=["PeriodIndex", "Series", "object-array", "list", "PeriodArray"],
+)
+@pytest.mark.parametrize("mode", ["forward", "purged_kfold"])
+@pytest.mark.parametrize("freq", ["M", "2M", "W-SUN", "Q-NOV", "D"])
+def test_period_time_splits_exactly_like_its_ordinals(wrap, mode, freq):
+    periods = pd.period_range("2020-01-01", periods=12, freq=freq).repeat(2)
+    ordinals = np.asarray(periods.asi8)
+    splitter = PurgedTimeSeriesSplit(n_splits=3, embargo=1, mode=mode)
+    expected = _fold_lists(
+        splitter, time=ordinals, event_end=np.asarray((periods + 1).asi8)
+    )
+    assert _fold_lists(splitter, time=wrap(periods), event_end=wrap(periods + 1)) == expected
+    grouped = GroupPurgedTimeSeriesSplit(n_splits=2, test_size=2, mode=mode)
+    groups = np.repeat(np.arange(12), 2)
+    assert _fold_lists(grouped, groups=groups, time=wrap(periods)) == _fold_lists(
+        grouped, groups=groups, time=ordinals
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        (
+            {"embargo": pd.Timedelta("31D")},
+            TypeError,
+            "a pandas Period time (freq='M') is split on its integer ordinals, so "
+            "embargo must be a non-negative integer count of ordinal steps; got "
+            "Timedelta('31 days 00:00:00')",
+        ),
+        (
+            {"embargo": 1.5},
+            TypeError,
+            "a pandas Period time (freq='M') is split on its integer ordinals, so "
+            "embargo must be a non-negative integer count of ordinal steps; got 1.5",
+        ),
+        (
+            {"event_end": "ordinals"},
+            ValueError,
+            "event_end must use the same timeline as time: pandas Period values of "
+            "one frequency on both, or neither; got time freq='M' and event_end "
+            "freq=None",
+        ),
+        (
+            {"event_end": "daily"},
+            ValueError,
+            "event_end must use the same timeline as time: pandas Period values of "
+            "one frequency on both, or neither; got time freq='M' and event_end "
+            "freq='D'",
+        ),
+        (
+            {"time": "mixed"},
+            ValueError,
+            "time mixes pandas Period frequencies; pass Periods of one frequency, "
+            "for example by converting them with asfreq",
+        ),
+        ({"time": "missing"}, ValueError, "time must not contain missing values"),
+    ],
+    ids=["timedelta-embargo", "float-embargo", "int-event-end", "other-freq-event-end",
+         "mixed-freq", "NaT"],
+)
+def test_period_time_rejects_what_has_no_common_period_timeline(kwargs, error, message):
+    periods = pd.period_range("2020-01", periods=12, freq="M").repeat(2)
+    embargo = kwargs.get("embargo", 0)
+    time = {
+        None: periods,
+        "mixed": np.array(list(periods[:-1]) + [pd.Period("2022-01", "2M")], dtype=object),
+        "missing": periods.insert(0, pd.NaT)[:-1],
+    }[kwargs.get("time")]
+    event_end = {
+        None: None,
+        "ordinals": np.asarray(periods.asi8) + 1,
+        "daily": periods.asfreq("D"),
+    }[kwargs.get("event_end")]
+    with pytest.raises(error) as excinfo:
+        _fold_lists(
+            PurgedTimeSeriesSplit(n_splits=3, embargo=embargo),
+            time=time,
+            event_end=event_end,
+        )
+    assert str(excinfo.value) == message
+
+
+def test_compare_and_path_run_a_purged_splitter_on_a_period_time_axis():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(24, 3)), columns=list("abc"))
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=24)
+    periods = pd.period_range("2020-01", periods=12, freq="M").repeat(2)
+    ordinals = np.asarray(periods.asi8)
+    factories = {"mrmr": lambda: MRMRSelector(k=1, task="regression")}
+    on_periods = compare(
+        factories, X, y, time=periods, event_end=periods + 1,
+        cv=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    on_ordinals = compare(
+        factories, X, y, time=ordinals, event_end=ordinals + 1,
+        cv=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    assert on_periods.fold_bookkeeping == on_ordinals.fold_bookkeeping
+    path_periods = evaluate_feature_path(
+        X, y, ["a", "b"], [1, 2], time=periods, event_end=periods + 1,
+        splitter=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    path_ordinals = evaluate_feature_path(
+        X, y, ["a", "b"], [1, 2], time=ordinals, event_end=ordinals + 1,
+        splitter=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    assert path_periods.scores == path_ordinals.scores
 
 
 # --------------------------------------------------------------------------

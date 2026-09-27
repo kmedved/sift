@@ -460,13 +460,29 @@ def _validate_table_selection(
             if not _labels_equal(feature, by_position[position]):
                 raise ValueError("raw_table selected feature identities do not match features")
         return
-    expected = sorted(
-        (json.dumps(_label_token(feature), sort_keys=True) for feature in features)
-    )
-    observed = sorted(
-        json.dumps(_label_token(feature), sort_keys=True)
-        for feature in selected_rows["feature"]
-    )
+    try:
+        expected = sorted(
+            (json.dumps(_label_token(feature), sort_keys=True) for feature in features)
+        )
+        observed = sorted(
+            json.dumps(_label_token(feature), sort_keys=True)
+            for feature in selected_rows["feature"]
+        )
+    except TypeError:
+        # Labels without a deterministic token (a pandas Interval, say) are
+        # paired by equality instead; only the manifest's hash needs tokens.
+        unmatched = list(selected_rows["feature"])
+        for feature in features:
+            position = next(
+                (i for i, row in enumerate(unmatched) if _labels_equal(feature, row)),
+                None,
+            )
+            if position is None:
+                raise ValueError(
+                    "raw_table selected feature identities do not match features"
+                ) from None
+            del unmatched[position]
+        return
     if observed != expected:
         raise ValueError("raw_table selected feature identities do not match features")
 

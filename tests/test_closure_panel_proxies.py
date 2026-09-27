@@ -1993,6 +1993,55 @@ def test_stability_entries_reject_wide_2d_targets(entry):
     )
 
 
+@pytest.mark.parametrize("task", ["regression", "classification"])
+@pytest.mark.parametrize(
+    ("make_y", "expected"),
+    [
+        (
+            lambda y: y.reshape(-1, 1, 1),
+            "y must be 1-D or a single column of shape (n_samples, 1); stability "
+            "selection fits one target per bootstrap run, but y has shape "
+            "(80, 1, 1). Pass a 1-D y",
+        ),
+        (
+            lambda y: y[:, None][:, :0],
+            "y must be 1-D or a single column of shape (n_samples, 1); stability "
+            "selection fits one target per bootstrap run, but y has shape "
+            "(80, 0). Pass a 1-D y",
+        ),
+        (
+            lambda y: pd.DataFrame(index=range(len(y))),
+            "y must be 1-D or a single column of shape (n_samples, 1); stability "
+            "selection fits one target per bootstrap run, but y has shape "
+            "(80, 0). Pass a 1-D y",
+        ),
+        (
+            lambda y: y[:-1],
+            "X and y must have the same number of rows; X has 80 rows but y has 79",
+        ),
+        (
+            lambda y: y[:-1].reshape(-1, 1),
+            "X and y must have the same number of rows; X has 80 rows but y has 79",
+        ),
+        (
+            lambda y: np.r_[y, y[:1]],
+            "X and y must have the same number of rows; X has 80 rows but y has 81",
+        ),
+    ],
+    ids=["3-D", "zero-width", "empty-frame", "short", "short-column", "long"],
+)
+def test_stability_fit_rejects_a_target_shape_it_cannot_use(task, make_y, expected):
+    rng = np.random.default_rng(9)
+    X = rng.normal(size=(80, 4))
+    signal = X[:, 0] + 0.3 * rng.normal(size=80)
+    y = signal if task == "regression" else (signal > 0.0).astype(int)
+    with pytest.raises(ValueError) as excinfo:
+        sift.StabilitySelector(
+            task=task, n_bootstrap=4, random_state=0, n_jobs=1, verbose=False
+        ).fit(X, make_y(y))
+    assert str(excinfo.value) == expected
+
+
 def _single_column_problem(task):
     rng = np.random.default_rng(9)
     X = pd.DataFrame(rng.normal(size=(80, 4)), columns=["a", "b", "c", "d"])
