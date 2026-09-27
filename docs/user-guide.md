@@ -91,8 +91,9 @@ level, and unknown transform values join `other` when that remainder exists
 (otherwise they are all-zero). Selected names stay raw; sklearn `transform` /
 `get_feature_names_out` use the encoded width. Nested and prefix-only
 `evaluate` held-out scoring learns the vocabulary inside training folds;
-in-sample prefix rules can use a full-data vocabulary. Prebuilt caches,
-`within`, knockoffs, and Boruta raise.
+in-sample prefix rules can use a full-data vocabulary. `within`, knockoffs,
+and Boruta raise, and so does a prebuilt cache when there is a column to
+encode.
 
 Use `cat_encoding="ordinal"` or `"frequency"` for target-blind numeric
 maps (no extra dependency). Ordinal codes are `0..C-1` over identities
@@ -111,9 +112,9 @@ with `strategy="time_holdout"`, path and scoring maps use the train
 partition. In-sample auto-k that happens to see a `time` vector (for
 example routed EBIC) still encodes the call's `X`. Prefix-only evaluate
 on non-holdout splits can still rank on a full-data path — use nested
-evaluate when the selected path itself must be holdout-blind. Prebuilt
-caches and resampled auto-k (`stability`, `knockoff_path`, `consensus`)
-raise.
+evaluate when the selected path itself must be holdout-blind. Resampled
+auto-k (`stability`, `knockoff_path`, `consensus`) raises, and so does a
+prebuilt cache when there is a column to encode.
 
 `target_cv` emits **centered category effects**, not raw category means: each
 value is the category estimate minus the training prior that produced it. An

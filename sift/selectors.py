@@ -34,6 +34,7 @@ from sift._preprocess import (
     TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
+    reject_prebuilt_cache_encoding,
     suppress_category_encoder_pandas_warnings,
     validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
@@ -917,20 +918,11 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "k='auto' nested evaluate paths"
             )
 
-        if resolved_cache is not None and has_supervised_categoricals:
-            raise ValueError(
-                "selector-class supervised categorical encoding does not support "
-                "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
-                "cache so the selector can fit encoders on the training rows."
-            )
-        if resolved_cache is not None and (
-            getattr(self, "cat_encoding", "none") == "onehot"
-            or is_unsupervised_cat_encoding(getattr(self, "cat_encoding", "none"))
-        ):
-            encoding = getattr(self, "cat_encoding", "none")
-            raise ValueError(
-                f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
-                "because the cache has no encoding provenance"
+        if resolved_cache is not None:
+            reject_prebuilt_cache_encoding(
+                X,
+                getattr(self, "cat_features", None),
+                getattr(self, "cat_encoding", "none"),
             )
         if getattr(self, "cat_encoding", "none") == "onehot":
             validate_onehot_max_levels(getattr(self, "onehot_max_levels", 32))
@@ -1423,10 +1415,11 @@ class MRMRSelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1515,9 +1508,9 @@ class MRMRSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, or if ``X`` is sparse or
-        not two-dimensional.
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, or if
+        ``X`` is sparse or not two-dimensional.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
         because the fitted encoder is not invertible.
@@ -1724,10 +1717,11 @@ class JMISelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1816,8 +1810,8 @@ class JMISelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, if
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, if
         ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
         sparse or not two-dimensional.
     NotImplementedError
@@ -2023,10 +2017,11 @@ class JMIMSelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -2115,8 +2110,8 @@ class JMIMSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, if
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, if
         ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
         sparse or not two-dimensional.
     NotImplementedError
@@ -2318,10 +2313,11 @@ class CEFSPlusSelector(_BaseSelector):
         are checked, never the row values, so a cache must be used with exactly
         the rows it was built from. A cache carries its own row weights, so it
         cannot be combined with ``sample_weight``, and it stores no encoding
-        provenance, so every ``cat_encoding`` other than ``"none"`` is rejected
-        -- including the target-blind ``"onehot"``, ``"ordinal"`` and
-        ``"frequency"`` -- and only a supervised encoding with no column to
-        encode passes as a no-op.
+        provenance, so any ``cat_encoding`` other than ``"none"`` --
+        supervised or target-blind -- raises once it has a column to encode (a
+        ``cat_features`` column present in ``X``, else an object, category or
+        string column); with nothing to encode it is inert, as it is without a
+        cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -2410,10 +2406,11 @@ class CEFSPlusSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``subsample`` or
         ``random_state`` is explicit beside a ``cache``, if ``sample_weight``
-        is passed beside a ``cache``, if a supervised ``cat_encoding`` is
-        combined with a ``cache``, or if ``X`` is sparse or not
-        two-dimensional. Contextual ``cat_encoding="target_cv"`` with
-        ``groups``/``time`` additionally requires an explicit
+        is passed beside a ``cache``, if a ``cat_encoding`` other than
+        ``"none"`` (supervised or target-blind) has a column to encode beside
+        a ``cache``, or if ``X`` is sparse or not two-dimensional. Contextual
+        ``cat_encoding="target_cv"`` with ``groups``/``time`` additionally
+        requires an explicit
         ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
@@ -3192,9 +3189,10 @@ class KnockoffSelector(_BaseSelector):
         and the column names are checked, never the row values, so a cache must
         be used with exactly the rows it was built from. A cache already stores
         row weights, so ``sample_weight`` is rejected beside it, and it stores
-        no encoding provenance, so every ``cat_encoding`` other than ``"none"``
-        is rejected too -- ``"ordinal"`` and ``"frequency"`` outright, a
-        supervised one as soon as it has a column to encode.
+        no encoding provenance, so any ``cat_encoding`` other than ``"none"``
+        raises once it has a column to encode (a ``cat_features`` column
+        present in ``X``, else an object, category or string column); with
+        nothing to encode it is inert, as it is without a cache.
     include : sequence of column labels, optional
         Conditioning set. These features are not tested by the knockoff
         filter; they are prepended to the selected set in caller order.
@@ -3263,8 +3261,9 @@ class KnockoffSelector(_BaseSelector):
     ValueError
         If ``groups`` or ``time`` is passed in any mode, if ``auto_k_config``
         is passed, if ``cat_encoding="target_cv"`` is requested, if
-        ``sample_weight``, an explicit ``subsample`` or a supervised
-        ``cat_encoding`` accompanies a ``cache``, or if ``X`` is sparse or not
+        ``sample_weight`` or an explicit ``subsample`` accompanies a
+        ``cache``, if a ``cat_encoding`` other than ``"none"`` has a column to
+        encode beside a ``cache``, or if ``X`` is sparse or not
         two-dimensional.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
@@ -3441,18 +3440,8 @@ class KnockoffSelector(_BaseSelector):
             )
 
         self._clear_fit_state()
-        has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
-        if resolved_cache is not None and has_supervised_categoricals:
-            raise ValueError(
-                "KnockoffSelector supervised categorical encoding does not support "
-                "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
-                "cache so the selector can fit encoders on the training rows."
-            )
-        if resolved_cache is not None and is_unsupervised_cat_encoding(self.cat_encoding):
-            raise ValueError(
-                f"cat_encoding={self.cat_encoding!r} cannot be combined with a "
-                "prebuilt cache because the cache has no encoding provenance"
-            )
+        if resolved_cache is not None:
+            reject_prebuilt_cache_encoding(X, self.cat_features, self.cat_encoding)
 
         call_params = dict(self._selector_params())
         if fit_params:

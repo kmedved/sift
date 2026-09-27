@@ -191,13 +191,20 @@ def test_classic_cache_type_and_override_walls():
             groups=np.repeat(np.arange(8), 10),
             verbose=False,
         )
-    with pytest.raises(ValueError, match="encoding"):
+    # A cache cannot apply an encoding to a column it would have to encode.
+    first = X.columns[0]
+    with pytest.raises(
+        ValueError,
+        match=rf"cat_encoding='target_cv' cannot be combined with a prebuilt cache "
+        rf"because the cache has no encoding provenance, so it cannot encode \['{first}'\]",
+    ):
         select_mrmr(
             X,
             y1,
             k=1,
             task="regression",
             cache=classic,
+            cat_features=[first],
             cat_encoding="target_cv",
             verbose=False,
         )

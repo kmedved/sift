@@ -4,7 +4,9 @@ import pytest
 from sklearn.base import clone
 
 from sift import (
+    Stabilized,
     build_cache,
+    build_classic_cache,
     select_cefsplus,
     select_fdr,
     select_jmi,
@@ -227,3 +229,124 @@ def test_public_cache_consumers_report_missing_required_fields(
             select_fdr(cache=cache, y=y, verbose=False)
         else:
             sample_knockoffs(cache)
+
+
+# --------------------------------------------------------------------------
+# 1.0.1: one cache x cat_encoding rule at every entry point. A prebuilt cache
+# stores no encoding provenance, so an encoding that would encode a column
+# raises with one message; with no column to encode it is inert, exactly as
+# it is without a cache.
+# --------------------------------------------------------------------------
+
+_CACHE_ENCODINGS = (
+    "target_cv", "target", "loo", "james_stein", "loo_logit",
+    "onehot", "ordinal", "frequency",
+)
+
+
+def _encoded_frames():
+    rng = np.random.default_rng(23)
+    n = 120
+    numeric = pd.DataFrame(
+        {
+            "a": rng.normal(size=n),
+            "b": rng.normal(size=n),
+            "c": rng.normal(size=n),
+            "cat": rng.integers(0, 3, size=n).astype(float),
+        }
+    )
+    y = (
+        numeric["a"].to_numpy()
+        + 0.8 * numeric["b"].to_numpy()
+        + 0.5 * numeric["cat"].to_numpy()
+        + 0.3 * rng.normal(size=n)
+    )
+    raw = numeric.copy()
+    raw["cat"] = np.array(["lo", "mid", "hi"])[numeric["cat"].astype(int)]
+    return numeric, raw, y
+
+
+def _cache_routes():
+    """(id, cache kind, call(X, y, cache, **encoding kwargs) -> selected names)."""
+
+    def fn(func, **fixed):
+        return lambda X, y, cache, **kw: list(
+            func(X, y, 2, cache=cache, verbose=False, **fixed, **kw)
+        )
+
+    def wrapper(cls, **fixed):
+        def run(X, y, cache, **kw):
+            est = cls(cache=cache, verbose=False, **fixed, **kw).fit(X, y)
+            return list(est.selected_features_)
+
+        return run
+
+    def stabilized(X, y, cache, **kw):
+        base = KnockoffSelector(cache=cache, q=0.5, verbose=False, **kw)
+        est = Stabilized(base, aggregation="evalues", n_resamples=2).fit(X, y)
+        return list(est.selected_features_)
+
+    regression = {"task": "regression"}
+    gaussian = {"task": "regression", "estimator": "gaussian"}
+    return (
+        ("select_mrmr-gaussian", "gaussian", fn(select_mrmr, **gaussian)),
+        ("select_mrmr-classic", "classic", fn(select_mrmr, **regression)),
+        ("select_jmi-gaussian", "gaussian", fn(select_jmi, **gaussian)),
+        ("select_jmi-classic", "classic", fn(select_jmi, **regression)),
+        ("select_jmim-gaussian", "gaussian", fn(select_jmim, **gaussian)),
+        ("select_jmim-classic", "classic", fn(select_jmim, **regression)),
+        ("select_cefsplus", "gaussian", fn(select_cefsplus)),
+        ("MRMRSelector-gaussian", "gaussian", wrapper(MRMRSelector, k=2, **gaussian)),
+        ("MRMRSelector-classic", "classic", wrapper(MRMRSelector, k=2, **regression)),
+        ("JMISelector-gaussian", "gaussian", wrapper(JMISelector, k=2, **gaussian)),
+        ("JMISelector-classic", "classic", wrapper(JMISelector, k=2, **regression)),
+        ("JMIMSelector-gaussian", "gaussian", wrapper(JMIMSelector, k=2, **gaussian)),
+        ("JMIMSelector-classic", "classic", wrapper(JMIMSelector, k=2, **regression)),
+        ("CEFSPlusSelector", "gaussian", wrapper(CEFSPlusSelector, k=2)),
+        ("KnockoffSelector", "gaussian", wrapper(KnockoffSelector, q=0.5)),
+        ("Stabilized-KnockoffSelector", "gaussian", stabilized),
+    )
+
+
+_CACHE_ROUTES = _cache_routes()
+
+
+def _route_encodings(route_id):
+    # The knockoff filter refuses target_cv and one-hot with or without a
+    # cache (no Model-X claim survives them); that rule is not about caches.
+    if "Knockoff" in route_id:
+        return tuple(e for e in _CACHE_ENCODINGS if e not in {"target_cv", "onehot"})
+    return _CACHE_ENCODINGS
+
+
+@pytest.mark.parametrize("route", _CACHE_ROUTES, ids=[r[0] for r in _CACHE_ROUTES])
+def test_prebuilt_cache_rejects_an_encoding_it_would_have_to_apply(route):
+    route_id, kind, run = route
+    numeric, raw, y = _encoded_frames()
+    cache = build_cache(numeric) if kind == "gaussian" else build_classic_cache(numeric)
+    for encoding in _route_encodings(route_id):
+        expected = (
+            f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
+            "because the cache has no encoding provenance, so it cannot encode "
+            "['cat']. Encode those columns before building the cache and pass "
+            "cat_encoding='none', or omit the cache"
+        )
+        # A raw string column the encoding would pick up by itself ...
+        with pytest.raises(ValueError) as caught:
+            run(raw, y, cache, cat_encoding=encoding)
+        assert str(caught.value) == expected, encoding
+        # ... and a (pre-encoded) numeric column named in cat_features.
+        with pytest.raises(ValueError) as caught:
+            run(numeric, y, cache, cat_encoding=encoding, cat_features=["cat"])
+        assert str(caught.value) == expected, encoding
+
+
+@pytest.mark.parametrize("route", _CACHE_ROUTES, ids=[r[0] for r in _CACHE_ROUTES])
+def test_prebuilt_cache_encoding_with_nothing_to_encode_is_inert(route):
+    route_id, kind, run = route
+    numeric, _raw, y = _encoded_frames()
+    cache = build_cache(numeric) if kind == "gaussian" else build_classic_cache(numeric)
+    baseline = run(numeric, y, cache, cat_encoding="none")
+    assert baseline
+    for encoding in _route_encodings(route_id):
+        assert run(numeric, y, cache, cat_encoding=encoding) == baseline, encoding

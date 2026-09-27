@@ -1359,6 +1359,33 @@ def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
         )
 
 
+def reject_prebuilt_cache_encoding(X, cat_features, cat_encoding) -> None:
+    """Raise when a prebuilt cache would have to apply ``cat_encoding``.
+
+    A cache stores no encoding provenance, so it cannot encode a column: any
+    encoding other than ``"none"`` raises once it has a column to encode (the
+    ``cat_features`` present in ``X``, else the object/category/string
+    columns of a DataFrame). With no such column the encoding is inert,
+    exactly as it is without a cache. One rule and one message for every
+    cache consumer.
+    """
+    if cat_encoding in (None, "none"):
+        return
+    if not isinstance(X, pd.DataFrame):
+        columns = list(cat_features or [])
+    elif cat_features is None:
+        columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    else:
+        columns = [col for col in cat_features if col in X.columns]
+    if columns:
+        raise ValueError(
+            f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
+            "cache because the cache has no encoding provenance, so it cannot "
+            f"encode {columns!r}. Encode those columns before building the "
+            "cache and pass cat_encoding='none', or omit the cache"
+        )
+
+
 class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
     """Target-independent one-hot encoder with a capped, pooled remainder.
 

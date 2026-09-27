@@ -11,8 +11,8 @@ The rest of the file pins the factual claims the docstrings of
 ``sift/selectors.py`` and ``sift/selection/filter_api.py`` now make: the
 sklearn parameter round trip, ``selector_metadata_``, the raw-namespace
 ``get_support()`` under one-hot, integer positions being DataFrame labels
-only, prebuilt caches refusing every encoding, and ``eta`` still driving the
-offset-zero counterfactual under e-value aggregation.
+only, prebuilt caches refusing every encoding they would have to apply, and
+``eta`` still driving the offset-zero counterfactual under e-value aggregation.
 """
 
 from __future__ import annotations
@@ -324,21 +324,33 @@ def test_onehot_unusable_include_reports_the_raw_column():
 
 
 @pytest.mark.parametrize("encoding", ["onehot", "ordinal", "frequency"])
-def test_prebuilt_caches_reject_every_target_blind_encoding(encoding):
+def test_prebuilt_caches_reject_every_target_blind_encoding_with_a_column(encoding):
     X, y = _frame()
+    expected = (
+        f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
+        "because the cache has no encoding provenance, so it cannot encode ['f1']"
+    )
 
     gaussian = build_cache(X)
-    with pytest.raises(ValueError, match="prebuilt cache"):
-        CEFSPlusSelector(k=2, verbose=False, cat_encoding=encoding, cache=gaussian).fit(
-            X, y
-        )
+    with pytest.raises(ValueError) as caught:
+        CEFSPlusSelector(
+            k=2, verbose=False, cat_encoding=encoding, cat_features=["f1"],
+            cache=gaussian,
+        ).fit(X, y)
+    assert str(caught.value).startswith(expected)
 
     classic = build_classic_cache(X)
-    with pytest.raises(ValueError, match="prebuilt"):
+    with pytest.raises(ValueError) as caught:
         MRMRSelector(
             k=2, task="regression", estimator="classic", verbose=False,
-            cat_encoding=encoding, cache=classic,
+            cat_encoding=encoding, cat_features=["f1"], cache=classic,
         ).fit(X, y)
+    assert str(caught.value).startswith(expected)
+
+    # With no column to encode the encoding is inert, as it is without a cache.
+    inert = CEFSPlusSelector(k=2, verbose=False, cat_encoding=encoding, cache=gaussian)
+    plain = CEFSPlusSelector(k=2, verbose=False, cache=gaussian)
+    assert inert.fit(X, y).selected_features_ == plain.fit(X, y).selected_features_
 
 
 def test_eta_drives_the_offset_zero_counterfactual_under_evalue_aggregation():

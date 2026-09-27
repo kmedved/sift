@@ -1457,6 +1457,20 @@ rebuild or invalidate caches created before `feature_names_are_synthetic` was
 recorded; old objects cannot prove whether `x0`, `x1`, ... names were real
 DataFrame columns or generated positional names.
 
+A prebuilt cache (`FeatureCache` or `ClassicFeatureCache`) stores no encoding
+provenance, so it cannot apply a categorical encoding. Every cache consumer
+that also takes `cat_encoding` (`select_mrmr`, `select_jmi`, `select_jmim`,
+`select_cefsplus`, their selector classes, and `KnockoffSelector`) follows one
+rule: any `cat_encoding` other than `"none"`, supervised or target-blind,
+raises once it has a column to encode, meaning a `cat_features` column present
+in `X` or, without `cat_features`, an object, category or string column. The
+message names the encoding and the columns:
+`cat_encoding='ordinal' cannot be combined with a prebuilt cache because the
+cache has no encoding provenance, so it cannot encode ['city']`. With nothing
+to encode (a numeric frame and no `cat_features`) the encoding is inert,
+exactly as it is without a cache. To combine categoricals with a cache, encode
+them before building the cache and pass `cat_encoding="none"`.
+
 Pass `rank_backend="threads"` (preferred; the sort and quantile transform
 release the GIL, so no copies of `X` are made) or `"processes"` with `n_jobs`
 to parallelize the rank-Gaussian column transforms during cache construction.

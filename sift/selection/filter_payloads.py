@@ -1230,16 +1230,8 @@ def _cache_for_gaussian(
     y_sel = ctx.request.y
     X_pre = ctx.request.X
     if ctx.request.cache is not None:
-        if (
-            _kw(ctx, "cat_encoding", "none")
-            in {"target_cv", "onehot", "ordinal", "frequency"}
-            and cat_features
-        ):
-            raise ValueError(
-                f"cat_encoding={_kw(ctx, 'cat_encoding')!r} cannot be combined "
-                "with a prebuilt Gaussian cache because the cache has no "
-                "encoding provenance"
-            )
+        # _validate_request_cache already rejected any encoding with a column
+        # to encode; what reaches here is inert.
         return (
             ctx.request.cache,
             cat_features,
@@ -1476,12 +1468,6 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     if cache is not None:
         if not is_classic_cache(cache):
             raise ValueError("cache is supported only with estimator='gaussian'")
-        encoding = _kw(ctx, "cat_encoding", "none")
-        if encoding not in (None, "none"):
-            raise ValueError(
-                f"cat_encoding={encoding!r} cannot be combined with a prebuilt "
-                "classic cache because the cache has no encoding provenance"
-            )
         y_arr = validate_target(
             ctx.request.y,
             ctx.request.task,
