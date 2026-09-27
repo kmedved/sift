@@ -59,6 +59,7 @@ from sift.selection.auto_k import AutoKConfig, resolve_auto_k_config
 from sift.selection.auto_k_nested import NestedAutoKFold, select_k_nested
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
+    _validate_knockoff_random_state,
     _validate_prebuilt_cache_structure,
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
@@ -3180,7 +3181,9 @@ class KnockoffSelector(_BaseSelector):
         cache. An explicit value beside a ``cache`` raises.
     random_state : int, default=0
         Seed for the knockoff draw. Unlike the filter selectors this stays
-        numeric, because it seeds a fresh draw even when a cache is reused.
+        numeric, because it seeds a fresh draw even when a cache is reused;
+        ``None`` or any other non-integer, and a negative value, raise
+        ``ValueError`` at ``fit``.
     n_jobs : int, default=1
         Worker count for cache construction and statistic evaluation.
     verbose : bool, default=False
@@ -3263,6 +3266,7 @@ class KnockoffSelector(_BaseSelector):
     ValueError
         If ``groups`` or ``time`` is passed in any mode, if ``auto_k_config``
         is passed, if ``cat_encoding="target_cv"`` is requested, if
+        ``random_state`` is not a non-negative integer, if
         ``sample_weight``, an explicit ``subsample`` or a supervised
         ``cat_encoding`` accompanies a ``cache``, or if ``X`` is sparse or not
         two-dimensional.
@@ -3432,6 +3436,8 @@ class KnockoffSelector(_BaseSelector):
         if auto_k_config is not None:
             raise ValueError("KnockoffSelector is q-based and does not support auto_k_config.")
         self._validate_categorical_encoding_params()
+        # Before any encoder is fitted; select_fdr repeats the same check.
+        _validate_knockoff_random_state(self.random_state)
 
         resolved_cache = cache if cache is not None else getattr(self, "cache", None)
         if resolved_cache is not None and sample_weight is not None:
