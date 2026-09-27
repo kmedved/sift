@@ -2,7 +2,146 @@
 
 ## 1.0.1 (unreleased)
 
-Development resumed after v1.0.0. No additional changes have shipped yet.
+A patch release: the 1.0 defaults, all 66 exports, signatures and the
+selections of calls that already worked are unchanged, except for the
+input-dependent changes listed under Compatibility.
+
+### Compatibility
+
+- A prebuilt `FeatureCache` or `ClassicFeatureCache` now meets `cat_encoding`
+  with one rule on `select_mrmr`, `select_jmi`, `select_jmim`,
+  `select_cefsplus`, their selector classes and `KnockoffSelector`: any
+  encoding other than `"none"` raises one message, naming the encoding and the
+  columns, once there is a column to encode; with nothing to encode the
+  encoding is inert, exactly as without a cache. Two consequences:
+  - Gaussian function calls with a prebuilt cache that silently ignored
+    `"target"`, `"loo"`, `"james_stein"` or `"loo_logit"` on a categorical
+    column, and skipped the `allow_full_data_target_encoding` opt-in, now
+    raise. Pass `cat_encoding="none"` with a cache built from encoded data.
+  - On numeric-only frames, one-hot, ordinal and frequency on the selector
+    classes and `KnockoffSelector`, one-hot on the function APIs, and any
+    encoding with a classic cache used to raise and now return the
+    `cat_encoding="none"` selection.
+- `AutoKConfig.random_state` must be a non-negative integer for the rules that
+  read it (`perm_gap`, `knockoff_path`, `stability`, a `consensus` that runs
+  one of them, and `gaussian_cv` / `xfit_objective` with `strategy="kfold"`,
+  including when `k_method="auto"` routes to one of them). `None` used to
+  crash with a bare `TypeError`; a float or string seed was silently truncated
+  by `int()` and now raises a `ValueError` too. Rules that never read the seed
+  accept any value, as before.
+- `select_fdr`, `KnockoffSelector` and `Stabilized(aggregation="evalues")`
+  raise a `ValueError` naming `random_state` when the knockoff seed is `None`
+  or not a non-negative integer, instead of a bare `TypeError` from inside the
+  filter. Knockoff draws are always seeded; integer seeds behave exactly as
+  before.
+- `cat_encoding="ordinal"` orders datetimes outside pandas' nanosecond range
+  (before 1677 or after 2262) by value instead of after strings, and orders
+  `Decimal` and `Fraction` levels numerically together with ints and floats
+  instead of by their text. The codes of other level types are unchanged.
+- Several error and warning messages are reworded (listed under Fixes); tests
+  that match their old text need updating.
+
+### Fixes
+
+- `reproducibility_()` manifests no longer report another project's commit as
+  sift's. When sift is installed into a virtualenv inside a different git
+  checkout (for example a git-ignored `.venv`), `environment.git_commit` and
+  `git_dirty` are now `None`; they used to show that project's HEAD, and
+  `git_dirty=False` even after the installed sift was edited. Checkouts,
+  editable installs and git worktrees of sift still report their commit and
+  dirty state.
+- `StabilitySelector.fit`, `stability_regression`, `stability_classif` and
+  `stability_select` accept a single-column target (an `(n, 1)` array or a
+  one-column DataFrame) and select exactly what the 1-D target selects. They
+  used to crash with a numpy `TypeError` (regression) or emit scikit-learn's
+  `DataConversionWarning` (classification). A target with more than one
+  column still raises the "2-D y is only supported ..." `ValueError`, now also
+  from `tune_threshold`.
+- `evaluate_feature_path` results record the estimator, the splitter (or the
+  default holdout with its `val_frac`), digests of `time` / `event_end`, and
+  `random_state` when it seeded the holdout in their reproducibility manifest
+  (`seeds.available` was `false`). `catboost_select` results record their
+  options and seed. A hand-assembled `FeaturePathEvaluationResult` or
+  `CatBoostSelectionResult` reports `captured_at="unknown"` instead of
+  claiming selection-time capture.
+- `compare` accepts a pandas `Period` time axis; hashing it for the split
+  record used to raise. Period values now have a deterministic manifest token
+  (frequency and ordinal), and row metadata with no deterministic token is
+  recorded as opaque instead of failing the comparison.
+- `evaluate_feature_path` imputes `+inf` / `-inf` cells like missing ones, with
+  the mean of the column's finite training values. A training column that
+  contained an infinity used to have all its non-finite cells filled with
+  `0.0`, and some all-missing or mixed-infinity columns leaked numpy
+  `RuntimeWarning`s despite the documented silent imputation.
+- Panel `within=` auto-k errors name a route that works on every public entry
+  point. The filter functions and selector classes no longer answer
+  `AutoKConfig(k_method="evaluate", strategy="kfold")` with "use time_holdout
+  or group_cv" (dead ends under `within`); the zero-config router, non-fold
+  methods such as `elbow`, and nested auto-k no longer suggest `evaluate` for
+  `within="two_way"`; and the guidance says that `gaussian_cv` /
+  `xfit_objective` need the Gaussian path (`estimator="gaussian"` for mRMR, JMI
+  and JMIM) and that `select_k_auto` cannot validate `within="two_way"`.
+- The panel auto-k warning about partially unseen validation levels no longer
+  recommends the split that produced it. Under `strategy="kfold"` it explains
+  that the affected entities or periods have very few rows and suggests
+  dropping or pooling them or raising `AutoKConfig.xfit_folds`; under
+  `time_holdout` it points to the `kfold` route.
+- `SelectionView.table` keeps `within_relevance` and `between_relevance`
+  whenever the filter ranking has them, so `view.table["between_relevance"]`
+  no longer raises `KeyError` when the score is NaN (two or fewer entities).
+  `within="two_way"` results also report `within_two_way_converged` and
+  `within_two_way_max_residual` next to `within_two_way_iterations`.
+- `include` errors name exactly the raw columns that cannot be conditioned on,
+  on every route, and list all of them rather than the first: the one-hot
+  selector classes no longer blame every `include` column;
+  `select_cefsplus_binary` and `CEFSPlusBinarySelector` (including
+  `loss="brier"`) no longer quote a one-hot dummy such as `city__NY`; the
+  classic mRMR/JMI/JMIM routes name the column instead of an encoded
+  position; and `select_fdr` / `KnockoffSelector` name the column and mention
+  a cache only when one was passed.
+- The ordinal, frequency and one-hot encoders accept `np.timedelta64` values
+  in an object column; they used to crash in `int()`. Equal durations in
+  different units are one level, shared with a `timedelta64` column.
+- `Stabilized(store_proxies=True)` reports a selected constant column with the
+  column remedy ("drop them from X or fit without store_proxies") when its
+  base selector declares no `feature_blocks`; a base that pulls a constant
+  member in through an atomic block still gets the block remedy.
+- `SelectionView.proxies`, `proxies_at`, `redundancy_report` and
+  `proxy_clusters` no longer blame a threshold change when proxies were never
+  stored. A view whose stored block was invalidated by
+  `StabilitySelector.set_threshold` still explains that the lower threshold
+  needs a refit; `StabilitySelector` and `Stabilized` views report which case
+  applies in `metadata["proxy_correlations_stale"]`.
+- The runtime-scaling benchmark records the version of the SIFT source it
+  measured rather than whatever distribution metadata is installed.
+
+### Documentation
+
+- Corrected the README's output-order example, which on 1.0 printed input
+  order for the selector it labelled as legacy; it now passes
+  `output_order="legacy"`, and a test binds its printed orders to its
+  comments. The README gains an "Upgrading to 1.0" section with the explicit
+  settings that restore 0.10 behavior.
+- Completed the 1.0.0 notes with a "Breaking changes and migration"
+  subsection: which transform methods and result views follow input order,
+  the removed `random_state=None` `FutureWarning`, the CatBoost collision
+  notice, and a per-entry-point table of restore settings.
+- Corrected the 0.10.0 note on one-hot encoding (prefix-only auto-k fits the
+  path-building encoder on every row; only held-out scoring refits per fold),
+  added seven 0.10.0 changes the notes had omitted, and restored the
+  deprecation ledger's 0.9 export count to the 58 names v0.9.0 shipped.
+- Documented the prebuilt-cache `cat_encoding` rule in one place (the cache
+  section of the manual) and fixed the `CEFSPlusSelector` Raises entry that
+  described it backwards; `compare` documents when its stratified default
+  passes through scikit-learn's "least populated class" warning and how an
+  explicit `cv=` avoids it.
+- Corrected docstrings: `include` / `exclude` / `candidates` references in
+  `select_fdr` and `select_cached`, the fold-local encoding in
+  `xfit_objective_curves` / `gaussian_cv_curves`, what `compare`'s
+  `random_state` seeds, `KnockoffSelector.eta` (it rescores only
+  `n_discoveries_offset_0`), and the `purged_kfold` cap's distance rule and
+  tie-break.
+- Updated pages and trackers that still described 0.9-era plans as current.
 
 ## 1.0.0 (2026-09-21)
 
