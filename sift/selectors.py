@@ -1358,7 +1358,7 @@ class MRMRSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -1666,7 +1666,7 @@ class JMISelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -1965,7 +1965,7 @@ class JMIMSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -2260,7 +2260,7 @@ class CEFSPlusSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -2589,7 +2589,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -3131,8 +3131,8 @@ class KnockoffSelector(_BaseSelector):
         observed in positive-weight training rows and do not upgrade the
         approximate-plugin FDR claim. Ordinal codes are ``0..C-1`` in natural
         order -- an ordered ``Categorical`` keeps its declared category order,
-        otherwise bool, then numeric levels ascending by value (ints and
-        floats together), then datetime-like by value, then strings in
+        otherwise bool, then numeric levels ascending by value (all real
+        numbers together), then datetime-like by value, then strings in
         ordinary string order, then other types, with a fitted missing level
         last -- while frequency emits the level's share of training weight;
         unknown levels map to ``-1`` / ``0`` and a numeric level whose exact

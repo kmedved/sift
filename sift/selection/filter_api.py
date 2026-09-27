@@ -522,7 +522,7 @@ def select_mrmr(
         categories that are declared but never observed are skipped. Ordinal
         codes are ``0..C-1`` in natural order -- an ordered ``Categorical``
         keeps its declared category order, otherwise bool, then numeric
-        levels ascending by value (ints and floats together), then
+        levels ascending by value (all real numbers together), then
         datetime-like by value, then strings in ordinary string order, then
         other types, with a fitted missing level taking the last code -- and
         unknown levels map to ``-1``; frequency is the training-mass
