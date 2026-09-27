@@ -994,8 +994,10 @@ _DETERMINISM_SCRIPT = """
         CEFSPlusSelector,
         KnockoffSelector,
         MRMRSelector,
+        PurgedTimeSeriesSplit,
         StabilitySelector,
         Stabilized,
+        catboost as cb,
         compare,
         evaluate_feature_path,
         select_cefsplus,
@@ -1004,19 +1006,31 @@ _DETERMINISM_SCRIPT = """
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.normal(size=(60, 5)), columns=[f"x{i}" for i in range(5)])
     y = 2.0 * X["x0"].to_numpy() + 0.1 * rng.normal(size=60)
-    context = dict(X=X, y=y, hash_data=True)
+    # Row metadata as pandas Periods, so every time / event_end digest below
+    # goes through the per-value token branch rather than raw array bytes.
+    months = pd.period_range("2000-01", periods=60, freq="M")
+    context = dict(X=X, y=y, time=months, hash_data=True)
+    knockoff = KnockoffSelector(q=0.5, n_draws=2, random_state=7).fit(X, y)
+    stability = StabilitySelector(n_bootstrap=4, random_state=7).fit(X, y)
+
+    # catboost is optional: stub its native fits so the adapter's manifest
+    # (seed, options, time digest) is still built.
+    cb.CatBoostRegressor = object
+    cb._run_catboost_split_evaluation = lambda **kwargs: (
+        {1: [0.2, 0.3]}, {1: [["x0"], ["x0"]]}, ["x0", "x1"]
+    )
+    cb._compute_final_catboost_importances = lambda **kwargs: pd.Series(
+        {name: 1.0 for name in kwargs["selected_features"]}
+    )
+
     manifests = {
         "select_cefsplus": select_cefsplus(
             X, y, k=2, random_state=7, verbose=False, return_result=True
         ).reproducibility_(**context),
         # Filter wrapper classes keep no result object; KnockoffSelector's
         # result_ and StabilitySelector's result_view_ are the wrapper routes.
-        "KnockoffSelector": KnockoffSelector(q=0.5, n_draws=2, random_state=7)
-        .fit(X, y)
-        .result_.reproducibility_(**context),
-        "StabilitySelector": StabilitySelector(n_bootstrap=4, random_state=7)
-        .fit(X, y)
-        .result_view_.reproducibility_(**context),
+        "KnockoffSelector": knockoff.result_.reproducibility_(**context),
+        "StabilitySelector": stability.result_view_.reproducibility_(**context),
         "Stabilized": Stabilized(MRMRSelector(k=2), n_resamples=4, random_state=7)
         .fit(X, y)
         .result_view_.reproducibility_(**context),
@@ -1028,44 +1042,108 @@ _DETERMINISM_SCRIPT = """
             X,
             y,
             estimator=Ridge(),
-            cv=3,
+            cv=PurgedTimeSeriesSplit(n_splits=3),
+            time=months,
+            event_end=months + 2,
             random_state=7,
         ).reproducibility_(**context),
         "evaluate_feature_path": evaluate_feature_path(
             X, y, ["x0", "x1", "x2"], [1, 2, 3], random_state=7
         ).reproducibility_(**context),
+        "evaluate_feature_path_purged": evaluate_feature_path(
+            X,
+            y,
+            ["x0", "x1", "x2"],
+            [1, 2, 3],
+            splitter=PurgedTimeSeriesSplit(n_splits=3),
+            time=months,
+            event_end=months + 2,
+        ).reproducibility_(**context),
+        "catboost_select": cb.catboost_select(
+            X,
+            y,
+            k=1,
+            algorithm="prediction",
+            prefilter_k=None,
+            n_splits=2,
+            n_estimators=10,
+            random_state=7,
+            verbose=False,
+            train_early_stopping_rounds=3,
+            n_jobs=1,
+            time=months,
+        ).reproducibility_(**context),
     }
-    print(json.dumps(manifests, sort_keys=True, allow_nan=False))
+    # A manifest describes a run, not its output: the seeded draws must
+    # repeat exactly as well.
+    draws = {
+        "KnockoffSelector": np.round(
+            knockoff.result_.W["W"].to_numpy(dtype=float), 9
+        ).tolist(),
+        "StabilitySelector": np.round(
+            stability.mean_abs_coef_.astype(float), 9
+        ).tolist(),
+    }
+    print(
+        json.dumps(
+            {"manifests": manifests, "draws": draws}, sort_keys=True, allow_nan=False
+        )
+    )
 """
+
+
+def _is_sha256(value) -> bool:
+    return isinstance(value, str) and len(value) == 64
 
 
 def test_identical_runs_give_byte_identical_manifests_across_processes():
     left = _subprocess_json(_DETERMINISM_SCRIPT, hash_seed="0")
     right = _subprocess_json(_DETERMINISM_SCRIPT, hash_seed="424242")
-    assert sorted(left) == [
+    manifests = left["manifests"]
+    assert sorted(manifests) == [
         "KnockoffSelector",
         "StabilitySelector",
         "Stabilized",
+        "catboost_select",
         "compare",
         "evaluate_feature_path",
+        "evaluate_feature_path_purged",
         "select_cefsplus",
     ]
-    for name in left:
-        assert json.dumps(left[name], sort_keys=True) == json.dumps(
-            right[name], sort_keys=True
+    for name in manifests:
+        assert json.dumps(manifests[name], sort_keys=True) == json.dumps(
+            right["manifests"][name], sort_keys=True
         ), name
-        assert left[name]["input"]["data_hash"], name
-        assert left[name]["input"]["y_hash"], name
+        assert manifests[name]["input"]["data_hash"], name
+        assert manifests[name]["input"]["y_hash"], name
+        # The object-dtype time went through the opt-in data hash.
+        assert _is_sha256(manifests[name]["input"]["time_hash"]), name
+    assert left["draws"] == right["draws"]
     for name in (
         "select_cefsplus",
         "KnockoffSelector",
         "StabilitySelector",
         "Stabilized",
         "evaluate_feature_path",
+        "catboost_select",
     ):
-        assert left[name]["configuration"]["seeds"]["random_state"] == 7, name
-    assert left["compare"]["configuration"]["seeds"]["compare_random_state"] == 7
-    assert len(left["compare"]["folds"]) == 3
+        assert manifests[name]["configuration"]["seeds"]["random_state"] == 7, name
+    compared = manifests["compare"]
+    assert compared["configuration"]["seeds"]["compare_random_state"] == 7
+    assert len(compared["folds"]) == 3
+    # The run-time row digests this test exists to pin are all present.
+    split = compared["configuration"]["configured"]["split"]
+    path_splitter = manifests["evaluate_feature_path_purged"]["configuration"][
+        "configured"
+    ]["splitter"]
+    row_digests = [
+        split["time_sha256"],
+        split["event_end_sha256"],
+        path_splitter["time_sha256"],
+        path_splitter["event_end_sha256"],
+        manifests["catboost_select"]["configuration"]["configured"]["time_sha256"],
+    ]
+    assert all(_is_sha256(digest) for digest in row_digests), row_digests
 
 
 # --------------------------------------------------------------------------
