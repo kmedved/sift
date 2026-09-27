@@ -468,6 +468,25 @@ def _validate_knockoff_random_state(random_state: Any) -> None:
         raise ValueError(f"random_state must be >= 0, got {random_state!r}")
 
 
+def _sample_knockoffs_rng(random_state: Any) -> np.random.Generator:
+    """Generator for ``sample_knockoffs``, with the ``select_fdr`` seed messages.
+
+    Everything ``np.random.default_rng`` accepted keeps working, including
+    ``None`` (fresh entropy) and numpy's own ``Generator`` / ``SeedSequence``
+    objects; what it rejected with a raw ``TypeError`` or ``ValueError``
+    now names ``random_state``.
+    """
+    try:
+        return np.random.default_rng(random_state)
+    except (TypeError, ValueError):
+        if isinstance(random_state, (int, np.integer)) and int(random_state) < 0:
+            raise ValueError(f"random_state must be >= 0, got {random_state!r}") from None
+        raise ValueError(
+            f"random_state must be an integer or None, got {random_state!r}; "
+            "pass an int such as random_state=0 for a reproducible draw"
+        ) from None
+
+
 def _tested_unit_ids(
     kept_local: np.ndarray,
     *,
@@ -1836,7 +1855,11 @@ def sample_knockoffs(
         emitted.
     random_state : int, default 0
         Seed for the knockoff noise draw.  The same seed and cache reproduce
-        the same matrix exactly.
+        the same matrix exactly.  Unlike ``select_fdr``, ``None`` is accepted
+        and draws from fresh entropy, so the matrix is not reproducible; a
+        numpy ``Generator`` or ``SeedSequence`` is also passed through to
+        ``numpy.random.default_rng``.  A float, a string or a negative
+        integer raises ``ValueError``.
 
     Returns
     -------
@@ -1851,9 +1874,11 @@ def sample_knockoffs(
         If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
         ``FeatureCache`` from ``build_cache``.
     ValueError
-        If the cache fails its structural or provenance checks, carries
-        duplicate feature names, has weights that are non-finite, negative, or
-        sum to zero, or retains no non-constant feature.
+        If ``random_state`` is not ``None``, a non-negative integer, or a
+        numpy seed object; if the cache fails its structural or provenance
+        checks, carries duplicate feature names, has weights that are
+        non-finite, negative, or sum to zero, or retains no non-constant
+        feature.
 
     Warns
     -----
@@ -1894,6 +1919,8 @@ def sample_knockoffs(
     True
     """
 
+    # Checked first, as select_fdr does; building the generator draws nothing.
+    rng = _sample_knockoffs_rng(random_state)
     _validate_prebuilt_cache_structure(cache, validate_rxx=False)
     _reject_duplicate_feature_names(cache)
     w = np.asarray(cache.sample_weight, dtype=np.float64)
@@ -1905,7 +1932,6 @@ def sample_knockoffs(
         raise ValueError("No active non-constant features remain for knockoffs")
     R_active = _build_active_rxx(cache, active, verbose=False)
     model = fit_gaussian_knockoffs(R_active, s_method=s_method, min_eig=min_eig)
-    rng = np.random.default_rng(random_state)
     Z_active = (
         np.asarray(cache.Z, dtype=np.float32)
         if bool(active.all())

@@ -508,6 +508,46 @@ def test_knockoff_seed_rejects_generators_and_negative_integers_cleanly():
     assert str(excinfo.value) == "random_state must be >= 0, got -1"
 
 
+@pytest.mark.parametrize(
+    ("seed", "message"),
+    [
+        (1.5, "random_state must be an integer or None, got 1.5; pass an int such as "
+              "random_state=0 for a reproducible draw"),
+        ("3", "random_state must be an integer or None, got '3'; pass an int such as "
+              "random_state=0 for a reproducible draw"),
+        (np.bool_(True), "random_state must be an integer or None, got True; pass an int "
+                         "such as random_state=0 for a reproducible draw"),
+        (-1, "random_state must be >= 0, got -1"),
+        (np.int64(-2), "random_state must be >= 0, got -2"),
+    ],
+    ids=["float", "str", "numpy-bool", "negative", "numpy-negative"],
+)
+def test_sample_knockoffs_rejects_an_unusable_seed_cleanly(seed, message):
+    X, _y = _seed_frame()
+    with pytest.raises(ValueError) as excinfo:
+        sample_knockoffs(build_cache(X), random_state=seed)
+    assert str(excinfo.value) == message
+
+
+def test_sample_knockoffs_keeps_every_seed_numpy_accepted():
+    X, _y = _seed_frame()
+    cache = build_cache(X)
+    seven = sample_knockoffs(cache, random_state=7)
+    np.testing.assert_array_equal(sample_knockoffs(cache, random_state=np.int64(7)), seven)
+    np.testing.assert_array_equal(
+        sample_knockoffs(cache, random_state=np.random.default_rng(7)), seven
+    )
+    np.testing.assert_array_equal(
+        sample_knockoffs(cache, random_state=np.random.SeedSequence(7)), seven
+    )
+    np.testing.assert_array_equal(
+        sample_knockoffs(cache, random_state=True), sample_knockoffs(cache, random_state=1)
+    )
+    assert sample_knockoffs(cache, random_state=2**40).shape == cache.Z.shape
+    # None is still an unseeded draw from fresh entropy.
+    assert sample_knockoffs(cache, random_state=None).shape == cache.Z.shape
+
+
 def test_knockoff_integer_seeds_are_unchanged_by_the_seed_check():
     X, y = _seed_frame()
     plain = select_fdr(X, y, q=0.5, n_draws=2, random_state=7)
