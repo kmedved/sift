@@ -185,7 +185,13 @@ the selected raw columns. Auto-k evaluate, Gaussian CV, and xfit-objective
 fit those means on training rows only. Unseen entity levels use the training
 grand mean for the entity effect; unseen time levels add no time effect. A
 warning reports affected rows. Routes where none can be seen are
-rejected up front.
+rejected up front: `within="two_way"` validates only under
+`k_method="gaussian_cv"` or `"xfit_objective"` with `strategy="kfold"`, which
+run on the Gaussian path (`select_cefsplus`, or `estimator="gaussian"` for
+mRMR, JMI and JMIM), and `within="groups"` also accepts `evaluate` with
+`time_holdout`. The `kfold` route still warns when every row of an entity or
+period lands in one validation fold; drop or pool such thin levels, or raise
+`AutoKConfig.xfit_folds`.
 
 ```python
 import numpy as np
@@ -219,7 +225,10 @@ positive-mass entities, and is not on the same scale as `within_relevance`.
 Demeaning can remove all variation, including singleton-only groups; the
 result is then an empty selection or a no-within-signal error. Prebuilt
 caches, classification, datetime/timedelta columns, and non-fold auto-k
-methods are rejected rather than silently ignored.
+methods are rejected rather than silently ignored. Two-way result metadata
+reports the path-building fit as `within_two_way_iterations`,
+`within_two_way_converged`, and `within_two_way_max_residual`; a fit that
+stops at the 200-pass cap also warns.
 
 When both `groups` and `time` are supplied, stability selection uses grouped
 block bootstrap.

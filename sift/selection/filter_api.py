@@ -88,7 +88,7 @@ from sift.selection.blocks import (
     resolve_feature_blocks,
 )
 from sift.selection.conditioning import _as_refs, resolve_conditioning
-from sift.selection.within import validate_within
+from sift.selection.within import validate_within, within_split_guidance
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -459,7 +459,8 @@ def select_mrmr(
         no validation row has a seen level raises before any path work --
         always the case for ``strategy="group_cv"``, and for ``"two_way"``
         with ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.  Demeaning can remove all
         variation, including singleton-only groups, yielding an empty
@@ -816,7 +817,8 @@ def select_jmi(
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
@@ -1094,7 +1096,8 @@ def select_jmim(
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
@@ -1882,7 +1885,12 @@ def _select_filter(
         if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
             resolved_config = AutoKConfig(k_method="auto")
         else:
-            resolved_config = resolve_auto_k_config(request.auto_k_config, ctx.time, ctx.groups)
+            resolved_config = resolve_auto_k_config(
+                request.auto_k_config,
+                ctx.time,
+                ctx.groups,
+                within=ctx.within,
+            )
         ctx = replace(
             ctx,
             auto_k_config=resolved_config,
@@ -2409,10 +2417,11 @@ def _require_within_support(ctx: FilterContext) -> None:
         assert ctx.auto_k_config is not None
         method = ctx.auto_k_config.k_method
         if method not in _WITHIN_AUTO_K_METHODS:
+            router = " (the zero-config k='auto' router)" if method == "auto" else ""
             raise ValueError(
-                "within is supported only with auto-k methods 'evaluate', "
-                "'gaussian_cv', and 'xfit_objective'; "
-                f"got k_method={method!r}"
+                f"within={ctx.within!r} cannot score auto-k k_method={method!r}"
+                f"{router}; choose an auto_k_config it can validate. "
+                f"{within_split_guidance(ctx.within)}"
             )
 
 

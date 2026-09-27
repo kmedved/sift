@@ -509,6 +509,11 @@ def select_k_auto(
         only; partially unseen validation entities use the training grand mean
         with a warning, while all-unseen routes raise before scoring.
         Datetime/timedelta path columns are rejected before conversion.
+        This helper scores only ``k_method='evaluate'``, so ``'groups'``
+        validates with ``strategy='time_holdout'`` when entities persist
+        across the holdout boundary, and ``'two_way'`` always raises here:
+        use a Gaussian selector's ``k='auto'`` with ``gaussian_cv`` or
+        ``xfit_objective`` and ``strategy='kfold'`` instead.
 
     Returns
     -------
@@ -727,7 +732,11 @@ def select_k_auto(
     metric = resolve_metric(config.metric, task)
     # One tally for the whole call so partial level overlap warns once, not
     # once per fold.
-    within_tally = None if resolved_within is None else UnseenWithinLevelTally()
+    within_tally = (
+        None
+        if resolved_within is None
+        else UnseenWithinLevelTally(strategy=config.strategy)
+    )
     eval_kwargs = {
         "X_path_df": X_path_df,
         "valid_features": valid_features,

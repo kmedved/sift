@@ -1342,7 +1342,12 @@ curve.
 Use `compare` to refit selector factories inside each training fold and score a
 fresh downstream estimator on the untouched fold. Empty selected sets remain
 empty and use an intercept-only predictor. `mode="in_sample_path"` is a labelled
-in-sample prefix diagnostic of a full-sample path.
+in-sample prefix diagnostic of a full-sample path. With `cv=None`, classification
+without `groups` or `time` uses a shuffled `StratifiedKFold(5)`; a class with
+fewer members than folds makes scikit-learn emit its "least populated class"
+`UserWarning`, which `compare` does not suppress. Pass an explicit `cv=` splitter
+(for example `KFold(5, shuffle=True, random_state=0)`) when running with
+warnings as errors.
 
 ```python
 import numpy as np

@@ -8,6 +8,8 @@ the two-way solver, the closed form for balanced panels, and
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,6 +25,7 @@ from sift.selection.within import (
     UnseenWithinLevelTally,
     fit_within_transform,
     warn_unseen_within_validation_levels,
+    within_split_guidance,
 )
 
 
@@ -264,6 +267,15 @@ def test_partially_unseen_validation_entities_warn_once_with_counts():
     assert f"{unseen / len(val_idx):.1%}" in message
     assert "entity" in message
     assert "late-entering" in message
+    # The remedy must not send the user back to the holdout that warned.
+    assert "strategy='time_holdout'" not in message
+    assert message.endswith(
+        "Drop or otherwise handle late-entering or early-exiting entities, or "
+        "switch to k_method='gaussian_cv' or 'xfit_objective' with "
+        "strategy='kfold' on the Gaussian path (select_cefsplus / "
+        "CEFSPlusSelector, or estimator='gaussian' for mRMR, JMI and JMIM), "
+        "which holds out rows instead of whole periods"
+    )
 
 
 def test_unseen_time_warning_preserves_known_entity_effect():
@@ -417,6 +429,320 @@ def test_impossible_within_split_rejects_before_building_the_path(within, strate
 
 
 # ---------------------------------------------------------------------------
+# 1.0.1: within guidance is truthful on every public auto-k route
+# ---------------------------------------------------------------------------
+
+
+def _balanced_panel():
+    """10 entities x 12 periods: every level has many rows, so nothing warns."""
+    rng = np.random.default_rng(2)
+    g = np.repeat(np.arange(10), 12)
+    t = np.tile(np.arange(12), 10)
+    n = g.size
+    entity = 3.0 * rng.normal(size=10)[g]
+    within = rng.normal(size=n)
+    X = pd.DataFrame(
+        {"between_only": entity, "within_signal": within, "noise": rng.normal(size=n)}
+    )
+    y = entity + 1.5 * within + 0.05 * rng.normal(size=n)
+    return X, y, g, t
+
+
+#: Public auto-k routes that accept ``within``.  A ``+gaussian`` route passes
+#: ``estimator="gaussian"``, the only mRMR/JMI/JMIM estimator that offers
+#: ``gaussian_cv`` and ``xfit_objective``; the others score ``evaluate`` only.
+_CLASSIC_WITHIN_ROUTES = [
+    "select_mrmr",
+    "select_jmi",
+    "select_jmim",
+    "MRMRSelector",
+    "JMISelector",
+    "JMIMSelector",
+    "select_k_auto",
+]
+_GAUSSIAN_WITHIN_ROUTES = [
+    "select_mrmr+gaussian",
+    "select_jmi+gaussian",
+    "select_jmim+gaussian",
+    "select_cefsplus",
+    "MRMRSelector+gaussian",
+    "JMISelector+gaussian",
+    "JMIMSelector+gaussian",
+    "CEFSPlusSelector",
+]
+
+#: The (k_method, strategy) pairs that can validate each within mode.
+_WORKING_WITHIN_ROUTES = {
+    "two_way": {("gaussian_cv", "kfold"), ("xfit_objective", "kfold")},
+    "groups": {
+        ("gaussian_cv", "kfold"),
+        ("xfit_objective", "kfold"),
+        ("evaluate", "time_holdout"),
+    },
+}
+
+
+def _run_within_route(route, X, y, g, t, *, within, config):
+    name, _, variant = route.partition("+")
+    if name == "select_k_auto":
+        # select_k_auto scores prefixes of a given path; hand it the path the
+        # selectors learn on this panel.
+        _best_k, selected, _diag = select_k_auto(
+            X,
+            np.asarray(y, dtype=np.float64),
+            ["within_signal", "noise", "between_only"],
+            config,
+            groups=g,
+            time=t,
+            within=within,
+        )
+        return list(selected)
+    options = {"verbose": False}
+    if name not in {"select_cefsplus", "CEFSPlusSelector"}:
+        options["task"] = "regression"
+    if variant == "gaussian":
+        options["estimator"] = "gaussian"
+    if name.startswith("select_"):
+        return list(
+            getattr(sift, name)(
+                X, y, k="auto", groups=g, time=t, within=within,
+                auto_k_config=config, **options,
+            )
+        )
+    selector = getattr(sift, name)(
+        k="auto", within=within, auto_k_config=config, **options
+    )
+    return list(selector.fit(X, y, groups=g, time=t).selected_features_)
+
+
+def _dead_end_prefix(within, k_method, strategy):
+    if strategy == "kfold":
+        return (
+            "AutoKConfig.strategy='kfold' is only supported by gaussian_cv and "
+            f"xfit_objective, and with within={within!r} the remaining evaluate "
+            "strategies cannot all be validated. "
+        )
+    return (
+        f"within={within!r} cannot be validated with k_method={k_method!r} and "
+        f"strategy={strategy!r}: "
+    )
+
+
+@pytest.mark.parametrize("within", ["groups", "two_way"])
+def test_within_guidance_names_exactly_the_routes_that_work(within):
+    guidance = within_split_guidance(within)
+    quoted = set(re.findall(r"'([a-z_]+)'", guidance))
+    working = _WORKING_WITHIN_ROUTES[within]
+    assert quoted & {"evaluate", "gaussian_cv", "xfit_objective"} == {
+        method for method, _ in working
+    }
+    assert quoted & {"kfold", "time_holdout", "group_cv"} == {
+        strategy for _, strategy in working
+    }
+    # gaussian_cv / xfit_objective exist only on the Gaussian path, so the
+    # guidance must say how mRMR/JMI/JMIM users get there.
+    assert (
+        "the Gaussian path (select_cefsplus / CEFSPlusSelector, or "
+        "estimator='gaussian' for mRMR, JMI and JMIM)"
+    ) in guidance
+    if within == "two_way":
+        assert guidance.endswith(
+            "so select_k_auto and the classic estimators cannot validate "
+            "within='two_way'"
+        )
+
+
+@pytest.mark.parametrize("route", _CLASSIC_WITHIN_ROUTES + _GAUSSIAN_WITHIN_ROUTES)
+@pytest.mark.parametrize(
+    "within,strategy",
+    [
+        ("groups", "kfold"),
+        ("two_way", "kfold"),
+        ("groups", "group_cv"),
+        ("two_way", "group_cv"),
+        ("two_way", "time_holdout"),
+    ],
+)
+def test_evaluate_dead_ends_name_a_working_route_on_every_public_route(
+    route, within, strategy
+):
+    X, y, g, t = _balanced_panel()
+    config = AutoKConfig(k_method="evaluate", strategy=strategy, min_k=1, max_k=2)
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(route, X, y, g, t, within=within, config=config)
+    message = str(excinfo.value)
+    assert message.startswith(_dead_end_prefix(within, "evaluate", strategy))
+    assert message.endswith(within_split_guidance(within))
+    assert "use time_holdout or group_cv" not in message
+
+
+@pytest.mark.parametrize("route", _GAUSSIAN_WITHIN_ROUTES)
+@pytest.mark.parametrize("k_method", ["gaussian_cv", "xfit_objective"])
+@pytest.mark.parametrize(
+    "within,strategy",
+    [("groups", "group_cv"), ("two_way", "group_cv"), ("two_way", "time_holdout")],
+)
+def test_fold_method_dead_ends_name_a_working_route_on_every_public_route(
+    route, k_method, within, strategy
+):
+    X, y, g, t = _balanced_panel()
+    config = AutoKConfig(
+        k_method=k_method, strategy=strategy, min_k=1, max_k=2, xfit_folds=3
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(route, X, y, g, t, within=within, config=config)
+    message = str(excinfo.value)
+    assert message.startswith(_dead_end_prefix(within, k_method, strategy))
+    assert message.endswith(within_split_guidance(within))
+
+
+def _recommended_route_cases():
+    cases = []
+    for within, working in sorted(_WORKING_WITHIN_ROUTES.items()):
+        for k_method, strategy in sorted(working):
+            routes = list(_GAUSSIAN_WITHIN_ROUTES)
+            if k_method == "evaluate":
+                routes = _CLASSIC_WITHIN_ROUTES + routes
+            cases.extend((within, k_method, strategy, route) for route in routes)
+    return cases
+
+
+@pytest.mark.parametrize("within,k_method,strategy,route", _recommended_route_cases())
+def test_following_the_within_guidance_succeeds_on_every_public_route(
+    within, k_method, strategy, route
+):
+    X, y, g, t = _balanced_panel()
+    options = {"xfit_folds": 3} if strategy == "kfold" else {}
+    config = AutoKConfig(
+        k_method=k_method, strategy=strategy, min_k=1, max_k=2, **options
+    )
+    # filterwarnings=error: the recommended route must not warn on a panel
+    # whose levels all have many rows.
+    selected = _run_within_route(route, X, y, g, t, within=within, config=config)
+    assert selected == ["within_signal"]
+
+
+@pytest.mark.parametrize("route", _GAUSSIAN_WITHIN_ROUTES)
+@pytest.mark.parametrize("k_method", ["auto", "elbow"])
+@pytest.mark.parametrize("within", ["groups", "two_way"])
+def test_non_fold_auto_k_methods_with_within_name_a_working_route(
+    route, k_method, within
+):
+    X, y, g, t = _balanced_panel()
+    if k_method == "auto" and route not in {"select_cefsplus", "CEFSPlusSelector"}:
+        # mRMR/JMI/JMIM have no zero-config router; request it explicitly.
+        config = AutoKConfig(k_method="auto")
+    elif k_method == "auto":
+        config = None  # CEFS+ routes k="auto" without a config to the router
+    else:
+        config = AutoKConfig(k_method="elbow")
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(route, X, y, g, t, within=within, config=config)
+    router = " (the zero-config k='auto' router)" if k_method == "auto" else ""
+    assert str(excinfo.value) == (
+        f"within={within!r} cannot score auto-k k_method={k_method!r}{router}; "
+        "choose an auto_k_config it can validate. "
+        f"{within_split_guidance(within)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "route", [r for r in _CLASSIC_WITHIN_ROUTES if r != "select_k_auto"]
+)
+def test_zero_config_two_way_on_classic_routes_names_a_working_route(route):
+    X, y, g, t = _balanced_panel()
+    # No config: time is present, so k="auto" infers evaluate/time_holdout.
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(route, X, y, g, t, within="two_way", config=None)
+    message = str(excinfo.value)
+    assert message.startswith(_dead_end_prefix("two_way", "evaluate", "time_holdout"))
+    assert message.endswith(within_split_guidance("two_way"))
+
+
+def test_nested_auto_k_with_within_names_a_working_route():
+    X, y, g, t = _balanced_panel()
+    config = AutoKConfig(auto_k_mode="nested", k_method="evaluate", strategy="time_holdout")
+    selector = sift.CEFSPlusSelector(
+        k="auto", within="two_way", auto_k_config=config, verbose=False
+    )
+    with pytest.raises(ValueError) as excinfo:
+        selector.fit(X, y, groups=g, time=t)
+    assert str(excinfo.value) == (
+        "within is not supported with auto_k_mode='nested'; use "
+        "auto_k_mode='prefix_only' so demeaning stays fold-local. "
+        f"{within_split_guidance('two_way')}"
+    )
+
+
+def _sparse_level_panel():
+    """A balanced core plus one-row entities and one-row periods."""
+    rows = [(e, p) for e in range(10) for p in range(12)]
+    rows += [(10, 0), (11, 3), (12, 7)]
+    rows += [(0, 12), (1, 13)]
+    g = np.asarray([r[0] for r in rows])
+    t = np.asarray([r[1] for r in rows])
+    n = g.size
+    rng = np.random.default_rng(3)
+    entity = 3.0 * rng.normal(size=13)[g]
+    within = rng.normal(size=n)
+    X = pd.DataFrame(
+        {"between_only": entity, "within_signal": within, "noise": rng.normal(size=n)}
+    )
+    y = entity + 1.5 * within + 0.05 * rng.normal(size=n)
+    return X, y, g, t
+
+
+@pytest.mark.parametrize("k_method", ["gaussian_cv", "xfit_objective"])
+@pytest.mark.parametrize("within", ["groups", "two_way"])
+def test_kfold_unseen_level_warning_does_not_recommend_its_own_route(k_method, within):
+    from sklearn.model_selection import KFold
+
+    X, y, g, t = _sparse_level_panel()
+    config = AutoKConfig(
+        k_method=k_method, strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+    )
+    with pytest.warns(UserWarning) as rec:
+        selected = sift.select_cefsplus(
+            X, y, k="auto", groups=g, time=t, within=within,
+            auto_k_config=config, verbose=False, subsample=None,
+        )
+    assert selected == ["within_signal"]
+    unseen = [w for w in rec if "auto-k scoring:" in str(w.message)]
+    assert len(unseen) == 1
+    message = str(unseen[0].message)
+
+    # Independent oracle: rebuild the folds and count validation rows whose
+    # level never appears in that fold's training rows.
+    n = g.size
+    entity_unseen = time_unseen = 0
+    folds = KFold(n_splits=3, shuffle=True, random_state=config.random_state)
+    for train_idx, val_idx in folds.split(np.arange(n)):
+        entity_unseen += int(np.isin(g[val_idx], g[train_idx], invert=True).sum())
+        time_unseen += int(np.isin(t[val_idx], t[train_idx], invert=True).sum())
+    assert entity_unseen > 0 and time_unseen > 0
+    assert (
+        f"{entity_unseen} of {n} validation rows ({entity_unseen / n:.1%}) had an "
+        "unseen entity level"
+    ) in message
+    if within == "two_way":
+        assert (
+            f"{time_unseen} of {n} validation rows ({time_unseen / n:.1%}) had an "
+            "unseen time level"
+        ) in message
+    # The route that produced the warning is the recommended one, so the
+    # remedy must name the cause instead of recommending the route again.
+    assert within_split_guidance(within) not in message
+    assert "choose a split" not in message
+    assert message.endswith(
+        "Under strategy='kfold' a level is unseen only when all of its rows "
+        "fall in the same validation fold, so the affected levels have very "
+        "few rows (a single-row level is always unseen): drop or pool them, or "
+        "raise AutoKConfig.xfit_folds so fewer of their rows are held out "
+        "together"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Item 3: non-finite contract on the Gaussian path
 # ---------------------------------------------------------------------------
 
@@ -503,6 +829,169 @@ def test_between_relevance_is_finite_with_three_entities(estimator):
     )
     between = result.ranking_["between_relevance"].to_numpy(dtype=float)
     assert np.isfinite(between).all()
+
+
+@pytest.mark.parametrize("estimator", ["classic", "gaussian"])
+@pytest.mark.parametrize("n_groups", [1, 2, 3])
+def test_view_table_keeps_panel_columns_whenever_the_ranking_has_them(
+    estimator, n_groups
+):
+    rng = np.random.default_rng(3)
+    groups = np.repeat(np.arange(n_groups), 12)
+    n = groups.size
+    entity = 4.0 * rng.normal(size=n_groups)[groups]
+    X = pd.DataFrame(
+        {
+            "between_only": entity,
+            "within_signal": rng.normal(size=n),
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = entity + 0.8 * X["within_signal"].to_numpy() + 0.05 * rng.normal(size=n)
+    result = sift.select_mrmr(
+        X, y, k=1, task="regression", estimator=estimator, groups=groups,
+        within="groups", subsample=None, verbose=False, return_result=True,
+    )
+    table = sift.as_result(result).table
+    # The column set must not depend on whether the entity-level score was
+    # degenerate (NaN with two or fewer entities) on this particular data.
+    assert list(table.columns) == [
+        "feature",
+        "selected_index",
+        "path_rank",
+        "selected",
+        "relevance",
+        "within_relevance",
+        "between_relevance",
+    ]
+    ranking = result.ranking_.set_index("feature")
+    for column in ("within_relevance", "between_relevance"):
+        np.testing.assert_array_equal(
+            table[column].to_numpy(dtype=float),
+            ranking.loc[table["feature"], column].to_numpy(dtype=float),
+        )
+    between = table["between_relevance"].to_numpy(dtype=float)
+    if n_groups <= 2:
+        assert np.isnan(between).all()
+    else:
+        assert np.isfinite(between).all()
+
+
+def test_view_table_without_within_has_no_panel_columns():
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame(rng.normal(size=(60, 3)), columns=["a", "b", "c"])
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=60)
+    result = sift.select_mrmr(
+        X, y, k=1, task="regression", verbose=False, return_result=True
+    )
+    columns = list(sift.as_result(result).table.columns)
+    assert "within_relevance" not in columns
+    assert "between_relevance" not in columns
+
+
+# ---------------------------------------------------------------------------
+# 1.0.1: two-way convergence diagnostics in result metadata
+# ---------------------------------------------------------------------------
+
+
+_TWO_WAY_SELECTORS = [
+    (sift.select_cefsplus, {}),
+    (sift.select_mrmr, {"task": "regression", "estimator": "classic"}),
+]
+
+
+@pytest.mark.parametrize("selector,options", _TWO_WAY_SELECTORS)
+def test_two_way_metadata_reports_convergence_of_the_path_fit(selector, options):
+    X, y, g, t, w = _unbalanced_panel(seed=7, weighted=False)
+    result = selector(
+        X, y, k=1, within="two_way", groups=g, time=t,
+        return_result=True, subsample=None, verbose=False, **options,
+    )
+    fitted = fit_within_transform("two_way", X, y, g, t, w)
+    meta = result.selector_metadata
+    assert meta["within_two_way_iterations"] == fitted.n_iterations
+    assert meta["within_two_way_converged"] is True
+    assert meta["within_two_way_max_residual"] == fitted.max_residual
+    assert meta["within_two_way_max_residual"] < TWO_WAY_TOLERANCE
+    view_meta = sift.as_result(result).metadata
+    assert view_meta["within_two_way_converged"] is True
+    assert view_meta["within_two_way_max_residual"] == fitted.max_residual
+
+
+@pytest.mark.parametrize("selector,options", _TWO_WAY_SELECTORS)
+def test_within_groups_metadata_has_no_two_way_diagnostics(selector, options):
+    X, y, g, _t, _w = _unbalanced_panel(seed=7, weighted=False)
+    meta = selector(
+        X, y, k=1, within="groups", groups=g,
+        return_result=True, subsample=None, verbose=False, **options,
+    ).selector_metadata
+    assert meta["within"] == "groups"
+    assert not {
+        "within_two_way_iterations",
+        "within_two_way_converged",
+        "within_two_way_max_residual",
+    } & set(meta)
+
+
+def _staircase_panel(n_entities=12, width=3):
+    """Entity i is observed only in periods i .. i + width - 1.
+
+    The entity/time graph is a long chain, which the alternating projection
+    crosses one link per pass, so 200 passes cannot reach the tolerance.
+    """
+    g = np.repeat(np.arange(n_entities), width)
+    t = (np.arange(n_entities)[:, None] + np.arange(width)[None, :]).reshape(-1)
+    rng = np.random.default_rng(0)
+    n = g.size
+    signal = rng.normal(size=n)
+    X = pd.DataFrame({"signal": signal, "noise": rng.normal(size=n)})
+    y = signal + 0.1 * rng.normal(size=n)
+    return X, y, g, t
+
+
+def _two_way_least_squares_residual(values, groups, time):
+    """Exact unweighted two-way residual: OLS on entity and time dummies."""
+    entity_dummies = pd.get_dummies(groups).to_numpy(dtype=float)
+    time_dummies = pd.get_dummies(time).to_numpy(dtype=float)
+    design = np.column_stack([entity_dummies, time_dummies])
+    coef, *_ = np.linalg.lstsq(design, values, rcond=None)
+    return values - design @ coef
+
+
+@pytest.mark.parametrize("selector,options", _TWO_WAY_SELECTORS)
+def test_two_way_iteration_cap_warns_and_reports_non_convergence(selector, options):
+    X, y, g, t = _staircase_panel()
+    with pytest.warns(UserWarning) as rec:
+        result = selector(
+            X, y, k=1, within="two_way", groups=g, time=t,
+            return_result=True, subsample=None, verbose=False, **options,
+        )
+    capped = [w for w in rec if "pass cap" in str(w.message)]
+    assert len(capped) == 1
+    meta = result.selector_metadata
+    assert meta["within_two_way_iterations"] == TWO_WAY_MAX_ITERATIONS
+    assert meta["within_two_way_converged"] is False
+    residual = meta["within_two_way_max_residual"]
+    assert residual > TWO_WAY_TOLERANCE
+    assert str(capped[0].message) == (
+        f"within='two_way' demeaning stopped at the {TWO_WAY_MAX_ITERATIONS}-pass "
+        f"cap with a scaled level-mean residual of {residual:.3e}, above the "
+        f"{TWO_WAY_TOLERANCE:.0e} tolerance; the entity and time effects are not "
+        "fully separated. This usually means the panel splits into weakly "
+        "connected entity/time components -- check for entities or periods that "
+        "barely overlap the rest of the panel, or use within='groups'"
+    )
+    # Independent check that the cap really cut the projection short: the
+    # capped transform is measurably away from the exact least-squares
+    # two-way residual.
+    with pytest.warns(UserWarning, match="pass cap"):
+        fitted = fit_within_transform(
+            "two_way", X.to_numpy(), y, g, t, np.ones(g.size)
+        )
+    X_capped, _ = fitted.transform(X.to_numpy(), y, g, t)
+    exact = _two_way_least_squares_residual(X.to_numpy(), g, t)
+    assert np.abs(X_capped - exact).max() > 1e-6
+    assert fitted.max_residual == residual
 
 
 # ---------------------------------------------------------------------------

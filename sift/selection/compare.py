@@ -991,7 +991,13 @@ def compare(
         family with ``n`` folds. May also be an iterable -- including a
         generator -- of ``(train_idx, val_idx)`` pairs, which is
         materialized once. The splitter that actually ran is recorded in
-        ``diagnostics["split"]``.
+        ``diagnostics["split"]``. When the stratified default meets a class
+        with fewer members than folds, scikit-learn's ``StratifiedKFold``
+        emits its "least populated class" ``UserWarning``; compare does not
+        suppress it, so callers running with warnings as errors should pass
+        an explicit splitter through ``cv`` (for example
+        ``KFold(5, shuffle=True, random_state=0)``, or ``StratifiedKFold``
+        with fewer splits).
     scoring : str, sklearn scorer, or None, default None
         Scoring from ``sift.scoring`` names or an sklearn scorer object.
         Sklearn scorer outputs follow the maximize convention, so

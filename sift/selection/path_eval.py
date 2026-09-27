@@ -456,8 +456,20 @@ def _build_splits(
 
 
 def _impute_train_val(Xtr: np.ndarray, Xva: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Mean-impute train/val arrays with train fold means."""
-    means = np.nanmean(Xtr, axis=0)
+    """Mean-impute train/val arrays with train fold means.
+
+    NaN and +-inf cells are both missing: each is filled with the mean of the
+    column's finite training values, and a column with no finite training
+    value is filled with ``0.0``.  Computed without ``np.nanmean`` so an
+    infinite training cell cannot poison the fill value and the all-missing
+    case stays silent.
+    """
+    finite = np.isfinite(Xtr)
+    counts = finite.sum(axis=0)
+    sums = np.where(finite, Xtr, 0.0).sum(axis=0)
+    means = np.zeros(Xtr.shape[1], dtype=np.float64)
+    np.divide(sums, counts, out=means, where=counts > 0)
+    # A sum of finite values can still overflow; keep the filled cells finite.
     means = np.where(np.isfinite(means), means, 0.0)
 
     Xtr_out = Xtr.copy()
@@ -644,10 +656,11 @@ def evaluate_feature_path(
     ----------
     X : DataFrame or ndarray
         Feature matrix. Missing values are mean-imputed per training fold --
-        each column's non-missing training mean fills that column in both
-        the training and the validation rows of the same fold, and an
-        all-missing training column is filled with ``0.0`` -- before the
-        estimator is fitted. The imputation is silent and unconditional;
+        NaN and ``+-inf`` cells alike are filled with the mean of the
+        column's finite training values, in both the training and the
+        validation rows of the same fold, and a training column with no
+        finite value is filled with ``0.0`` -- before the estimator is
+        fitted. The imputation is silent and unconditional;
         pass an already-imputed matrix when a different policy is wanted.
         An imputer inside an ``estimator`` pipeline sees these filled values,
         so it cannot override this preprocessing step.
