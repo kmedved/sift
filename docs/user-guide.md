@@ -122,7 +122,9 @@ unknown or unseen category therefore maps to a zero centered effect (the
 global-mean estimate before centering). That is what makes the path safe for
 high-cardinality columns: a unique ID, a group proxy, or a timestamp proxy is
 never present in its own fold's training rows, so it emits a constant zero and
-carries no relevance instead of encoding a fold-identifying prior.
+carries no relevance instead of encoding a fold-identifying prior. A constant
+categorical emits exactly zero as well, in every fold and at inference, so
+every route treats it as a constant column.
 
 **Know the boundary of that guarantee.** Centering neutralizes only
 *unseen-in-fold* emissions. It removes the fold marker; it is not a defence

@@ -240,11 +240,13 @@ Categorical encoding:
   `full_fit_encoding - full_training_prior`. Unknown or unseen categories
   therefore map to a zero centered effect, i.e. the global-mean estimate before
   centering, so a unique-ID, group-proxy, or timestamp-proxy column cannot
-  identify its own fold through the complement folds' prior. Missing values
-  stay one learned category. The unweighted fixed-k folds reproduce sklearn's
-  `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
-  shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
-  m-estimates.
+  identify its own fold through the complement folds' prior. A level that is
+  the only one its fitting rows observed has an effect of exactly zero, so a
+  constant categorical is a zero column that every route treats as constant.
+  Missing values stay one learned category. The unweighted fixed-k folds
+  reproduce sklearn's `TargetEncoder` split construction and `smooth="auto"`
+  empirical-Bayes shrinkage; weighted, grouped, and time-aware calls use
+  fold-local weighted m-estimates.
 - **What centering does and does not guarantee.** It neutralizes only
   *unseen-in-fold* emissions. It is not a defence against high cardinality as
   such: a level appearing two or more times in a fold's training rows still

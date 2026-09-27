@@ -666,7 +666,9 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     that the fitting rows never saw therefore emits a zero centered effect (the
     raw global-mean estimate before centering) instead of a fold-identifying
     prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
-    fold markers.
+    fold markers.  When the fitting rows observe a single level, that level's
+    effect is exactly zero (its mean is the prior), not per-fold rounding
+    noise, so a constant categorical encodes to a constant zero column.
 
     **What centering does and does not guarantee.**  Centering neutralizes only
     *unseen-in-fold* emissions: a level absent from a fold's training rows emits
@@ -940,6 +942,13 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 sort=False,
                 use_na_sentinel=False,
             )
+            if len(categories) == 1:
+                # One level's mean is the prior itself, so its centered effect
+                # is exactly zero. Computed, it is rounding noise (~1e-17) that
+                # differs per fold, and a rank transform would inflate that
+                # noise into a full-variance column.
+                mappings[col] = {categories.tolist()[0]: 0.0}
+                continue
             counts = np.bincount(codes, weights=weights, minlength=len(categories))
             sums = np.bincount(
                 codes,
