@@ -88,8 +88,8 @@ class AutoKConfig:
         ``'stability'``), for the shuffled ``strategy='kfold'`` splits used
         by the cross-fitted rules, and for the seeded members of a
         ``'consensus'``. When a rule reads it, ``None``, a float, a string or
-        any other non-integer raises ``ValueError`` (``bool`` counts as an
-        integer). The resampling rules also need it to be non-negative and
+        any other non-integer raises ``ValueError`` (``bool`` and NumPy
+        booleans count as integers). The resampling rules also need it to be non-negative and
         the shuffled k-fold splits need ``0 <= random_state < 2**32``;
         ``'consensus'`` accepts any integer, because each member's seed is
         derived from it modulo ``2**32``. With ``auto_dense_check=True`` the
@@ -853,9 +853,9 @@ _KFOLD_SEED_LIMIT = 2**32
 
 
 def _is_integer_seed(seed: Any) -> bool:
-    # ``bool`` is an ``int`` and ``int(True)`` has always seeded these rules;
-    # ``np.bool_`` is not a numpy integer type, as for the knockoff seed.
-    return isinstance(seed, (int, np.integer))
+    # ``bool`` is an ``int``, and ``int(True)`` / ``int(np.bool_(True))`` have
+    # always seeded these rules, so both booleans stay accepted.
+    return isinstance(seed, (int, np.integer, np.bool_))
 
 
 def check_auto_k_seed(config: AutoKConfig, *, auto_route: str | None = None) -> None:

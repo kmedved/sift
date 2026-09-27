@@ -78,9 +78,7 @@ _SEEDED_RULES = {
 }
 
 
-@pytest.mark.parametrize(
-    "seed", [None, 1.5, "3", np.bool_(True)], ids=["none", "float", "str", "numpy-bool"]
-)
+@pytest.mark.parametrize("seed", [None, 1.5, "3"], ids=["none", "float", "str"])
 @pytest.mark.parametrize("k_method", sorted(_SEEDED_RULES))
 def test_seeded_auto_k_rules_reject_a_non_integer_seed(k_method, seed):
     X, y = _regression_data()
@@ -126,7 +124,13 @@ def test_a_bool_seed_is_the_integer_it_equals():
             X, y, k="auto", time=time,
             auto_k_config=AutoKConfig(k_method=k_method, strategy=strategy, random_state=1),
         )
-        assert as_bool == as_int, k_method
+        as_numpy_bool = select_cefsplus(
+            X, y, k="auto", time=time,
+            auto_k_config=AutoKConfig(
+                k_method=k_method, strategy=strategy, random_state=np.bool_(True)
+            ),
+        )
+        assert as_bool == as_int == as_numpy_bool, k_method
 
 
 _CONSENSUS_MEMBER_LISTS = {
@@ -218,9 +222,7 @@ def _dense_check_config(seed) -> AutoKConfig:
     )
 
 
-@pytest.mark.parametrize(
-    "seed", [None, 1.5, "3", np.bool_(True)], ids=["none", "float", "str", "numpy-bool"]
-)
+@pytest.mark.parametrize("seed", [None, 1.5, "3"], ids=["none", "float", "str"])
 def test_auto_dense_check_rejects_a_non_integer_seed_it_would_read(seed):
     X, y = _regression_data()
     with pytest.raises(ValueError) as excinfo:
