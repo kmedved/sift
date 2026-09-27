@@ -943,6 +943,13 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 raise ValueError(
                     f"{self.__class__.__name__} does not support prebuilt caches."
                 )
+            # Likewise nested auto-k, which refits per fold and never takes a
+            # cache; only an explicit config selects it.
+            if (
+                self.k == "auto"
+                and getattr(resolved_auto_k, "auto_k_mode", None) == "nested"
+            ):
+                raise ValueError("auto_k_mode='nested' does not support prebuilt caches")
             reject_prebuilt_cache_encoding(
                 X,
                 getattr(self, "cat_features", None),

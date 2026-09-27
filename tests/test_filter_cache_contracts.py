@@ -423,3 +423,27 @@ def test_binary_selector_rejects_a_cache_before_the_encoding_rule(encoding):
         with pytest.raises(ValueError) as caught:
             selector.fit(X, y_binary, cache=cache)
         assert str(caught.value) == "CEFSPlusBinarySelector does not support prebuilt caches."
+
+
+@pytest.mark.parametrize("encoding", ("none", "ordinal", "frequency", "target_cv"))
+@pytest.mark.parametrize("selector_cls", (MRMRSelector, CEFSPlusSelector))
+def test_nested_auto_k_rejects_a_cache_before_the_encoding_rule(selector_cls, encoding):
+    from sift import AutoKConfig
+
+    numeric, raw, y = _encoded_frames()
+    groups = np.repeat(np.arange(12), 10)
+    cache = build_cache(numeric)
+    kwargs = {"task": "regression"} if selector_cls is MRMRSelector else {}
+    selector = selector_cls(
+        k="auto",
+        auto_k_config=AutoKConfig(k_method="evaluate", strategy="group_cv", auto_k_mode="nested"),
+        cat_features=["cat"],
+        cat_encoding=encoding,
+        verbose=False,
+        **kwargs,
+    )
+    # Following the encoding rule's advice would only reach this rejection.
+    for X in (raw, numeric):
+        with pytest.raises(ValueError) as caught:
+            selector.fit(X, y, groups=groups, cache=cache)
+        assert str(caught.value) == "auto_k_mode='nested' does not support prebuilt caches"
