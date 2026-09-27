@@ -252,6 +252,10 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
         "fdr_control": extra.get("fdr_control", "none"),
         "configured_options": configured,
     }
+    if getattr(selector, "_proxy_input_numeric_", True) is False:
+        # Proxies are computed on the raw matrix, which had non-numeric
+        # columns: a store_proxies=True refit on it would fail.
+        metadata["proxy_input_numeric"] = False
     if mode != "evalues":
         metadata["threshold"] = threshold
         metadata["resample"] = configured.get("resample", selector.resample)

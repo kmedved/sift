@@ -487,13 +487,19 @@ def _validate_table_selection(
         raise ValueError("raw_table selected feature identities do not match features")
 
 
-#: Every entry point that accepts ``store_proxies=True``.  A view whose source
-#: is not one of them names this list instead of advising a rerun that fails.
-_PROXY_STORING_ROUTES = (
-    "select_cefsplus, select_cefsplus_binary with loss='brier', and select_mrmr, "
-    "select_jmi and select_jmim with estimator='gaussian' (none of these with "
-    "cat_encoding='onehot'), and on select_cached, StabilitySelector and "
-    "Stabilized"
+#: The entry points that accept ``store_proxies=True``, by the target they
+#: take.  A view whose source is not one of them names the list for its task
+#: instead of advising a rerun that fails; select_cached, StabilitySelector
+#: and Stabilized compute proxies on the raw matrix, so they need it numeric.
+_REGRESSION_PROXY_ROUTES = (
+    "select_cefsplus, and select_mrmr, select_jmi and select_jmim with "
+    "estimator='gaussian' (none of these with cat_encoding='onehot'), and, on "
+    "an all-numeric X, select_cached, StabilitySelector and Stabilized"
+)
+_CLASSIFICATION_PROXY_ROUTES = (
+    "select_cefsplus_binary with loss='brier' for a two-class target (not "
+    "with cat_encoding='onehot'), and, on an all-numeric X, StabilitySelector "
+    "with task='classification' and Stabilized"
 )
 _FILTER_FUNCTIONS = {
     "mrmr": "select_mrmr",
@@ -502,6 +508,23 @@ _FILTER_FUNCTIONS = {
     "cefsplus": "select_cefsplus",
     "cefsplus_binary": "select_cefsplus_binary",
 }
+
+
+def _proxy_storing_routes(metadata: Mapping[str, Any]) -> str:
+    """Name the ``store_proxies=True`` routes that take the source's target."""
+    selector = metadata.get("selector")
+    task = {"cefsplus": "regression", "cefsplus_binary": "classification"}.get(
+        str(selector), metadata.get("task")
+    )
+    if task == "regression":
+        return f"on {_REGRESSION_PROXY_ROUTES}"
+    if task == "classification":
+        return f"on {_CLASSIFICATION_PROXY_ROUTES}"
+    # Sources that do not record their task get both lists.
+    return (
+        f"for regression on {_REGRESSION_PROXY_ROUTES}; for classification on "
+        f"{_CLASSIFICATION_PROXY_ROUTES}"
+    )
 
 
 def _proxy_storage_blocker(metadata: Mapping[str, Any]) -> str | None:
@@ -1358,7 +1381,15 @@ class SelectionView:
                 raise NotImplementedError(
                     "proxy correlations were not stored for this selection, and "
                     f"its source ({blocker}) cannot store them; store_proxies=True "
-                    f"is available on {_PROXY_STORING_ROUTES}"
+                    f"is available {_proxy_storing_routes(self._metadata)}"
+                )
+            if self._metadata.get("proxy_input_numeric") is False:
+                raise NotImplementedError(
+                    "proxy correlations were not stored for this selection, and "
+                    "Stabilized computes them on the raw feature matrix, which has "
+                    "non-numeric columns here, so a store_proxies=True refit on it "
+                    "fails; encode those columns as numbers before refitting with "
+                    "store_proxies=True"
                 )
             raise NotImplementedError(
                 "proxy correlations were not stored for this selection; rerun or "

@@ -1852,12 +1852,24 @@ def test_never_stored_proxy_guidance_does_not_blame_a_threshold_change():
         )
 
 
-_PROXY_ROUTES_TEXT = (
-    "select_cefsplus, select_cefsplus_binary with loss='brier', and "
-    "select_mrmr, select_jmi and select_jmim with estimator='gaussian' (none of "
-    "these with cat_encoding='onehot'), and on select_cached, StabilitySelector "
-    "and Stabilized"
+_REGRESSION_PROXY_ROUTES_TEXT = (
+    "select_cefsplus, and select_mrmr, select_jmi and select_jmim with "
+    "estimator='gaussian' (none of these with cat_encoding='onehot'), and, on "
+    "an all-numeric X, select_cached, StabilitySelector and Stabilized"
 )
+_CLASSIFICATION_PROXY_ROUTES_TEXT = (
+    "select_cefsplus_binary with loss='brier' for a two-class target (not "
+    "with cat_encoding='onehot'), and, on an all-numeric X, StabilitySelector "
+    "with task='classification' and Stabilized"
+)
+_PROXY_ROUTES_TEXT = {
+    "regression": f"on {_REGRESSION_PROXY_ROUTES_TEXT}",
+    "classification": f"on {_CLASSIFICATION_PROXY_ROUTES_TEXT}",
+    None: (
+        f"for regression on {_REGRESSION_PROXY_ROUTES_TEXT}; for classification "
+        f"on {_CLASSIFICATION_PROXY_ROUTES_TEXT}"
+    ),
+}
 
 
 def _proxy_source_frame():
@@ -1875,33 +1887,52 @@ def _with_category(X):
     return X
 
 
+def _proxy_target(y, target):
+    """The regression target, or a two- or three-class label derived from it."""
+    if target == "binary":
+        return (y > 0).astype(int)
+    if target == "multiclass":
+        return np.digitize(y, np.quantile(y, [1 / 3, 2 / 3]))
+    return y
+
+
 def _unsupported_proxy_sources():
-    from sklearn.linear_model import LinearRegression
+    """(blocker, task, target, categorical X, build) for sources without the option."""
+    from sklearn.linear_model import LinearRegression, LogisticRegression
 
     def filt(name, **kw):
         return lambda X, y: getattr(sift, name)(
             X, y, k=2, verbose=False, return_result=True, **kw
         )
 
+    onehot = {"cat_features": ["cat"], "cat_encoding": "onehot"}
     return [
-        ("select_mrmr with estimator='classic'", filt("select_mrmr", task="regression")),
-        ("select_jmi with estimator='r2'", filt("select_jmi", task="regression")),
+        ("select_mrmr with estimator='classic'", "regression", "continuous", False,
+         filt("select_mrmr", task="regression")),
+        ("select_jmi with estimator='r2'", "regression", "continuous", False,
+         filt("select_jmi", task="regression")),
+        ("select_cefsplus with cat_encoding='onehot'", "regression", "continuous", True,
+         filt("select_cefsplus", **onehot)),
+        ("select_mrmr with cat_encoding='onehot'", "regression", "continuous", True,
+         filt("select_mrmr", task="regression", estimator="gaussian", **onehot)),
+        ("select_mrmr with estimator='classic'", "classification", "binary", False,
+         filt("select_mrmr", task="classification")),
+        ("select_jmi with estimator='binned'", "classification", "binary", False,
+         filt("select_jmi", task="classification")),
+        ("select_jmim with estimator='binned'", "classification", "multiclass", False,
+         filt("select_jmim", task="classification")),
+        ("select_mrmr with cat_encoding='onehot'", "classification", "binary", True,
+         filt("select_mrmr", task="classification", **onehot)),
+        ("select_cefsplus_binary with loss='logloss'", "classification", "binary", False,
+         filt("select_cefsplus_binary")),
+        ("select_cefsplus_binary with cat_encoding='onehot'", "classification", "binary",
+         True, filt("select_cefsplus_binary", loss="brier", **onehot)),
+        ("ModelSelector", None, "continuous", False,
+         lambda X, y: sift.ModelSelector(LinearRegression()).fit(X, y)),
+        ("ModelSelector", None, "binary", False,
+         lambda X, y: sift.ModelSelector(LogisticRegression()).fit(X, y)),
         (
-            "select_cefsplus_binary with loss='logloss'",
-            lambda X, y: sift.select_cefsplus_binary(
-                X, (y > 0).astype(int), k=2, verbose=False, return_result=True
-            ),
-        ),
-        (
-            "select_cefsplus with cat_encoding='onehot'",
-            lambda X, y: sift.select_cefsplus(
-                _with_category(X), y, k=2, cat_features=["cat"],
-                cat_encoding="onehot", verbose=False, return_result=True,
-            ),
-        ),
-        ("ModelSelector", lambda X, y: sift.ModelSelector(LinearRegression()).fit(X, y)),
-        (
-            "KnockoffSelectionResult",
+            "KnockoffSelectionResult", None, "continuous", False,
             lambda X, y: sift.KnockoffSelector(
                 random_state=0, verbose=False, q=0.5
             ).fit(X, y).result_,
@@ -1909,22 +1940,152 @@ def _unsupported_proxy_sources():
     ]
 
 
-@pytest.mark.parametrize(
-    "source,build",
-    [pytest.param(source, build, id=source) for source, build in _unsupported_proxy_sources()],
-)
+def _unsupported_proxy_params():
+    return [
+        pytest.param(*case, id=f"{case[0]}-{case[2]}{'-categorical' if case[3] else ''}")
+        for case in _unsupported_proxy_sources()
+    ]
+
+
+@pytest.mark.parametrize("source,task,target,categorical,build", _unsupported_proxy_params())
 def test_never_stored_proxies_on_a_source_without_store_proxies_names_the_routes_that_have_it(
-    source, build
+    source, task, target, categorical, build
 ):
     X, y = _proxy_source_frame()
-    view = sift.as_result(build(X, y))
+    view = sift.as_result(
+        build(_with_category(X) if categorical else X, _proxy_target(y, target))
+    )
     expected = (
         "proxy correlations were not stored for this selection, and its source "
-        f"({source}) cannot store them; store_proxies=True is available on "
-        f"{_PROXY_ROUTES_TEXT}"
+        f"({source}) cannot store them; store_proxies=True is available "
+        f"{_PROXY_ROUTES_TEXT[task]}"
     )
     assert _proxy_message(view.redundancy_report) == expected
     assert _proxy_message(view.proxy_clusters) == expected
+
+
+def _advised_proxy_reruns(task):
+    """One runner per route the advice for ``task`` names, as the text says.
+
+    A runner takes the source's X (with its categorical column, if any) and
+    target and applies the qualifiers the advice states: a cat_encoding other
+    than 'onehot' on the encoding routes, and an all-numeric X (the category
+    as integer codes) on the routes that compute proxies on the raw matrix.
+    """
+    def encoded(X):
+        return {"cat_features": ["cat"], "cat_encoding": "ordinal"} if "cat" in X else {}
+
+    def numeric(X):
+        if "cat" not in X:
+            return X
+        return X.assign(cat=(X["cat"] == "hi").astype(int))
+
+    def filt(name, **kw):
+        return lambda X, y: getattr(sift, name)(
+            X, y, k=2, verbose=False, return_result=True, store_proxies=True,
+            **kw, **encoded(X),
+        )
+
+    def stability(**kw):
+        return lambda X, y: sift.StabilitySelector(
+            n_bootstrap=5, threshold=0.5, random_state=0, verbose=False, n_jobs=1,
+            store_proxies=True, **kw,
+        ).fit(numeric(X), y)
+
+    def stabilized(base):
+        return lambda X, y: sift.Stabilized(
+            base(), n_resamples=3, random_state=0, verbose=False, store_proxies=True
+        ).fit(numeric(X), y)
+
+    if task == "regression":
+        return {
+            "select_cefsplus": filt("select_cefsplus"),
+            "select_mrmr+gaussian": filt("select_mrmr", task="regression", estimator="gaussian"),
+            "select_jmi+gaussian": filt("select_jmi", task="regression", estimator="gaussian"),
+            "select_jmim+gaussian": filt("select_jmim", task="regression", estimator="gaussian"),
+            "select_cached": lambda X, y: sift.select_cached(
+                sift.build_cache(numeric(X)), y, k=2, return_result=True, store_proxies=True
+            ),
+            "StabilitySelector": stability(),
+            "Stabilized": stabilized(lambda: sift.CEFSPlusSelector(k=2, verbose=False)),
+        }
+    return {
+        "select_cefsplus_binary(loss='brier')": filt("select_cefsplus_binary", loss="brier"),
+        "StabilitySelector(task='classification')": stability(task="classification"),
+        "Stabilized": stabilized(
+            lambda: sift.MRMRSelector(k=2, task="classification", verbose=False)
+        ),
+    }
+
+
+def _advised_rerun_params():
+    params = []
+    for source, task, target, categorical, _build in _unsupported_proxy_sources():
+        for kind in [task] if task is not None else ["regression", "classification"]:
+            if (kind == "regression") != (target == "continuous"):
+                continue  # the advice for the other task, on this target
+            for route in _advised_proxy_reruns(kind):
+                if target == "multiclass" and "binary" in route:
+                    continue  # advised for a two-class target only
+                suffix = "-categorical" if categorical else ""
+                params.append(
+                    pytest.param(
+                        kind, target, categorical, route,
+                        id=f"{source}-{target}{suffix}->{route}",
+                    )
+                )
+    return params
+
+
+@pytest.mark.parametrize("task,target,categorical,route", _advised_rerun_params())
+def test_every_route_the_never_stored_advice_names_stores_proxies(
+    task, target, categorical, route
+):
+    X, y = _proxy_source_frame()
+    X = _with_category(X) if categorical else X
+    view = sift.as_result(_advised_proxy_reruns(task)[route](X, _proxy_target(y, target)))
+    assert view.metadata["proxy_correlations_stored"] is True
+    report = view.redundancy_report(0.0)
+    assert list(report.columns) == [
+        "selected_feature", "selected_index", "feature", "candidate_index", "correlation"
+    ]
+    assert set(report["selected_index"]) <= set(view.indices)
+
+
+@pytest.mark.parametrize("encoding", ["onehot", "ordinal", "target_cv"])
+def test_stabilized_over_a_categorical_frame_says_how_to_store_proxies(encoding):
+    X, y = _proxy_source_frame()
+    Xc = _with_category(X)
+
+    def fit(frame, **extra):
+        return sift.Stabilized(
+            sift.CEFSPlusSelector(
+                k=2, cat_features=["cat"], cat_encoding=encoding, verbose=False
+            ),
+            n_resamples=3, random_state=0, verbose=False, **extra,
+        ).fit(frame, y)
+
+    view = sift.as_result(fit(Xc))
+    assert view.metadata["proxy_input_numeric"] is False
+    assert _proxy_message(view.redundancy_report) == (
+        "proxy correlations were not stored for this selection, and Stabilized "
+        "computes them on the raw feature matrix, which has non-numeric columns "
+        "here, so a store_proxies=True refit on it fails; encode those columns "
+        "as numbers before refitting with store_proxies=True"
+    )
+    # The plain rerun really fails on this frame ...
+    with pytest.raises(ValueError) as excinfo:
+        fit(Xc, store_proxies=True)
+    assert str(excinfo.value) == "store_proxies=True requires a numeric feature matrix"
+    # ... and the named remedy works, with the same selection.
+    codes = Xc.assign(cat=(Xc["cat"] == "hi").astype(int))
+    stored = sift.as_result(fit(codes, store_proxies=True))
+    assert stored.metadata["proxy_correlations_stored"] is True
+    assert stored.features == view.features
+    # A numeric frame keeps the plain rerun advice and no new metadata.
+    numeric_view = sift.as_result(fit(codes))
+    assert "proxy_input_numeric" not in numeric_view.metadata
+    assert _proxy_message(numeric_view.redundancy_report) == _NEVER_STORED_PROXY_MESSAGE
 
 
 def _supported_proxy_sources():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Hashable, Iterable, Mapping, Set
 from typing import Any
 
@@ -421,6 +422,27 @@ def _support_mask_from_fitted(fitted: Any, n_features: int) -> np.ndarray:
     return mask
 
 
+def _proxy_matrix_is_numeric(X: Any) -> bool:
+    """Whether ``store_proxies=True`` could convert ``X`` to its float matrix.
+
+    NumPy integer, boolean and float columns always convert; any other
+    column (categorical, string, object) is tried the way the proxy payload
+    converts it.  Only called when ``store_proxies`` is off, so the view of
+    that fit can say whether a ``store_proxies=True`` refit on this ``X``
+    would work.
+    """
+    dtypes = list(X.dtypes) if isinstance(X, pd.DataFrame) else [np.asarray(X).dtype]
+    if all(isinstance(dtype, np.dtype) and dtype.kind in "biuf" for dtype in dtypes):
+        return True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            np.asarray(X, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _spawn_resample_rngs(random_state: int, n_resamples: int) -> list[np.random.Generator]:
     sequence = np.random.SeedSequence(int(random_state))
     return [np.random.default_rng(child) for child in sequence.spawn(int(n_resamples))]
@@ -510,7 +532,8 @@ class Stabilized(SelectorMixin, BaseEstimator):
         If True, retain the rank-Gaussian candidate-by-selected correlation
         block and, in frequency mode, per-resample boolean indicators for
         ``SelectionView`` proxy/cluster reports. Storage is capped; X is not
-        retained. Default False.
+        retained. The block is computed on the raw ``X``, so every column must
+        be numeric: encode categorical columns before fitting. Default False.
     output_order : {"legacy", "original"}, default="original"
         Transform order. ``"legacy"`` is descending frequency then original
         index in frequency mode, or the base discovery order for e-values.
@@ -791,6 +814,10 @@ class Stabilized(SelectorMixin, BaseEstimator):
 
         if self.store_proxies:
             self._store_proxy_payload(X, sample_weight)
+        else:
+            # Proxies are computed on this raw matrix, so the view can tell
+            # whether a store_proxies=True refit on the same X would work.
+            self._proxy_input_numeric_ = _proxy_matrix_is_numeric(X)
         self._fit_configured_options_ = self._snapshot_fit_configuration()
         return self
 
@@ -1366,6 +1393,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
             "_n_rows_original_",
             "_n_rows_used_",
             "_proxy_correlations",
+            "_proxy_input_numeric_",
             "_resample_row_counts_",
             "_resample_fit_policy_",
             "_resample_fitted_row_counts_",
