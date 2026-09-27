@@ -103,19 +103,21 @@ def _exact_column_positions(columns, required_names) -> np.ndarray:
     return available.get_indexer(required)
 
 
-def _reject_multi_target_y(y) -> None:
-    """Reject a 2-D target before the bootstrap loop reaches numpy.
+def _single_target_y(y):
+    """Reject a wide target and flatten a single-column one.
 
     Stability selection fits one target per bootstrap run; a wide ``y`` used
     to die deep inside the weighted-average call with a bare numpy
     ``TypeError``. Mirrors the filter guard in
     ``sift.selection.filter_payloads._reject_multi_target_unless_cefsplus``.
-    A single-column ``y`` is left alone so its behaviour is unchanged.
+    A single-column ``y`` -- an ``(n, 1)`` array or a one-column DataFrame --
+    is the 1-D target it holds, as for the filter selectors, and selects
+    exactly what that 1-D target selects.
     """
     try:
         arr = np.asarray(y)
     except (TypeError, ValueError):
-        return
+        return y
     if arr.ndim >= 2 and int(arr.shape[1]) > 1:
         raise ValueError(
             "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
@@ -123,6 +125,9 @@ def _reject_multi_target_y(y) -> None:
             f"one target per bootstrap run, but y has shape {tuple(arr.shape)}. "
             "Pass a 1-D y and run the selector once per target column"
         )
+    if arr.ndim == 2 and int(arr.shape[1]) == 1:
+        return y.iloc[:, 0] if isinstance(y, pd.DataFrame) else arr[:, 0]
+    return y
 
 
 # =============================================================================
@@ -371,8 +376,10 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         ----------
         X : array-like or DataFrame of shape (n_samples, n_features)
             Training data.
-        y : array-like of shape (n_samples,)
-            Target values.
+        y : array-like of shape (n_samples,) or (n_samples, 1)
+            Target values. A single-column 2-D target (including a
+            one-column DataFrame) is used as its 1-D column; a wider one
+            raises ``ValueError``.
         sample_weight : array-like of shape (n_samples,), optional
             Sample weights.
         groups : array, optional
@@ -389,7 +396,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         """
         self._clear_fit_state()
         try:
-            _reject_multi_target_y(y)
+            y = _single_target_y(y)
             metadata = resolve_row_metadata(X, groups=groups, time=time)
             X = metadata.X
             # Smart-sampler group/time columns live in X but are not candidate
@@ -1113,7 +1120,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             raise ValueError(
                 f"X must have {self.n_features_in_} feature columns for threshold tuning"
             )
-        y_values = np.asarray(y).ravel()
+        y_values = np.asarray(_single_target_y(y)).ravel()
         if y_values.shape[0] != X_values.shape[0]:
             raise ValueError("X and y must have the same number of rows")
         n_rows = X_values.shape[0]
@@ -1917,8 +1924,9 @@ def stability_regression(
     ----------
     X : DataFrame or ndarray of shape (n_samples, n_features)
         Candidate feature matrix.
-    y : Series or ndarray of shape (n_samples,)
-        Continuous target.
+    y : Series or ndarray of shape (n_samples,) or (n_samples, 1)
+        Continuous target. A single-column 2-D target is used as its 1-D
+        column.
     k : int
         Upper bound on the number of returned features, forwarded as
         ``max_features``.
@@ -2012,8 +2020,9 @@ def stability_classif(
     ----------
     X : DataFrame or ndarray of shape (n_samples, n_features)
         Candidate feature matrix.
-    y : Series or ndarray of shape (n_samples,)
-        Class labels; they are label-encoded internally.
+    y : Series or ndarray of shape (n_samples,) or (n_samples, 1)
+        Class labels; they are label-encoded internally. A single-column 2-D
+        target is used as its 1-D column.
     k : int
         Upper bound on the number of returned features, forwarded as
         ``max_features``.

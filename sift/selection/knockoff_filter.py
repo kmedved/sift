@@ -449,6 +449,23 @@ def _validate_offset(offset: int) -> int:
     return offset_int
 
 
+def _validate_knockoff_random_state(random_state: Any) -> None:
+    """Reject a knockoff seed that is not a non-negative integer.
+
+    The public signatures document ``random_state: int``; ``None`` (and any
+    other non-integer) used to surface as a bare ``TypeError`` from ``int()``
+    or ``SeedSequence`` deep inside the filter.  Booleans are left alone:
+    they are ``int`` instances and have always seeded the draw.
+    """
+    if not isinstance(random_state, (int, np.integer)):
+        raise ValueError(
+            f"random_state must be an integer, got {random_state!r}; knockoff "
+            "draws are always seeded, so pass an int such as random_state=0"
+        )
+    if int(random_state) < 0:
+        raise ValueError(f"random_state must be >= 0, got {random_state!r}")
+
+
 def _tested_unit_ids(
     kept_local: np.ndarray,
     *,
@@ -2539,6 +2556,8 @@ def select_fdr(
         Seed for cache subsampling when building from ``X``, and for the
         knockoff draws.  Unlike ``sample_weight`` and ``subsample``, this
         stays meaningful with a prebuilt cache because it seeds a fresh draw.
+        The draws are always seeded: ``None`` or any other non-integer, and a
+        negative value, raise ``ValueError``.
     n_jobs : int, default 1
         Worker count for cache construction and for statistics that fit
         sklearn models.  Building a cache from ``X`` rejects ``0``; the
@@ -2592,6 +2611,7 @@ def select_fdr(
         is paired with ``n_draws == 1`` or ``offset != 1``,
         ``aggregation="selection_frequency"`` is paired with ``n_draws == 1``,
         or ``screen_pairs`` is not a positive integer or ``None``; if
+        ``random_state`` is not a non-negative integer; if
         ``statistic`` is unknown or reserved; if
         ``statistic_options`` carries keys the statistic does not accept; if
         ``feature_groups`` is a string other than ``"auto"``, has the wrong
@@ -2704,6 +2724,7 @@ def select_fdr(
         aggregation, n_draws=n_draws_int, offset=offset_int
     )
     screen_pairs_int = _validate_screen_pairs(screen_pairs)
+    _validate_knockoff_random_state(random_state)
     stat_spec = _get_statistic(statistic)
     options = dict(statistic_options or {})
     unknown_options = set(options) - stat_spec.allowed_options

@@ -458,8 +458,10 @@ class Stabilized(SelectorMixin, BaseEstimator):
 
     ``aggregation="evalues"`` is valid only for a ``KnockoffSelector`` base.
     It reuses that class's native full-data ``n_draws`` /
-    ``aggregation="evalues"`` path. It does not average e-values across
-    bootstrap datasets and does not claim FDR for frequency voting.
+    ``aggregation="evalues"`` path, seeded by the base's own integer
+    ``random_state`` (no seed is derived for a ``None`` base there). It does
+    not average e-values across bootstrap datasets and does not claim FDR for
+    frequency voting.
 
     Parameters
     ----------
@@ -939,6 +941,14 @@ class Stabilized(SelectorMixin, BaseEstimator):
                 "remain 'moving'"
             )
         base_seed = getattr(self.selector, "random_state", _EVALUE_DEFAULT_RANDOM_STATE)
+        if not isinstance(base_seed, (int, np.integer)):
+            # Frequency mode derives seeds for an unset base parameter; this
+            # mode runs the base once and never touches its parameters.
+            raise ValueError(
+                "aggregation='evalues' seeds the knockoff draws from "
+                "KnockoffSelector.random_state, which must be an integer, got "
+                f"{base_seed!r}; set KnockoffSelector(random_state=0) or another int"
+            )
         if (
             int(self.random_state) != _EVALUE_DEFAULT_RANDOM_STATE
             and int(self.random_state) != int(base_seed)

@@ -407,3 +407,67 @@ def test_choose_target_k_shortfall_warning_points_to_helper_caller():
         )
     assert (target_k, best_k) == (3, 1)
     assert Path(caught[0].filename) == Path(__file__)
+
+
+def _stubbed_catboost_manifest(monkeypatch, **overrides):
+    _stub_native_catboost(monkeypatch)
+    X = pd.DataFrame(np.arange(40, dtype=float).reshape(10, 4), columns=list("abcd"))
+    y = pd.Series(np.arange(10, dtype=float))
+    kwargs = dict(
+        k=1,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=5,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    kwargs.update(overrides)
+    result = cb.catboost_select(X, y, **kwargs)
+    return result.reproducibility_(input_features=list(X.columns))["configuration"]
+
+
+def test_catboost_select_manifest_records_its_seed_and_options(monkeypatch):
+    from sift.selection.reproducibility import describe_splitter
+    from sklearn.model_selection import KFold
+
+    configuration = _stubbed_catboost_manifest(monkeypatch)
+    assert configuration["captured_at"] == "selection"
+    assert configuration["seeds"]["random_state"] == 5
+    assert configuration["seeds"]["available"] is True
+    configured = configuration["configured"]
+    assert configured["random_state"] == 5
+    assert configured["n_estimators"] == 10
+    assert configured["algorithm"] == "prediction"
+    assert configured["n_splits"] == 2
+    assert configured["cv"] is None
+    assert configured["time_sha256"] is None
+    assert configured["metric"] == "RMSE"
+    for data_argument in ("X", "y", "groups", "time", "sample_weight", "callback"):
+        assert data_argument not in configured
+
+    other = _stubbed_catboost_manifest(monkeypatch, random_state=6)
+    assert other["seeds"]["random_state"] == 6
+    assert other["configured"] != configured
+
+    splitter = KFold(n_splits=2, shuffle=True, random_state=4)
+    with_cv = _stubbed_catboost_manifest(monkeypatch, cv=splitter)
+    assert with_cv["configured"]["cv"] == describe_splitter(splitter)
+
+
+def test_catboost_select_manifest_reports_an_unseeded_run_honestly(monkeypatch):
+    from sift.selection.reproducibility import _context_hash
+
+    configuration = _stubbed_catboost_manifest(monkeypatch, random_state=None)
+    assert configuration["captured_at"] == "selection"
+    assert configuration["configured"]["random_state"] is None
+    assert configuration["seeds"]["random_state"] is None
+    assert configuration["seeds"]["available"] is False
+
+    time = np.arange(10)[::-1]
+    timed = _stubbed_catboost_manifest(monkeypatch, time=time)
+    assert timed["configured"]["time_sha256"] == _context_hash(
+        time, label="time", n_rows=10
+    )

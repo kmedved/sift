@@ -20,6 +20,13 @@ from sift._metadata import resolve_row_metadata
 from sift._preprocess import best_score_from_dict, ensure_weights
 from sift.selection.auto_k_core import weighted_regression_score
 from sift.selection.purged_cv import PurgedTimeSeriesSplit
+from sift.selection.reproducibility import (
+    RUN_PROVENANCE_ATTR,
+    _sanitize_param,
+    describe_estimator,
+    describe_splitter,
+    row_context_digest,
+)
 from sift.scoring import (
     UnsupportedScorerSampleWeightError,
     is_sklearn_scorer,
@@ -98,6 +105,12 @@ class FeaturePathEvaluationResult:
     ``sift.selection.view.as_result``, which validate that it agrees with
     ``scores`` and ``diagnostics``; a hand-assembled instance whose fields
     disagree is rejected there rather than silently normalized.
+
+    ``reproducibility_()`` also reports what ``evaluate_feature_path``
+    recorded while it ran: estimator and splitter snapshots, ``time`` /
+    ``event_end`` digests, and ``random_state`` when it seeded the default
+    holdout. A hand-assembled instance has no such record, so its manifest
+    says ``captured_at="unknown"``.
 
     Examples
     --------
@@ -455,6 +468,56 @@ def _build_splits(
     )
 
 
+def _describe_path_splitter(
+    splitter: Any,
+    *,
+    random_state: Any,
+    val_frac: float,
+    time: Optional[np.ndarray],
+    event_end: Optional[np.ndarray],
+    n_rows: int,
+) -> dict[str, Any]:
+    """The requested split protocol, shaped like ``compare``'s split record."""
+    if splitter is None:
+        described: dict[str, Any] = {
+            "type": "random_holdout",
+            "status": "params",
+            "params": {
+                "val_frac": _sanitize_param(val_frac),
+                "random_state": _sanitize_param(random_state),
+            },
+            "source": "default",
+        }
+    elif hasattr(splitter, "split") and not isinstance(splitter, (list, tuple)):
+        described = dict(describe_splitter(splitter))
+        described["source"] = "caller"
+    else:
+        described = {
+            "type": "precomputed",
+            "status": "params",
+            "params": {},
+            "source": "caller",
+        }
+    described["uses_random_state"] = splitter is None
+    described["time_sha256"] = row_context_digest(time, label="time", n_rows=n_rows)
+    described["event_end_sha256"] = row_context_digest(
+        event_end, label="event_end", n_rows=n_rows
+    )
+    return described
+
+
+def _collapse_fitted_estimators(snapshots: List[dict[str, Any]]) -> dict[str, Any]:
+    """One snapshot when every fit used the same estimator, else all of them."""
+    if not snapshots:
+        return {"status": "absent"}
+    if all(item == snapshots[0] for item in snapshots):
+        collapsed = dict(snapshots[0])
+        if len(snapshots) > 1:
+            collapsed["n_fits"] = len(snapshots)
+        return collapsed
+    return {"status": "varies", "by_fit": list(snapshots)}
+
+
 def _impute_train_val(Xtr: np.ndarray, Xva: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Mean-impute train/val arrays with train fold means.
 
@@ -789,6 +852,7 @@ def evaluate_feature_path(
     w_arr = ensure_weights(sample_weight, X_path.shape[0], normalize=True)
 
     k_values = _resolve_k_grid(k_grid, max_k=X_path.shape[1])
+    time_arr = None if time is None else np.asarray(time).reshape(-1)
     splits = _build_splits(
         X_path.shape[0],
         splitter,
@@ -796,11 +860,12 @@ def evaluate_feature_path(
         val_frac=val_frac,
         groups=groups,
         y=y_arr,
-        time=None if time is None else np.asarray(time).reshape(-1),
+        time=time_arr,
         event_end=event_end,
     )
 
     raw_scores: dict[int, list[float]] = {k: [] for k in k_values}
+    fitted_estimators: list[dict[str, Any]] = []
 
     for train_idx, val_idx in splits:
         w_train = _split_weights(w_arr, train_idx, label="train")
@@ -815,6 +880,7 @@ def evaluate_feature_path(
 
         for k in k_values:
             est = _to_estimator(estimator=estimator, estimator_factory=estimator_factory)
+            fitted_estimators.append(describe_estimator(est))
             score = _fit_predict_score(
                 est,
                 X_train_full[:, :k],
@@ -873,7 +939,7 @@ def evaluate_feature_path(
         }
     )
 
-    return FeaturePathEvaluationResult(
+    result = FeaturePathEvaluationResult(
         feature_path=path_names,
         k=k_values,
         features=best_features,
@@ -881,6 +947,39 @@ def evaluate_feature_path(
         best_k=best_k,
         diagnostics=diagnostics,
     )
+    # What the run used, for the manifest: descriptors and digests only,
+    # never the estimator, splitter or row metadata themselves.  The seed is
+    # recorded only when it drove the default holdout.
+    if estimator_factory is not None:
+        configured_estimator: dict[str, Any] = {"status": "factory"}
+    elif estimator is not None:
+        configured_estimator = describe_estimator(estimator)
+    else:
+        configured_estimator = describe_estimator(
+            _to_estimator(estimator=None, estimator_factory=None)
+        )
+    configured_options: dict[str, Any] = {
+        "estimator": configured_estimator,
+        "splitter": _describe_path_splitter(
+            splitter,
+            random_state=random_state,
+            val_frac=val_frac,
+            time=time_arr,
+            event_end=event_end,
+            n_rows=int(X_path.shape[0]),
+        ),
+    }
+    provenance: dict[str, Any] = {
+        "configured_options": configured_options,
+        "effective_options": {
+            "estimator": _collapse_fitted_estimators(fitted_estimators),
+        },
+    }
+    if splitter is None:
+        configured_options["random_state"] = _sanitize_param(random_state)
+        provenance["random_state"] = configured_options["random_state"]
+    object.__setattr__(result, RUN_PROVENANCE_ATTR, provenance)
+    return result
 
 
 __all__ = ["FeaturePathEvaluationResult", "evaluate_feature_path"]
