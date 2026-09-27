@@ -89,7 +89,11 @@ from sift.selection.blocks import (
     resolve_feature_blocks,
 )
 from sift.selection.conditioning import UnusableIncludeError, _as_refs, resolve_conditioning
-from sift.selection.within import validate_within, within_split_guidance
+from sift.selection.within import (
+    reject_conditioned_within_auto_k,
+    validate_within,
+    within_split_guidance,
+)
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -451,9 +455,11 @@ def select_mrmr(
         Optional panel transform applied *after* encoding and *before* ranks
         or classic relevance.  ``"groups"`` subtracts per-entity weighted
         means of ``X`` and ``y``.  ``"two_way"`` alternates entity and time
-        demeaning until the relative change falls below ``1e-10``, at most 200
-        passes.  Regression only; rejected with a prebuilt ``cache``,
-        classification, or auto-k methods that are not fold-backed.
+        demeaning until the largest entity or time mean removed in a pass,
+        divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes.  Regression only; rejected with a
+        prebuilt ``cache``, classification, or auto-k methods that are not
+        fold-backed.
         Validation/resampling fits the means on training folds only:
         validation rows whose level was unseen fall back to the training grand
         mean and raise one ``UserWarning`` counting them, and a route on which
@@ -1387,7 +1393,9 @@ def select_cefsplus(
         Optional panel transform applied after encoding and before the rank
         transform.  ``"groups"`` subtracts per-entity weighted means of
         ``X`` and ``y``.  ``"two_way"`` alternates entity and time demeaning
-        until the relative change falls below ``1e-10``, at most 200 passes.
+        until the largest entity or time mean removed in a pass, divided by
+        the column's weighted standard deviation, falls below ``1e-10``, at
+        most 200 passes.
         Rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
@@ -1887,14 +1895,21 @@ def _select_filter(
     ctx = _build_context(spec, request)
     _require_fixed_filter_metadata(ctx)
     if ctx.k == "auto":
+        # Any conditioning keyword counts, even an empty one: the fold-scored
+        # routes reject include/exclude/candidates outright.
+        conditioning = ctx.conditioning is not None
         if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
             resolved_config = AutoKConfig(k_method="auto")
+            reject_conditioned_within_auto_k(
+                ctx.within, resolved_config, conditioning=conditioning
+            )
         else:
             resolved_config = resolve_auto_k_config(
                 request.auto_k_config,
                 ctx.time,
                 ctx.groups,
                 within=ctx.within,
+                conditioning=conditioning,
             )
         ctx = replace(
             ctx,
@@ -2427,7 +2442,13 @@ def _require_within_support(ctx: FilterContext) -> None:
         assert ctx.auto_k_config is not None
         method = ctx.auto_k_config.k_method
         if method not in _WITHIN_AUTO_K_METHODS:
-            router = " (the zero-config k='auto' router)" if method == "auto" else ""
+            # Only CEFS+ routes a config-less k="auto" to the router; mRMR,
+            # JMI and JMIM infer evaluate there.
+            router = (
+                " (the zero-config k='auto' router)"
+                if method == "auto" and ctx.spec.selector == "cefsplus"
+                else ""
+            )
             raise ValueError(
                 f"within={ctx.within!r} cannot score auto-k k_method={method!r}"
                 f"{router}; choose an auto_k_config it can validate. "

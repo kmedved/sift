@@ -525,15 +525,25 @@ def _impute_train_val(Xtr: np.ndarray, Xva: np.ndarray) -> tuple[np.ndarray, np.
     column's finite training values, and a column with no finite training
     value is filled with ``0.0``.  Computed without ``np.nanmean`` so an
     infinite training cell cannot poison the fill value and the all-missing
-    case stays silent.
+    case stays silent.  A column whose finite values sum past the float range
+    (magnitudes near ``1e308``) is averaged again after dividing by its
+    largest absolute finite value, so its mean stays exact up to rounding and
+    no overflow warning escapes.
     """
     finite = np.isfinite(Xtr)
     counts = finite.sum(axis=0)
-    sums = np.where(finite, Xtr, 0.0).sum(axis=0)
+    values = np.where(finite, Xtr, 0.0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        sums = values.sum(axis=0)
     means = np.zeros(Xtr.shape[1], dtype=np.float64)
     np.divide(sums, counts, out=means, where=counts > 0)
-    # A sum of finite values can still overflow; keep the filled cells finite.
-    means = np.where(np.isfinite(means), means, 0.0)
+    overflowed = (counts > 0) & ~np.isfinite(sums)
+    for col in np.flatnonzero(overflowed):
+        # Every scaled value lies in [-1, 1], so this sum cannot overflow, and
+        # the mean it gives is no larger in magnitude than the column's
+        # largest finite value.
+        scale = float(np.max(np.abs(values[:, col])))
+        means[col] = scale * (float(np.sum(values[:, col] / scale)) / float(counts[col]))
 
     Xtr_out = Xtr.copy()
     Xva_out = Xva.copy()

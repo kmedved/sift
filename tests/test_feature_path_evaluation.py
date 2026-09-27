@@ -374,6 +374,54 @@ def test_infinite_cells_are_imputed_like_missing_ones_with_the_training_mean():
     assert expected_val[0, 3] == pytest.approx(4.0)
 
 
+def test_training_means_near_the_float_limit_are_imputed_without_overflow():
+    from fractions import Fraction
+
+    inf, nan = np.inf, np.nan
+    X = np.array(
+        [
+            # finite sum overflows; mixed-sign sum hits inf - inf; negative
+            # overflow; an ordinary column that must stay on the plain path
+            [1.5e308, 1.7e308, -1.6e308, 1.0],
+            [1.5e308, 1.7e308, -1.6e308, 2.0],
+            [nan, -1.7e308, -1.6e308, nan],
+            [1.2e308, -1.7e308, nan, 4.0],
+            [inf, 1.0e308, -1.0e308, 5.0],
+            [1.3e308, nan, -inf, 6.0],
+            [nan, inf, nan, nan],
+            [-inf, nan, inf, 7.0],
+        ]
+    )
+    y = np.arange(8, dtype=np.float64)
+    train_idx, val_idx = np.arange(6), np.array([6, 7])
+    log = []
+    # filterwarnings=error: numpy's "overflow encountered in reduce" (and the
+    # "invalid value" of inf - inf) must not escape the documented silent
+    # imputation.
+    evaluate_feature_path(
+        X,
+        y,
+        feature_path=[0, 1, 2, 3],
+        k_grid=[4],
+        estimator_factory=lambda: _MatrixSpy(log),
+        splitter=[(train_idx, val_idx)],
+    )
+    # Exact oracle: rational mean of each column's finite training values.
+    fills = []
+    for col in range(X.shape[1]):
+        finite = [Fraction(float(v)) for v in X[train_idx, col] if np.isfinite(v)]
+        fills.append(float(sum(finite) / len(finite)))
+    assert fills[:3] == pytest.approx([1.375e308, 2e307, -1.45e308], rel=1e-15)
+    expected_train = np.where(np.isfinite(X[train_idx]), X[train_idx], fills)
+    expected_val = np.where(np.isfinite(X[val_idx]), X[val_idx], fills)
+    assert [kind for kind, _ in log] == ["fit", "predict"]
+    for actual, expected in ((log[0][1], expected_train), (log[1][1], expected_val)):
+        assert np.isfinite(actual).all()
+        np.testing.assert_allclose(actual, expected, rtol=4 * np.finfo(float).eps, atol=0)
+    # The ordinary column keeps the plain-sum mean bit for bit.
+    assert log[0][1][2, 3] == np.sum([1.0, 2.0, 4.0, 5.0, 6.0]) / 5
+
+
 def test_finite_matrices_are_passed_through_unchanged():
     rng = np.random.default_rng(5)
     X = rng.normal(size=(20, 3))
