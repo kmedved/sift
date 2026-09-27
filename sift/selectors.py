@@ -434,6 +434,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         "auto_k_config": UNUSED,
     }
     _selector_fn: Callable
+    _accepts_prebuilt_cache = True
     _subsample_auto_is_cache_default = False
     _random_state_auto_is_cache_default = False
 
@@ -921,6 +922,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             )
 
         if resolved_cache is not None:
+            # A class that takes no cache says so before the encoding rule
+            # advises encoding the columns first.
+            if not self._accepts_prebuilt_cache:
+                raise ValueError(
+                    f"{self.__class__.__name__} does not support prebuilt caches."
+                )
             reject_prebuilt_cache_encoding(
                 X,
                 getattr(self, "cat_features", None),
@@ -2778,6 +2785,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
 
     """
 
+    _accepts_prebuilt_cache = False
+
     def __init__(
         self,
         k: int | str = 75,
@@ -2874,9 +2883,6 @@ class CEFSPlusBinarySelector(_BaseSelector):
         encoding_groups=None,
         encoding_time=None,
     ):
-        if cache is not None:
-            raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
-
         call_params = dict(self._selector_params())
         call_params["sample_weight"] = sample_weight
         if groups is not None:

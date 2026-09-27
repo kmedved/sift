@@ -1376,31 +1376,61 @@ def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
         )
 
 
+def _names_array_column(ref: Any, n_features: int) -> bool:
+    """Whether ``ref`` names a column of an ndarray with ``n_features`` columns.
+
+    An in-range integer position or its generated ``x{i}`` name, the two
+    spellings ``include`` accepts for an ndarray.
+    """
+    if isinstance(ref, (bool, np.bool_)):
+        return False
+    if isinstance(ref, (int, np.integer)):
+        return 0 <= int(ref) < n_features
+    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isdigit():
+        return ref == f"x{int(ref[1:])}" and int(ref[1:]) < n_features
+    return False
+
+
 def reject_prebuilt_cache_encoding(X, cat_features, cat_encoding) -> None:
     """Raise when a prebuilt cache would have to apply ``cat_encoding``.
 
     A cache stores no encoding provenance, so it cannot encode a column: any
-    encoding other than ``"none"`` raises once it has a column to encode (the
-    ``cat_features`` present in ``X``, else the object/category/string
-    columns of a DataFrame). With no such column the encoding is inert,
-    exactly as it is without a cache. One rule and one message for every
-    cache consumer.
+    encoding other than ``"none"`` raises once it has a column to encode. A
+    column to encode is a ``cat_features`` entry that names a column of ``X``
+    (a DataFrame label; for an ndarray, an in-range integer position or its
+    generated ``x{i}`` name), or, without ``cat_features``, an
+    object/category/string column of a DataFrame. With no such column the
+    encoding is inert, exactly as it is without a cache. A ``str``
+    ``cat_features`` is read one character per column name, as every
+    encoder reads it. One rule and one message for every cache consumer.
     """
     if cat_encoding in (None, "none"):
         return
-    if not isinstance(X, pd.DataFrame):
-        columns = list(cat_features or [])
-    elif cat_features is None:
-        columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    requested = [] if cat_features is None else list(cat_features)
+    if isinstance(X, pd.DataFrame):
+        if cat_features is None:
+            columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+        else:
+            columns = [col for col in requested if col in X.columns]
     else:
-        columns = [col for col in cat_features if col in X.columns]
-    if columns:
-        raise ValueError(
-            f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
-            "cache because the cache has no encoding provenance, so it cannot "
-            f"encode {columns!r}. Encode those columns before building the "
-            "cache and pass cat_encoding='none', or omit the cache"
+        shape = np.shape(X)
+        n_features = int(shape[1]) if len(shape) == 2 else 0
+        columns = [ref for ref in requested if _names_array_column(ref, n_features)]
+    if not columns:
+        return
+    columns = [col.item() if isinstance(col, np.generic) else col for col in columns]
+    hint = ""
+    if isinstance(cat_features, str):
+        hint = (
+            f". cat_features={cat_features!r} is a str, so each character "
+            f"names a column; pass [{cat_features!r}] to name one column"
         )
+    raise ValueError(
+        f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
+        "cache because the cache has no encoding provenance, so it cannot "
+        f"encode {columns!r}. Encode those columns before building the "
+        f"cache and pass cat_encoding='none', or omit the cache{hint}"
+    )
 
 
 class OneHotBlockEncoder(BaseEstimator, TransformerMixin):

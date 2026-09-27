@@ -324,6 +324,7 @@ def test_prebuilt_cache_rejects_an_encoding_it_would_have_to_apply(route):
     route_id, kind, run = route
     numeric, raw, y = _encoded_frames()
     cache = build_cache(numeric) if kind == "gaussian" else build_classic_cache(numeric)
+    categorical = numeric.assign(cat=numeric["cat"].astype("category"))
     for encoding in _route_encodings(route_id):
         expected = (
             f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
@@ -335,9 +336,13 @@ def test_prebuilt_cache_rejects_an_encoding_it_would_have_to_apply(route):
         with pytest.raises(ValueError) as caught:
             run(raw, y, cache, cat_encoding=encoding)
         assert str(caught.value) == expected, encoding
-        # ... and a (pre-encoded) numeric column named in cat_features.
+        # ... a (pre-encoded) numeric column named in cat_features ...
         with pytest.raises(ValueError) as caught:
             run(numeric, y, cache, cat_encoding=encoding, cat_features=["cat"])
+        assert str(caught.value) == expected, encoding
+        # ... and a category-dtype numeric column, picked up without cat_features.
+        with pytest.raises(ValueError) as caught:
+            run(categorical, y, cache, cat_encoding=encoding)
         assert str(caught.value) == expected, encoding
 
 
@@ -350,3 +355,71 @@ def test_prebuilt_cache_encoding_with_nothing_to_encode_is_inert(route):
     assert baseline
     for encoding in _route_encodings(route_id):
         assert run(numeric, y, cache, cat_encoding=encoding) == baseline, encoding
+
+
+def _cache_rule_message(encoding, columns, hint=""):
+    return (
+        f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
+        "because the cache has no encoding provenance, so it cannot encode "
+        f"{columns}. Encode those columns before building the cache and pass "
+        f"cat_encoding='none', or omit the cache{hint}"
+    )
+
+
+@pytest.mark.parametrize("route", _CACHE_ROUTES, ids=[r[0] for r in _CACHE_ROUTES])
+def test_prebuilt_cache_on_an_ndarray_counts_only_cat_features_naming_a_column(route):
+    route_id, kind, run = route
+    numeric, _raw, y = _encoded_frames()
+    arr = numeric.to_numpy()
+    cache = build_cache(arr) if kind == "gaussian" else build_classic_cache(arr)
+    baseline = run(arr, y, cache, cat_encoding="none")
+    assert baseline
+    for encoding in _route_encodings(route_id):
+        # An in-range position, its generated name, or an ndarray of positions
+        # names a real column, so the cache would have to encode it.
+        for cat_features, shown in (([3], "[3]"), (["x3"], "['x3']"), (np.array([2, 3]), "[2, 3]")):
+            with pytest.raises(ValueError) as caught:
+                run(arr, y, cache, cat_encoding=encoding, cat_features=cat_features)
+            assert str(caught.value) == _cache_rule_message(encoding, shown), encoding
+        # Entries that name no column leave the cache nothing to encode. One-hot
+        # then meets its own ndarray rule, which holds with or without a cache.
+        unresolved = [99, -1, "zzz", "x03", True]
+        if encoding == "onehot":
+            with pytest.raises(TypeError) as caught:
+                run(arr, y, cache, cat_encoding=encoding, cat_features=unresolved)
+            assert str(caught.value) == (
+                "cat_encoding='onehot' with cat_features requires a pandas "
+                "DataFrame; an ndarray has no categorical column metadata"
+            )
+            continue
+        assert run(arr, y, cache, cat_encoding=encoding, cat_features=unresolved) == baseline
+
+
+@pytest.mark.parametrize("route", _CACHE_ROUTES, ids=[r[0] for r in _CACHE_ROUTES])
+def test_prebuilt_cache_rule_reads_a_str_cat_features_as_every_encoder_does(route):
+    route_id, kind, run = route
+    numeric, _raw, y = _encoded_frames()
+    cache = build_cache(numeric) if kind == "gaussian" else build_classic_cache(numeric)
+    hint = (
+        ". cat_features='cat' is a str, so each character names a column; "
+        "pass ['cat'] to name one column"
+    )
+    for encoding in _route_encodings(route_id):
+        # "cat" is read as the columns "c", "a" and "t"; X has the first two.
+        with pytest.raises(ValueError) as caught:
+            run(numeric, y, cache, cat_encoding=encoding, cat_features="cat")
+        assert str(caught.value) == _cache_rule_message(encoding, "['c', 'a']", hint)
+
+
+@pytest.mark.parametrize("encoding", ("none",) + _CACHE_ENCODINGS)
+def test_binary_selector_rejects_a_cache_before_the_encoding_rule(encoding):
+    numeric, raw, y = _encoded_frames()
+    y_binary = (y > np.median(y)).astype(int)
+    cache = build_cache(numeric)
+    selector = CEFSPlusBinarySelector(
+        k=2, cat_features=["cat"], cat_encoding=encoding, verbose=False
+    )
+    for X in (raw, numeric):
+        with pytest.raises(ValueError) as caught:
+            selector.fit(X, y_binary, cache=cache)
+        assert str(caught.value) == "CEFSPlusBinarySelector does not support prebuilt caches."
