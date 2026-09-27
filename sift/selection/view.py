@@ -1020,7 +1020,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``feature`` is missing or ambiguous -- use ``proxies_at``
             for positional access -- or if ``r_min`` is outside ``[0, 1]``.
@@ -1103,7 +1105,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``selected_index`` is not an integer or is not a selected proxy
             position, or if ``r_min`` is not a finite number in ``[0, 1]``.
@@ -1193,7 +1197,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``r_min`` is not a finite number in ``[0, 1]``.
 
@@ -1252,7 +1258,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``r_min`` is not a finite number in ``[0, 1]``.
         """
@@ -1270,12 +1278,16 @@ class SelectionView:
 
     def _require_proxy_block(self) -> pd.DataFrame:
         if self._proxy_correlations is None:
+            if self._metadata.get("proxy_correlations_stale") is True:
+                raise NotImplementedError(
+                    "proxy correlations are unavailable for this selected set: the "
+                    "stored proxy block holds one column per feature selected when it "
+                    "was computed, and a threshold change added features it cannot "
+                    "describe; refit with the lower threshold and store_proxies=True"
+                )
             raise NotImplementedError(
-                "proxy correlations are unavailable for this selected set; rerun or "
-                "refit selection with store_proxies=True. A stored proxy block holds "
-                "one column per feature selected when it was computed, so a threshold "
-                "change added features it cannot describe; refit with the lower "
-                "threshold and store_proxies=True"
+                "proxy correlations were not stored for this selection; rerun or "
+                "refit selection with store_proxies=True"
             )
         return self._proxy_correlations
 

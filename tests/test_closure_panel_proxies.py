@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator
+from sklearn.feature_selection import SelectorMixin
 
 import sift
 from sift.selection.auto_k import AutoKConfig, select_k_auto
@@ -620,11 +622,69 @@ def test_stale_threshold_guidance_explains_the_stored_block():
         n_jobs=1,
     ).fit(X, y)
     view = selector.set_threshold(0.05).result_view_
+    assert view.metadata["proxy_correlations_stale"] is True
     with pytest.raises(NotImplementedError) as excinfo:
         view.redundancy_report(0.8)
-    message = str(excinfo.value)
-    assert "one column per feature selected when it was computed" in message
-    assert "refit with the lower threshold and store_proxies=True" in message
+    assert str(excinfo.value) == _STALE_PROXY_MESSAGE
+
+
+_NEVER_STORED_PROXY_MESSAGE = (
+    "proxy correlations were not stored for this selection; rerun or refit "
+    "selection with store_proxies=True"
+)
+_STALE_PROXY_MESSAGE = (
+    "proxy correlations are unavailable for this selected set: the stored "
+    "proxy block holds one column per feature selected when it was computed, "
+    "and a threshold change added features it cannot describe; refit with the "
+    "lower threshold and store_proxies=True"
+)
+
+
+def _proxy_message(call):
+    with pytest.raises(NotImplementedError) as excinfo:
+        call()
+    return str(excinfo.value)
+
+
+def test_never_stored_proxy_guidance_does_not_blame_a_threshold_change():
+    rng = np.random.default_rng(23)
+    n = 200
+    signal = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "a": signal,
+            "b": signal + 0.02 * rng.normal(size=n),
+            "c": rng.normal(size=n),
+            "d": rng.normal(size=n),
+        }
+    )
+    y = signal + 0.3 * rng.normal(size=n)
+    function_view = sift.as_result(
+        sift.select_cefsplus(X, y, k=2, verbose=False, return_result=True),
+        input_features=list(X.columns),
+    )
+    selector = sift.StabilitySelector(
+        n_bootstrap=10,
+        threshold=0.9,
+        store_coefs=False,
+        random_state=0,
+        verbose=False,
+        n_jobs=1,
+    ).fit(X, y)
+    stability_view = selector.result_view_
+    lowered_view = selector.set_threshold(0.05).result_view_
+    assert function_view.metadata.get("proxy_correlations_stale") is None
+    assert stability_view.metadata["proxy_correlations_stale"] is False
+    assert lowered_view.metadata["proxy_correlations_stale"] is False
+    # store_proxies was never set, so even after the threshold change the
+    # message must point at store_proxies rather than at the threshold.
+    for view in (function_view, stability_view, lowered_view):
+        assert _proxy_message(view.redundancy_report) == _NEVER_STORED_PROXY_MESSAGE
+        assert _proxy_message(view.proxy_clusters) == _NEVER_STORED_PROXY_MESSAGE
+        assert (
+            _proxy_message(lambda: view.proxies_at(view.indices[0]))
+            == _NEVER_STORED_PROXY_MESSAGE
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +724,69 @@ def test_blocks_in_play_still_points_at_the_block():
             feature_names=["constant", "varying"],
             blocks_in_play=True,
         )
+
+
+class _SelectEverything(SelectorMixin, BaseEstimator):
+    """Generic sklearn selector with no block concept: keeps every column."""
+
+    def fit(self, X, y=None):
+        self.n_features_in_ = np.asarray(X).shape[1]
+        return self
+
+    def _get_support_mask(self):
+        return np.ones(self.n_features_in_, dtype=bool)
+
+
+def _stabilized_constant_frame():
+    rng = np.random.default_rng(31)
+    n = 120
+    signal = rng.normal(size=n)
+    X = pd.DataFrame(
+        {"signal": signal, "flat": np.full(n, 3.0), "noise": rng.normal(size=n)}
+    )
+    y = signal + 0.1 * rng.normal(size=n)
+    return X, y
+
+
+def test_stabilized_constant_column_message_names_columns_without_blocks():
+    X, y = _stabilized_constant_frame()
+    with pytest.raises(ValueError) as excinfo:
+        sift.Stabilized(
+            _SelectEverything(),
+            n_resamples=4,
+            store_proxies=True,
+            random_state=0,
+            verbose=False,
+        ).fit(X, y)
+    assert str(excinfo.value) == (
+        "store_proxies=True cannot retain finite copula correlations for "
+        "selected constant features: ['flat'] (positions [1]). Those columns "
+        "stay in the selection but have no finite copula correlation to "
+        "store; drop them from X or fit without store_proxies"
+    )
+
+
+def test_stabilized_constant_block_member_message_points_at_the_block():
+    X, y = _stabilized_constant_frame()
+    base = sift.CEFSPlusSelector(
+        k=1, feature_blocks={"sf": ["signal", "flat"]}, verbose=False
+    )
+    # The constant column reaches the selection only through the atomic block.
+    fitted = sift.Stabilized(base, n_resamples=4, random_state=0, verbose=False).fit(
+        X, y
+    )
+    assert fitted.selected_features_ == ["signal", "flat"]
+    with pytest.raises(ValueError) as excinfo:
+        sift.Stabilized(
+            base, n_resamples=4, store_proxies=True, random_state=0, verbose=False
+        ).fit(X, y)
+    assert str(excinfo.value) == (
+        "store_proxies=True cannot retain finite copula correlations for "
+        "selected constant features or cache-dropped constant or otherwise "
+        "unavailable block members: ['flat'] (positions [1]). Atomic selection "
+        "still expands those raw columns; omit store_proxies or drop "
+        "unavailable members from the block"
+    )
 
 
 def test_stability_without_store_proxies_accepts_a_constant_column():

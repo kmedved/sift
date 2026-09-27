@@ -184,6 +184,25 @@ def _base_needs_named_frame(selector: Any) -> bool:
     ).startswith("sift.")
 
 
+def _base_can_force_block_members(selector: Any) -> bool:
+    """True when the base (or a nested estimator) declares ``feature_blocks``.
+
+    Such a base can pull a constant column into the selection through an
+    atomic block. ``KnockoffSelector`` expands groups over cache-valid
+    members only, so its blocks never select a constant column.
+    """
+    if _is_knockoff_selector(selector):
+        return False
+    try:
+        params = selector.get_params(deep=True)
+    except (AttributeError, TypeError, ValueError):
+        params = {"feature_blocks": getattr(selector, "feature_blocks", None)}
+    return any(
+        (key == "feature_blocks" or key.endswith("__feature_blocks")) and value is not None
+        for key, value in params.items()
+    )
+
+
 def _n_rows_used_from_fitted(fitted: Any) -> int | None:
     meta = getattr(fitted, "selector_metadata_", None)
     if not isinstance(meta, Mapping):
@@ -1268,6 +1287,9 @@ class Stabilized(SelectorMixin, BaseEstimator):
             selected,
             available_original=varying_raw,
             feature_names=self.feature_names_in_,
+            # Only a base with atomic feature_blocks can force a constant
+            # member in; otherwise the remedy is the column, not a block.
+            blocks_in_play=_base_can_force_block_members(self.selector),
         )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))
