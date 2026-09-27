@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import replace
+from decimal import Decimal
+import enum
+from fractions import Fraction
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -61,14 +64,6 @@ def _consensus_message(members, seed) -> str:
     )
 
 
-def _dense_check_message(seed) -> str:
-    return (
-        "AutoKConfig.random_state must be an integer for auto_dense_check=True, "
-        "whose gaussian_cv cross-check seeds shuffled k-fold splits when the "
-        f"configured strategy has no time or groups to split on; got {seed!r}"
-    )
-
-
 _SEEDED_RULES = {
     "perm_gap": ("time_holdout", _resample_message),
     "knockoff_path": ("time_holdout", _resample_message),
@@ -78,7 +73,14 @@ _SEEDED_RULES = {
 }
 
 
-@pytest.mark.parametrize("seed", [None, 1.5, "3"], ids=["none", "float", "str"])
+_NON_INTEGER_SEEDS = pytest.mark.parametrize(
+    "seed",
+    [None, 1.5, "3", Decimal("7.5"), Fraction(15, 2), float("nan"), np.array([7])],
+    ids=["none", "float", "str", "decimal", "fraction", "nan", "1-d-array"],
+)
+
+
+@_NON_INTEGER_SEEDS
 @pytest.mark.parametrize("k_method", sorted(_SEEDED_RULES))
 def test_seeded_auto_k_rules_reject_a_non_integer_seed(k_method, seed):
     X, y = _regression_data()
@@ -133,6 +135,40 @@ def test_a_bool_seed_is_the_integer_it_equals():
         assert as_bool == as_int == as_numpy_bool, k_method
 
 
+class _Seed(enum.IntEnum):
+    SEVEN = 7
+
+
+# Values int() has always turned into 7, and that are exactly 7.
+_INTEGRAL_SEEDS = {
+    "float": 7.0,
+    "numpy-float": np.float64(7.0),
+    "decimal": Decimal("7.0"),
+    "fraction": Fraction(14, 2),
+    "0-d-array": np.array(7),
+    "0-d-float-array": np.array(7.0),
+    "int-enum": _Seed.SEVEN,
+}
+
+
+@pytest.mark.parametrize("k_method", sorted(_SEEDED_RULES))
+def test_an_integral_seed_is_the_integer_it_equals(k_method):
+    # These worked through int() in 1.0.0 and must name the same stream.
+    X, y = _regression_data()
+    strategy, _message = _SEEDED_RULES[k_method]
+
+    def run(seed):
+        config = AutoKConfig(k_method=k_method, strategy=strategy, random_state=seed)
+        result = select_cefsplus(
+            X, y, k="auto", time=np.arange(len(y)), auto_k_config=config, return_result=True
+        )
+        return result.selected_features, result.diagnostics_["auto_k"]["selected_k"]
+
+    expected = run(7)
+    for name, seed in _INTEGRAL_SEEDS.items():
+        assert run(seed) == expected, name
+
+
 _CONSENSUS_MEMBER_LISTS = {
     "default": (("ebic", "chi2_stop", "perm_gap", "gaussian_cv"), ["perm_gap", "gaussian_cv"]),
     "gaussian_cv": (("ebic", "gaussian_cv"), ["gaussian_cv"]),
@@ -180,6 +216,7 @@ def test_consensus_accepts_any_integer_seed_as_before():
     assert run(2**32 + 7) == run(7)
     assert run(True) == run(1)
     assert run(np.uint64(7)) == run(7)
+    assert run(Decimal(7)) == run(7.0) == run(np.array(7)) == run(7)
 
 
 def test_consensus_without_a_seeded_member_ignores_the_seed():
@@ -222,33 +259,60 @@ def _dense_check_config(seed) -> AutoKConfig:
     )
 
 
-@pytest.mark.parametrize("seed", [None, 1.5, "3"], ids=["none", "float", "str"])
-def test_auto_dense_check_rejects_a_non_integer_seed_it_would_read(seed):
-    X, y = _regression_data()
-    with pytest.raises(ValueError) as excinfo:
-        select_cefsplus(X, y, k="auto", auto_k_config=_dense_check_config(seed))
-    assert str(excinfo.value) == _dense_check_message(seed)
+_DENSE_CHECK_SKIPPED = (
+    "Auto-K dense check could not run gaussian_cv/best; selected k is unchanged. Reason: "
+)
 
 
-def test_auto_dense_check_runs_with_a_bool_seed_and_skips_an_out_of_range_one():
+def _dense_check_route(result) -> dict:
+    return result.diagnostics_["auto_k"]["auto_routing"]["dense_check"]
+
+
+@_NON_INTEGER_SEEDS
+def test_auto_dense_check_skips_for_a_seed_it_cannot_use(seed):
+    # The cross-check is a diagnostic: as in 1.0.0, a seed its shuffled
+    # k-fold cannot use skips it with a warning and the EBIC k stands. 1.0.0
+    # gave int()'s TypeError as the reason for None (and truncated 1.5); the
+    # reason now names random_state.
     X, y = _regression_data()
     with pytest.warns(UserWarning) as record:
-        as_int = select_cefsplus(X, y, k="auto", auto_k_config=_dense_check_config(1))
-    with pytest.warns(UserWarning) as bool_record:
-        as_bool = select_cefsplus(X, y, k="auto", auto_k_config=_dense_check_config(True))
-    assert as_bool == as_int == ["f0", "f1"]
+        result = select_cefsplus(
+            X, y, k="auto", auto_k_config=_dense_check_config(seed), return_result=True
+        )
+    reason = "ValueError: " + _kfold_message("gaussian_cv", seed)
+    assert [str(w.message) for w in record] == [_DENSE_CHECK_SKIPPED + reason]
+    assert result.selected_features == ["f0", "f1"]
+    route = _dense_check_route(result)
+    assert (route["ran"], route["reason"], route["error"]) == (False, "gaussian_cv_failed", reason)
+
+
+def test_auto_dense_check_runs_with_an_integral_seed_and_skips_an_out_of_range_one():
+    X, y = _regression_data()
+    with pytest.warns(UserWarning) as record:
+        checked = select_cefsplus(
+            X, y, k="auto", auto_k_config=_dense_check_config(1), return_result=True
+        )
     ran = [str(w.message) for w in record]
-    assert [str(w.message) for w in bool_record] == ran
+    assert checked.selected_features == ["f0", "f1"]
     assert any(message.startswith("Auto-K dense-signal diagnostic") for message in ran)
+    assert _dense_check_route(checked)["ran"] is True
+    # Booleans and integral values run the same check on the same folds.
+    for seed in (True, np.bool_(True), 1.0, Decimal(1), Fraction(1), np.array(1)):
+        with pytest.warns(UserWarning) as seed_record:
+            same = select_cefsplus(
+                X, y, k="auto", auto_k_config=_dense_check_config(seed), return_result=True
+            )
+        assert same.selected_features == checked.selected_features
+        assert [str(w.message) for w in seed_record] == ran
+        assert _dense_check_route(same) == _dense_check_route(checked)
 
     # An integer KFold cannot use still only skips the diagnostic, as before.
     for seed in (-1, 2**40):
         with pytest.warns(UserWarning) as skip_record:
             skipped = select_cefsplus(X, y, k="auto", auto_k_config=_dense_check_config(seed))
-        assert skipped == as_int
+        assert skipped == checked.selected_features
         assert [str(w.message) for w in skip_record] == [
-            "Auto-K dense check could not run gaussian_cv/best; selected k is "
-            "unchanged. Reason: ValueError: " + _kfold_message("gaussian_cv", seed)
+            _DENSE_CHECK_SKIPPED + "ValueError: " + _kfold_message("gaussian_cv", seed)
         ]
 
 
