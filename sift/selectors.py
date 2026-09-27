@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import importlib.util
 import warnings
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Callable, Literal
 
@@ -62,6 +63,7 @@ from sift.selection.knockoff_filter import (
     _validate_prebuilt_cache_structure,
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
+from sift.selection.conditioning import UnusableIncludeError
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset(
     {"target_cv", "loo", "target", "james_stein", "loo_logit"}
@@ -340,6 +342,17 @@ def _apply_onehot_call_params(selector, call_params, feature_names) -> tuple:
             for dummy in encoder.encoded_columns_for(raw_names[int(raw_i)])
         ]
     return encoder, composed, encoded_names
+
+
+@contextmanager
+def _raw_include_errors(encoder):
+    """Quote the raw columns, not the wrapper's one-hot dummies, in include errors."""
+    try:
+        yield
+    except UnusableIncludeError as exc:
+        if not isinstance(encoder, OneHotBlockEncoder):
+            raise
+        raise exc.relabel(encoder.parent_of) from None
 
 
 def _make_category_encoder(
@@ -779,7 +792,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             self, call_params, feature_names
         )
 
-        try:
+        with _raw_include_errors(onehot_encoder):
             result = self._selector_fn(
                 X_fit,
                 y,
@@ -787,20 +800,6 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 return_result=True,
                 **call_params,
             )
-        except ValueError as exc:
-            if (
-                isinstance(onehot_encoder, OneHotBlockEncoder)
-                and str(exc).startswith("include features were dropped as constant or non-finite")
-            ):
-                raw_include = list(dict.fromkeys(
-                    onehot_encoder.parent_of(name)
-                    for name in call_params.get("include", ())
-                ))
-                raise ValueError(
-                    "include features were dropped as constant or non-finite: "
-                    f"{raw_include!r}. Pass raw columns that vary on the retained rows"
-                ) from exc
-            raise
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         if hasattr(result, "selected_indices"):
@@ -2956,13 +2955,14 @@ class CEFSPlusBinarySelector(_BaseSelector):
             self, call_params, feature_names
         )
 
-        result = self._selector_fn(
-            X_fit,
-            y,
-            k=k,
-            return_result=True,
-            **call_params,
-        )
+        with _raw_include_errors(onehot_encoder):
+            result = self._selector_fn(
+                X_fit,
+                y,
+                k=k,
+                return_result=True,
+                **call_params,
+            )
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         selected_features = list(result.selected_features)

@@ -87,7 +87,7 @@ from sift.selection.blocks import (
     require_atomic_conditioning,
     resolve_feature_blocks,
 )
-from sift.selection.conditioning import _as_refs, resolve_conditioning
+from sift.selection.conditioning import UnusableIncludeError, _as_refs, resolve_conditioning
 from sift.selection.within import validate_within
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
@@ -1918,7 +1918,14 @@ def _select_filter(
             "store_proxies=True is currently supported only by Gaussian/cached "
             "filter routes; choose estimator='gaussian' or omit store_proxies"
         )
-    payload = handler(ctx)
+    try:
+        payload = handler(ctx)
+    except UnusableIncludeError as exc:
+        if ctx.onehot_parents is None:
+            raise
+        # Report the raw column the caller wrote, not its one-hot dummies.
+        parent_of = dict(zip(ctx.feature_names, ctx.onehot_parents))
+        raise exc.relabel(lambda name: parent_of.get(name, name)) from None
     if ctx.onehot_encoder is not None:
         payload = _collapse_onehot_payload(ctx, payload)
         raw_names = list(ctx.raw_feature_names or [])

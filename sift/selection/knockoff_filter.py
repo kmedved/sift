@@ -34,8 +34,10 @@ from sift.estimators.knockoffs import (
 from sift.selection.blocks import labels_for_columns, resolve_feature_blocks
 from sift.selection.conditioning import (
     FDR_COMPATIBLE_PROVENANCE,
+    UnusableIncludeError,
     compose_selected,
     conditioning_record,
+    map_original_to_valid,
     named_feature_space,
     require_include_provenance,
     resolve_conditioning,
@@ -2822,19 +2824,24 @@ def select_fdr(
     valid_cols_arr = np.asarray(resolved_cache.valid_cols, dtype=np.int64)
     include_valid = np.empty(0, dtype=np.int64)
     if resolved_sets is not None and resolved_sets.include:
+        map_original_to_valid(
+            resolved_sets.include,
+            valid_cols_arr,
+            feature_names=cache_names,
+            label="include",
+            prebuilt_cache=cache is not None,
+        )
         include_orig = {int(i) for i in resolved_sets.include}
         include_valid = np.array(
             [i for i, orig in enumerate(valid_cols_arr) if int(orig) in include_orig],
             dtype=np.int64,
         )
-        if include_valid.size != len(resolved_sets.include):
-            raise ValueError(
-                "include features are not present in the cache valid columns "
-                "(dropped as constant/non-finite or never cached)"
-            )
         if np.any(zero_var[include_valid]):
-            raise ValueError(
-                "include features have no usable variation for knockoff conditioning"
+            raise UnusableIncludeError(
+                "include features have no usable variation for knockoff "
+                "conditioning: {refs}. Drop them from include, or pass columns "
+                "that vary on the retained rows",
+                [feature_names[int(i)] for i in include_valid[zero_var[include_valid]]],
             )
     if resolved_sets is not None and resolved_sets.active:
         discovery_original = set(int(i) for i in resolved_sets.discovery)
