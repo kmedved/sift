@@ -240,11 +240,13 @@ Categorical encoding:
   `full_fit_encoding - full_training_prior`. Unknown or unseen categories
   therefore map to a zero centered effect, i.e. the global-mean estimate before
   centering, so a unique-ID, group-proxy, or timestamp-proxy column cannot
-  identify its own fold through the complement folds' prior. Missing values
-  stay one learned category. The unweighted fixed-k folds reproduce sklearn's
-  `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
-  shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
-  m-estimates.
+  identify its own fold through the complement folds' prior. A level that is
+  the only one its fitting rows observed has an effect of exactly zero, so a
+  constant categorical is a zero column that every route treats as constant.
+  Missing values stay one learned category. The unweighted fixed-k folds
+  reproduce sklearn's `TargetEncoder` split construction and `smooth="auto"`
+  empirical-Bayes shrinkage; weighted, grouped, and time-aware calls use
+  fold-local weighted m-estimates.
 - **What centering does and does not guarantee.** It neutralizes only
   *unseen-in-fold* emissions. It is not a defence against high cardinality as
   such: a level appearing two or more times in a fold's training rows still
@@ -1467,9 +1469,14 @@ provenance, so it cannot apply a categorical encoding. Every cache consumer
 that also takes `cat_encoding` (`select_mrmr`, `select_jmi`, `select_jmim`,
 `select_cefsplus`, their selector classes, and `KnockoffSelector`) follows one
 rule: any `cat_encoding` other than `"none"`, supervised or target-blind,
-raises once it has a column to encode, meaning a `cat_features` column present
-in `X` or, without `cat_features`, an object, category or string column. The
-message names the encoding and the columns:
+raises once it has a column to encode, meaning a `cat_features` entry that
+names a column of `X` or, without `cat_features`, an object, category or
+string column. For an ndarray `X` an entry names a column when it is an
+in-range integer position or that column's generated `x{i}` name. Pass
+`cat_features` as a list: a bare `str` is read one character per column
+name, here as in every encoder. `CEFSPlusBinarySelector` takes no cache and
+rejects one before this rule applies. The message names the encoding and the
+columns:
 `cat_encoding='ordinal' cannot be combined with a prebuilt cache because the
 cache has no encoding provenance, so it cannot encode ['city']`. With nothing
 to encode (a numeric frame and no `cat_features`) the encoding is inert,

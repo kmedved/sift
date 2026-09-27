@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Container, List, Literal, Optional, Sequence, Tuple, get_args
 import warnings
 
@@ -443,6 +444,21 @@ def subsample_xy(
 # --- Categorical encoding ---
 
 
+def _category_missing_mask(series: pd.Series) -> np.ndarray:
+    """``series.isna()`` that also reads a signaling-NaN ``Decimal`` as missing.
+
+    pandas finds a NaN ``Decimal`` by comparing it with itself, which raises
+    for a signaling NaN; only then is each value checked on its own.
+    """
+    try:
+        return series.isna().to_numpy()
+    except InvalidOperation:
+        values = series.to_numpy(dtype=object)
+        return np.fromiter(
+            (_is_onehot_missing(value) for value in values), dtype=bool, count=len(values)
+        )
+
+
 @contextmanager
 def suppress_category_encoder_pandas_warnings():
     """Hide narrow pandas 3.0 deprecation warnings emitted by category_encoders."""
@@ -495,10 +511,11 @@ class LeaveOneOutLogitEncoder:
     @staticmethod
     def _series_with_missing_sentinel(series: pd.Series) -> pd.Series:
         sentinel = "__SIFT_MISSING_CATEGORY__"
-        values = set(series.dropna().astype(object).tolist())
+        missing = _category_missing_mask(series)
+        values = set(series[~missing].astype(object).tolist())
         while sentinel in values:
             sentinel += "_"
-        return series.astype(object).where(~series.isna(), sentinel)
+        return series.astype(object).where(~missing, sentinel)
 
     @staticmethod
     def _get_column_series(X: pd.DataFrame, col: str) -> pd.Series:
@@ -666,7 +683,9 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     that the fitting rows never saw therefore emits a zero centered effect (the
     raw global-mean estimate before centering) instead of a fold-identifying
     prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
-    fold markers.
+    fold markers.  When the fitting rows observe a single level, that level's
+    effect is exactly zero (its mean is the prior), not per-fold rounding
+    noise, so a constant categorical encodes to a constant zero column.
 
     **What centering does and does not guarantee.**  Centering neutralizes only
     *unseen-in-fold* emissions: a level absent from a fold's training rows emits
@@ -796,7 +815,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
     @staticmethod
     def _normalized_series(series: pd.Series) -> pd.Series:
-        return series.astype(object).where(~series.isna(), np.nan)
+        return series.astype(object).where(~_category_missing_mask(series), np.nan)
 
     @staticmethod
     def _centered_targets(
@@ -940,6 +959,13 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 sort=False,
                 use_na_sentinel=False,
             )
+            if len(categories) == 1:
+                # One level's mean is the prior itself, so its centered effect
+                # is exactly zero. Computed, it is rounding noise (~1e-17) that
+                # differs per fold, and a rank transform would inflate that
+                # noise into a full-variance column.
+                mappings[col] = {categories.tolist()[0]: 0.0}
+                continue
             counts = np.bincount(codes, weights=weights, minlength=len(categories))
             sums = np.bincount(
                 codes,
@@ -1260,6 +1286,9 @@ def _is_onehot_missing(value: Any) -> bool:
         return True
     if isinstance(value, (bytes, bytearray, str, list, dict, tuple, set)):
         return False
+    if isinstance(value, Decimal):
+        # Quiet or signaling; pd.isna raises on a signaling NaN.
+        return value.is_nan()
     try:
         missing = pd.isna(value)
     except (TypeError, ValueError):
@@ -1282,11 +1311,19 @@ def _onehot_level_identity(value: Any) -> tuple:
     if isinstance(value, np.timedelta64):
         # np.timedelta64 subclasses np.integer, and int() of one fails for
         # most units. Identify it as the pd.Timedelta a timedelta64 column
-        # yields; a unit pandas cannot hold (years, months) stays as is.
-        try:
-            value = pd.Timedelta(value)
-        except (TypeError, ValueError, OverflowError):
-            pass
+        # yields, so equal durations in different units are one level.
+        # Pandas holds no calendar units; numpy equates a year with twelve
+        # months, so years and months become one level counted in months.
+        unit, count = np.datetime_data(value.dtype)
+        if unit in ("Y", "M"):
+            months = int(value.astype(np.int64)) * count * (12 if unit == "Y" else 1)
+            if -(2**63) < months < 2**63:  # -2**63 is NaT
+                value = np.timedelta64(months, "M")
+        else:
+            try:
+                value = pd.Timedelta(value)
+            except (TypeError, ValueError, OverflowError):
+                pass
         return ("hashable", type(value).__name__, value)
     if isinstance(value, (int, np.integer)):
         return ("int", int(value))
@@ -1368,31 +1405,61 @@ def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
         )
 
 
+def _names_array_column(ref: Any, n_features: int) -> bool:
+    """Whether ``ref`` names a column of an ndarray with ``n_features`` columns.
+
+    An in-range integer position or its generated ``x{i}`` name, the two
+    spellings ``include`` accepts for an ndarray.
+    """
+    if isinstance(ref, (bool, np.bool_)):
+        return False
+    if isinstance(ref, (int, np.integer)):
+        return 0 <= int(ref) < n_features
+    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isdigit():
+        return ref == f"x{int(ref[1:])}" and int(ref[1:]) < n_features
+    return False
+
+
 def reject_prebuilt_cache_encoding(X, cat_features, cat_encoding) -> None:
     """Raise when a prebuilt cache would have to apply ``cat_encoding``.
 
     A cache stores no encoding provenance, so it cannot encode a column: any
-    encoding other than ``"none"`` raises once it has a column to encode (the
-    ``cat_features`` present in ``X``, else the object/category/string
-    columns of a DataFrame). With no such column the encoding is inert,
-    exactly as it is without a cache. One rule and one message for every
-    cache consumer.
+    encoding other than ``"none"`` raises once it has a column to encode. A
+    column to encode is a ``cat_features`` entry that names a column of ``X``
+    (a DataFrame label; for an ndarray, an in-range integer position or its
+    generated ``x{i}`` name), or, without ``cat_features``, an
+    object/category/string column of a DataFrame. With no such column the
+    encoding is inert, exactly as it is without a cache. A ``str``
+    ``cat_features`` is read one character per column name, as every
+    encoder reads it. One rule and one message for every cache consumer.
     """
     if cat_encoding in (None, "none"):
         return
-    if not isinstance(X, pd.DataFrame):
-        columns = list(cat_features or [])
-    elif cat_features is None:
-        columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    requested = [] if cat_features is None else list(cat_features)
+    if isinstance(X, pd.DataFrame):
+        if cat_features is None:
+            columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+        else:
+            columns = [col for col in requested if col in X.columns]
     else:
-        columns = [col for col in cat_features if col in X.columns]
-    if columns:
-        raise ValueError(
-            f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
-            "cache because the cache has no encoding provenance, so it cannot "
-            f"encode {columns!r}. Encode those columns before building the "
-            "cache and pass cat_encoding='none', or omit the cache"
+        shape = np.shape(X)
+        n_features = int(shape[1]) if len(shape) == 2 else 0
+        columns = [ref for ref in requested if _names_array_column(ref, n_features)]
+    if not columns:
+        return
+    columns = [col.item() if isinstance(col, np.generic) else col for col in columns]
+    hint = ""
+    if isinstance(cat_features, str):
+        hint = (
+            f". cat_features={cat_features!r} is a str, so each character "
+            f"names a column; pass [{cat_features!r}] to name one column"
         )
+    raise ValueError(
+        f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
+        "cache because the cache has no encoding provenance, so it cannot "
+        f"encode {columns!r}. Encode those columns before building the "
+        f"cache and pass cat_encoding='none', or omit the cache{hint}"
+    )
 
 
 class OneHotBlockEncoder(BaseEstimator, TransformerMixin):

@@ -282,6 +282,26 @@ class UnusableIncludeError(ValueError):
         return type(self)(self.template, list(labels))
 
 
+def no_variation_include_template(*, positions: bool = False) -> str:
+    """Message for include columns with no usable variation to condition on.
+
+    The classic loops see positions of ``X`` and say so, which is what the
+    low-level ``include_idx`` callers read; the filter layer names the
+    columns instead.
+    """
+    if positions:
+        return (
+            "include positions have no usable variation for conditioning "
+            "(constant or non-finite): {refs}. Drop them from include_idx, or "
+            "pass columns that vary on the retained rows"
+        )
+    return (
+        "include features have no usable variation for conditioning "
+        "(constant or non-finite): {refs}. Drop them from include, or pass "
+        "columns that vary on the retained rows"
+    )
+
+
 def dropped_include_template(label: str = "include") -> str:
     """Message for conditioning columns dropped as constant in this call."""
     return (

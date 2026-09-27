@@ -85,6 +85,7 @@ from sift.selection.conditioning import (
     UnusableIncludeError,
     compose_selected,
     conditioning_record,
+    no_variation_include_template,
     require_supported_auto_k,
 )
 from sift.selection.loops import jmi_select, mrmr_select
@@ -141,8 +142,13 @@ def _run_classic_path(
     try:
         return path_func(ctx, prep, k, top_m)
     except UnusableIncludeError as exc:
-        # The classic loops see positions of prep.X_arr; name the columns.
-        raise exc.relabel(lambda position: prep.feature_names[int(position)]) from None
+        # The classic loops report positions of prep.X_arr, in block order
+        # when one-hot blocks are present. Name the columns, in the caller's
+        # include order.
+        rank = {int(position): r for r, position in enumerate(_include_indices(ctx))}
+        positions = sorted(exc.columns, key=lambda position: rank.get(int(position), len(rank)))
+        names = dict.fromkeys(prep.feature_names[int(position)] for position in positions)
+        raise UnusableIncludeError(no_variation_include_template(), list(names)) from None
 
 
 def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], SelectionPayload]:

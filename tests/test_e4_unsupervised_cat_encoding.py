@@ -466,8 +466,14 @@ def test_wrapper_nested_evaluate_and_inference_map_fixed():
 
 
 def test_multi_target_cefsplus_accepts_unsupervised_maps():
-    X, y = _frame(n=48, seed=11)
-    noise = np.random.default_rng(12).normal(size=len(X))
+    X, _y = _frame(n=48, seed=11)
+    # First appearance is LA, NY, CHI, so NY, the level with the effect, is
+    # last in natural order (CHI, LA, NY) but would sit in the middle of a
+    # first-appearance order, which would weaken the monotone relevance.
+    X["city"] = np.array(["LA", "NY", "CHI", "NY"] * 12, dtype=object)
+    rng = np.random.default_rng(12)
+    y = X["city"].eq("NY").astype(float) * 1.8 + 0.4 * X["x0"] + 0.1 * rng.normal(size=48)
+    noise = rng.normal(size=len(X))
     Y = np.column_stack([np.asarray(y), 0.4 * X["x0"].to_numpy() + noise])
     encoded = select_cefsplus(
         X, Y, k=1, cat_encoding="ordinal", subsample=None, verbose=False,

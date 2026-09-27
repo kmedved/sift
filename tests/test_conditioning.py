@@ -32,7 +32,7 @@ from sift.selection.cefsplus_binary_common import binary_refit_loglik_gains
 
 def _expect_infeasible_knockoff_plus():
     return pytest.warns(UserWarning, match=r"knockoff\+ \(offset=1\).*m\*q < 1")
-from sift.selection.loops import _mrmr_loop_blas, _mrmr_loop_processes, mrmr_select
+from sift.selection.loops import _mrmr_loop_blas, _mrmr_loop_processes, jmi_select, mrmr_select
 
 
 def _small_regression(n=80, p=8, seed=0):
@@ -1250,20 +1250,30 @@ _INCLUDE_ROUTES = (
 )
 
 
+# One include order follows the columns of X; the other reverses the two
+# unusable columns, which one-hot encoding places in the other order.
+_INCLUDE_ORDERS = (
+    (["x1", "const_cat", "flat"], "'const_cat', 'flat'"),
+    (["flat", "x1", "const_cat"], "'flat', 'const_cat'"),
+)
+
+
+@pytest.mark.parametrize("include, refs", _INCLUDE_ORDERS, ids=["column_order", "reversed"])
 @pytest.mark.parametrize("encoding", ["onehot", "ordinal", "frequency"])
 @pytest.mark.parametrize(
     "route", _INCLUDE_ROUTES, ids=[route[0] for route in _INCLUDE_ROUTES]
 )
-def test_unusable_include_names_exactly_the_raw_columns(route, encoding):
+def test_unusable_include_names_exactly_the_raw_columns(route, encoding, include, refs):
     _label, call, fit, template = route
     X, y, yb = _constant_include_frame()
     kw = {
         "cat_features": ["const_cat", "city"],
         "cat_encoding": encoding,
-        "include": ["x1", "const_cat", "flat"],
+        "include": include,
         "verbose": False,
     }
-    expected = template.format(refs="'const_cat', 'flat'")
+    # Exactly the unusable raw columns, in the caller's include order.
+    expected = template.format(refs=refs)
 
     with pytest.raises(ValueError) as function_error:
         call(X, y, yb, kw)
@@ -1313,6 +1323,24 @@ def test_unusable_include_on_an_ndarray_uses_the_positional_names():
     with pytest.raises(ValueError) as caught:
         MRMRSelector(k=2, task="regression", include=[0, 2], verbose=False).fit(arr, y)
     assert str(caught.value) == _UNUSABLE_CLASSIC_INCLUDE.format(refs="'x2'")
+
+
+def test_low_level_include_error_names_the_positions_it_was_given():
+    rng = np.random.default_rng(0)
+    X = np.c_[rng.normal(size=(100, 2)), np.ones(100), np.ones(100)]
+    y = X[:, 0] + rng.normal(size=100)
+    relevance = np.array([0.5, 0.1, 0.0, 0.0])
+    expected = (
+        "include positions have no usable variation for conditioning (constant "
+        "or non-finite): 3, 2. Drop them from include_idx, or pass columns that "
+        "vary on the retained rows"
+    )
+    with pytest.raises(ValueError) as caught:
+        mrmr_select(X, relevance, 1, include_idx=[0, 3, 2])
+    assert str(caught.value) == expected
+    with pytest.raises(ValueError) as caught:
+        jmi_select(X, y, 1, relevance, include_idx=[0, 3, 2])
+    assert str(caught.value) == expected
 
 
 _PREBUILT_CACHE_INCLUDE = (

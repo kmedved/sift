@@ -13,7 +13,7 @@ from threadpoolctl import threadpool_limits
 from sift._numba import njit_optional_cache
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, validate_k
-from sift.selection.conditioning import UnusableIncludeError
+from sift.selection.conditioning import UnusableIncludeError, no_variation_include_template
 
 FLOOR = 1e-6
 MrmrBackend = Literal["auto", "serial", "blas", "processes"]
@@ -217,10 +217,7 @@ def _require_usable_include_columns(
     if unusable:
         # Positions of X; the filter layer relabels them to column names.
         raise UnusableIncludeError(
-            "include features have no usable variation for conditioning "
-            "(constant or non-finite): {refs}. Drop them from include, or pass "
-            "columns that vary on the retained rows",
-            unusable,
+            no_variation_include_template(positions=True), unusable
         )
 
 

@@ -434,6 +434,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         "auto_k_config": UNUSED,
     }
     _selector_fn: Callable
+    _accepts_prebuilt_cache = True
     _subsample_auto_is_cache_default = False
     _random_state_auto_is_cache_default = False
 
@@ -554,6 +555,19 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         return False
 
     def _categorical_target(self, y):
+        # An encoder reads one target column. Reject a 2-D y with the function
+        # API's own message before a supervised encoder misreads its shape.
+        if np.ndim(y) == 2 and np.shape(y)[1] > 1:
+            from sift.selection.cefsplus_multi import (
+                reject_unsupported_multi_target_context,
+            )
+
+            reject_unsupported_multi_target_context(
+                n_targets=int(np.shape(y)[1]),
+                selector=self._selector_fn.__name__.removeprefix("select_"),
+                within=getattr(self, "within", None),
+                cat_encoding=getattr(self, "cat_encoding", "none"),
+            )
         return y
 
     def _categorical_sample_weight(self, y, sample_weight):
@@ -635,6 +649,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         if not cat_features:
             return X
 
+        # Validate the target first, as the function API does, so a 2-D y
+        # gets its own message whatever the encoder would raise.
+        y_enc = self._categorical_target(y)
         encoder = _make_category_encoder(
             cat_encoding,
             cat_features,
@@ -664,7 +681,6 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "('target_cv', 'loo_logit', 'onehot', 'ordinal', 'frequency'), "
                 "which do, or drop sample_weight."
             )
-        y_enc = self._categorical_target(y)
         with suppress_category_encoder_pandas_warnings():
             if isinstance(encoder, LeaveOneOutLogitEncoder):
                 X_encoded = encoder.fit_transform(
@@ -921,6 +937,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             )
 
         if resolved_cache is not None:
+            # A class that takes no cache says so before the encoding rule
+            # advises encoding the columns first.
+            if not self._accepts_prebuilt_cache:
+                raise ValueError(
+                    f"{self.__class__.__name__} does not support prebuilt caches."
+                )
             reject_prebuilt_cache_encoding(
                 X,
                 getattr(self, "cat_features", None),
@@ -2423,7 +2445,8 @@ class CEFSPlusSelector(_BaseSelector):
         ``random_state`` is explicit beside a ``cache``, if ``sample_weight``
         is passed beside a ``cache``, if a ``cat_encoding`` other than
         ``"none"`` (supervised or target-blind) has a column to encode beside
-        a ``cache``, or if ``X`` is sparse or not two-dimensional. Contextual
+        a ``cache``, if a 2-D ``y`` meets a supervised ``cat_encoding``, or if
+        ``X`` is sparse or not two-dimensional. Contextual
         ``cat_encoding="target_cv"`` with ``groups``/``time`` additionally
         requires an explicit
         ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
@@ -2786,6 +2809,8 @@ class CEFSPlusBinarySelector(_BaseSelector):
 
     """
 
+    _accepts_prebuilt_cache = False
+
     def __init__(
         self,
         k: int | str = 75,
@@ -2882,9 +2907,6 @@ class CEFSPlusBinarySelector(_BaseSelector):
         encoding_groups=None,
         encoding_time=None,
     ):
-        if cache is not None:
-            raise ValueError("CEFSPlusBinarySelector does not support prebuilt caches.")
-
         call_params = dict(self._selector_params())
         call_params["sample_weight"] = sample_weight
         if groups is not None:

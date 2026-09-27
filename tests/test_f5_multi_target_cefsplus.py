@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression
 from sift import (
     AutoKConfig,
     CEFSPlusSelector,
+    MRMRSelector,
     build_cache,
     evaluate_feature_path,
     select_cached,
@@ -284,6 +285,36 @@ def test_unsupported_2d_combinations_are_rejected():
         )
     with pytest.raises(ValueError, match="2-D y is only supported"):
         select_fdr(X, Y, q=0.2)
+
+
+# "target" needs the optional category_encoders only once the target is valid.
+@pytest.mark.parametrize("encoding", ["target_cv", "loo_logit", "target"])
+@pytest.mark.parametrize("k", [2, "auto"])
+def test_selector_classes_reject_2d_y_with_the_function_api_message(encoding, k):
+    X, Y = _shared_signal_frame()
+    labeled = X.copy()
+    labeled["city"] = np.array(["a", "b", "c", "d"])[np.arange(len(X)) % 4]
+    with pytest.raises(ValueError) as function_error:
+        select_cefsplus(
+            labeled, Y, k=k, cat_encoding=encoding,
+            allow_full_data_target_encoding=encoding != "target_cv", verbose=False,
+        )
+    # The wrapper used to fit the encoder on the flattened 2-D y first
+    # ("X has 240 rows but y has 480").
+    with pytest.raises(ValueError) as wrapper_error:
+        CEFSPlusSelector(k=k, cat_encoding=encoding, verbose=False).fit(labeled, Y)
+    assert str(wrapper_error.value) == str(function_error.value) == (
+        f"2-D y is not supported with supervised cat_encoding={encoding!r}; use "
+        "'none', 'onehot', 'ordinal', or 'frequency', or encode first"
+    )
+    with pytest.raises(ValueError) as wrapper_error:
+        MRMRSelector(
+            k=2, estimator="gaussian", cat_encoding=encoding, verbose=False
+        ).fit(labeled, Y)
+    assert str(wrapper_error.value) == (
+        "2-D y is only supported for select_cefsplus / CEFSPlusSelector and "
+        "select_cached(method='cefsplus'); got selector='mrmr'"
+    )
 
 
 def test_select_k_auto_keeps_string_classification_labels():
