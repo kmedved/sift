@@ -130,6 +130,30 @@ def _single_target_y(y):
     return y
 
 
+def _require_fit_target_shape(y, n_rows: int) -> None:
+    """Reject a ``y`` that ``_single_target_y`` left in a shape ``fit`` cannot use.
+
+    A zero-width, 3-D or scalar ``y``, or one whose length differs from the
+    rows of ``X``, used to surface as a numpy ``TypeError`` or ``IndexError``
+    from inside the bootstrap loop.
+    """
+    try:
+        shape = tuple(np.shape(y))
+    except (TypeError, ValueError):
+        return
+    if len(shape) != 1:
+        raise ValueError(
+            "y must be 1-D or a single column of shape (n_samples, 1); "
+            "stability selection fits one target per bootstrap run, but y has "
+            f"shape {shape}. Pass a 1-D y"
+        )
+    if shape[0] != int(n_rows):
+        raise ValueError(
+            f"X and y must have the same number of rows; X has {int(n_rows)} "
+            f"rows but y has {shape[0]}"
+        )
+
+
 # =============================================================================
 # Stability Selector
 # =============================================================================
@@ -378,8 +402,9 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             Training data.
         y : array-like of shape (n_samples,) or (n_samples, 1)
             Target values. A single-column 2-D target (including a
-            one-column DataFrame) is used as its 1-D column; a wider one
-            raises ``ValueError``.
+            one-column DataFrame) is used as its 1-D column. Any other shape
+            (a wider, zero-width or 3-D target), or a length that differs
+            from the rows of ``X``, raises ``ValueError``.
         sample_weight : array-like of shape (n_samples,), optional
             Sample weights.
         groups : array, optional
@@ -422,6 +447,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             self._n_rows_original_ = int(
                 shape[0] if shape is not None else np.asarray(X).shape[0]
             )
+            _require_fit_target_shape(y, self._n_rows_original_)
             if isinstance(X, pd.DataFrame):
                 column_index = _feature_names_index(X.columns)
                 duplicate_mask = column_index.duplicated()
