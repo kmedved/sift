@@ -262,7 +262,7 @@ class UnusableIncludeError(ValueError):
 
     ``columns`` holds the offending columns as the raising routine saw them:
     labels, or positions for the classic loops. A caller that transformed
-    ``X`` first re-raises :meth:`relabel`, so the message quotes the columns
+    ``X`` first re-raises ``relabel``, so the message quotes the columns
     the user wrote (a raw categorical, never its one-hot dummy ``city__NY``).
     """
 
@@ -302,7 +302,7 @@ def map_original_to_valid(
 ) -> np.ndarray:
     """Map original column positions onto cache.valid_cols / Z columns.
 
-    A missing column raises :class:`UnusableIncludeError` naming it by
+    A missing column raises ``UnusableIncludeError`` naming it by
     ``feature_names`` (positions when there are none); the filter layer
     relabels one-hot dummies to their raw column. ``prebuilt_cache`` is set by
     callers that received a cache from the user: only those can report a
