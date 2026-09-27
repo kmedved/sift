@@ -62,6 +62,7 @@ from sift.selection.knockoff_filter import (
     _validate_prebuilt_cache_structure,
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
+from sift.selection.within import validate_within, within_split_guidance
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset(
     {"target_cv", "loo", "target", "james_stein", "loo_logit"}
@@ -956,6 +957,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 time,
                 groups,
                 allow_nested=True,
+                within=validate_within(getattr(self, "within", None)),
             )
             if (
                 has_supervised_categoricals
@@ -1108,11 +1110,12 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
     ):
         if cache is not None:
             raise ValueError("auto_k_mode='nested' does not support prebuilt caches")
-        if getattr(self, "within", None) is not None:
+        within = validate_within(getattr(self, "within", None))
+        if within is not None:
             raise ValueError(
                 "within is not supported with auto_k_mode='nested'; use "
-                "function-style prefix_only evaluate, gaussian_cv, or "
-                "xfit_objective so demeaning stays fold-local"
+                "auto_k_mode='prefix_only' so demeaning stays fold-local. "
+                f"{within_split_guidance(within)}"
             )
 
         y_arr = np.asarray(y).reshape(-1)
@@ -1444,7 +1447,8 @@ class MRMRSelector(_BaseSelector):
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
         estimators mean-impute first. ``transform`` still returns selected raw
         columns.
@@ -1745,7 +1749,8 @@ class JMISelector(_BaseSelector):
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
         estimators mean-impute first. ``transform`` still returns selected raw
         columns.
@@ -2044,7 +2049,8 @@ class JMIMSelector(_BaseSelector):
         validation row has a seen level raises before any path work -- always
         the case for ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         Gaussian routes need finite ``X`` and ``y`` under ``within``; classic
         estimators mean-impute first. ``transform`` still returns selected raw
         columns.

@@ -115,23 +115,36 @@ _IMPOSSIBLE_WITHIN_SPLITS: dict[str, dict[str, str]] = {
 }
 
 
+#: The fold-scored route that keeps levels on both sides of a split, and the
+#: selectors that offer it: ``gaussian_cv`` / ``xfit_objective`` exist only on
+#: the Gaussian path, never on classic estimators or ``select_k_auto``.
+_KFOLD_WITHIN_ROUTE = "k_method='gaussian_cv' or 'xfit_objective' with strategy='kfold'"
+_GAUSSIAN_PATH = (
+    "the Gaussian path (select_cefsplus / CEFSPlusSelector, or "
+    "estimator='gaussian' for mRMR, JMI and JMIM)"
+)
+
+
 def within_split_guidance(mode: str) -> str:
     """Name the auto-k combinations that can satisfy the within guard.
 
     Kept in one place so the up-front rejection, the fold guard and the
-    ``AutoKConfig`` validator all quote the same working routes.
+    ``AutoKConfig`` validator all quote the same working routes.  The text
+    names the Gaussian path because a classic estimator rejects
+    ``gaussian_cv`` / ``xfit_objective`` outright, and ``select_k_auto``
+    scores only ``evaluate``.
     """
     if mode == "two_way":
         return (
-            "within='two_way' scores only under k_method='gaussian_cv' or "
-            "'xfit_objective' with strategy='kfold', which keeps entity and "
-            "time levels on both sides of every split"
+            f"within='two_way' scores only under {_KFOLD_WITHIN_ROUTE}, which "
+            "keeps entity and time levels on both sides of every split; those "
+            f"methods run on {_GAUSSIAN_PATH}, so select_k_auto and the "
+            "classic estimators cannot validate within='two_way'"
         )
     return (
-        "within='groups' scores under k_method='gaussian_cv' or "
-        "'xfit_objective' with strategy='kfold', or under k_method='evaluate' "
-        "with strategy='time_holdout' when entities persist across the "
-        "holdout boundary"
+        f"within='groups' scores under {_KFOLD_WITHIN_ROUTE} on {_GAUSSIAN_PATH}, "
+        "or under k_method='evaluate' with strategy='time_holdout' when "
+        "entities persist across the holdout boundary"
     )
 
 
@@ -184,7 +197,8 @@ class UnseenWithinLevelTally:
     """Running count of validation rows whose within level was unseen.
 
     One tally spans a whole auto-k call so the partial-overlap warning is
-    emitted once, not once per fold.
+    emitted once, not once per fold.  ``strategy`` is the split that produced
+    the folds; the warning uses it so its remedy never recommends that split.
     """
 
     mode: str | None = None
@@ -192,6 +206,7 @@ class UnseenWithinLevelTally:
     entity_unseen: int = 0
     time_unseen: int = 0
     _dimensions: list[str] = field(default_factory=list)
+    strategy: str | None = None
 
     def add(self, *, mode: str, n_rows: int, entity_unseen: int, time_unseen: int) -> None:
         self.mode = mode
@@ -205,6 +220,30 @@ def _unseen_clause(dimension: str, unseen: int, n_rows: int) -> str:
     return f"{unseen} of {n_rows} validation rows ({fraction:.1%}) had an unseen {dimension} level"
 
 
+def _unseen_level_remedy(mode: str, strategy: str | None) -> str:
+    """Say how to avoid unseen levels without recommending the split that made them."""
+    if strategy == "kfold":
+        # kfold is the route within_split_guidance recommends, so name the
+        # cause (levels with very few rows) instead of the route.
+        return (
+            "Under strategy='kfold' a level is unseen only when all of its rows "
+            "fall in the same validation fold, so the affected levels have very "
+            "few rows (a single-row level is always unseen): drop or pool them, "
+            "or raise AutoKConfig.xfit_folds so fewer of their rows are held "
+            "out together"
+        )
+    remedy = "Drop or otherwise handle late-entering or early-exiting entities"
+    if strategy == "time_holdout":
+        return (
+            f"{remedy}, or switch to {_KFOLD_WITHIN_ROUTE} on {_GAUSSIAN_PATH}, "
+            "which holds out rows instead of whole periods"
+        )
+    return (
+        f"{remedy}, or choose a split that keeps levels overlapping: "
+        f"{within_split_guidance(mode)}"
+    )
+
+
 def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None") -> None:
     """Emit one warning per auto-k call for partially unseen validation levels.
 
@@ -212,6 +251,13 @@ def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None")
     level overlaps training. Rows with an unseen entity use the training grand
     mean for that effect; an unseen time level contributes no time effect.
     Effects from a seen level in the other dimension still apply.
+
+    The recommended ``strategy="kfold"`` route warns too: those rows are
+    scored with the same partial demeaning whichever split produced them, and
+    staying silent would hide panels dominated by one- or two-row levels.  Its
+    remedy names that cause (and ``AutoKConfig.xfit_folds``) rather than
+    recommending ``kfold`` again; a ``time_holdout`` remedy likewise points
+    away from the holdout.
     """
     if tally is None or tally.n_rows <= 0:
         return
@@ -235,9 +281,8 @@ def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None")
     warnings.warn(
         f"within={mode!r} auto-k scoring: {' and '.join(clauses)}; "
         f"{' and '.join(missing_effects)}. {other_effect}The chosen k "
-        "uses a mixture of fully and partially demeaned rows. Drop or "
-        "otherwise handle late-entering or early-exiting entities, or choose a "
-        f"split that keeps levels overlapping: {within_split_guidance(mode)}",
+        "uses a mixture of fully and partially demeaned rows. "
+        f"{_unseen_level_remedy(mode, tally.strategy)}",
         UserWarning,
         stacklevel=3,
     )

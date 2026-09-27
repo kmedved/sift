@@ -399,7 +399,9 @@ def _fold_score_arrays(
     y_fold = None
     # One tally for the whole call so partial level overlap warns once, not
     # once per fold.
-    within_tally = None if within is None else UnseenWithinLevelTally()
+    within_tally = (
+        None if within is None else UnseenWithinLevelTally(strategy=config.strategy)
+    )
     if within is not None:
         if within_X is None or within_y is None:
             raise ValueError("within fold scoring requires the encoded pre-rank matrix")
