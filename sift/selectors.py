@@ -555,6 +555,19 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         return False
 
     def _categorical_target(self, y):
+        # An encoder reads one target column. Reject a 2-D y with the function
+        # API's own message before a supervised encoder misreads its shape.
+        if np.ndim(y) == 2 and np.shape(y)[1] > 1:
+            from sift.selection.cefsplus_multi import (
+                reject_unsupported_multi_target_context,
+            )
+
+            reject_unsupported_multi_target_context(
+                n_targets=int(np.shape(y)[1]),
+                selector=self._selector_fn.__name__.removeprefix("select_"),
+                within=getattr(self, "within", None),
+                cat_encoding=getattr(self, "cat_encoding", "none"),
+            )
         return y
 
     def _categorical_sample_weight(self, y, sample_weight):
@@ -2422,7 +2435,8 @@ class CEFSPlusSelector(_BaseSelector):
         ``random_state`` is explicit beside a ``cache``, if ``sample_weight``
         is passed beside a ``cache``, if a ``cat_encoding`` other than
         ``"none"`` (supervised or target-blind) has a column to encode beside
-        a ``cache``, or if ``X`` is sparse or not two-dimensional. Contextual
+        a ``cache``, if a 2-D ``y`` meets a supervised ``cat_encoding``, or if
+        ``X`` is sparse or not two-dimensional. Contextual
         ``cat_encoding="target_cv"`` with ``groups``/``time`` additionally
         requires an explicit
         ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
