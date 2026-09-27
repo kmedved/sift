@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -257,6 +257,40 @@ def conditioning_record(
     return record
 
 
+class UnusableIncludeError(ValueError):
+    """``include`` names columns that carry no usable variation.
+
+    ``columns`` holds the offending columns as the raising routine saw them:
+    labels, or positions for the classic loops. A caller that transformed
+    ``X`` first re-raises ``relabel``, so the message quotes the columns
+    the user wrote (a raw categorical, never its one-hot dummy ``city__NY``).
+    """
+
+    def __init__(self, template: str, columns: Sequence[Any]) -> None:
+        self.template = template
+        self.columns = tuple(columns)
+        super().__init__(
+            template.format(refs=", ".join(repr(column) for column in self.columns))
+        )
+
+    def __reduce__(self):
+        return type(self), (self.template, self.columns)
+
+    def relabel(self, label_of: Callable[[Any], Any]) -> "UnusableIncludeError":
+        """Same message with every column mapped through ``label_of``, deduplicated."""
+        labels = dict.fromkeys(label_of(column) for column in self.columns)
+        return type(self)(self.template, list(labels))
+
+
+def dropped_include_template(label: str = "include") -> str:
+    """Message for conditioning columns dropped as constant in this call."""
+    return (
+        f"{label} features were dropped as constant or non-finite, so they "
+        "carry no information to condition on: {refs}. Drop them from "
+        f"{label}, or pass columns that vary on the retained rows"
+    )
+
+
 def map_original_to_valid(
     original_idx: Sequence[int],
     valid_cols: np.ndarray,
@@ -264,18 +298,16 @@ def map_original_to_valid(
     feature_names: Sequence[str] | None,
     label: str,
     missing: Literal["error", "drop"] = "error",
-    raw_names: Mapping[Any, Any] | None = None,
     prebuilt_cache: bool = False,
 ) -> np.ndarray:
     """Map original column positions onto cache.valid_cols / Z columns.
 
-    ``raw_names`` maps an internal column name back to the raw column the
-    caller passed, so an error never quotes a name the user never wrote
-    (one-hot dummies such as ``city__NY``). Omitting it reports the internal
-    names unchanged. ``prebuilt_cache`` is set by callers that received a
-    cache from the user: only those can report a column as "never cached",
-    because a cache built from ``X`` in this call drops columns for exactly
-    one reason.
+    A missing column raises ``UnusableIncludeError`` naming it by
+    ``feature_names`` (positions when there are none); the filter layer
+    relabels one-hot dummies to their raw column. ``prebuilt_cache`` is set by
+    callers that received a cache from the user: only those can report a
+    column as "never cached", because a cache built from ``X`` in this call
+    drops columns for exactly one reason.
     """
     lookup = {int(orig): int(local) for local, orig in enumerate(np.asarray(valid_cols))}
     mapped: list[int] = []
@@ -288,21 +320,16 @@ def map_original_to_valid(
             mapped.append(lookup[key])
     if missing_idx and missing == "error":
         names = list(feature_names or [])
-        refs = _format_original_refs(
-            missing_idx, names, named=bool(names), raw_names=raw_names
-        )
+        columns = [names[i] for i in missing_idx] if names else missing_idx
         if prebuilt_cache:
-            raise ValueError(
+            raise UnusableIncludeError(
                 f"{label} features are not present in the cache valid columns "
-                f"(dropped as constant/non-finite or never cached): {refs}. "
+                "(dropped as constant/non-finite or never cached): {refs}. "
                 f"Drop them from {label}, or rebuild the cache from columns "
-                "that vary"
+                "that vary",
+                columns,
             )
-        raise ValueError(
-            f"{label} features were dropped as constant or non-finite, so they "
-            f"carry no information to condition on: {refs}. Drop them from "
-            f"{label}, or pass columns that vary on the retained rows"
-        )
+        raise UnusableIncludeError(dropped_include_template(label), columns)
     return np.asarray(mapped, dtype=np.int64)
 
 
@@ -440,11 +467,7 @@ def _format_original_refs(
     names: Sequence[str],
     *,
     named: bool,
-    raw_names: Mapping[Any, Any] | None = None,
 ) -> str:
     if named and names:
-        labels = [names[int(i)] for i in indices]
-        if raw_names is not None:
-            labels = list(dict.fromkeys(raw_names.get(name, name) for name in labels))
-        return ", ".join(repr(name) for name in labels)
+        return ", ".join(repr(names[int(i)]) for i in indices)
     return ", ".join(str(int(i)) for i in indices)

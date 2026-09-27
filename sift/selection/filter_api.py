@@ -22,6 +22,7 @@ from sift._preprocess import (
     OneHotBlockEncoder,
     RelevanceMethod,
     Task,
+    reject_prebuilt_cache_encoding,
     resolve_jmi_estimator,
     validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
@@ -87,7 +88,7 @@ from sift.selection.blocks import (
     require_atomic_conditioning,
     resolve_feature_blocks,
 )
-from sift.selection.conditioning import _as_refs, resolve_conditioning
+from sift.selection.conditioning import UnusableIncludeError, _as_refs, resolve_conditioning
 from sift.selection.within import validate_within, within_split_guidance
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
@@ -416,10 +417,10 @@ def select_mrmr(
         exactly the rows it was built from. Because a cache freezes its rows
         and weights, ``sample_weight``, ``subsample``, and ``random_state``
         cannot be passed alongside it. A cache also stores no encoding
-        provenance: a ``ClassicFeatureCache`` rejects every ``cat_encoding``
-        other than ``"none"``, and a ``FeatureCache`` rejects ``"onehot"``
-        (no cache can be built from a frame that still holds categorical
-        columns in the first place).
+        provenance, so any ``cat_encoding`` other than ``"none"`` raises once
+        it has a column to encode (a ``cat_features`` column present in
+        ``X``, else an object, category or string column); with nothing to
+        encode it is inert, as it is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -517,13 +518,14 @@ def select_mrmr(
         columns is fit on every row, except under ``k_method="evaluate"``
         with ``strategy="time_holdout"``, where it is fit on the training
         partition; the map is target-blind, so this is not target leakage.
-        Prebuilt caches, ``within``, and knockoffs raise.
+        ``within`` and knockoffs raise, and so does a prebuilt cache when
+        there is a column to encode.
         ``"ordinal"`` and ``"frequency"`` are target-blind numeric maps over
         the levels observed in positive-weight training rows; pandas
         categories that are declared but never observed are skipped. Ordinal
         codes are ``0..C-1`` in natural order -- an ordered ``Categorical``
         keeps its declared category order, otherwise bool, then numeric
-        levels ascending by value (ints and floats together), then
+        levels ascending by value (all real numbers together), then
         datetime-like by value, then strings in ordinary string order, then
         other types, with a fitted missing level taking the last code -- and
         unknown levels map to ``-1``; frequency is the training-mass
@@ -545,8 +547,9 @@ def select_mrmr(
         auto-k routes such as in-sample EBIC still encode the call's ``X``.
         Prefix-only ranking on non-holdout splits may still use a full-data
         path -- use nested evaluate for holdout-blind selection assessment.
-        Prebuilt caches and resampled auto-k
-        (``stability`` / ``knockoff_path`` / ``consensus``) raise.
+        Resampled auto-k (``stability`` / ``knockoff_path`` /
+        ``consensus``) raises, and so does a prebuilt cache when there is a
+        column to encode.
     target_cv_n_splits : int, default 5
         Requested fold count for ``cat_encoding="target_cv"``.  Must be at
         least 2; the encoder reports the count it could actually use in
@@ -777,11 +780,11 @@ def select_jmi(
         and the column names are checked, never the row values, so a cache
         must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it. A cache also stores no encoding provenance: a
-        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
-        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
-        be built from a frame that still holds categorical columns in the
-        first place).
+        accompany it. A cache also stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises once it has a column to
+        encode (a ``cat_features`` column present in ``X``, else an object,
+        category or string column); with nothing to encode it is inert, as it
+        is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1056,11 +1059,11 @@ def select_jmim(
         and the column names are checked, never the row values, so a cache
         must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it. A cache also stores no encoding provenance: a
-        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
-        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
-        be built from a frame that still holds categorical columns in the
-        first place).
+        accompany it. A cache also stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises once it has a column to
+        encode (a ``cat_features`` column present in ``X``, else an object,
+        category or string column); with nothing to encode it is inert, as it
+        is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1349,9 +1352,11 @@ def select_cefsplus(
         the row values, so a cache must be used with exactly the rows it was
         built from.  Because a cache freezes its rows and weights,
         ``sample_weight``, ``subsample``, and ``random_state`` cannot be
-        passed alongside it, and it stores no encoding provenance, so
-        ``cat_encoding="onehot"`` is rejected beside it (no cache can be built
-        from a frame that still holds categorical columns in the first place).
+        passed alongside it, and it stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises beside it once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1926,7 +1931,14 @@ def _select_filter(
             "store_proxies=True is currently supported only by Gaussian/cached "
             "filter routes; choose estimator='gaussian' or omit store_proxies"
         )
-    payload = handler(ctx)
+    try:
+        payload = handler(ctx)
+    except UnusableIncludeError as exc:
+        if ctx.onehot_parents is None:
+            raise
+        # Report the raw column the caller wrote, not its one-hot dummies.
+        parent_of = dict(zip(ctx.feature_names, ctx.onehot_parents))
+        raise exc.relabel(lambda name: parent_of.get(name, name)) from None
     if ctx.onehot_encoder is not None:
         payload = _collapse_onehot_payload(ctx, payload)
         raw_names = list(ctx.raw_feature_names or [])
@@ -1969,11 +1981,6 @@ def _apply_onehot_encoding(ctx: FilterContext) -> FilterContext:
     encoding = (ctx.selector_kwargs or {}).get("cat_encoding", "none")
     if encoding != "onehot":
         return ctx
-    if ctx.request.cache is not None:
-        raise ValueError(
-            "cat_encoding='onehot' cannot be combined with a prebuilt cache "
-            "because the cache has no one-hot provenance"
-        )
     if ctx.within is not None:
         raise ValueError(
             "cat_encoding='onehot' is not supported with within panel demeaning"
@@ -2369,14 +2376,17 @@ def _validate_request_cache(
             )
         validate_classic_cache_compatibility(request.X, cache)
         _validate_classic_cache_overrides(request)
-        return
-    if spec.estimator == "gaussian":
+    elif spec.estimator == "gaussian":
         _validate_gaussian_cache_compatibility(
             request.X, cache, n_rows, n_features
         )
         _validate_gaussian_cache_overrides(request)
-        return
-    raise ValueError("cache is supported only with estimator='gaussian'")
+    else:
+        raise ValueError("cache is supported only with estimator='gaussian'")
+    kwargs = request.selector_kwargs or {}
+    reject_prebuilt_cache_encoding(
+        request.X, kwargs.get("cat_features"), kwargs.get("cat_encoding")
+    )
 
 
 def _require_fixed_filter_metadata(ctx: FilterContext) -> None:

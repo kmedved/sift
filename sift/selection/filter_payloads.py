@@ -82,6 +82,7 @@ from sift.selection.filter_auto_k import (
     select_gaussian_xfit_objective_path,
 )
 from sift.selection.conditioning import (
+    UnusableIncludeError,
     compose_selected,
     conditioning_record,
     require_supported_auto_k,
@@ -134,6 +135,16 @@ GaussianMethod = Callable[["FilterContext"], str]
 GaussianRunner = Callable[..., tuple[list[str], list[int], pd.DataFrame, dict]]
 
 
+def _run_classic_path(
+    path_func: ClassicPath, ctx: "FilterContext", prep: ClassicPrepared, k: int, top_m: int
+) -> np.ndarray:
+    try:
+        return path_func(ctx, prep, k, top_m)
+    except UnusableIncludeError as exc:
+        # The classic loops see positions of prep.X_arr; name the columns.
+        raise exc.relabel(lambda position: prep.feature_names[int(position)]) from None
+
+
 def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], SelectionPayload]:
     def fixed_classic(ctx: "FilterContext") -> SelectionPayload:
         prep = _prepare_xy_classic(ctx)
@@ -144,7 +155,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 f"{ctx.spec.display_name} classic: selecting {k} features from "
                 f"{prep.X_arr.shape[1]} (top_m={top_m})"
             )
-        selected_idx = path_func(ctx, prep, k, top_m)
+        selected_idx = _run_classic_path(path_func, ctx, prep, k, top_m)
         selected_idx, selected = _compose_classic_selection(ctx, prep, selected_idx)
         ranking = None
         diagnostics = None
@@ -202,7 +213,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 f"{ctx.spec.display_name} classic auto-k: building path to {max_k} "
                 f"features (top_m={top_m})"
             )
-        path_idx = path_func(ctx, prep, max_k, top_m)
+        path_idx = _run_classic_path(path_func, ctx, prep, max_k, top_m)
         X_eval = (
             ctx.request.X
             if isinstance(ctx.request.X, pd.DataFrame)
@@ -1226,16 +1237,8 @@ def _cache_for_gaussian(
     y_sel = ctx.request.y
     X_pre = ctx.request.X
     if ctx.request.cache is not None:
-        if (
-            _kw(ctx, "cat_encoding", "none")
-            in {"target_cv", "onehot", "ordinal", "frequency"}
-            and cat_features
-        ):
-            raise ValueError(
-                f"cat_encoding={_kw(ctx, 'cat_encoding')!r} cannot be combined "
-                "with a prebuilt Gaussian cache because the cache has no "
-                "encoding provenance"
-            )
+        # _validate_request_cache already rejected any encoding with a column
+        # to encode; what reaches here is inert.
         return (
             ctx.request.cache,
             cat_features,
@@ -1308,8 +1311,6 @@ def _cache_for_gaussian(
     cache._built_for_filter_call = True
     if within_two_way is not None:
         cache._within_two_way = within_two_way
-    if ctx.onehot_parents is not None:
-        cache._raw_name_by_encoded = dict(zip(ctx.feature_names, ctx.onehot_parents))
     return (
         cache,
         cat_features,
@@ -1474,12 +1475,6 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     if cache is not None:
         if not is_classic_cache(cache):
             raise ValueError("cache is supported only with estimator='gaussian'")
-        encoding = _kw(ctx, "cat_encoding", "none")
-        if encoding not in (None, "none"):
-            raise ValueError(
-                f"cat_encoding={encoding!r} cannot be combined with a prebuilt "
-                "classic cache because the cache has no encoding provenance"
-            )
         y_arr = validate_target(
             ctx.request.y,
             ctx.request.task,

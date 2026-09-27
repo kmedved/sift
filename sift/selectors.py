@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import importlib.util
 import warnings
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Callable, Literal
 
@@ -33,6 +34,7 @@ from sift._preprocess import (
     TargetCVEncoder,
     ensure_weights,
     extract_feature_names,
+    reject_prebuilt_cache_encoding,
     suppress_category_encoder_pandas_warnings,
     validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
@@ -64,6 +66,7 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 from sift.selection.within import validate_within, within_split_guidance
+from sift.selection.conditioning import UnusableIncludeError
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset(
     {"target_cv", "loo", "target", "james_stein", "loo_logit"}
@@ -342,6 +345,17 @@ def _apply_onehot_call_params(selector, call_params, feature_names) -> tuple:
             for dummy in encoder.encoded_columns_for(raw_names[int(raw_i)])
         ]
     return encoder, composed, encoded_names
+
+
+@contextmanager
+def _raw_include_errors(encoder):
+    """Quote the raw columns, not the wrapper's one-hot dummies, in include errors."""
+    try:
+        yield
+    except UnusableIncludeError as exc:
+        if not isinstance(encoder, OneHotBlockEncoder):
+            raise
+        raise exc.relabel(encoder.parent_of) from None
 
 
 def _make_category_encoder(
@@ -781,7 +795,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             self, call_params, feature_names
         )
 
-        try:
+        with _raw_include_errors(onehot_encoder):
             result = self._selector_fn(
                 X_fit,
                 y,
@@ -789,20 +803,6 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 return_result=True,
                 **call_params,
             )
-        except ValueError as exc:
-            if (
-                isinstance(onehot_encoder, OneHotBlockEncoder)
-                and str(exc).startswith("include features were dropped as constant or non-finite")
-            ):
-                raw_include = list(dict.fromkeys(
-                    onehot_encoder.parent_of(name)
-                    for name in call_params.get("include", ())
-                ))
-                raise ValueError(
-                    "include features were dropped as constant or non-finite: "
-                    f"{raw_include!r}. Pass raw columns that vary on the retained rows"
-                ) from exc
-            raise
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         if hasattr(result, "selected_indices"):
@@ -920,20 +920,11 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "k='auto' nested evaluate paths"
             )
 
-        if resolved_cache is not None and has_supervised_categoricals:
-            raise ValueError(
-                "selector-class supervised categorical encoding does not support "
-                "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
-                "cache so the selector can fit encoders on the training rows."
-            )
-        if resolved_cache is not None and (
-            getattr(self, "cat_encoding", "none") == "onehot"
-            or is_unsupervised_cat_encoding(getattr(self, "cat_encoding", "none"))
-        ):
-            encoding = getattr(self, "cat_encoding", "none")
-            raise ValueError(
-                f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
-                "because the cache has no encoding provenance"
+        if resolved_cache is not None:
+            reject_prebuilt_cache_encoding(
+                X,
+                getattr(self, "cat_features", None),
+                getattr(self, "cat_encoding", "none"),
             )
         if getattr(self, "cat_encoding", "none") == "onehot":
             validate_onehot_max_levels(getattr(self, "onehot_max_levels", 32))
@@ -1363,7 +1354,7 @@ class MRMRSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -1428,10 +1419,11 @@ class MRMRSelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1521,9 +1513,9 @@ class MRMRSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, or if ``X`` is sparse or
-        not two-dimensional.
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, or if
+        ``X`` is sparse or not two-dimensional.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
         because the fitted encoder is not invertible.
@@ -1672,7 +1664,7 @@ class JMISelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -1730,10 +1722,11 @@ class JMISelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -1823,8 +1816,8 @@ class JMISelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, if
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, if
         ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
         sparse or not two-dimensional.
     NotImplementedError
@@ -1972,7 +1965,7 @@ class JMIMSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -2030,10 +2023,11 @@ class JMIMSelector(_BaseSelector):
         order; a positional cache requires the matching ndarray. Only the row
         count and the column names are checked, never the row values, so a
         cache must be used with exactly the rows it was built from. A cache
-        stores no encoding provenance, so every ``cat_encoding`` other than
-        ``"none"`` is rejected -- including the target-blind ``"onehot"``,
-        ``"ordinal"`` and ``"frequency"`` -- and only a supervised encoding
-        with no column to encode passes as a no-op.
+        stores no encoding provenance, so any ``cat_encoding`` other than
+        ``"none"`` -- supervised or target-blind -- raises once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -2123,8 +2117,8 @@ class JMIMSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``k="auto"`` has
         neither ``auto_k_config`` nor row context, if ``subsample`` or
-        ``random_state`` is explicit beside a ``cache``, if a supervised
-        ``cat_encoding`` is combined with a ``cache``, if
+        ``random_state`` is explicit beside a ``cache``, if a ``cat_encoding``
+        other than ``"none"`` has a column to encode beside a ``cache``, if
         ``estimator="ksg"`` is combined with ``sample_weight``, or if ``X`` is
         sparse or not two-dimensional.
     NotImplementedError
@@ -2268,7 +2262,7 @@ class CEFSPlusSelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -2326,10 +2320,11 @@ class CEFSPlusSelector(_BaseSelector):
         are checked, never the row values, so a cache must be used with exactly
         the rows it was built from. A cache carries its own row weights, so it
         cannot be combined with ``sample_weight``, and it stores no encoding
-        provenance, so every ``cat_encoding`` other than ``"none"`` is rejected
-        -- including the target-blind ``"onehot"``, ``"ordinal"`` and
-        ``"frequency"`` -- and only a supervised encoding with no column to
-        encode passes as a no-op.
+        provenance, so any ``cat_encoding`` other than ``"none"`` --
+        supervised or target-blind -- raises once it has a column to encode (a
+        ``cat_features`` column present in ``X``, else an object, category or
+        string column); with nothing to encode it is inert, as it is without a
+        cache.
     auto_k_config : AutoKConfig or None, default=None
         Automatic-sizing configuration, read only when ``k="auto"``. Selector
         classes additionally accept ``auto_k_mode="nested"`` together with
@@ -2418,10 +2413,11 @@ class CEFSPlusSelector(_BaseSelector):
     ValueError
         If ``groups``/``time`` reach a fixed-``k`` fit, if ``subsample`` or
         ``random_state`` is explicit beside a ``cache``, if ``sample_weight``
-        is passed beside a ``cache``, if a supervised ``cat_encoding`` is
-        combined with a ``cache``, or if ``X`` is sparse or not
-        two-dimensional. Contextual ``cat_encoding="target_cv"`` with
-        ``groups``/``time`` additionally requires an explicit
+        is passed beside a ``cache``, if a ``cat_encoding`` other than
+        ``"none"`` (supervised or target-blind) has a column to encode beside
+        a ``cache``, or if ``X`` is sparse or not two-dimensional. Contextual
+        ``cat_encoding="target_cv"`` with ``groups``/``time`` additionally
+        requires an explicit
         ``AutoKConfig(auto_k_mode="nested", k_method="evaluate")``.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
@@ -2597,7 +2593,7 @@ class CEFSPlusBinarySelector(_BaseSelector):
         training rows, and ignore ``y``. Ordinal codes are ``0..C-1`` in
         natural order -- an ordered ``Categorical`` keeps its declared
         category order, otherwise bool, then numeric levels ascending by
-        value (ints and floats together), then datetime-like by value, then
+        value (all real numbers together), then datetime-like by value, then
         strings in ordinary string order, then other types, with a fitted
         missing level taking the last code -- while frequency emits the
         level's share of training weight; declared-but-unobserved categories
@@ -2963,13 +2959,14 @@ class CEFSPlusBinarySelector(_BaseSelector):
             self, call_params, feature_names
         )
 
-        result = self._selector_fn(
-            X_fit,
-            y,
-            k=k,
-            return_result=True,
-            **call_params,
-        )
+        with _raw_include_errors(onehot_encoder):
+            result = self._selector_fn(
+                X_fit,
+                y,
+                k=k,
+                return_result=True,
+                **call_params,
+            )
         if hasattr(result, "selector_metadata"):
             self.selector_metadata_ = dict(result.selector_metadata or {})
         selected_features = list(result.selected_features)
@@ -3141,8 +3138,8 @@ class KnockoffSelector(_BaseSelector):
         observed in positive-weight training rows and do not upgrade the
         approximate-plugin FDR claim. Ordinal codes are ``0..C-1`` in natural
         order -- an ordered ``Categorical`` keeps its declared category order,
-        otherwise bool, then numeric levels ascending by value (ints and
-        floats together), then datetime-like by value, then strings in
+        otherwise bool, then numeric levels ascending by value (all real
+        numbers together), then datetime-like by value, then strings in
         ordinary string order, then other types, with a fitted missing level
         last -- while frequency emits the level's share of training weight;
         unknown levels map to ``-1`` / ``0`` and a numeric level whose exact
@@ -3204,9 +3201,10 @@ class KnockoffSelector(_BaseSelector):
         and the column names are checked, never the row values, so a cache must
         be used with exactly the rows it was built from. A cache already stores
         row weights, so ``sample_weight`` is rejected beside it, and it stores
-        no encoding provenance, so every ``cat_encoding`` other than ``"none"``
-        is rejected too -- ``"ordinal"`` and ``"frequency"`` outright, a
-        supervised one as soon as it has a column to encode.
+        no encoding provenance, so any ``cat_encoding`` other than ``"none"``
+        raises once it has a column to encode (a ``cat_features`` column
+        present in ``X``, else an object, category or string column); with
+        nothing to encode it is inert, as it is without a cache.
     include : sequence of column labels, optional
         Conditioning set. These features are not tested by the knockoff
         filter; they are prepended to the selected set in caller order.
@@ -3276,8 +3274,9 @@ class KnockoffSelector(_BaseSelector):
         If ``groups`` or ``time`` is passed in any mode, if ``auto_k_config``
         is passed, if ``cat_encoding="target_cv"`` is requested, if
         ``random_state`` is not a non-negative integer, if
-        ``sample_weight``, an explicit ``subsample`` or a supervised
-        ``cat_encoding`` accompanies a ``cache``, or if ``X`` is sparse or not
+        ``sample_weight`` or an explicit ``subsample`` accompanies a
+        ``cache``, if a ``cat_encoding`` other than ``"none"`` has a column to
+        encode beside a ``cache``, or if ``X`` is sparse or not
         two-dimensional.
     NotImplementedError
         From ``inverse_transform`` after a supervised categorical encoding,
@@ -3456,18 +3455,8 @@ class KnockoffSelector(_BaseSelector):
             )
 
         self._clear_fit_state()
-        has_supervised_categoricals = self._would_fit_supervised_categoricals(X)
-        if resolved_cache is not None and has_supervised_categoricals:
-            raise ValueError(
-                "KnockoffSelector supervised categorical encoding does not support "
-                "prebuilt caches. Use cat_encoding='none' with a cache, or omit the "
-                "cache so the selector can fit encoders on the training rows."
-            )
-        if resolved_cache is not None and is_unsupervised_cat_encoding(self.cat_encoding):
-            raise ValueError(
-                f"cat_encoding={self.cat_encoding!r} cannot be combined with a "
-                "prebuilt cache because the cache has no encoding provenance"
-            )
+        if resolved_cache is not None:
+            reject_prebuilt_cache_encoding(X, self.cat_features, self.cat_encoding)
 
         call_params = dict(self._selector_params())
         if fit_params:

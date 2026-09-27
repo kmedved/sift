@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from fractions import Fraction
 from typing import get_args
 
 import numpy as np
@@ -48,6 +50,42 @@ def test_datetime_bytes_and_other_kinds_order_by_value():
     assert _codes(stamps) == [2.0, 0.0, 1.0]
     assert _codes([timedelta(days=3), timedelta(hours=1)]) == [1.0, 0.0]
     assert _codes([b"z", b"a"]) == [1.0, 0.0]
+
+
+def test_datetimes_outside_the_nanosecond_range_order_by_value():
+    # pandas cannot hold these in nanoseconds; they used to rank as "other".
+    assert _codes([datetime(2020, 1, 1), datetime(1500, 1, 1), datetime(2021, 1, 1)]) == [
+        1.0, 0.0, 2.0,
+    ]
+    assert _codes([date(2020, 1, 1), date(3000, 1, 1), date(1000, 1, 1)]) == [1.0, 2.0, 0.0]
+    stamps = pd.Series(
+        [np.datetime64("2020-01-01"), np.datetime64("1500-01-01"), np.datetime64("2021-01-01")],
+        dtype=object,
+    )
+    assert _codes(stamps) == [1.0, 0.0, 2.0]
+    assert _codes([timedelta(days=10**6), timedelta(days=1), timedelta(days=-(10**6))]) == [
+        2.0, 1.0, 0.0,
+    ]
+    # An aware value orders by its UTC instant, as in-range timestamps do.
+    aware = datetime(1500, 1, 1, 6, tzinfo=timezone(timedelta(hours=5)))  # 01:00 UTC
+    assert _codes([aware, datetime(1500, 1, 1, 0, 30), datetime(1500, 1, 1, 1, 30)]) == [
+        1.0, 0.0, 2.0,
+    ]
+    # Still datetime-like: after numbers, before strings.
+    assert _codes(["x", datetime(1500, 1, 1), 5, datetime(2000, 1, 1)]) == [3.0, 1.0, 0.0, 2.0]
+
+
+def test_decimal_and_fraction_levels_order_as_numbers():
+    assert _codes([Decimal(10), Decimal(2), 3]) == [2.0, 0.0, 1.0]
+    assert _codes([Fraction(1, 2), Fraction(1, 3), 1]) == [1.0, 0.0, 2.0]
+    assert _codes([Fraction(7, 3), Decimal("2.5"), 2, 2.4]) == [1.0, 3.0, 0.0, 2.0]
+    assert _codes(["x", Decimal(5), 1, "a"]) == [3.0, 1.0, 0.0, 2.0]
+    # Numerically equal levels stay distinct: int, then float, then the other
+    # real types by repr.
+    assert _codes([Fraction(1), Decimal(1), 1.0, 1]) == [3.0, 2.0, 1.0, 0.0]
+    assert _codes([Decimal("Infinity"), Decimal(1), 10**400]) == [2.0, 0.0, 1.0]
+    # A NaN Decimal is missing and takes the last code.
+    assert _codes([Decimal("NaN"), Decimal(1), "a"]) == [2.0, 0.0, 1.0]
 
 
 def test_ordered_categorical_uses_declared_order():

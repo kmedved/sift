@@ -274,7 +274,7 @@ def test_binary_callback_scores_and_failed_include():
     assert disc.notna().all()
     X_bad = X.copy()
     X_bad["c"] = 1.0
-    with pytest.raises(ValueError, match="usable variation|could not be fit|not a valid"):
+    with pytest.raises(ValueError, match="dropped as constant or non-finite.*: 'c'. Drop"):
         select_cefsplus_binary(
             X_bad, y, k=1, include=["c"], verbose=False, subsample=None
         )
@@ -518,15 +518,16 @@ def test_constant_include_rejected_consistently():
     X, y = _small_regression()
     X = X.copy()
     X["f0"] = 1.0
-    # The Gaussian cache drops the constant column before conditioning, so the
-    # message says so; the classic path reports it as unusable variation.
-    dead = "usable variation|dropped as constant|not present|not a valid"
-    with pytest.raises(ValueError, match=dead):
+    # The Gaussian cache and the binary path drop the constant column before
+    # conditioning, so the message says so; the classic path reports it as
+    # unusable variation. Every route names the column.
+    dropped = "dropped as constant or non-finite.*: 'f0'. Drop"
+    with pytest.raises(ValueError, match="no usable variation.*: 'f0'. Drop"):
         select_mrmr(X, y, k=1, task="regression", include=["f0"], verbose=False)
-    with pytest.raises(ValueError, match=dead):
+    with pytest.raises(ValueError, match=dropped):
         select_cefsplus(X, y, k=1, include=["f0"], verbose=False, subsample=None)
     y_bin = (y > np.median(y)).astype(int)
-    with pytest.raises(ValueError, match=dead):
+    with pytest.raises(ValueError, match=dropped):
         select_cefsplus_binary(X, y_bin, k=1, include=["f0"], verbose=False, subsample=None)
 
 
@@ -1084,7 +1085,7 @@ def test_binary_constant_include_and_unusable_candidates():
         verbose=False, subsample=None,
     )
     assert omitted == explicit_none
-    with pytest.raises(ValueError, match="not a valid|usable variation"):
+    with pytest.raises(ValueError, match="dropped as constant or non-finite.*: 'a'. Drop"):
         select_cefsplus_binary(
             const_X, y_bin, k=1, include=["a"], verbose=False, subsample=None
         )
@@ -1146,3 +1147,219 @@ def test_candidate_list_permutation_does_not_change_path():
         X, y, k=2, candidates=["d", "e", "c"], verbose=False, subsample=None, top_m=10
     )
     assert a == b
+
+
+# --------------------------------------------------------------------------
+# 1.0.1: an unusable include is reported by the raw columns the caller wrote,
+# on every route and under every categorical encoding.
+# --------------------------------------------------------------------------
+
+_DROPPED_INCLUDE = (
+    "include features were dropped as constant or non-finite, so they carry no "
+    "information to condition on: {refs}. Drop them from include, or pass "
+    "columns that vary on the retained rows"
+)
+_UNUSABLE_CLASSIC_INCLUDE = (
+    "include features have no usable variation for conditioning (constant or "
+    "non-finite): {refs}. Drop them from include, or pass columns that vary on "
+    "the retained rows"
+)
+
+
+def _constant_include_frame():
+    rng = np.random.default_rng(31)
+    n = 160
+    X = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "const_cat": ["a"] * n,
+            "city": rng.choice(["NY", "LA", "SF"], size=n),
+            "flat": np.full(n, 2.5),
+        }
+    )
+    y = (X["x1"] + 0.5 * X["x2"] + 0.3 * rng.normal(size=n)).to_numpy()
+    return X, y, (y > np.median(y)).astype(int)
+
+
+# (label, function call, wrapper fit, expected template); every route names
+# exactly the two constant raw columns, never the varying ``x1`` or a dummy.
+_INCLUDE_ROUTES = (
+    (
+        "mrmr_classic",
+        lambda X, y, yb, kw: select_mrmr(X, y, 2, task="regression", **kw),
+        lambda X, y, yb, kw: MRMRSelector(k=2, task="regression", **kw).fit(X, y),
+        _UNUSABLE_CLASSIC_INCLUDE,
+    ),
+    (
+        "mrmr_classic_classification",
+        lambda X, y, yb, kw: select_mrmr(X, yb, 2, task="classification", **kw),
+        lambda X, y, yb, kw: MRMRSelector(k=2, task="classification", **kw).fit(X, yb),
+        _UNUSABLE_CLASSIC_INCLUDE,
+    ),
+    (
+        "mrmr_gaussian",
+        lambda X, y, yb, kw: select_mrmr(
+            X, y, 2, task="regression", estimator="gaussian", **kw
+        ),
+        lambda X, y, yb, kw: MRMRSelector(
+            k=2, task="regression", estimator="gaussian", **kw
+        ).fit(X, y),
+        _DROPPED_INCLUDE,
+    ),
+    (
+        "jmi_classic",
+        lambda X, y, yb, kw: select_jmi(X, y, 2, task="regression", **kw),
+        lambda X, y, yb, kw: JMISelector(k=2, task="regression", **kw).fit(X, y),
+        _UNUSABLE_CLASSIC_INCLUDE,
+    ),
+    (
+        "jmi_gaussian",
+        lambda X, y, yb, kw: select_jmi(
+            X, y, 2, task="regression", estimator="gaussian", **kw
+        ),
+        lambda X, y, yb, kw: JMISelector(
+            k=2, task="regression", estimator="gaussian", **kw
+        ).fit(X, y),
+        _DROPPED_INCLUDE,
+    ),
+    (
+        "jmim_classic",
+        lambda X, y, yb, kw: select_jmim(X, y, 2, task="regression", **kw),
+        lambda X, y, yb, kw: JMIMSelector(k=2, task="regression", **kw).fit(X, y),
+        _UNUSABLE_CLASSIC_INCLUDE,
+    ),
+    (
+        "cefsplus",
+        lambda X, y, yb, kw: select_cefsplus(X, y, 2, **kw),
+        lambda X, y, yb, kw: CEFSPlusSelector(k=2, **kw).fit(X, y),
+        _DROPPED_INCLUDE,
+    ),
+    (
+        "cefsplus_binary_logloss",
+        lambda X, y, yb, kw: select_cefsplus_binary(X, yb, 2, **kw),
+        lambda X, y, yb, kw: CEFSPlusBinarySelector(k=2, **kw).fit(X, yb),
+        _DROPPED_INCLUDE,
+    ),
+    (
+        "cefsplus_binary_brier",
+        lambda X, y, yb, kw: select_cefsplus_binary(X, yb, 2, loss="brier", **kw),
+        lambda X, y, yb, kw: CEFSPlusBinarySelector(k=2, loss="brier", **kw).fit(X, yb),
+        _DROPPED_INCLUDE,
+    ),
+)
+
+
+@pytest.mark.parametrize("encoding", ["onehot", "ordinal", "frequency"])
+@pytest.mark.parametrize(
+    "route", _INCLUDE_ROUTES, ids=[route[0] for route in _INCLUDE_ROUTES]
+)
+def test_unusable_include_names_exactly_the_raw_columns(route, encoding):
+    _label, call, fit, template = route
+    X, y, yb = _constant_include_frame()
+    kw = {
+        "cat_features": ["const_cat", "city"],
+        "cat_encoding": encoding,
+        "include": ["x1", "const_cat", "flat"],
+        "verbose": False,
+    }
+    expected = template.format(refs="'const_cat', 'flat'")
+
+    with pytest.raises(ValueError) as function_error:
+        call(X, y, yb, kw)
+    assert str(function_error.value) == expected
+
+    with pytest.raises(ValueError) as wrapper_error:
+        fit(X, y, yb, kw)
+    assert str(wrapper_error.value) == expected
+
+
+def test_unusable_include_on_auto_k_and_classic_cache_routes_names_raw_columns():
+    X, y, _yb = _constant_include_frame()
+    onehot = {
+        "cat_features": ["const_cat", "city"],
+        "cat_encoding": "onehot",
+        "include": ["x1", "const_cat"],
+        "verbose": False,
+    }
+    with pytest.raises(ValueError) as caught:
+        select_cefsplus(X, y, "auto", **onehot)
+    assert str(caught.value) == _DROPPED_INCLUDE.format(refs="'const_cat'")
+
+    with pytest.raises(ValueError) as caught:
+        select_mrmr(
+            X, y, "auto", task="regression", time=np.arange(len(X)), **onehot
+        )
+    assert str(caught.value) == _UNUSABLE_CLASSIC_INCLUDE.format(refs="'const_cat'")
+
+    from sift import build_classic_cache
+
+    numeric = X[["x1", "x2", "flat"]]
+    cache = build_classic_cache(numeric)
+    with pytest.raises(ValueError) as caught:
+        select_mrmr(
+            numeric, y, 2, task="regression", cache=cache,
+            include=["x1", "flat"], verbose=False,
+        )
+    assert str(caught.value) == _UNUSABLE_CLASSIC_INCLUDE.format(refs="'flat'")
+
+
+def test_unusable_include_on_an_ndarray_uses_the_positional_names():
+    X, y, _yb = _constant_include_frame()
+    arr = X[["x1", "x2", "flat"]].to_numpy()
+    with pytest.raises(ValueError) as caught:
+        select_mrmr(arr, y, 2, task="regression", include=[0, 2], verbose=False)
+    assert str(caught.value) == _UNUSABLE_CLASSIC_INCLUDE.format(refs="'x2'")
+    with pytest.raises(ValueError) as caught:
+        MRMRSelector(k=2, task="regression", include=[0, 2], verbose=False).fit(arr, y)
+    assert str(caught.value) == _UNUSABLE_CLASSIC_INCLUDE.format(refs="'x2'")
+
+
+_PREBUILT_CACHE_INCLUDE = (
+    "include features are not present in the cache valid columns (dropped as "
+    "constant/non-finite or never cached): {refs}. Drop them from include, or "
+    "rebuild the cache from columns that vary"
+)
+
+
+def test_unusable_include_on_the_knockoff_routes_names_the_columns():
+    X, y, _yb = _constant_include_frame()
+    numeric = X[["x1", "x2", "flat"]]
+    kw = {"include": ["x1", "flat"], "include_provenance": "prespecified", "verbose": False}
+    # No cache was passed, so the message must not blame one.
+    with pytest.raises(ValueError) as caught:
+        select_fdr(numeric, y, **kw)
+    assert str(caught.value) == _DROPPED_INCLUDE.format(refs="'flat'")
+    with pytest.raises(ValueError) as caught:
+        KnockoffSelector(**kw).fit(numeric, y)
+    assert str(caught.value) == _DROPPED_INCLUDE.format(refs="'flat'")
+    with pytest.raises(ValueError) as caught:
+        KnockoffSelector(
+            cat_features=["const_cat", "city"],
+            cat_encoding="ordinal",
+            **{**kw, "include": ["x1", "const_cat", "flat"]},
+        ).fit(X, y)
+    assert str(caught.value) == _DROPPED_INCLUDE.format(refs="'const_cat', 'flat'")
+
+    cache = build_cache(numeric)
+    with pytest.raises(ValueError) as caught:
+        select_fdr(y=y, cache=cache, **kw)
+    assert str(caught.value) == _PREBUILT_CACHE_INCLUDE.format(refs="'flat'")
+
+
+def test_prebuilt_cache_include_error_keeps_the_cache_wording():
+    X, y, _yb = _constant_include_frame()
+    numeric = X[["x1", "x2", "flat"]]
+    cache = build_cache(numeric)
+    expected = _PREBUILT_CACHE_INCLUDE.format(refs="'flat'")
+    with pytest.raises(ValueError) as caught:
+        select_cached(cache, y, 2, include=["x1", "flat"])
+    assert str(caught.value) == expected
+    with pytest.raises(ValueError) as caught:
+        select_cefsplus(numeric, y, 2, cache=cache, include=["x1", "flat"], verbose=False)
+    assert str(caught.value) == expected
+    with pytest.raises(ValueError) as caught:
+        CEFSPlusSelector(k=2, cache=cache, include=["x1", "flat"], verbose=False).fit(
+            numeric, y
+        )
+    assert str(caught.value) == expected

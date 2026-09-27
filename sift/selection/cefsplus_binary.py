@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from sift._progress import ProgressCallback, report_progress
+from sift.selection.conditioning import UnusableIncludeError, dropped_include_template
 
 
 @dataclass
@@ -578,6 +579,19 @@ def _corr_prune_candidates(
     return keep, pruned
 
 
+def _require_valid_include(
+    include_arr: np.ndarray, valid_original: np.ndarray, feature_names: list[str]
+) -> None:
+    """Name every include column the standardization dropped as constant."""
+    dropped = [
+        feature_names[int(orig)]
+        for orig in include_arr
+        if not np.any(valid_original == int(orig))
+    ]
+    if dropped:
+        raise UnusableIncludeError(dropped_include_template(), dropped)
+
+
 def select_binary_logistic_path(
     X: np.ndarray,
     y: np.ndarray,
@@ -623,15 +637,10 @@ def select_binary_logistic_path(
         if include_idx is None
         else np.asarray(include_idx, dtype=np.int64)
     )
-    include_valid = []
-    for orig in include_arr:
-        matches = np.flatnonzero(valid_original == int(orig))
-        if matches.size == 0:
-            raise ValueError(
-                f"include feature {feature_names[int(orig)]!r} is not a valid "
-                "non-constant column for binary CEFS+"
-            )
-        include_valid.append(int(matches[0]))
+    _require_valid_include(include_arr, valid_original, feature_names)
+    include_valid = [
+        int(np.flatnonzero(valid_original == int(orig))[0]) for orig in include_arr
+    ]
     include_valid_arr = np.asarray(include_valid, dtype=np.int64)
     include_valid_set = set(include_valid)
     discovery_original = None if candidate_idx is None else set(int(i) for i in candidate_idx)
@@ -885,15 +894,10 @@ def _select_binary_logistic_block_path(
         if include_idx is None
         else np.asarray(include_idx, dtype=np.int64)
     )
-    include_valid: list[int] = []
-    for orig in include_arr:
-        matches = np.flatnonzero(valid_original == int(orig))
-        if matches.size == 0:
-            raise ValueError(
-                f"include feature {feature_names[int(orig)]!r} is not a valid "
-                "non-constant column for binary CEFS+"
-            )
-        include_valid.append(int(matches[0]))
+    _require_valid_include(include_arr, valid_original, feature_names)
+    include_valid: list[int] = [
+        int(np.flatnonzero(valid_original == int(orig))[0]) for orig in include_arr
+    ]
     orig_block_ids, members_valid = map_blocks_to_valid(blocks, valid_original)
     n_discovery_candidates = 0
     if Z.shape[1] == 0 or not members_valid:

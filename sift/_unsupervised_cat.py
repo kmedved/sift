@@ -8,7 +8,10 @@ Public exports and one-hot behavior are unchanged.
 
 from __future__ import annotations
 
+import numbers
 from datetime import date, datetime, timedelta
+from decimal import Decimal
+from fractions import Fraction
 from typing import Any, List, Literal
 
 import numpy as np
@@ -86,6 +89,33 @@ def _positive_mass(series: pd.Series, weights: np.ndarray) -> dict[tuple, float]
     return mass
 
 
+_EPOCH = datetime(1970, 1, 1)
+_MICROSECOND = timedelta(microseconds=1)
+
+
+def _microseconds(value: Any) -> int | None:
+    """Exact microseconds since the epoch (or in a duration), outside pandas.
+
+    Python datetimes have microsecond resolution and years 1-9999, so this
+    covers the values pandas cannot hold in nanoseconds (before 1677, after
+    2262). An aware datetime counts its UTC instant, as ``pd.Timestamp`` does.
+    """
+    try:
+        if isinstance(value, datetime):
+            offset = value.utcoffset()
+            if offset is not None:
+                value = value.replace(tzinfo=None) - offset
+            return (value - _EPOCH) // _MICROSECOND
+        if isinstance(value, date):
+            return (datetime(value.year, value.month, value.day) - _EPOCH) // _MICROSECOND
+        if isinstance(value, timedelta):
+            return value // _MICROSECOND
+        unit = "datetime64[us]" if isinstance(value, np.datetime64) else "timedelta64[us]"
+        return int(value.astype(unit).astype(np.int64))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _datetime_like_value(value: Any) -> tuple[int, int] | None:
     """``(sub-kind, nanoseconds)`` for datetime-like/timedelta-like values."""
     if isinstance(value, (datetime, date, np.datetime64)):
@@ -97,18 +127,43 @@ def _datetime_like_value(value: Any) -> tuple[int, int] | None:
     try:
         return sub_kind, int(stamp(value).value)
     except (TypeError, ValueError, OverflowError):
+        pass
+    micros = _microseconds(value)
+    return None if micros is None else (sub_kind, micros * 1000)
+
+
+def _real_value(value: Any) -> Any | None:
+    """Exactly comparable value of a real number outside the int/float kinds.
+
+    ``Decimal`` (not registered as ``numbers.Real``) and rationals such as
+    ``Fraction`` compare exactly with ints and floats; any other real type is
+    compared through ``float``. A NaN has no place in the order.
+    """
+    try:
+        if isinstance(value, Decimal):
+            return None if value.is_nan() else value
+        if isinstance(value, numbers.Rational):
+            return Fraction(value.numerator, value.denominator)
+        if isinstance(value, numbers.Real):
+            as_float = float(value)
+            return None if np.isnan(as_float) else as_float
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
         return None
+    return None
 
 
 def _natural_order_key(identity: tuple) -> tuple:
     """Sort key ordering one level the way its kind is normally ordered.
 
     Kinds rank bool < numeric < datetime-like < str < bytes < everything else,
-    so the key stays total across mixed columns. Integers and floats share the
-    numeric rank and compare by value (exactly, without a float cast), with the
-    integer first when both are numerically equal. The trailing ``repr`` only
-    breaks ties between identities a kind cannot separate, for example two
-    timestamps that denote the same instant in different time zones.
+    so the key stays total across mixed columns. Integers, floats and other
+    real numbers (``Decimal``, ``Fraction``) share the numeric rank and compare
+    by value (exactly, without a float cast); numerically equal levels order
+    int, then float, then the other real types. Datetime-likes compare by
+    instant, including those outside pandas' nanosecond range. The trailing
+    ``repr`` only breaks ties between identities a kind cannot separate, for
+    example two timestamps that denote the same instant in different time
+    zones.
     """
     kind = identity[0]
     if kind == "bool":
@@ -120,11 +175,14 @@ def _natural_order_key(identity: tuple) -> tuple:
     elif kind == "bytes":
         primary = (4, identity[1])
     else:
-        moment = _datetime_like_value(identity[2])
-        if moment is None:
-            primary = (5, identity[1])
-        else:
+        real = _real_value(identity[2])
+        moment = None if real is not None else _datetime_like_value(identity[2])
+        if real is not None:
+            primary = (1, real, 2)
+        elif moment is not None:
             primary = (2,) + moment
+        else:
+            primary = (5, identity[1])
     return primary + (repr(identity),)
 
 
@@ -167,8 +225,9 @@ class UnsupervisedCatEncoder(BaseEstimator, TransformerMixin):
 
     Ordinal codes are ``0..C-1`` in natural level order, independent of row
     order: an ordered Categorical uses its declared category order, otherwise
-    levels group by kind as bool < numeric (ints and floats by value) <
-    datetime-like < str < bytes < everything else (by type name and ``repr``).
+    levels group by kind as bool < numeric (ints, floats, ``Decimal`` and
+    ``Fraction`` by value) < datetime-like (by instant, any year) < str <
+    bytes < everything else (by type name and ``repr``).
     Missing, when fitted, always takes the last code. Ordinal unknown is
     ``-1``; frequency unknown is ``0``. Frequency values are the level's share
     of positive training mass (scale-invariant), so equal-mass levels share one

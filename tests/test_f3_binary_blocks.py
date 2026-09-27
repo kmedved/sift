@@ -329,7 +329,7 @@ def test_constant_include_on_all_invalid_block_path_raises():
     y = np.arange(40) % 2
     blocks = {"pair": ["a", "b"]}
     with pytest.raises(
-        ValueError, match="include feature 'a' is not a valid non-constant"
+        ValueError, match="to condition on: 'a', 'b'. Drop them from include"
     ):
         select_cefsplus_binary(
             X,
@@ -341,14 +341,14 @@ def test_constant_include_on_all_invalid_block_path_raises():
             verbose=False,
         )
     with pytest.raises(
-        ValueError, match="include feature 'a' is not a valid non-constant"
+        ValueError, match="to condition on: 'a', 'b'. Drop them from include"
     ):
         select_cefsplus_binary(
             X, y, k=1, include=["a", "b"], subsample=None, verbose=False
         )
     w = np.random.default_rng(0).uniform(0.2, 2.0, 40)
     with pytest.raises(
-        ValueError, match="include feature 'a' is not a valid non-constant"
+        ValueError, match="to condition on: 'a', 'b'. Drop them from include"
     ):
         select_cefsplus_binary(
             X,
