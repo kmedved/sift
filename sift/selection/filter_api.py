@@ -816,9 +816,11 @@ def select_jmi(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a
@@ -1095,9 +1097,11 @@ def select_jmim(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a
@@ -1895,21 +1899,14 @@ def _select_filter(
     ctx = _build_context(spec, request)
     _require_fixed_filter_metadata(ctx)
     if ctx.k == "auto":
-        # Any conditioning keyword counts, even an empty one: the fold-scored
-        # routes reject include/exclude/candidates outright.
-        conditioning = ctx.conditioning is not None
         if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
             resolved_config = AutoKConfig(k_method="auto")
-            reject_conditioned_within_auto_k(
-                ctx.within, resolved_config, conditioning=conditioning
-            )
         else:
             resolved_config = resolve_auto_k_config(
                 request.auto_k_config,
                 ctx.time,
                 ctx.groups,
                 within=ctx.within,
-                conditioning=conditioning,
             )
         ctx = replace(
             ctx,
@@ -1946,6 +1943,11 @@ def _select_filter(
             "store_proxies=True is currently supported only by Gaussian/cached "
             "filter routes; choose estimator='gaussian' or omit store_proxies"
         )
+    # The handler's first within or conditioning rejection (gaussian_cv /
+    # xfit_objective refusing exact conditioning, or a split that can never
+    # leave a within level seen) would send a conditioned within call to the
+    # other rejection; say once that no such config serves both.
+    _reject_conditioned_within(ctx)
     try:
         payload = handler(ctx)
     except UnusableIncludeError as exc:
@@ -2442,6 +2444,9 @@ def _require_within_support(ctx: FilterContext) -> None:
         assert ctx.auto_k_config is not None
         method = ctx.auto_k_config.k_method
         if method not in _WITHIN_AUTO_K_METHODS:
+            # With conditioning, the within methods named below reject it in
+            # turn, so the combined rejection takes this one's place.
+            _reject_conditioned_within(ctx)
             # Only CEFS+ routes a config-less k="auto" to the router; mRMR,
             # JMI and JMIM infer evaluate there.
             router = (
@@ -2454,6 +2459,22 @@ def _require_within_support(ctx: FilterContext) -> None:
                 f"{router}; choose an auto_k_config it can validate. "
                 f"{within_split_guidance(ctx.within)}"
             )
+
+
+def _reject_conditioned_within(ctx: FilterContext) -> None:
+    """Reject a within auto-k call whose conditioning no config can honor.
+
+    Any conditioning keyword counts, even an empty one: the fold-scored
+    routes reject include/exclude/candidates outright.
+    """
+    if ctx.k != "auto" or ctx.within is None:
+        return
+    assert ctx.auto_k_config is not None
+    reject_conditioned_within_auto_k(
+        ctx.within,
+        ctx.auto_k_config,
+        conditioning=ctx.conditioning is not None,
+    )
 
 
 def _format_payload(

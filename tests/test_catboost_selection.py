@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import Ridge
 
-from sift import ModelSelector, catboost as cb
+from sift import ModelSelector, SelectionView, catboost as cb
 from sift.selection import orchestration as _selection_orchestration
 from sift.selection.orchestration import SelectionBackend
 
@@ -526,3 +526,31 @@ def test_catboost_manifest_gives_untokenizable_labels_a_null_columns_hash(monkey
         "CatBoost feature Interval(0, 1, closed='right') is missing or ambiguous "
         "in input_features"
     )
+
+    # Without input_features the view pairs the table's selected rows with
+    # the features by equality, since Interval labels have no token.
+    unpositioned = result.result_view()
+    assert unpositioned.indices is None
+    table = unpositioned.table.loc[:, ["feature", "selected_index", "path_rank", "selected"]]
+    assert table["feature"].tolist() == [first, third]
+    assert table["selected"].tolist() == [True, True]
+
+    def rebuild(table_features, features=(first, third)):
+        return SelectionView(
+            features=list(features),
+            indices=None,
+            raw_features=None,
+            n_raw_features=None,
+            raw_table=table.assign(feature=table_features),
+        )
+
+    # The rows pair in any order, with fresh but equal Interval objects.
+    assert rebuild([pd.Interval(2, 3), pd.Interval(0, 1)]).features == [first, third]
+    # A selected row that names another label, or the same label twice,
+    # does not match the selected features.
+    for tampered in ([columns[1], third], [first, first], [third, pd.Interval(0, 1, "left")]):
+        with pytest.raises(ValueError) as excinfo:
+            rebuild(tampered)
+        assert str(excinfo.value) == (
+            "raw_table selected feature identities do not match features"
+        )

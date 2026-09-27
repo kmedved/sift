@@ -199,8 +199,9 @@ that likelier, so drop or pool those levels or lower `xfit_folds`.
 `include`, `exclude` and `candidates` need an auto-k method that truncates the
 conditioned path, while `gaussian_cv` and `xfit_objective` rebuild an
 unconditioned one. Combined with `within`, `k="auto"` therefore works only for
-`within="groups"` with `evaluate` and `time_holdout`; for `within="two_way"`
-pass a fixed `k` or drop the conditioning keywords.
+`within="groups"` with `evaluate` and `time_holdout`. Otherwise pass a fixed
+`k` (a fixed-`k` `within="groups"` call takes no `time`), or drop the
+conditioning keywords and use one of the Gaussian-path methods above.
 
 ```python
 import numpy as np

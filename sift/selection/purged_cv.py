@@ -56,7 +56,15 @@ def _reject_non_timeline_dtype(values, arr: np.ndarray, *, name: str) -> None:
     -- strings, bytes, booleans, complex numbers, categoricals -- is refused
     here instead of failing later inside a comparison ufunc.
     """
-    if isinstance(getattr(values, "dtype", None), pd.CategoricalDtype):
+    dtype = getattr(values, "dtype", None)
+    if isinstance(dtype, pd.CategoricalDtype):
+        categories = dtype.categories.dtype
+        if isinstance(categories, pd.PeriodDtype):
+            raise ValueError(
+                f"{name} must be {_TIMELINE_KIND_TEXT}, or pandas Periods of one "
+                "frequency; got a pandas Categorical of Periods. Pass the Periods "
+                f"themselves, for example {name}.astype({str(categories)!r})"
+            )
         raise ValueError(
             f"{name} must be {_TIMELINE_KIND_TEXT}; got a pandas Categorical. "
             f"Pass the underlying timestamps, for example "
@@ -107,9 +115,14 @@ def _period_values(values, *, name: str) -> pd.PeriodIndex | None:
 
     Periods of one frequency are ordered and map exactly onto integer
     ordinals. A mix of frequencies has no common timeline and is rejected.
+    A pandas Categorical is never a Period timeline, even of Periods: it is
+    refused like every other categorical.
     """
-    if isinstance(getattr(values, "dtype", None), pd.PeriodDtype):
+    dtype = getattr(values, "dtype", None)
+    if isinstance(dtype, pd.PeriodDtype):
         return pd.PeriodIndex(values)
+    if isinstance(dtype, pd.CategoricalDtype):
+        return None
     arr = values.to_numpy() if isinstance(values, pd.Series) else np.asarray(values)
     if arr.ndim != 1 or arr.dtype.kind != "O" or arr.size == 0:
         return None
@@ -132,8 +145,9 @@ def _as_timeline(values, n_rows: int, *, name: str) -> tuple[np.ndarray, str | N
     """``time`` / ``event_end`` as a comparable 1-D array, plus its Period frequency.
 
     A pandas ``Period`` timeline is split on its integer ordinals, so the
-    integer rules apply to it: the embargo is an integer count of
-    ordinal steps (months for ``freq='M'``).
+    integer rules apply to it: the embargo is an integer count of ordinal
+    steps, which count the frequency's base unit, not whole periods (months
+    for ``freq='M'`` and ``'2M'``, minutes for ``'15min'``).
     """
     periods = _period_values(values, name=name) if values is not None else None
     if periods is None:
@@ -382,8 +396,11 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         embargo, an integer ``time`` requires an integer embargo, and a
         float ``time`` takes any finite number even when ``event_end`` is
         integer. A pandas ``Period`` ``time`` is split on its integer
-        ordinals, so it takes an integer count of ordinal steps (months for
-        ``freq='M'`` or ``'2M'``). Forward mode only embargoes the past side of validation,
+        ordinals, so it takes an integer count of ordinal steps. A step is
+        one unit of the frequency's base unit, not one period: a month for
+        ``freq='M'`` and also for ``'2M'`` (so ``embargo=2`` covers one
+        ``'2M'`` period and ``embargo=1`` none), a minute for ``'15min'``.
+        Forward mode only embargoes the past side of validation,
         which is the deliberate deviation from López de Prado's after-the-
         test-block embargo (forward training never follows validation, so
         an after-side embargo would drop nothing). ``purged_kfold`` keeps
@@ -806,7 +823,8 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
         ``PurgedTimeSeriesSplit``.
     embargo : 0, number, or timedelta, default 0
         Extra exclusion duration in the same domain as ``time`` (an integer
-        count of ordinal steps for a pandas ``Period`` ``time``). Forward
+        count of ordinal steps of the frequency's base unit for a pandas
+        ``Period`` ``time``; see ``PurgedTimeSeriesSplit``). Forward
         mode embargoes the past side of validation only, the same
         deliberate deviation from López de Prado described on
         ``PurgedTimeSeriesSplit``.

@@ -406,23 +406,38 @@ def _fold_lists(splitter, **kwargs):
     ]
 
 
+#: A fixed row shuffle: folds on shuffled rows catch any wrapper that sorts
+#: or realigns the values instead of splitting them in row order.
+_PERIOD_ROW_ORDER = np.random.default_rng(5).permutation(24)
+
+
 @pytest.mark.parametrize(
     "wrap",
-    [lambda p: p, pd.Series, np.asarray, list, lambda p: p.array],
-    ids=["PeriodIndex", "Series", "object-array", "list", "PeriodArray"],
+    [
+        lambda p: p,
+        pd.Series,
+        lambda p: pd.Series(p, index=np.arange(100, 124)[_PERIOD_ROW_ORDER]),
+        np.asarray,
+        list,
+        lambda p: p.array,
+    ],
+    ids=["PeriodIndex", "Series", "Series-shuffled-index", "object-array", "list", "PeriodArray"],
 )
 @pytest.mark.parametrize("mode", ["forward", "purged_kfold"])
 @pytest.mark.parametrize("freq", ["M", "2M", "W-SUN", "Q-NOV", "D"])
 def test_period_time_splits_exactly_like_its_ordinals(wrap, mode, freq):
     periods = pd.period_range("2020-01-01", periods=12, freq=freq).repeat(2)
+    periods = periods[_PERIOD_ROW_ORDER]
     ordinals = np.asarray(periods.asi8)
+    # The oracle's folds follow the shuffled rows, not sorted time.
+    assert not np.all(np.diff(ordinals) >= 0)
     splitter = PurgedTimeSeriesSplit(n_splits=3, embargo=1, mode=mode)
     expected = _fold_lists(
         splitter, time=ordinals, event_end=np.asarray((periods + 1).asi8)
     )
     assert _fold_lists(splitter, time=wrap(periods), event_end=wrap(periods + 1)) == expected
     grouped = GroupPurgedTimeSeriesSplit(n_splits=2, test_size=2, mode=mode)
-    groups = np.repeat(np.arange(12), 2)
+    groups = np.repeat(np.arange(12), 2)[_PERIOD_ROW_ORDER]
     assert _fold_lists(grouped, groups=groups, time=wrap(periods)) == _fold_lists(
         grouped, groups=groups, time=ordinals
     )
@@ -464,10 +479,33 @@ def test_period_time_splits_exactly_like_its_ordinals(wrap, mode, freq):
             "time mixes pandas Period frequencies; pass Periods of one frequency, "
             "for example by converting them with asfreq",
         ),
+        (
+            {"time": "mixed-base"},
+            ValueError,
+            "time mixes pandas Period frequencies; pass Periods of one frequency, "
+            "for example by converting them with asfreq",
+        ),
         ({"time": "missing"}, ValueError, "time must not contain missing values"),
+        (
+            {"time": "categorical"},
+            ValueError,
+            "time must be integer, unsigned integer, float, datetime64, or "
+            "timedelta64, or pandas Periods of one frequency; got a pandas "
+            "Categorical of Periods. Pass the Periods themselves, for example "
+            "time.astype('period[M]')",
+        ),
+        (
+            {"event_end": "categorical"},
+            ValueError,
+            "event_end must be integer, unsigned integer, float, datetime64, or "
+            "timedelta64, or pandas Periods of one frequency; got a pandas "
+            "Categorical of Periods. Pass the Periods themselves, for example "
+            "event_end.astype('period[M]')",
+        ),
     ],
     ids=["timedelta-embargo", "float-embargo", "int-event-end", "other-freq-event-end",
-         "mixed-freq", "NaT"],
+         "mixed-freq", "mixed-base-freq", "NaT", "categorical-time",
+         "categorical-event-end"],
 )
 def test_period_time_rejects_what_has_no_common_period_timeline(kwargs, error, message):
     periods = pd.period_range("2020-01", periods=12, freq="M").repeat(2)
@@ -475,12 +513,19 @@ def test_period_time_rejects_what_has_no_common_period_timeline(kwargs, error, m
     time = {
         None: periods,
         "mixed": np.array(list(periods[:-1]) + [pd.Period("2022-01", "2M")], dtype=object),
+        # A monthly and a daily period share no ordinal scale at all.
+        "mixed-base": np.array(
+            list(periods[:-1]) + [pd.Period("2022-01-15", "D")], dtype=object
+        ),
         "missing": periods.insert(0, pd.NaT)[:-1],
+        # A Categorical is refused like every other, even one of Periods.
+        "categorical": pd.Categorical(periods),
     }[kwargs.get("time")]
     event_end = {
         None: None,
         "ordinals": np.asarray(periods.asi8) + 1,
         "daily": periods.asfreq("D"),
+        "categorical": pd.Categorical(periods + 1),
     }[kwargs.get("event_end")]
     with pytest.raises(error) as excinfo:
         _fold_lists(

@@ -571,9 +571,13 @@ def test_compare_row_metadata_without_a_token_is_recorded_as_opaque():
 @pytest.mark.parametrize("splitter", ["default", "time_series", "purged"])
 def test_compare_digests_a_single_column_time_like_its_1d_values(shape, splitter):
     X, y = _regression_data()
-    flat = np.arange(len(y))
+    # Shuffled time: a digest that sorted the column, or read it in any order
+    # but the rows', would differ from the 1-D digest.
+    order = np.random.default_rng(3).permutation(len(y))
+    flat = np.arange(len(y))[order]
     if shape == "datetime-frame":
-        flat = pd.date_range("2020-01-01", periods=len(y), freq="D").to_numpy()
+        flat = pd.date_range("2020-01-01", periods=len(y), freq="D").to_numpy()[order]
+    assert not pd.Index(flat).is_monotonic_increasing
     wrapped = flat.reshape(-1, 1) if shape == "column" else pd.DataFrame({"date": flat})
     cv = {
         "default": None,

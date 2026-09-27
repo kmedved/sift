@@ -989,7 +989,9 @@ _TWO_WAY_CONDITIONED_AUTO_K = (
     "'xfit_objective' with strategy='kfold' can validate within='two_way', and "
     "those methods rebuild an unconditioned path, so they cannot honor exact "
     "conditioning. Pass a fixed integer k, or omit include, exclude and "
-    "candidates"
+    "candidates and use one of those methods on the Gaussian path "
+    "(select_cefsplus / CEFSPlusSelector, or estimator='gaussian' for mRMR, "
+    "JMI and JMIM)"
 )
 
 
@@ -1001,8 +1003,11 @@ def _groups_conditioned_auto_k(got):
         f"holdout boundary); got {got}. k_method='gaussian_cv' and "
         "'xfit_objective' rebuild an unconditioned path, so they cannot honor "
         "exact conditioning, and the other auto-k methods cannot validate "
-        "within. Use that evaluate route, pass a fixed integer k, or omit "
-        "include, exclude and candidates"
+        "within. Use that evaluate route, pass a fixed integer k (and drop "
+        "time), or omit include, exclude and candidates and use "
+        "k_method='gaussian_cv' or 'xfit_objective' with strategy='kfold' or "
+        "'time_holdout' on the Gaussian path (select_cefsplus / "
+        "CEFSPlusSelector, or estimator='gaussian' for mRMR, JMI and JMIM)"
     )
 
 
@@ -1011,32 +1016,44 @@ _CONDITIONING_CASES = [
     {"exclude": ["noise"]},
     {"candidates": ["within_signal", "noise"]},
 ]
-_CONDITIONED_ROUTES = [
-    "select_cefsplus",
-    "select_mrmr",
-    "select_mrmr+gaussian",
-    "CEFSPlusSelector",
-    "MRMRSelector",
-]
+#: Routes whose estimator offers every auto-k method, and classic routes,
+#: which score only ``evaluate`` and reject any other method first.
+_GAUSSIAN_CONDITIONED_ROUTES = ["select_cefsplus", "select_mrmr+gaussian", "CEFSPlusSelector"]
+_CLASSIC_CONDITIONED_ROUTES = ["select_mrmr", "MRMRSelector"]
+_CONDITIONED_ROUTES = _GAUSSIAN_CONDITIONED_ROUTES + _CLASSIC_CONDITIONED_ROUTES
 
 
-@pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
+def _conditioned_cases(gaussian_configs, classic_configs):
+    return [
+        (route, config)
+        for routes, configs in (
+            (_GAUSSIAN_CONDITIONED_ROUTES, gaussian_configs),
+            (_CLASSIC_CONDITIONED_ROUTES, classic_configs),
+        )
+        for route in routes
+        for config in configs
+    ]
+
+
 @pytest.mark.parametrize("conditioning", _CONDITIONING_CASES)
 @pytest.mark.parametrize(
-    "k_method,strategy",
-    [
-        ("gaussian_cv", "kfold"),
-        ("xfit_objective", "kfold"),
-        ("evaluate", "time_holdout"),
-        ("evaluate", "kfold"),
-        ("elbow", "time_holdout"),
-        (None, None),
-    ],
+    "route,k_method_strategy",
+    _conditioned_cases(
+        [
+            ("gaussian_cv", "kfold"),
+            ("xfit_objective", "kfold"),
+            ("evaluate", "time_holdout"),
+            ("elbow", "time_holdout"),
+            (None, None),
+        ],
+        [("evaluate", "time_holdout"), (None, None)],
+    ),
 )
 def test_two_way_auto_k_with_conditioning_says_no_method_can_serve_both(
-    route, conditioning, k_method, strategy
+    route, k_method_strategy, conditioning
 ):
     X, y, g, t = _balanced_panel()
+    k_method, strategy = k_method_strategy
     config = (
         None
         if k_method is None
@@ -1049,21 +1066,21 @@ def test_two_way_auto_k_with_conditioning_says_no_method_can_serve_both(
     assert str(excinfo.value) == _TWO_WAY_CONDITIONED_AUTO_K
 
 
-@pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
 @pytest.mark.parametrize(
-    "k_method,strategy,got",
-    [
-        ("gaussian_cv", "kfold", "k_method='gaussian_cv'"),
-        ("xfit_objective", "time_holdout", "k_method='xfit_objective'"),
-        ("evaluate", "kfold", "k_method='evaluate' with strategy='kfold'"),
-        ("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'"),
-        ("elbow", "time_holdout", "k_method='elbow'"),
-    ],
+    "route,case",
+    _conditioned_cases(
+        [
+            ("gaussian_cv", "kfold", "k_method='gaussian_cv'"),
+            ("xfit_objective", "time_holdout", "k_method='xfit_objective'"),
+            ("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'"),
+            ("elbow", "time_holdout", "k_method='elbow'"),
+        ],
+        [("evaluate", "group_cv", "k_method='evaluate' with strategy='group_cv'")],
+    ),
 )
-def test_groups_auto_k_with_conditioning_names_the_evaluate_holdout_route(
-    route, k_method, strategy, got
-):
+def test_groups_auto_k_with_conditioning_names_the_evaluate_holdout_route(route, case):
     X, y, g, t = _balanced_panel()
+    k_method, strategy, got = case
     config = AutoKConfig(k_method=k_method, strategy=strategy, min_k=1, max_k=2)
     with pytest.raises(ValueError) as excinfo:
         _run_within_route(
@@ -1082,23 +1099,61 @@ def test_zero_config_groups_router_with_conditioning_names_the_evaluate_route(ro
     assert str(excinfo.value) == _groups_conditioned_auto_k("k_method='auto'")
 
 
+def _gaussian_counterpart(route):
+    if route in {"select_cefsplus", "CEFSPlusSelector"} or "+" in route:
+        return route
+    return f"{route}+gaussian"
+
+
 @pytest.mark.parametrize("route", _CONDITIONED_ROUTES)
 def test_conditioned_within_exits_named_by_the_rejection_work(route):
     X, y, g, t = _balanced_panel()
-    # Fixed k keeps the include under both modes (groups takes no time here).
+    gaussian = _gaussian_counterpart(route)
+    kfold = AutoKConfig(
+        k_method="gaussian_cv", strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+    )
+    # two_way: a fixed k keeps the include (two_way needs its time) ...
     assert _run_within_route(
         route, X, y, g, t, within="two_way", config=None, k=2, include=["noise"]
     ) == ["noise", "within_signal"]
+    # ... and without the keywords a kfold method runs on the Gaussian path,
+    # which a classic route reaches through estimator='gaussian'.
     assert _run_within_route(
-        route, X, y, g, None, within="groups", config=None, k=2, include=["noise"]
-    ) == ["noise", "within_signal"]
+        gaussian, X, y, g, t, within="two_way", config=kfold
+    ) == ["within_signal"]
     # groups: evaluate with time_holdout honors the conditioning.
     evaluate = AutoKConfig(k_method="evaluate", strategy="time_holdout", min_k=1, max_k=2)
     assert _run_within_route(
         route, X, y, g, t, within="groups", config=evaluate, include=["noise"]
     ) == ["noise", "within_signal"]
-    # two_way: dropping the conditioning keywords reopens the kfold route
-    # (checked on every Gaussian route by the guidance test above).
+    # A fixed k works once time is dropped; keeping it is the error the
+    # message's "(and drop time)" steers around.
+    assert _run_within_route(
+        route, X, y, g, None, within="groups", config=None, k=2, include=["noise"]
+    ) == ["noise", "within_signal"]
+    with pytest.raises(ValueError) as excinfo:
+        _run_within_route(
+            route, X, y, g, t, within="groups", config=None, k=2, include=["noise"]
+        )
+    assert str(excinfo.value) == (
+        "time is only used with within='two_way' or auto-k evaluation; omit "
+        "time for a fixed-k within='groups' call"
+    )
+    # Without the keywords both fold methods run on the Gaussian path under
+    # kfold and time_holdout.
+    for k_method in ("gaussian_cv", "xfit_objective"):
+        assert _run_within_route(
+            gaussian, X, y, g, t, within="groups",
+            config=AutoKConfig(
+                k_method=k_method, strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+            ),
+        ) == ["within_signal"]
+    assert _run_within_route(
+        gaussian, X, y, g, t, within="groups",
+        config=AutoKConfig(
+            k_method="gaussian_cv", strategy="time_holdout", min_k=1, max_k=2
+        ),
+    ) == ["within_signal", "noise"]
 
 
 @pytest.mark.parametrize("route", ["select_cefsplus", "CEFSPlusSelector"])
@@ -1122,6 +1177,170 @@ def test_empty_conditioning_keywords_count_as_conditioning_under_within(route):
     assert _run_within_route(
         route, X, y, g, t, within="groups", config=evaluate, include=[]
     ) == ["within_signal"]
+
+
+_GROUPS_KFOLD = AutoKConfig(
+    k_method="gaussian_cv", strategy="kfold", xfit_folds=3, min_k=1, max_k=2
+)
+
+
+def _conditioned_within_call(route, *, within="groups", config=_GROUPS_KFOLD, **overrides):
+    """One conditioned within auto-k call; ``overrides`` edit its inputs."""
+    X, y, g, t = _balanced_panel()
+    call = {
+        "X": X, "y": y, "groups": g, "time": t, "within": within,
+        "config": config, "conditioning": {"include": ["noise"]},
+        "options": {}, "fit": {},
+    }
+    call.update(overrides)
+    name, _, variant = route.partition("+")
+    options = {"verbose": False, **call["options"]}
+    if name != "CEFSPlusSelector" and name != "select_cefsplus":
+        options.setdefault("task", "regression")
+    if variant == "gaussian":
+        options["estimator"] = "gaussian"
+    context = {"groups": call["groups"], "time": call["time"], **call["fit"]}
+    if name.startswith("select_"):
+        getattr(sift, name)(
+            call["X"], call["y"], k="auto", within=call["within"],
+            auto_k_config=call["config"], **context, **options,
+            **call["conditioning"],
+        )
+        return
+    getattr(sift, name)(
+        k="auto", within=call["within"], auto_k_config=call["config"],
+        **options, **call["conditioning"],
+    ).fit(call["X"], call["y"], **context)
+
+
+def _with_category():
+    X, _y, _g, _t = _balanced_panel()
+    return X.assign(cat=pd.Categorical(np.tile(["p", "q"], len(X) // 2)))
+
+
+#: Inputs with a more basic problem than within + conditioning, and the
+#: 1.0.0 error each one keeps (the text the same call raises without
+#: include/exclude/candidates).
+_MORE_BASIC_WITHIN_ERRORS = {
+    "empty candidates": (
+        {"conditioning": {"candidates": []}},
+        "conditioning leaves no eligible features for discovery; include, "
+        "exclude, and candidates produce an empty candidate pool",
+    ),
+    "unknown include": (
+        {"conditioning": {"include": ["typo"]}},
+        "include contains unknown feature 'typo'",
+    ),
+    "include/exclude overlap": (
+        {"conditioning": {"include": ["noise"], "exclude": ["noise"]}},
+        "include and exclude overlap: 'noise'",
+    ),
+    "missing groups": (
+        {"groups": None},
+        "within='groups' requires groups",
+    ),
+    "two_way without time": (
+        {"within": "two_way", "time": None},
+        "within='two_way' requires groups and time",
+    ),
+    "min_k > max_k": (
+        {"config": AutoKConfig(k_method="gaussian_cv", strategy="kfold", min_k=3, max_k=2)},
+        "AutoKConfig.min_k must be <= AutoKConfig.max_k",
+    ),
+    "classification": (
+        {
+            "config": AutoKConfig(k_method="evaluate", strategy="time_holdout"),
+            "options": {"task": "classification"},
+            "y": (np.arange(120) % 2),
+        },
+        "within is only supported for task='regression'",
+    ),
+    "holdout without time": (
+        {
+            "config": AutoKConfig(k_method="evaluate", strategy="time_holdout"),
+            "time": None,
+        },
+        "auto-k evaluate with strategy='time_holdout' requires time parameter",
+    ),
+    "one-hot": (
+        {
+            "X": _with_category(),
+            "options": {"cat_features": ["cat"], "cat_encoding": "onehot"},
+        },
+        "cat_encoding='onehot' is not supported with within panel demeaning",
+    ),
+    "evaluate with kfold": (
+        {"config": AutoKConfig(k_method="evaluate", strategy="kfold")},
+        "AutoKConfig.strategy='kfold' is only supported by gaussian_cv and "
+        "xfit_objective, and with within='groups' the remaining evaluate "
+        f"strategies cannot all be validated. {_EXPECTED_GUIDANCE['groups']}",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "route,case",
+    [
+        (route, case)
+        for case in sorted(_MORE_BASIC_WITHIN_ERRORS)
+        for route in _GAUSSIAN_CONDITIONED_ROUTES
+        # CEFS+ has no task parameter.
+        if case != "classification" or route == "select_mrmr+gaussian"
+    ],
+)
+def test_conditioned_within_auto_k_keeps_the_more_basic_error(route, case):
+    overrides, expected = _MORE_BASIC_WITHIN_ERRORS[case]
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, **overrides)
+    assert str(excinfo.value) == expected
+
+
+@pytest.mark.parametrize("route", ["select_cefsplus", "CEFSPlusSelector"])
+def test_conditioned_within_auto_k_keeps_the_prebuilt_cache_error(route):
+    X, _y, _g, _t = _balanced_panel()
+    cache = sift.build_cache(X)
+    overrides = (
+        {"options": {"cache": cache}} if route == "select_cefsplus"
+        else {"fit": {"cache": cache}}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, **overrides)
+    assert str(excinfo.value) == (
+        "within cannot be combined with a prebuilt cache; demeaning must "
+        "precede the rank transform, so rebuild without cache"
+    )
+
+
+@pytest.mark.parametrize("route", _CLASSIC_CONDITIONED_ROUTES)
+@pytest.mark.parametrize("within", ["groups", "two_way"])
+@pytest.mark.parametrize("k_method", ["gaussian_cv", "xfit_objective", "elbow"])
+def test_classic_conditioned_within_keeps_the_unsupported_method_error(
+    route, within, k_method
+):
+    # A classic estimator scores only evaluate; that is the first thing wrong
+    # with these calls, as in 1.0.0.
+    config = AutoKConfig(k_method=k_method, strategy="kfold", xfit_folds=3)
+    if k_method == "elbow":
+        config = AutoKConfig(k_method="elbow")
+    with pytest.raises(ValueError) as excinfo:
+        _conditioned_within_call(route, within=within, config=config)
+    assert str(excinfo.value) == f"mRMR does not support k_method={k_method!r}"
+
+
+def test_nested_conditioned_within_keeps_the_nested_error():
+    X, y, g, t = _balanced_panel()
+    config = AutoKConfig(auto_k_mode="nested", k_method="evaluate", strategy="time_holdout")
+    selector = sift.CEFSPlusSelector(
+        k="auto", within="groups", include=["noise"], auto_k_config=config,
+        verbose=False,
+    )
+    with pytest.raises(ValueError) as excinfo:
+        selector.fit(X, y, groups=g, time=t)
+    assert str(excinfo.value) == (
+        "within is not supported with auto_k_mode='nested'; use "
+        "auto_k_mode='prefix_only' so demeaning stays fold-local. "
+        f"{_EXPECTED_GUIDANCE['groups']}"
+    )
 
 
 @pytest.mark.parametrize("within", ["groups", "two_way"])
@@ -1160,6 +1379,8 @@ def test_select_k_auto_non_evaluate_without_within_keeps_its_message():
 
 _WITHIN_DOCSTRING_ENTRIES = [
     "select_mrmr",
+    "select_jmi",
+    "select_jmim",
     "select_cefsplus",
     "MRMRSelector",
     "JMISelector",
@@ -1177,6 +1398,24 @@ def test_within_docstrings_state_the_two_way_convergence_criterion(entry):
         "the column's weighted standard deviation, falls below ``1e-10``, at "
         "most 200 passes"
     ) in doc
+
+
+def test_every_export_that_describes_two_way_sweeps_is_pinned():
+    # Any public docstring that describes the two-way alternation must be in
+    # the pinned list above, so a new or missed one cannot keep stale text.
+    describing = sorted(
+        name
+        for name in sift.__all__
+        if "alternates entity and time demeaning"
+        in " ".join((getattr(sift, name).__doc__ or "").split())
+    )
+    assert describing == sorted(_WITHIN_DOCSTRING_ENTRIES)
+    stale = sorted(
+        name
+        for name in sift.__all__
+        if "relative change" in " ".join((getattr(sift, name).__doc__ or "").split())
+    )
+    assert stale == []
 
 
 # ---------------------------------------------------------------------------
@@ -1613,12 +1852,24 @@ def test_never_stored_proxy_guidance_does_not_blame_a_threshold_change():
         )
 
 
-_PROXY_ROUTES_TEXT = (
-    "select_cefsplus, select_cefsplus_binary with loss='brier', and "
-    "select_mrmr, select_jmi and select_jmim with estimator='gaussian' (none of "
-    "these with cat_encoding='onehot'), and on select_cached, StabilitySelector "
-    "and Stabilized"
+_REGRESSION_PROXY_ROUTES_TEXT = (
+    "select_cefsplus, and select_mrmr, select_jmi and select_jmim with "
+    "estimator='gaussian' (none of these with cat_encoding='onehot'), and, on "
+    "an all-numeric X, select_cached, StabilitySelector and Stabilized"
 )
+_CLASSIFICATION_PROXY_ROUTES_TEXT = (
+    "select_cefsplus_binary with loss='brier' for a two-class target (not "
+    "with cat_encoding='onehot'), and, on an all-numeric X, StabilitySelector "
+    "with task='classification' and Stabilized"
+)
+_PROXY_ROUTES_TEXT = {
+    "regression": f"on {_REGRESSION_PROXY_ROUTES_TEXT}",
+    "classification": f"on {_CLASSIFICATION_PROXY_ROUTES_TEXT}",
+    None: (
+        f"for regression on {_REGRESSION_PROXY_ROUTES_TEXT}; for classification "
+        f"on {_CLASSIFICATION_PROXY_ROUTES_TEXT}"
+    ),
+}
 
 
 def _proxy_source_frame():
@@ -1636,33 +1887,52 @@ def _with_category(X):
     return X
 
 
+def _proxy_target(y, target):
+    """The regression target, or a two- or three-class label derived from it."""
+    if target == "binary":
+        return (y > 0).astype(int)
+    if target == "multiclass":
+        return np.digitize(y, np.quantile(y, [1 / 3, 2 / 3]))
+    return y
+
+
 def _unsupported_proxy_sources():
-    from sklearn.linear_model import LinearRegression
+    """(blocker, task, target, categorical X, build) for sources without the option."""
+    from sklearn.linear_model import LinearRegression, LogisticRegression
 
     def filt(name, **kw):
         return lambda X, y: getattr(sift, name)(
             X, y, k=2, verbose=False, return_result=True, **kw
         )
 
+    onehot = {"cat_features": ["cat"], "cat_encoding": "onehot"}
     return [
-        ("select_mrmr with estimator='classic'", filt("select_mrmr", task="regression")),
-        ("select_jmi with estimator='r2'", filt("select_jmi", task="regression")),
+        ("select_mrmr with estimator='classic'", "regression", "continuous", False,
+         filt("select_mrmr", task="regression")),
+        ("select_jmi with estimator='r2'", "regression", "continuous", False,
+         filt("select_jmi", task="regression")),
+        ("select_cefsplus with cat_encoding='onehot'", "regression", "continuous", True,
+         filt("select_cefsplus", **onehot)),
+        ("select_mrmr with cat_encoding='onehot'", "regression", "continuous", True,
+         filt("select_mrmr", task="regression", estimator="gaussian", **onehot)),
+        ("select_mrmr with estimator='classic'", "classification", "binary", False,
+         filt("select_mrmr", task="classification")),
+        ("select_jmi with estimator='binned'", "classification", "binary", False,
+         filt("select_jmi", task="classification")),
+        ("select_jmim with estimator='binned'", "classification", "multiclass", False,
+         filt("select_jmim", task="classification")),
+        ("select_mrmr with cat_encoding='onehot'", "classification", "binary", True,
+         filt("select_mrmr", task="classification", **onehot)),
+        ("select_cefsplus_binary with loss='logloss'", "classification", "binary", False,
+         filt("select_cefsplus_binary")),
+        ("select_cefsplus_binary with cat_encoding='onehot'", "classification", "binary",
+         True, filt("select_cefsplus_binary", loss="brier", **onehot)),
+        ("ModelSelector", None, "continuous", False,
+         lambda X, y: sift.ModelSelector(LinearRegression()).fit(X, y)),
+        ("ModelSelector", None, "binary", False,
+         lambda X, y: sift.ModelSelector(LogisticRegression()).fit(X, y)),
         (
-            "select_cefsplus_binary with loss='logloss'",
-            lambda X, y: sift.select_cefsplus_binary(
-                X, (y > 0).astype(int), k=2, verbose=False, return_result=True
-            ),
-        ),
-        (
-            "select_cefsplus with cat_encoding='onehot'",
-            lambda X, y: sift.select_cefsplus(
-                _with_category(X), y, k=2, cat_features=["cat"],
-                cat_encoding="onehot", verbose=False, return_result=True,
-            ),
-        ),
-        ("ModelSelector", lambda X, y: sift.ModelSelector(LinearRegression()).fit(X, y)),
-        (
-            "KnockoffSelectionResult",
+            "KnockoffSelectionResult", None, "continuous", False,
             lambda X, y: sift.KnockoffSelector(
                 random_state=0, verbose=False, q=0.5
             ).fit(X, y).result_,
@@ -1670,22 +1940,152 @@ def _unsupported_proxy_sources():
     ]
 
 
-@pytest.mark.parametrize(
-    "source,build",
-    [pytest.param(source, build, id=source) for source, build in _unsupported_proxy_sources()],
-)
+def _unsupported_proxy_params():
+    return [
+        pytest.param(*case, id=f"{case[0]}-{case[2]}{'-categorical' if case[3] else ''}")
+        for case in _unsupported_proxy_sources()
+    ]
+
+
+@pytest.mark.parametrize("source,task,target,categorical,build", _unsupported_proxy_params())
 def test_never_stored_proxies_on_a_source_without_store_proxies_names_the_routes_that_have_it(
-    source, build
+    source, task, target, categorical, build
 ):
     X, y = _proxy_source_frame()
-    view = sift.as_result(build(X, y))
+    view = sift.as_result(
+        build(_with_category(X) if categorical else X, _proxy_target(y, target))
+    )
     expected = (
         "proxy correlations were not stored for this selection, and its source "
-        f"({source}) cannot store them; store_proxies=True is available on "
-        f"{_PROXY_ROUTES_TEXT}"
+        f"({source}) cannot store them; store_proxies=True is available "
+        f"{_PROXY_ROUTES_TEXT[task]}"
     )
     assert _proxy_message(view.redundancy_report) == expected
     assert _proxy_message(view.proxy_clusters) == expected
+
+
+def _advised_proxy_reruns(task):
+    """One runner per route the advice for ``task`` names, as the text says.
+
+    A runner takes the source's X (with its categorical column, if any) and
+    target and applies the qualifiers the advice states: a cat_encoding other
+    than 'onehot' on the encoding routes, and an all-numeric X (the category
+    as integer codes) on the routes that compute proxies on the raw matrix.
+    """
+    def encoded(X):
+        return {"cat_features": ["cat"], "cat_encoding": "ordinal"} if "cat" in X else {}
+
+    def numeric(X):
+        if "cat" not in X:
+            return X
+        return X.assign(cat=(X["cat"] == "hi").astype(int))
+
+    def filt(name, **kw):
+        return lambda X, y: getattr(sift, name)(
+            X, y, k=2, verbose=False, return_result=True, store_proxies=True,
+            **kw, **encoded(X),
+        )
+
+    def stability(**kw):
+        return lambda X, y: sift.StabilitySelector(
+            n_bootstrap=5, threshold=0.5, random_state=0, verbose=False, n_jobs=1,
+            store_proxies=True, **kw,
+        ).fit(numeric(X), y)
+
+    def stabilized(base):
+        return lambda X, y: sift.Stabilized(
+            base(), n_resamples=3, random_state=0, verbose=False, store_proxies=True
+        ).fit(numeric(X), y)
+
+    if task == "regression":
+        return {
+            "select_cefsplus": filt("select_cefsplus"),
+            "select_mrmr+gaussian": filt("select_mrmr", task="regression", estimator="gaussian"),
+            "select_jmi+gaussian": filt("select_jmi", task="regression", estimator="gaussian"),
+            "select_jmim+gaussian": filt("select_jmim", task="regression", estimator="gaussian"),
+            "select_cached": lambda X, y: sift.select_cached(
+                sift.build_cache(numeric(X)), y, k=2, return_result=True, store_proxies=True
+            ),
+            "StabilitySelector": stability(),
+            "Stabilized": stabilized(lambda: sift.CEFSPlusSelector(k=2, verbose=False)),
+        }
+    return {
+        "select_cefsplus_binary(loss='brier')": filt("select_cefsplus_binary", loss="brier"),
+        "StabilitySelector(task='classification')": stability(task="classification"),
+        "Stabilized": stabilized(
+            lambda: sift.MRMRSelector(k=2, task="classification", verbose=False)
+        ),
+    }
+
+
+def _advised_rerun_params():
+    params = []
+    for source, task, target, categorical, _build in _unsupported_proxy_sources():
+        for kind in [task] if task is not None else ["regression", "classification"]:
+            if (kind == "regression") != (target == "continuous"):
+                continue  # the advice for the other task, on this target
+            for route in _advised_proxy_reruns(kind):
+                if target == "multiclass" and "binary" in route:
+                    continue  # advised for a two-class target only
+                suffix = "-categorical" if categorical else ""
+                params.append(
+                    pytest.param(
+                        kind, target, categorical, route,
+                        id=f"{source}-{target}{suffix}->{route}",
+                    )
+                )
+    return params
+
+
+@pytest.mark.parametrize("task,target,categorical,route", _advised_rerun_params())
+def test_every_route_the_never_stored_advice_names_stores_proxies(
+    task, target, categorical, route
+):
+    X, y = _proxy_source_frame()
+    X = _with_category(X) if categorical else X
+    view = sift.as_result(_advised_proxy_reruns(task)[route](X, _proxy_target(y, target)))
+    assert view.metadata["proxy_correlations_stored"] is True
+    report = view.redundancy_report(0.0)
+    assert list(report.columns) == [
+        "selected_feature", "selected_index", "feature", "candidate_index", "correlation"
+    ]
+    assert set(report["selected_index"]) <= set(view.indices)
+
+
+@pytest.mark.parametrize("encoding", ["onehot", "ordinal", "target_cv"])
+def test_stabilized_over_a_categorical_frame_says_how_to_store_proxies(encoding):
+    X, y = _proxy_source_frame()
+    Xc = _with_category(X)
+
+    def fit(frame, **extra):
+        return sift.Stabilized(
+            sift.CEFSPlusSelector(
+                k=2, cat_features=["cat"], cat_encoding=encoding, verbose=False
+            ),
+            n_resamples=3, random_state=0, verbose=False, **extra,
+        ).fit(frame, y)
+
+    view = sift.as_result(fit(Xc))
+    assert view.metadata["proxy_input_numeric"] is False
+    assert _proxy_message(view.redundancy_report) == (
+        "proxy correlations were not stored for this selection, and Stabilized "
+        "computes them on the raw feature matrix, which has non-numeric columns "
+        "here, so a store_proxies=True refit on it fails; encode those columns "
+        "as numbers before refitting with store_proxies=True"
+    )
+    # The plain rerun really fails on this frame ...
+    with pytest.raises(ValueError) as excinfo:
+        fit(Xc, store_proxies=True)
+    assert str(excinfo.value) == "store_proxies=True requires a numeric feature matrix"
+    # ... and the named remedy works, with the same selection.
+    codes = Xc.assign(cat=(Xc["cat"] == "hi").astype(int))
+    stored = sift.as_result(fit(codes, store_proxies=True))
+    assert stored.metadata["proxy_correlations_stored"] is True
+    assert stored.features == view.features
+    # A numeric frame keeps the plain rerun advice and no new metadata.
+    numeric_view = sift.as_result(fit(codes))
+    assert "proxy_input_numeric" not in numeric_view.metadata
+    assert _proxy_message(numeric_view.redundancy_report) == _NEVER_STORED_PROXY_MESSAGE
 
 
 def _supported_proxy_sources():
