@@ -114,10 +114,10 @@ stability_selector = StabilitySelector(
 
 Only `StabilitySelector` changed all four defaults. The five filter classes,
 `KnockoffSelector` and `Stabilized` changed `output_order` and `verbose`;
-`BorutaSelector` only `verbose` (its legacy order already was input order);
-`ModelSelector` only `output_order`; `permutation_importance` `n_jobs` and
-`random_state`; `catboost_select` those two and `verbose`; `SmartSamplerConfig`
-and the `select_*` functions only `verbose`. The
+`BorutaSelector` in effect only `verbose` (its legacy order already was input
+order); `ModelSelector` only `output_order`; `permutation_importance` `n_jobs`
+and `random_state`; `catboost_select` those two and `verbose`;
+`SmartSamplerConfig` and the `select_*` functions only `verbose`. The
 [1.0.0 release notes](https://github.com/kmedved/sift/blob/main/docs/release-notes.md#100-2026-09-21)
 list every changed entry point.
 
