@@ -23,6 +23,7 @@ from sift.selection.auto_k import (
     validate_auto_k_config,
     with_effective_k_bounds,
 )
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.auto_k_core import (
     build_score_curve_diagnostics,
     split_weights,
@@ -112,6 +113,7 @@ def _fold_splits(
         n_splits = min(int(config.xfit_folds), int(n_rows))
         if n_splits < 2:
             raise ValueError(f"kfold requires at least 2 rows, got {n_rows}")
+        check_auto_k_seed(config)
         splitter = KFold(n_splits=n_splits, shuffle=True, random_state=int(config.random_state))
         return [
             (train.astype(np.int64), val.astype(np.int64))
