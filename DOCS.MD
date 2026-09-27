@@ -635,11 +635,11 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff. It remains the 0.9 compatibility default.
-  The retained [statistic bakeoff](docs/knockoff-statistic-bakeoff.md)
-  recommends keeping `relevance` for the 1.0 owner decision on those four
-  Gaussian designs (ridge reduced realized FDP but lost power on correlated
-  draws). That is not a universal ranking.
+  original feature and its knockoff. It is the default, and 1.0 kept it
+  (settled 2026-09-21) on the retained
+  [statistic bakeoff](docs/knockoff-statistic-bakeoff.md) over four Gaussian
+  designs (ridge reduced realized FDP but lost power on correlated draws).
+  That is not a universal ranking.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
   target correlations. Truncated LARS paths and ties are **not** generally
@@ -1281,14 +1281,14 @@ assert caught[0].category is FutureWarning
 ```
 
 The staged helper is the same object as the top-level
-`sift.gaussian_cv_curves`, which stays warning-free through 0.9; only the
-`sift.experimental` spelling announces the 1.0 move.
+`sift.gaussian_cv_curves`, which stays warning-free; only the
+`sift.experimental` spelling emits the notice.
 
 Accessing one of the 16 names through `sift.experimental` emits a
-`FutureWarning` because those helpers may change before 1.0. Their existing
-top-level imports remain available and warning-free throughout 0.9;
-`sift.__all__` remains the ordered public surface (60 names after F9's additive
-`compare` / `CompareResult`). The option-group types
+`FutureWarning` marking it as a research-oriented helper whose behavior may
+evolve in later releases. 1.0 keeps both spellings: the top-level imports
+remain available and warning-free, and `sift.__all__` remains the ordered
+public surface (66 names since 0.10.0). The option-group types
 remain module-scoped and are not added to either top-level export list.
 
 ### Explicit feature-path evaluation

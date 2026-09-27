@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import io
 import os
 import pathlib
 import re
@@ -434,6 +435,42 @@ def test_every_skip_directive_states_a_reason() -> None:
         if block.error is not None and "reason" in block.error
     ]
     assert unexplained == [], f"skip without reason in {unexplained}"
+
+
+def test_readme_output_order_example_prints_the_orders_its_comments_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The README contrasts the two ``output_order`` values; both must be real.
+
+    The runner only proves a block executes. This example's point is the two
+    printed orders, so its comments and its output are pinned together.
+    """
+    (block,) = [
+        block
+        for block in DOC_BLOCKS["README.md"]
+        if 'set_output(transform="pandas")' in block.source
+    ]
+    stated = [
+        line.split("#", 1)[1].strip()
+        for line in block.source.splitlines()
+        if line.startswith("print(")
+    ]
+    assert stated == [
+        "['f4', 'f1'] - selection order",
+        "['f1', 'f4'] - input order",
+        "all six fitted names",
+        "(200, 6), zero-filled",
+    ]
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        _run_source(block, _fresh_namespace(), tmp_path)
+    assert buffer.getvalue().splitlines() == [
+        "['f4', 'f1']",
+        "['f1', 'f4']",
+        "['f0', 'f1', 'f2', 'f3', 'f4', 'f5']",
+        "(200, 6)",
+    ]
 
 
 # --------------------------------------------------------------------------

@@ -113,8 +113,10 @@ datetime feature columns are not cached; encode or convert them first.
 
 The ordered sequence of features a greedy selector adds, one at a time.
 Fixed-k returns a prefix of length at most `k`. Auto-k walks the same path
-and applies a [stopping rule](#stopping-rule). Path order is the default
-filter [result view](#result-view) order unless `output_order="original"`.
+and applies a [stopping rule](#stopping-rule). Filter functions and their
+[result views](#result-view) report path order. Selector-class transforms
+follow input order by default since 1.0; `output_order="legacy"` restores
+path order there.
 
 ## Fixed-k
 
