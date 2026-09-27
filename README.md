@@ -80,6 +80,47 @@ features, so a small `q` on a narrow design legitimately selects none.
 For the full public API, examples, selector support matrix, and option details,
 start with the [full API manual](https://github.com/kmedved/sift/blob/main/DOCS.MD).
 
+## Upgrading to 1.0
+
+1.0 changes four defaults. Selector mathematics, the features a seeded call
+selects, all 66 exports, result forms and permanent aliases are unchanged.
+
+- **Transform order.** The ten selector classes (`MRMRSelector`, `JMISelector`,
+  `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`,
+  `KnockoffSelector`, `BorutaSelector`, `StabilitySelector`, `ModelSelector`,
+  `Stabilized`) default to `output_order="original"`: `transform`,
+  `get_feature_names_out()`, `get_support(indices=True)` and
+  `inverse_transform` follow fitted input order instead of selection order, and
+  so do the `sift.as_result` views of a fitted `StabilitySelector`,
+  `ModelSelector` or `Stabilized`. `selected_features_`, result tables and the
+  lists returned by the function API keep selection order. Refit a downstream
+  model that was trained on the old column order.
+- **Quiet by default.** Public `verbose` defaults are now `False`.
+- **Seeds and workers.** `StabilitySelector`, `permutation_importance` and
+  `catboost_select` (and the `stability_*` / `catboost_*` wrappers) default to
+  `random_state=0` and `n_jobs=1`. The `random_state=None` `FutureWarning` is
+  gone; an explicit `None` still draws fresh entropy.
+
+To keep the 0.10 behavior, pass the old values explicitly:
+
+```python
+from sift import MRMRSelector, StabilitySelector
+
+filter_selector = MRMRSelector(k=10, output_order="legacy", verbose=True)
+stability_selector = StabilitySelector(
+    output_order="legacy", verbose=True, n_jobs=-1, random_state=None
+)
+```
+
+Only `StabilitySelector` changed all four defaults. The five filter classes,
+`KnockoffSelector` and `Stabilized` changed `output_order` and `verbose`;
+`BorutaSelector` only `verbose` (its legacy order already was input order);
+`ModelSelector` only `output_order`; `permutation_importance` `n_jobs` and
+`random_state`; `catboost_select` those two and `verbose`; `SmartSamplerConfig`
+and the `select_*` functions only `verbose`. The
+[1.0.0 release notes](https://github.com/kmedved/sift/blob/main/docs/release-notes.md#100-2026-09-21)
+list every changed entry point.
+
 ## What's New in 0.9
 
 0.9 is a product layer that sits beside the existing API: the surfaces below are
@@ -94,8 +135,13 @@ the migration notes, and the deprecation ledger are in the
   normalized result view.
 - `cat_encoding="target_cv"` adds leakage-safe, fold-centered target encoding
   for DataFrames with string columns, with no optional dependency.
-  `cat_encoding="ordinal"` and `"frequency"` are target-blind numeric maps on the
-  same surfaces (unknown `-1` / `0`; no extra dependency).
+  `cat_encoding="ordinal"` and `"frequency"` are target-blind numeric maps
+  (unknown `-1` / `0`; no extra dependency). Their surfaces differ from
+  `target_cv`'s: `KnockoffSelector` and multi-target CEFS+ accept them but
+  reject `target_cv`, while resampled auto-k (`stability`, `knockoff_path`,
+  `consensus`) accepts `target_cv` but rejects them. The
+  [data-type support notes](https://github.com/kmedved/sift/blob/main/docs/data-type-support.md#how-to-read-the-axes)
+  summarize which entry points accept each encoding.
 - Selector classes gain `output_order`, `inverse_transform`, sklearn's
   `feature_names_in_` contract, `set_output(transform="pandas")`, and explicit
   sklearn 1.4+ metadata routing.
@@ -177,9 +223,10 @@ columns, or pass `groups=` so an identifier's rows land in one fold.
 
 ### Sklearn-native selector classes
 
-All eight selector classes are `SelectorMixin` transformers. `output_order`
-chooses between historical selection order and ascending input order, and
-`set_output(transform="pandas")` keeps a DataFrame on the way out.
+All ten selector classes are `SelectorMixin` transformers. Their output
+follows ascending input order by default (since 1.0); `output_order="legacy"`
+keeps each selector's historical selection order. `set_output(transform="pandas")`
+keeps a DataFrame on the way out.
 
 ```python
 import numpy as np
@@ -190,10 +237,10 @@ rng = np.random.default_rng(0)
 X = pd.DataFrame(rng.normal(size=(200, 6)), columns=[f"f{i}" for i in range(6)])
 y = 2.0 * X["f4"] + X["f1"] + rng.normal(scale=0.1, size=200)
 
-legacy = MRMRSelector(k=2, task="regression", verbose=False).fit(X, y)
+legacy = MRMRSelector(k=2, task="regression", output_order="legacy").fit(X, y)
 print(list(legacy.get_feature_names_out()))  # ['f4', 'f1'] - selection order
 
-original = MRMRSelector(k=2, task="regression", output_order="original", verbose=False)
+original = MRMRSelector(k=2, task="regression")  # output_order="original"
 original.set_output(transform="pandas")
 X_selected = original.fit_transform(X, y)
 
@@ -221,8 +268,9 @@ downstream = AutoKConfig.downstream(strategy="group_cv", metric="r2", rule="best
 
 `AutoKConfig.from_groups(...)` flattens seven immutable option groups into the
 same flat config. `sift.experimental` stages 16 research-oriented auto-k helpers
-whose access emits a `FutureWarning`; all 58 names in `sift.__all__` stay
-importable from `sift` itself, warning-free, throughout 0.9.
+whose access through that namespace emits a `FutureWarning`. Every name in
+`sift.__all__` (58 in 0.9.0, 66 since 0.10.0) stays importable from `sift`
+itself without a warning, and 1.0 keeps all 66.
 
 ## Documentation
 
