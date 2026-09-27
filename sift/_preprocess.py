@@ -1514,7 +1514,8 @@ def _names_array_column(ref: Any, n_features: int) -> bool:
         return False
     if isinstance(ref, (int, np.integer)):
         return 0 <= int(ref) < n_features
-    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isdigit():
+    # ASCII digits only: str.isdigit() also accepts "²", which int() rejects.
+    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isascii() and ref[1:].isdigit():
         return ref == f"x{int(ref[1:])}" and int(ref[1:]) < n_features
     return False
 
