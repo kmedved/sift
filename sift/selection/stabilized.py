@@ -184,23 +184,37 @@ def _base_needs_named_frame(selector: Any) -> bool:
     ).startswith("sift.")
 
 
-def _base_can_force_block_members(selector: Any) -> bool:
-    """True when the base (or a nested estimator) declares ``feature_blocks``.
+def _declared_block_members(selector: Any, names: list, *, named: bool) -> set[int]:
+    """Raw positions inside a multi-member block the base (or a nested estimator) declares.
 
-    Such a base can pull a constant column into the selection through an
-    atomic block. ``KnockoffSelector`` expands groups over cache-valid
-    members only, so its blocks never select a constant column.
+    Only such a column can be pulled into the selection through an atomic
+    block; a singleton block or an undeclared column is selected on its own.
+    ``KnockoffSelector`` expands groups over cache-valid members only, so its
+    blocks never select a constant column.  A declaration that does not
+    resolve against these names contributes nothing.
     """
     if _is_knockoff_selector(selector):
-        return False
+        return set()
+    from sift.selection.blocks import resolve_feature_blocks
+
     try:
         params = selector.get_params(deep=True)
     except (AttributeError, TypeError, ValueError):
         params = {"feature_blocks": getattr(selector, "feature_blocks", None)}
-    return any(
-        (key == "feature_blocks" or key.endswith("__feature_blocks")) and value is not None
-        for key, value in params.items()
-    )
+    members: set[int] = set()
+    for key, value in params.items():
+        if value is None or not (key == "feature_blocks" or key.endswith("__feature_blocks")):
+            continue
+        try:
+            resolved = resolve_feature_blocks(value, feature_names=names, named=named)
+        except (TypeError, ValueError):
+            continue
+        if resolved is None:
+            continue
+        for block in resolved.members:
+            if len(block) > 1:
+                members.update(int(col) for col in block)
+    return members
 
 
 def _n_rows_used_from_fitted(fitted: Any) -> int | None:
@@ -1293,13 +1307,22 @@ class Stabilized(SelectorMixin, BaseEstimator):
         )
         selected = [int(i) for i in np.asarray(self.selected_indices_)]
         varying_raw = np.flatnonzero(varying).astype(np.int64)
+        constant_selected = [pos for pos in selected if not bool(varying[pos])]
+        # Only a constant column inside a declared multi-member block can have
+        # been forced in by that block; otherwise the remedy is the column.
+        blocks_in_play = bool(constant_selected) and bool(
+            set(constant_selected)
+            & _declared_block_members(
+                self.selector,
+                list(self.feature_names_in_),
+                named=isinstance(X, pd.DataFrame),
+            )
+        )
         reject_unavailable_proxy_positions(
             selected,
             available_original=varying_raw,
             feature_names=self.feature_names_in_,
-            # Only a base with atomic feature_blocks can force a constant
-            # member in; otherwise the remedy is the column, not a block.
-            blocks_in_play=_base_can_force_block_members(self.selector),
+            blocks_in_play=blocks_in_play,
         )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))

@@ -471,6 +471,54 @@ def _validate_table_selection(
         raise ValueError("raw_table selected feature identities do not match features")
 
 
+#: Every entry point that accepts ``store_proxies=True``.  A view whose source
+#: is not one of them names this list instead of advising a rerun that fails.
+_PROXY_STORING_ROUTES = (
+    "select_cefsplus, select_cefsplus_binary with loss='brier', and select_mrmr, "
+    "select_jmi and select_jmim with estimator='gaussian' (none of these with "
+    "cat_encoding='onehot'), and on select_cached, StabilitySelector and "
+    "Stabilized"
+)
+_FILTER_FUNCTIONS = {
+    "mrmr": "select_mrmr",
+    "jmi": "select_jmi",
+    "jmim": "select_jmim",
+    "cefsplus": "select_cefsplus",
+    "cefsplus_binary": "select_cefsplus_binary",
+}
+
+
+def _proxy_storage_blocker(metadata: Mapping[str, Any]) -> str | None:
+    """Name the source that cannot store proxies, or ``None`` when it can.
+
+    ``None`` also covers sources the view cannot identify, which keep the
+    plain "rerun with store_proxies=True" advice.
+    """
+    adapter = metadata.get("adapter")
+    if adapter in {"StabilitySelector", "Stabilized"}:
+        return None
+    if adapter != "FilterSelectionResult":
+        return None if adapter in {None, "unknown"} else str(adapter)
+    selector = str(metadata.get("selector"))
+    if selector.startswith("cached_"):
+        return None
+    entry = _FILTER_FUNCTIONS.get(selector)
+    if entry is None:
+        return None
+    options = metadata.get("configured_options")
+    encoding = options.get("cat_encoding") if isinstance(options, Mapping) else None
+    if encoding is None:
+        encoding = metadata.get("cat_encoding")
+    if encoding == "onehot":
+        return f"{entry} with cat_encoding='onehot'"
+    estimator = metadata.get("estimator")
+    if selector in {"mrmr", "jmi", "jmim"} and isinstance(estimator, str) and estimator != "gaussian":
+        return f"{entry} with estimator={estimator!r}"
+    if selector == "cefsplus_binary" and metadata.get("delegate_selector") != "cefsplus":
+        return f"{entry} with loss={metadata.get('loss', 'logloss')!r}"
+    return None
+
+
 class SelectionView:
     """Normalized, non-replacing view over a SIFT selection result.
 
@@ -1288,6 +1336,13 @@ class SelectionView:
                     "stored proxy block holds one column per feature selected when it "
                     "was computed, and a threshold change added features it cannot "
                     "describe; refit with the lower threshold and store_proxies=True"
+                )
+            blocker = _proxy_storage_blocker(self._metadata)
+            if blocker is not None:
+                raise NotImplementedError(
+                    "proxy correlations were not stored for this selection, and "
+                    f"its source ({blocker}) cannot store them; store_proxies=True "
+                    f"is available on {_PROXY_STORING_ROUTES}"
                 )
             raise NotImplementedError(
                 "proxy correlations were not stored for this selection; rerun or "

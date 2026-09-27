@@ -142,9 +142,57 @@ def within_split_guidance(mode: str) -> str:
             "classic estimators cannot validate within='two_way'"
         )
     return (
-        f"within='groups' scores under {_KFOLD_WITHIN_ROUTE} on {_GAUSSIAN_PATH}, "
-        "or under k_method='evaluate' with strategy='time_holdout' when "
-        "entities persist across the holdout boundary"
+        "within='groups' scores under k_method='gaussian_cv' or "
+        "'xfit_objective' with strategy='kfold' or 'time_holdout' on "
+        f"{_GAUSSIAN_PATH}, or under k_method='evaluate' with "
+        "strategy='time_holdout'; a time_holdout split needs entities that "
+        "persist across the holdout boundary"
+    )
+
+
+def reject_conditioned_within_auto_k(
+    within: str | None,
+    config,
+    *,
+    conditioning: bool,
+) -> None:
+    """Reject auto-k configs that cannot combine ``within`` with conditioning.
+
+    Exact ``include`` / ``exclude`` / ``candidates`` conditioning needs a
+    prefix-truncation auto-k method, while ``gaussian_cv`` and
+    ``xfit_objective`` rebuild an unconditioned path.  Those two are the only
+    methods that validate ``within='two_way'``, so no auto-k method serves
+    both; under ``within='groups'`` only ``evaluate`` with ``time_holdout``
+    does.  Saying so here keeps the conditioning and within rejections from
+    sending the caller back and forth.  ``config`` is the resolved
+    ``AutoKConfig``.
+    """
+    if within is None or not conditioning:
+        return
+    if within == "two_way":
+        raise ValueError(
+            "within='two_way' cannot choose k automatically with "
+            f"include/exclude/candidates: only {_KFOLD_WITHIN_ROUTE} can validate "
+            "within='two_way', and those methods rebuild an unconditioned path, "
+            "so they cannot honor exact conditioning. Pass a fixed integer k, or "
+            "omit include, exclude and candidates"
+        )
+    k_method = str(config.k_method)
+    strategy = str(config.strategy)
+    if k_method == "evaluate" and strategy == "time_holdout":
+        return
+    got = f"k_method={k_method!r}"
+    if k_method == "evaluate":
+        got += f" with strategy={strategy!r}"
+    raise ValueError(
+        "within='groups' with include/exclude/candidates chooses k "
+        "automatically only under k_method='evaluate' with "
+        "strategy='time_holdout' (pass time; entities must persist across the "
+        f"holdout boundary); got {got}. k_method='gaussian_cv' and "
+        "'xfit_objective' rebuild an unconditioned path, so they cannot honor "
+        "exact conditioning, and the other auto-k methods cannot validate "
+        "within. Use that evaluate route, pass a fixed integer k, or omit "
+        "include, exclude and candidates"
     )
 
 
@@ -288,6 +336,44 @@ def warn_unseen_within_validation_levels(tally: "UnseenWithinLevelTally | None")
     )
 
 
+def _no_seen_level_remedy(mode: str, strategy: str | None, dimension: str) -> str:
+    """Explain a fold with no seen level without recommending its own split.
+
+    ``dimension`` is ``"entity"`` or ``"time"``.  Mirrors
+    ``_unseen_level_remedy``: under ``kfold`` (the recommended route) the cause
+    is levels with very few rows, and the fold count cuts both ways -- more
+    folds hold fewer rows of a level out together but make each validation
+    fold smaller, so a fold made only of unseen rows gets more likely.
+    """
+    if dimension == "entity":
+        article, noun, plural, between = "an", "entity", "entities", "between-entity"
+    else:
+        article, noun, plural, between = "a", "period", "periods", "between-time"
+    if strategy == "kfold":
+        return (
+            "Under strategy='kfold' this happens when every validation row of a "
+            f"fold belongs to {article} {noun} whose rows all fall in that fold, "
+            f"which takes many {plural} with very few rows (a single-row {noun} "
+            "is never seen in training): drop or pool them, or lower "
+            "AutoKConfig.xfit_folds -- more folds hold fewer rows of each "
+            f"{noun} out together but make each validation fold smaller, so a "
+            f"fold with no seen {noun} gets more likely. Or omit within when "
+            f"validating {between} effects"
+        )
+    if strategy == "time_holdout" and dimension == "entity":
+        return (
+            "Under strategy='time_holdout' every validation entity first appears "
+            "after the holdout boundary: drop or otherwise handle late-entering "
+            f"entities, or switch to {_KFOLD_WITHIN_ROUTE} on {_GAUSSIAN_PATH}, "
+            "which holds out rows instead of whole periods. Or omit within when "
+            f"validating {between} effects"
+        )
+    return (
+        f"{within_split_guidance(mode)}, or omit within when validating "
+        f"{between} effects"
+    )
+
+
 def require_seen_within_validation_levels(
     fitted: "WithinTransform",
     groups: np.ndarray,
@@ -301,15 +387,17 @@ def require_seen_within_validation_levels(
     intentionally keeps its causal fallback for ordinary transforms of rows
     containing unseen entity or time ids.  Partial overlap still scores; pass a
     ``tally`` to collect the fallback row counts and report them once through
-    ``warn_unseen_within_validation_levels``.
+    ``warn_unseen_within_validation_levels``.  The tally's ``strategy`` also
+    picks the remedy of the no-overlap error, so it never recommends the split
+    that produced the fold.
     """
+    strategy = None if tally is None else tally.strategy
     group_codes = fitted.group_index.get_indexer(np.asarray(groups).reshape(-1))
     if not np.any(group_codes >= 0):
         raise ValueError(
             "within validation requires at least one entity level seen in the "
             "training fold; no validation entity can be demeaned from training "
-            f"effects. {within_split_guidance(fitted.mode)}, or omit within when "
-            "validating between-entity effects"
+            f"effects. {_no_seen_level_remedy(fitted.mode, strategy, 'entity')}"
         )
     time_codes = None
     if fitted.mode == "two_way":
@@ -322,8 +410,7 @@ def require_seen_within_validation_levels(
             raise ValueError(
                 "within validation requires at least one time level seen in the "
                 "training fold; no validation time can be demeaned from training "
-                f"effects. {within_split_guidance(fitted.mode)}, or omit within "
-                "when validating between-time effects"
+                f"effects. {_no_seen_level_remedy(fitted.mode, strategy, 'time')}"
             )
     if tally is not None:
         tally.add(

@@ -188,10 +188,19 @@ warning reports affected rows. Routes where none can be seen are
 rejected up front: `within="two_way"` validates only under
 `k_method="gaussian_cv"` or `"xfit_objective"` with `strategy="kfold"`, which
 run on the Gaussian path (`select_cefsplus`, or `estimator="gaussian"` for
-mRMR, JMI and JMIM), and `within="groups"` also accepts `evaluate` with
-`time_holdout`. The `kfold` route still warns when every row of an entity or
-period lands in one validation fold; drop or pool such thin levels, or raise
-`AutoKConfig.xfit_folds`.
+mRMR, JMI and JMIM). `within="groups"` also validates those two methods with
+`strategy="time_holdout"`, and `evaluate` with `time_holdout`, when entities
+persist across the holdout boundary. The `kfold` route still warns when every
+row of an entity or period lands in one validation fold; drop or pool such
+thin levels, or raise `AutoKConfig.xfit_folds`. When thin levels dominate, a
+whole validation fold can hold no seen level, which raises; more folds make
+that likelier, so drop or pool those levels or lower `xfit_folds`.
+
+`include`, `exclude` and `candidates` need an auto-k method that truncates the
+conditioned path, while `gaussian_cv` and `xfit_objective` rebuild an
+unconditioned one. Combined with `within`, `k="auto"` therefore works only for
+`within="groups"` with `evaluate` and `time_holdout`; for `within="two_way"`
+pass a fixed `k` or drop the conditioning keywords.
 
 ```python
 import numpy as np

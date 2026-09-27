@@ -25,6 +25,7 @@ from sift.selection.within import (
     require_within_context,
     validate_within,
     warn_unseen_within_validation_levels,
+    within_split_guidance,
 )
 from sift.selection.auto_k_config import (
     AutoKConfig as AutoKConfig,
@@ -610,7 +611,15 @@ def select_k_auto(
     groups = metadata.groups
     time = metadata.time
     sample_weight = metadata.sample_weight
-    _ensure_supported_auto_k_mode(config, within=validate_within(within))
+    within_mode = validate_within(within)
+    _ensure_supported_auto_k_mode(config, within=within_mode)
+    if config.k_method != "evaluate" and within_mode is not None:
+        # select_k_elbow scores an objective path and takes no within, so
+        # name the routes that can validate the panel mode instead.
+        raise ValueError(
+            "select_k_auto supports only AutoKConfig(k_method='evaluate'); got "
+            f"k_method={config.k_method!r}. {within_split_guidance(within_mode)}"
+        )
     if config.k_method != "evaluate":
         raise ValueError(
             "select_k_auto supports only AutoKConfig(k_method='evaluate'). "

@@ -425,7 +425,8 @@ time level adds no time effect. A warning reports affected rows, while
 routes where no validation level can be seen are rejected up front. Only
 `k_method="gaussian_cv"` or `"xfit_objective"` with `strategy="kfold"` on the
 Gaussian path validates `"two_way"`; that route still warns when all rows of
-a level land in one validation fold. Demeaning
+a level land in one validation fold. No auto-k method combines `"two_way"`
+with `include`/`exclude`/`candidates`, so those calls need a fixed `k`. Demeaning
 can remove all variation, including singleton-only groups, and then the selection is empty or the
 call raises that no within-entity signal remains. Ranking tables then
 include `within_relevance` (the selector relevance on the demeaned data)

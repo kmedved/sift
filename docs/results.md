@@ -280,7 +280,10 @@ absolute-correlation threshold. When raw labels repeat, use
 `view.proxies_at(selected_index, r_min=0.8)` for unambiguous positional access.
 The proxy block is deliberately omitted from `to_dict()`; its presence, byte
 count, and candidate count are recorded in metadata. Without the explicit
-option, both proxy accessors raise with guidance to rerun selection.
+option, both proxy accessors raise with guidance to rerun selection with
+`store_proxies=True`; a view whose source has no such option (a classic or
+log-loss filter route, `ModelSelector`, a knockoff result, and so on) names
+the entry points that do instead.
 
 `view.redundancy_report(r_min=0.8)` lists qualifying selected-to-candidate
 edges; pass `include_selected=True` to include selected-to-selected edges.

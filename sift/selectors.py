@@ -66,7 +66,7 @@ from sift.selection.knockoff_filter import (
 )
 from sift.selection.filter_api import _RANDOM_STATE_DEFAULT
 from sift.selection.within import validate_within, within_split_guidance
-from sift.selection.conditioning import UnusableIncludeError
+from sift.selection.conditioning import UnusableIncludeError, omitted_conditioning
 
 _SUPERVISED_CLASS_ENCODINGS = frozenset(
     {"target_cv", "loo", "target", "james_stein", "loo_logit"}
@@ -944,12 +944,16 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 # config use the measured Auto-K router instead of the legacy
                 # evaluate/time_holdout inference.
                 resolved_auto_k = AutoKConfig(k_method="auto")
+            _blocks, include, exclude, candidates = (
+                _effective_nested_blocks_and_conditioning(self, fit_params)
+            )
             effective_auto_k = resolve_auto_k_config(
                 resolved_auto_k,
                 time,
                 groups,
                 allow_nested=True,
                 within=validate_within(getattr(self, "within", None)),
+                conditioning=not omitted_conditioning(include, exclude, candidates),
             )
             if (
                 has_supervised_categoricals
@@ -1431,10 +1435,11 @@ class MRMRSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning until the relative change falls below ``1e-10``, at
-        most 200 passes. Regression only. Fixed-``k`` fits then require
-        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: unseen entity levels use the training
+        and time demeaning until the largest entity or time mean removed in a
+        pass, divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes. Regression only. Fixed-``k`` fits then
+        require ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k
+        fits the means on training folds only: unseen entity levels use the training
         grand mean for that effect, while unseen time levels add no time effect.
         One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
@@ -1734,10 +1739,11 @@ class JMISelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning until the relative change falls below ``1e-10``, at
-        most 200 passes. Regression only. Fixed-``k`` fits then require
-        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: unseen entity levels use the training
+        and time demeaning until the largest entity or time mean removed in a
+        pass, divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes. Regression only. Fixed-``k`` fits then
+        require ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k
+        fits the means on training folds only: unseen entity levels use the training
         grand mean for that effect, while unseen time levels add no time effect.
         One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
@@ -2035,10 +2041,11 @@ class JMIMSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning until the relative change falls below ``1e-10``, at
-        most 200 passes. Regression only. Fixed-``k`` fits then require
-        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: unseen entity levels use the training
+        and time demeaning until the largest entity or time mean removed in a
+        pass, divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes. Regression only. Fixed-``k`` fits then
+        require ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k
+        fits the means on training folds only: unseen entity levels use the training
         grand mean for that effect, while unseen time levels add no time effect.
         One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
@@ -2332,10 +2339,11 @@ class CEFSPlusSelector(_BaseSelector):
     within : {"groups", "two_way"} or None, default=None
         Panel demeaning applied after encoding and before ranks. ``"groups"``
         subtracts per-entity weighted means; ``"two_way"`` alternates entity
-        and time demeaning until the relative change falls below ``1e-10``, at
-        most 200 passes. Regression only. Fixed-``k`` fits then require
-        ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k fits the
-        means on training folds only: unseen entity levels use the training
+        and time demeaning until the largest entity or time mean removed in a
+        pass, divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes. Regression only. Fixed-``k`` fits then
+        require ``groups`` (and ``time`` for ``"two_way"``). Fold-based auto-k
+        fits the means on training folds only: unseen entity levels use the training
         grand mean for that effect, while unseen time levels add no time effect.
         One ``UserWarning`` counts affected rows, and a route on which no
         validation row has a seen level raises before any path work -- always
