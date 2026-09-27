@@ -542,6 +542,96 @@ def test_git_dirty_is_none_outside_a_checkout(tmp_path, monkeypatch):
     (loose / "__init__.py").write_text("")
     monkeypatch.setattr(sift, "__file__", str(loose / "__init__.py"))
     assert _git_dirty() is None
+    env = repro._export_environment()
+    assert (env["git_commit"], env["git_commit_source"], env["git_dirty"]) == (
+        None,
+        "sift_package",
+        None,
+    )
+
+
+def _git_head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _git_fields() -> tuple:
+    env = repro._export_environment()
+    return env["git_commit"], env["git_commit_source"], env["git_dirty"]
+
+
+def test_git_fields_report_the_checkout_that_tracks_the_package(
+    tmp_path, monkeypatch
+):
+    package = _tiny_git_package(tmp_path)
+    head = _git_head(package.parent)
+    monkeypatch.setattr(sift, "__file__", str(package / "__init__.py"))
+    assert _git_fields() == (head, "sift_package", False)
+
+    (package / "__init__.py").write_text("__version__ = '0'  # edited\n")
+    assert _git_fields() == (head, "sift_package", True)
+
+
+def test_git_fields_follow_a_linked_worktree(tmp_path, monkeypatch):
+    package = _tiny_git_package(tmp_path)
+    repo = package.parent
+    worktree = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "side", str(worktree)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "fakepkg" / "extra.py").write_text("x = 1\n")
+    for command in (
+        ["git", "add", "-A"],
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "side"],
+    ):
+        subprocess.run(command, cwd=worktree, check=True, capture_output=True)
+    side_head = _git_head(worktree)
+    assert (worktree / ".git").is_file()
+    assert side_head != _git_head(repo)
+
+    monkeypatch.setattr(sift, "__file__", str(worktree / "fakepkg" / "__init__.py"))
+    assert _git_fields() == (side_head, "sift_package", False)
+    (worktree / "fakepkg" / "extra.py").write_text("x = 2\n")
+    assert _git_fields() == (side_head, "sift_package", True)
+
+
+@pytest.mark.parametrize("ignored", [True, False], ids=["ignored", "untracked"])
+def test_git_fields_are_withheld_for_a_venv_inside_another_project(
+    tmp_path, monkeypatch, ignored
+):
+    # The common "pip install into ./.venv of my own project" layout: the
+    # installed package sits under the project's .git but is not part of its
+    # history, so the project HEAD says nothing about the sift source.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("print('app')\n")
+    if ignored:
+        (project / ".gitignore").write_text(".venv/\n")
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "init"],
+    ):
+        subprocess.run(command, cwd=project, check=True, capture_output=True)
+    installed = project / ".venv" / "lib" / "python3.12" / "site-packages" / "fakepkg"
+    installed.mkdir(parents=True)
+    (installed / "__init__.py").write_text("__version__ = '0'\n")
+    monkeypatch.setattr(sift, "__file__", str(installed / "__init__.py"))
+
+    assert _git_fields() == (None, "sift_package", None)
+    assert _git_dirty() is None
+    (installed / "__init__.py").write_text("__version__ = '0'  # edited\n")
+    assert _git_fields() == (None, "sift_package", None)
 
 
 # --------------------------------------------------------------------------

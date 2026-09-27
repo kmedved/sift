@@ -52,8 +52,10 @@ ran the selection.
     entry carries is dropped: it embeds the OS user name.  Empty list when
     threadpoolctl cannot inspect the process.
 ``git_commit`` : str or None
-    40-character commit of the tree the installed package lives in; ``None``
-    outside a git checkout or when git is unavailable.
+    40-character HEAD commit of the git checkout (or linked worktree) that
+    tracks the installed package directory.  ``None`` when no repository
+    tracks it -- a non-git install, or a copy installed into a virtualenv
+    inside some other project's checkout -- or when git is unavailable.
 ``git_commit_source`` : str
     Always ``"sift_package"``: the commit is resolved from the package
     directory, never from the caller's working directory.
@@ -378,22 +380,22 @@ def _module_version(module_name: str) -> str | None:
     return None if version is None else str(version)
 
 
-def _sift_source_root() -> Path:
+def _sift_package_dir() -> Path:
     import sift
 
-    path = Path(sift.__file__).resolve().parent
-    for candidate in (path, *path.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return path
+    return Path(sift.__file__).resolve().parent
 
 
 def _git(*args: str) -> str | None:
-    """Run a short read-only git command in the package tree, or give up."""
+    """Run a short read-only git command in the package directory, or give up.
+
+    git itself finds the enclosing repository, including the ``.git`` file of
+    a linked worktree or submodule.
+    """
     try:
         proc = subprocess.run(
             ["git", "--no-optional-locks", *args],
-            cwd=str(_sift_source_root()),
+            cwd=str(_sift_package_dir()),
             capture_output=True,
             text=True,
             timeout=2,
@@ -406,31 +408,41 @@ def _git(*args: str) -> str | None:
     return proc.stdout
 
 
-def _git_commit() -> str | None:
+def _git_state() -> dict[str, Any]:
+    """HEAD commit and dirty flag of the checkout that tracks the package.
+
+    Both are ``None`` unless the enclosing repository tracks at least one
+    file under the installed package directory.  A copy installed into a
+    virtualenv inside some other project's checkout sits under that
+    project's ``.git`` (usually git-ignored) without being part of its
+    history, so that project's HEAD says nothing about the sift source.
+    Only the package directory is inspected for changes, so unrelated edits
+    elsewhere in the repository do not flag the run.
+    """
+    unavailable: dict[str, Any] = {"git_commit": None, "git_dirty": None}
+    package_dir = str(_sift_package_dir())
+    tracked = _git("ls-files", "--", package_dir)
+    if not tracked or not tracked.strip():
+        return unavailable
     output = _git("rev-parse", "HEAD")
-    if output is None:
-        return None
-    commit = output.strip()
-    if len(commit) == 40 and all(char in "0123456789abcdef" for char in commit):
-        return commit
-    return None
+    commit = "" if output is None else output.strip()
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        return unavailable
+    status = _git("status", "--porcelain", "--", package_dir)
+    return {
+        "git_commit": commit,
+        "git_dirty": None if status is None else bool(status.strip()),
+    }
 
 
 def _git_dirty() -> bool | None:
     """Whether the installed package directory has uncommitted changes.
 
-    ``None`` when sift does not run from a git checkout, when git is missing,
-    or when the command fails for any other reason.  Only the package
-    directory is inspected, so unrelated edits elsewhere in the repository do
-    not flag the run.
+    ``None`` when no git checkout tracks the package directory (see
+    ``_git_state``), when git is missing, or when the command fails for any
+    other reason.
     """
-    import sift
-
-    package_dir = Path(sift.__file__).resolve().parent
-    output = _git("status", "--porcelain", "--", str(package_dir))
-    if output is None:
-        return None
-    return bool(output.strip())
+    return _git_state()["git_dirty"]
 
 
 def _blas_identity() -> list[dict[str, Any]]:
@@ -451,6 +463,7 @@ def _blas_identity() -> list[dict[str, Any]]:
 def _export_environment() -> dict[str, Any]:
     import sift
 
+    git = _git_state()
     return {
         "captured_at": "export",
         "sift": str(sift.__version__),
@@ -463,9 +476,9 @@ def _export_environment() -> dict[str, Any]:
         "numba": _module_version("numba"),
         "threadpoolctl": _module_version("threadpoolctl"),
         "blas": _blas_identity(),
-        "git_commit": _git_commit(),
+        "git_commit": git["git_commit"],
         "git_commit_source": "sift_package",
-        "git_dirty": _git_dirty(),
+        "git_dirty": git["git_dirty"],
     }
 
 
