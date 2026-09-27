@@ -471,3 +471,58 @@ def test_catboost_select_manifest_reports_an_unseeded_run_honestly(monkeypatch):
     assert timed["configured"]["time_sha256"] == _context_hash(
         time, label="time", n_rows=10
     )
+
+
+def test_catboost_manifest_gives_untokenizable_labels_a_null_columns_hash(monkeypatch):
+    from sift import select_cefsplus
+
+    columns = pd.interval_range(0, 4)
+    first, third = columns[0], columns[2]
+    _stub_native_catboost(
+        monkeypatch,
+        scores={2: [0.2, 0.3]},
+        paths={2: [[first, third], [first, third]]},
+        prefilter=[first, third],
+    )
+    X = pd.DataFrame(np.arange(40, dtype=float).reshape(10, 4), columns=columns)
+    y = pd.Series(np.arange(10, dtype=float))
+    result = cb.catboost_select(
+        X,
+        y,
+        k=2,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=5,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    assert result.selected_features == [first, third]
+
+    # Interval labels have no deterministic token: the filter views record a
+    # null column hash, and the CatBoost adapter now does the same.
+    rng = np.random.default_rng(0)
+    X_filter = pd.DataFrame(rng.normal(size=(60, 4)), columns=columns)
+    y_filter = X_filter[first] + 0.1 * rng.normal(size=60)
+    filter_manifest = select_cefsplus(
+        X_filter, y_filter, k=2, verbose=False, return_result=True
+    ).reproducibility_()
+    assert filter_manifest["input"]["columns_hash"] is None
+    manifest = result.reproducibility_(input_features=list(X.columns))
+    assert manifest["input"]["columns_hash"] is None
+    assert manifest["configuration"]["captured_at"] == "selection"
+    assert result.reproducibility_()["input"]["columns_hash"] is None
+
+    # Features are still matched to input positions, by equality.
+    view = result.result_view(input_features=list(X.columns))
+    assert view.indices == [0, 2]
+    assert view.table["selected"].tolist() == [True, False, True, False]
+    assert result.result_view(input_features=list(pd.interval_range(0, 4))).indices == [0, 2]
+    with pytest.raises(ValueError) as excinfo:
+        result.result_view(input_features=list(pd.interval_range(1, 5)))
+    assert str(excinfo.value) == (
+        "CatBoost feature Interval(0, 1, closed='right') is missing or ambiguous "
+        "in input_features"
+    )
