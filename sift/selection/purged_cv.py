@@ -310,8 +310,11 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         after purge, embargo, and group exclusion. Forward mode keeps
         the most recent eligible timestamps. ``purged_kfold`` keeps the
         ``max_train_size`` unique-time *indices* nearest the validation
-        block (index distance, not elapsed time). ``None`` keeps every
-        eligible training timestamp.
+        block (index distance, not elapsed time). The distance runs to the
+        nearer block edge on the full unique timeline, so purged and
+        embargoed timestamps still count, and a tie between a timestamp
+        before the block and one after it goes to the earlier one. ``None``
+        keeps every eligible training timestamp.
     test_size : int or None, default None
         Distinct timestamps in each validation block. In ``forward`` mode,
         ``None`` uses ``n_unique // (n_splits + 1)``, the sklearn
@@ -731,7 +734,9 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
     n_splits : int, default 5
         Number of train/validation folds. Must be at least 2.
     max_train_size : int or None, default None
-        Optional cap on distinct training timestamps after purge/embargo.
+        Optional cap on distinct training timestamps after purge, embargo,
+        and group exclusion. Which timestamps it keeps, including the
+        ``purged_kfold`` tie-break, follows ``PurgedTimeSeriesSplit``.
     test_size : int or None, default None
         Distinct timestamps in each validation block. See
         ``PurgedTimeSeriesSplit``.

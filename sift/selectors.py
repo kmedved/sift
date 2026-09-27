@@ -3086,11 +3086,14 @@ class KnockoffSelector(_BaseSelector):
         Selection-frequency cut for derandomized runs, in ``(0, 1]``, applied
         when ``n_draws > 1`` and ``aggregation`` is omitted or
         ``"selection_frequency"``. Ignored for a single draw. With
-        ``aggregation="evalues"`` it does not affect the selection, which is
-        e-BH on the averaged e-values, but it still controls the reported
+        ``aggregation="evalues"`` it never changes the selection, which is
+        e-BH on the averaged e-values; it only rescores the reported
         offset-zero frequency-vote counterfactual
-        (``n_discoveries_offset_0`` and its per-draw list); it never controls
-        e-BH.
+        ``selector_metadata_["n_discoveries_offset_0"]``, the number of
+        features an ``offset=0`` vote at this ``eta`` would have returned.
+        The per-draw counts ``n_discoveries_offset_0_per_draw`` and the
+        ``result_.diagnostics_["offset_zero_selection_sets"]`` they count are
+        per draw and do not depend on ``eta``.
     aggregation : {None, "evalues", "selection_frequency"}, default=None
         How to combine ``n_draws > 1``. ``None`` keeps the legacy frequency
         vote. ``"evalues"`` requires ``n_draws > 1`` and ``offset=1``.

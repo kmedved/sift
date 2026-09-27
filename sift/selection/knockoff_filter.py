@@ -2546,17 +2546,22 @@ def select_fdr(
     verbose : bool, default False
         Log the threshold, selected count, and ``s_mean`` at INFO on the
         ``"sift"`` logger.
-    include : sequence of names or positions, optional
+    include : sequence of column labels or positions, optional
         Conditioning set. These features are not tested; they are prepended
         to ``selected_features`` in caller order. Any of ``include``,
         ``exclude``, or ``candidates`` requires ``include_provenance``.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels or positions, optional
         Features removed from the tested discovery universe. Requires
         ``include_provenance``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels or positions, optional
         Hard allow-list for the tested discovery universe. ``include`` may
         sit outside it. Overlap with ``exclude`` is rejected. Requires
-        ``include_provenance``.
+        ``include_provenance``. With a DataFrame ``X``, or a cache built
+        from one, all three take column labels and reject an integer that
+        is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for an ndarray ``X`` or
+        a cache built from one. Positions count columns of the original
+        matrix, not of the cache-dropped ``valid_cols``.
     include_provenance : {"prespecified", "sample_split", "data_derived"} or None
         Required when ``include``, ``exclude``, or ``candidates`` is
         provided. FDR-compatible wording is allowed only for
