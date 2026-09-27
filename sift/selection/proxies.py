@@ -127,8 +127,9 @@ def reject_unavailable_proxy_positions(
     ``blocks_in_play`` selects the remedy. Callers that can force a column
     into the selection through an atomic ``feature_blocks`` entry keep the
     default True so the message points at the block. Callers with no block
-    concept -- stability selection, ``Stabilized`` -- pass False and are told
-    to drop the constant columns or fit without ``store_proxies`` instead.
+    concept -- stability selection, and ``Stabilized`` over a base that
+    declares no ``feature_blocks`` -- pass False and are told to drop the
+    constant columns or fit without ``store_proxies`` instead.
     """
     selected = _positions(selected_indices, label="selected_indices")
     available = {int(i) for i in _positions(available_original, label="available_original")}

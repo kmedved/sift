@@ -237,8 +237,9 @@ def test_nested_refit_uses_block_k():
     selector.fit(X, y, groups=groups)
     assert selector.k_ in {1, 2}
     names = list(selector.selected_features_)
-    if "ab__0" in names or "ab__1" in names:
-        assert {"ab__0", "ab__1"} <= set(names)
+    # y is driven by the ab block, so it always enters; k_ counts it once.
+    assert {"ab__0", "ab__1"} <= set(names)
+    assert len(names) == selector.k_ + 1
     Xt = selector.transform(X)
     assert Xt.shape[1] == len(names)
 
@@ -283,9 +284,9 @@ def test_select_k_auto_prefix_sizes_stay_in_block_units():
     assert best_k in {1, 2, 3}
     assert set(diag["k"].astype(int)) <= {1, 2, 3}
     assert int(diag["k"].max()) <= 3
-    assert len(features) in {2, 3, 4}
-    if "ab__0" in features or "ab__1" in features:
-        assert features[:2] == ["ab__0", "ab__1"]
+    # Prefix sizes (2, 3, 4) are k = 1, 2, 3 in block units, and every
+    # prefix starts with the complete ab block.
+    assert features == ["ab__0", "ab__1", "c", "n0"][: (2, 3, 4)[best_k - 1]]
 
 
 def test_elbow_and_gaussian_cv_keep_complete_blocks():
@@ -302,8 +303,8 @@ def test_elbow_and_gaussian_cv_keep_complete_blocks():
         return_result=True,
     )
     names = elbow.selected_features
-    if "ab__0" in names or "ab__1" in names:
-        assert {"ab__0", "ab__1"} <= set(names)
+    assert {"ab__0", "ab__1"} <= set(names)
+    assert "ab" in elbow.selector_metadata["selected_blocks"]
     cv = select_cefsplus(
         X,
         y,
@@ -361,8 +362,8 @@ def test_default_auto_routing_and_wrapper_cache_alignment():
     assert summary["method"] in SUPPORTED_BLOCK_AUTO_K
     assert summary["method"] != "perm_gap"
     names = routed.selected_features
-    if "ab__0" in names or "ab__1" in names:
-        assert {"ab__0", "ab__1"} <= set(names)
+    assert {"ab__0", "ab__1"} <= set(names)
+    assert "ab" in routed.selector_metadata["selected_blocks"]
     cfg = AutoKConfig(
         k_method="evaluate",
         strategy="time_holdout",
@@ -417,8 +418,8 @@ def test_default_auto_routing_and_wrapper_cache_alignment():
         return_result=True,
     )
     cnames = classic.selected_features
-    if "ab__0" in cnames or "ab__1" in cnames:
-        assert {"ab__0", "ab__1"} <= set(cnames)
+    assert {"ab__0", "ab__1"} <= set(cnames)
+    assert "ab" in classic.selector_metadata["selected_blocks"]
 
 
 def test_bic_df_is_model_dimension_ebic_uses_block_k():
@@ -628,16 +629,14 @@ def test_nested_fit_time_blocks_and_integer_labels():
     )
     selector.fit(X, y, groups=groups, feature_blocks=blocks)
     names = list(selector.selected_features_)
-    if set("abc") & set(names):
-        assert set("abc") <= set(names)
+    # y is X.a, so the abc block always enters first; k_ counts blocks of 3.
+    assert sorted(names) == list("abcdef")[: 3 * selector.k_]
     folds = selector.nested_auto_k_diagnostics_["folds"]
+    assert len(folds) > 0
     for path in folds["path"]:
-        if not path:
-            continue
-        if set("abc") & set(path):
-            assert set("abc") <= set(path)
-        if set("def") & set(path):
-            assert set("def") <= set(path)
+        # Every fold path is a prefix of complete blocks, abc first.
+        assert sorted(path[:3]) == list("abc")
+        assert sorted(path) in (list("abc"), list("abcdef"))
 
     X_int = X.copy()
     X_int.columns = list(range(6))
@@ -652,8 +651,7 @@ def test_nested_fit_time_blocks_and_integer_labels():
     int_sel.fit(X_int, y, groups=groups)
     assert int_sel.k_ in {1, 2}
     selected = list(int_sel.selected_features_)
-    if 0 in selected or 1 in selected or 2 in selected:
-        assert {0, 1, 2} <= set(selected)
+    assert sorted(selected) == list(range(3 * int_sel.k_))
 
 
 def test_singleton_mapping_preserves_calibrated_and_default_routes():

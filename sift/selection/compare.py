@@ -1014,7 +1014,12 @@ def compare(
     task : {'regression', 'classification'}, default 'regression'
         Downstream predictor family and default scorer.
     random_state : int, default 0
-        Shuffle seed for default ``KFold``.
+        Shuffle seed for the shuffled ``KFold`` or ``StratifiedKFold`` that
+        ``cv=None`` or an integer ``cv`` resolves to. It seeds nothing else:
+        not ``GroupKFold`` (which does not shuffle), not a caller-supplied
+        splitter, and not the selectors or the downstream estimator.
+        ``diagnostics["split"]["uses_compare_random_state"]`` records whether
+        it shaped the folds.
     val_frac : float, default 0.2
         Retained compatibility parameter, unused by compare's CV protocol.
         Only the default is accepted, compared with a tolerance so

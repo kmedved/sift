@@ -838,9 +838,14 @@ def xfit_objective_curves(
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
     unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
-        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
-        training rows only, then optionally applies ``within`` and scores
-        columns aligned to ``cache.valid_cols``.
+        When set with ``unsupervised_raw_X``, each fold fits this encoder on
+        its training rows only. Every raw categorical column becomes one
+        numeric column: ordinal codes ``0..C-1``, or the level's share of
+        training weight (so levels of equal weight share a value), with
+        levels unseen in the fold's training rows mapped to ``-1`` / ``0``.
+        The fold then optionally applies ``within`` and scores the columns
+        aligned to ``cache.valid_cols``; with ``feature_blocks`` a path step
+        is a complete block, so one step can add several encoded columns.
     unsupervised_raw_X : DataFrame or None, default None
         Original categorical frame with ``n_rows_original`` rows. Required
         when ``unsupervised_encoding`` is set.
@@ -1072,9 +1077,14 @@ def gaussian_cv_curves(
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
     unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
-        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
-        training rows only, then optionally applies ``within`` and scores
-        columns aligned to ``cache.valid_cols``.
+        When set with ``unsupervised_raw_X``, each fold fits this encoder on
+        its training rows only. Every raw categorical column becomes one
+        numeric column: ordinal codes ``0..C-1``, or the level's share of
+        training weight (so levels of equal weight share a value), with
+        levels unseen in the fold's training rows mapped to ``-1`` / ``0``.
+        The fold then optionally applies ``within`` and scores the columns
+        aligned to ``cache.valid_cols``; with ``feature_blocks`` a path step
+        is a complete block, so one step can add several encoded columns.
     unsupervised_raw_X : DataFrame or None, default None
         Original categorical frame with ``n_rows_original`` rows. Required
         when ``unsupervised_encoding`` is set.

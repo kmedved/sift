@@ -239,6 +239,10 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
 
     proxy_correlations = getattr(selector, "_proxy_correlations", None)
     proxy_usable = False
+    # A block stored at fit time that no longer covers the selected set (a
+    # later threshold change added features) is dropped; the view says so
+    # instead of telling the caller to set store_proxies again.
+    proxy_stale = False
     if proxy_correlations is not None:
         stored_columns = [int(column) for column in proxy_correlations.columns.tolist()]
         if stored_columns == view_indices:
@@ -249,6 +253,7 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
             proxy_usable = True
         else:
             proxy_correlations = None
+            proxy_stale = True
     resample_selections = None
     if proxy_usable:
         stored_resamples = getattr(selector, "_resample_selections_", None)
@@ -294,6 +299,7 @@ def _as_stability_selector(selector: Any, input_features: Any) -> SelectionView:
         "n_bootstrap_requested": n_bootstrap_requested,
         "coefs_available": coefs_available,
         "store_proxies": bool(getattr(selector, "store_proxies", False)),
+        "proxy_correlations_stale": proxy_stale,
     }
     configured = getattr(selector, "_fit_configured_options_", None)
     if isinstance(configured, dict):

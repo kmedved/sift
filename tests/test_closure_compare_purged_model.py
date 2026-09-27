@@ -319,6 +319,33 @@ def test_max_train_size_cap_is_exact_and_keeps_tied_timestamps_together():
     assert val.tolist() == [12, 13, 14, 15, 16, 17]
 
 
+@pytest.mark.parametrize(
+    ("cap", "embargo", "kept_times"),
+    [
+        # Middle block 4..7: times 3 and 8 are both one step from an edge;
+        # the earlier one wins the single slot.
+        (1, 0, [3]),
+        (2, 0, [3, 8]),
+        # 2 and 9 tie at distance two; the third slot goes to 2.
+        (3, 0, [2, 3, 8]),
+        # The embargo removes 3 and 8, but distance still runs on the full
+        # timeline: 2 and 9 are two steps out, and 2 wins the tie.
+        (1, 1, [2]),
+        (2, 1, [2, 9]),
+    ],
+)
+def test_purged_kfold_cap_breaks_distance_ties_towards_the_earlier_time(
+    cap, embargo, kept_times
+):
+    time = np.arange(12, dtype=np.int64)
+    splitter = PurgedTimeSeriesSplit(
+        n_splits=3, mode="purged_kfold", max_train_size=cap, embargo=embargo
+    )
+    train, val = list(splitter.split(np.zeros((12, 1)), time=time))[1]
+    assert val.tolist() == [4, 5, 6, 7]
+    assert time[train].tolist() == kept_times
+
+
 # --------------------------------------------------------------------------
 # time / event_end dtype validation (item 10)
 # --------------------------------------------------------------------------
