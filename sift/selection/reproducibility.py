@@ -238,6 +238,11 @@ _DESCRIPTOR_STATUSES = {
 # Twelve levels of nested estimators stay well inside this budget.
 _MAX_NESTING = 32
 _CAPTURED_AT_VALUES = ("selection", "compare", "export", "unknown")
+#: Private attribute on a result object holding the JSON-safe run record a
+#: selection attached for the manifest (``evaluate_feature_path``,
+#: ``catboost_select``).  It is not a dataclass field, so the public fields,
+#: equality and repr are unchanged; a hand-assembled result has none.
+RUN_PROVENANCE_ATTR = "_run_provenance"
 # Each ``threadpool_info()`` entry also carries an absolute ``filepath`` to the
 # loaded shared library, which commonly embeds the OS user name.  Only these
 # identity fields are exported.
@@ -964,6 +969,21 @@ def _context_hash(value: Any, *, label: str, n_rows: int | None) -> str:
     else:
         digest.update(np.ascontiguousarray(array).tobytes())
     return digest.hexdigest()
+
+
+def row_context_digest(values: Any, *, label: str, n_rows: int) -> Any:
+    """Digest run-shaping row metadata (``time``, ``event_end``) for a run record.
+
+    ``None`` when the values were not supplied.  Values without a
+    deterministic token (a pandas ``Period``, say) give an opaque marker
+    instead of failing the selection that is being recorded.
+    """
+    if values is None:
+        return None
+    try:
+        return _context_hash(values, label=label, n_rows=int(n_rows))
+    except TypeError:
+        return {"status": "opaque", "reason": "no_deterministic_token"}
 
 
 def _context_input_fields(

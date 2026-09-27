@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from sift.selection.reproducibility import RUN_PROVENANCE_ATTR
 from sift.selection.view import (
     SelectionView,
     _coerce_feature_names,
@@ -20,10 +21,11 @@ from sift.selection.view import (
 )
 
 
-# Seed keys read from a ``selector_metadata`` mapping if the result carries
-# one, mirroring ``sift.selection.view_boruta``.  ``CatBoostSelectionResult``
-# has no such field today, so the manifest normally records only the scoring
-# protocol its other fields prove.
+# Keys of the run record ``catboost_select`` attaches to its result
+# (``RUN_PROVENANCE_ATTR``), or of a ``selector_metadata`` mapping a
+# hand-assembled result carries, mirroring ``sift.selection.view_boruta``.
+# A result with neither only proves its scoring protocol, and the manifest
+# then does not claim the configuration was captured while a selection ran.
 _RUN_CONFIGURATION_KEYS = (
     "random_state",
     "realized_random_state",
@@ -41,7 +43,12 @@ def _catboost_run_configuration(
     best_k: int,
     n_selected: int,
 ) -> dict[str, Any]:
-    """Scoring protocol the run recorded, plus any seed it passed along."""
+    """Scoring protocol the result proves, plus the run record it carries.
+
+    Requested options from the record override the protocol fields of the
+    same name (``higher_is_better=None`` asks for inference), so the
+    resolved direction is also reported under ``effective``.
+    """
     configured: dict[str, Any] = {
         "metric": metric,
         "higher_is_better": higher_is_better,
@@ -49,11 +56,15 @@ def _catboost_run_configuration(
         "k_grid": list(k_grid),
     }
     carried: dict[str, Any] = {}
-    snapshot = getattr(result, "selector_metadata", None)
+    snapshot = getattr(result, RUN_PROVENANCE_ATTR, None)
+    if not isinstance(snapshot, Mapping):
+        snapshot = getattr(result, "selector_metadata", None)
+    recorded = False
     if isinstance(snapshot, Mapping):
         for key in _RUN_CONFIGURATION_KEYS:
             if key not in snapshot:
                 continue
+            recorded = True
             value = copy.deepcopy(snapshot[key])
             if key == "configured_options" and isinstance(value, Mapping):
                 configured.update(dict(value))
@@ -64,8 +75,9 @@ def _catboost_run_configuration(
         "k": int(best_k),
         "n_features_selected": int(n_selected),
         "metric": metric,
+        "higher_is_better": higher_is_better,
     }
-    carried["configuration_captured_at"] = "selection"
+    carried["configuration_captured_at"] = "selection" if recorded else "unknown"
     return carried
 
 

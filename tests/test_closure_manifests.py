@@ -7,6 +7,7 @@ import fractions
 import hashlib
 import json
 import os
+import pickle
 import subprocess
 import sys
 import textwrap
@@ -16,8 +17,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.model_selection import KFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 import sift
 from sift import (
@@ -444,6 +447,173 @@ def test_path_evaluation_manifest_carries_the_protocol_it_recorded():
         assert json.dumps(variant.reproducibility_(), sort_keys=True) != encoded
 
 
+def _json_roundtrip(value):
+    return json.loads(json.dumps(value, allow_nan=False))
+
+
+def test_path_evaluation_manifest_records_the_holdout_seed_and_estimator():
+    X, y = _importance_frame(n=90, p=4, seed=6)
+    path = ["x0", "x1", "x2", "x3"]
+    base = evaluate_feature_path(X, y, path, [1, 2, 3], random_state=3)
+    other_seed = evaluate_feature_path(X, y, path, [1, 2, 3], random_state=4)
+    other_frac = evaluate_feature_path(
+        X, y, path, [1, 2, 3], val_frac=0.3, random_state=3
+    )
+
+    payload = base.reproducibility_()
+    configuration = payload["configuration"]
+    assert configuration["captured_at"] == "selection"
+    assert configuration["seeds"] == {
+        "available": True,
+        "random_state": 3,
+        "auto_k_random_state": None,
+        "realized_random_state": None,
+        "base_seed_control": None,
+    }
+    configured = configuration["configured"]
+    assert configured["random_state"] == 3
+    assert configured["splitter"] == {
+        "type": "random_holdout",
+        "status": "params",
+        "params": {"val_frac": 0.2, "random_state": 3},
+        "source": "default",
+        "uses_random_state": True,
+        "time_sha256": None,
+        "event_end_sha256": None,
+    }
+    default_model = repro.describe_estimator(
+        make_pipeline(StandardScaler(), LinearRegression())
+    )
+    assert configured["estimator"] == _json_roundtrip(default_model)
+    assert configuration["effective"]["estimator"] == _json_roundtrip(
+        {**default_model, "n_fits": 3}
+    )
+    encoded = json.dumps(payload, sort_keys=True)
+    for variant in (other_seed, other_frac):
+        assert json.dumps(variant.reproducibility_(), sort_keys=True) != encoded
+
+
+def test_path_evaluation_manifest_records_an_explicit_splitter_and_its_row_context():
+    X, y = _importance_frame(n=90, p=4, seed=6)
+    path = ["x0", "x1", "x2", "x3"]
+    time = np.arange(len(X), dtype=np.int64)
+    event_end = time + 3
+    splitter = sift.PurgedTimeSeriesSplit(n_splits=3)
+    result = evaluate_feature_path(
+        X,
+        y,
+        path,
+        [1, 2],
+        estimator=Ridge(alpha=2.0),
+        splitter=splitter,
+        time=time,
+        event_end=event_end,
+        random_state=3,
+    )
+    configuration = result.reproducibility_()["configuration"]
+    configured = configuration["configured"]
+    # The function seed only drives the default holdout, so an explicit
+    # splitter leaves it out, as filters leave out a seed a cache made unused.
+    assert "random_state" not in configured
+    assert configuration["seeds"]["available"] is False
+    assert configuration["seeds"]["random_state"] is None
+    assert configured["splitter"] == _json_roundtrip(
+        {
+            **repro.describe_splitter(splitter),
+            "source": "caller",
+            "uses_random_state": False,
+            "time_sha256": repro._context_hash(time, label="time", n_rows=90),
+            "event_end_sha256": repro._context_hash(
+                event_end, label="event_end", n_rows=90
+            ),
+        }
+    )
+    assert configured["estimator"] == _json_roundtrip(
+        repro.describe_estimator(Ridge(alpha=2.0))
+    )
+    assert configured["estimator"]["params"]["alpha"] == 2.0
+    assert configuration["effective"]["estimator"]["n_fits"] == 6
+
+    other_end = evaluate_feature_path(
+        X, y, path, [1, 2], estimator=Ridge(alpha=2.0), splitter=splitter,
+        time=time, event_end=time + 5,
+    )
+    assert (
+        other_end.reproducibility_()["configuration"]["configured"]["splitter"][
+            "event_end_sha256"
+        ]
+        != configured["splitter"]["event_end_sha256"]
+    )
+
+
+def test_path_evaluation_manifest_records_factories_and_precomputed_splits():
+    X, y = _importance_frame(n=60, p=3, seed=2)
+    kfold = KFold(n_splits=3, shuffle=True, random_state=1)
+    pairs = list(kfold.split(X))
+    result = evaluate_feature_path(
+        X,
+        y,
+        ["x0", "x1", "x2"],
+        [1, 2],
+        estimator_factory=lambda: Ridge(alpha=0.5),
+        splitter=pairs,
+    )
+    configured = result.reproducibility_()["configuration"]["configured"]
+    assert configured["estimator"] == {"status": "factory"}
+    assert configured["splitter"] == {
+        "type": "precomputed",
+        "status": "params",
+        "params": {},
+        "source": "caller",
+        "uses_random_state": False,
+        "time_sha256": None,
+        "event_end_sha256": None,
+    }
+    effective = result.reproducibility_()["configuration"]["effective"]
+    assert effective["estimator"] == _json_roundtrip(
+        {**repro.describe_estimator(Ridge(alpha=0.5)), "n_fits": 6}
+    )
+
+    kfold_result = evaluate_feature_path(
+        X, y, ["x0", "x1", "x2"], [1, 2], splitter=kfold
+    )
+    kfold_split = kfold_result.reproducibility_()["configuration"]["configured"][
+        "splitter"
+    ]
+    assert kfold_split["type"] == "sklearn.model_selection._split.KFold"
+    assert kfold_split["params"] == {
+        "n_splits": 3,
+        "shuffle": True,
+        "random_state": 1,
+    }
+
+
+def test_hand_built_path_result_does_not_claim_selection_time_capture():
+    X, y = _importance_frame(n=90, p=4, seed=6)
+    run = evaluate_feature_path(X, y, ["x0", "x1", "x2"], [1, 2], random_state=0)
+    rebuilt = sift.FeaturePathEvaluationResult(
+        feature_path=run.feature_path,
+        k=run.k,
+        features=run.features,
+        scores=run.scores,
+        best_k=run.best_k,
+        diagnostics=run.diagnostics,
+    )
+    configuration = rebuilt.reproducibility_()["configuration"]
+    assert configuration["captured_at"] == "unknown"
+    assert configuration["seeds"]["available"] is False
+    assert configuration["configured"] == {
+        "k_grid": [1, 2],
+        "scoring": "rmse",
+        "n_splits": 1,
+        "feature_path_length": 3,
+    }
+    # The run itself keeps its record through a pickle round trip.
+    restored = pickle.loads(pickle.dumps(run))
+    assert restored.reproducibility_() == run.reproducibility_()
+    assert restored.reproducibility_()["configuration"]["captured_at"] == "selection"
+
+
 def test_catboost_adapter_reports_the_scoring_protocol_it_can_prove():
     from sift.catboost_common import CatBoostSelectionResult
 
@@ -459,7 +629,10 @@ def test_catboost_adapter_reports_the_scoring_protocol_it_can_prove():
     )
     payload = result.reproducibility_(input_features=["a", "b"])
     configured = payload["configuration"]["configured"]
-    assert payload["configuration"]["captured_at"] == "selection"
+    # Hand-assembled: the fields are readable, but nothing proves they were
+    # recorded while a selection ran.
+    assert payload["configuration"]["captured_at"] == "unknown"
+    assert payload["configuration"]["seeds"]["available"] is False
     assert configured["metric"] == "RMSE"
     assert configured["k_grid"] == [1, 2]
     assert configured["higher_is_better"] is False
@@ -467,6 +640,7 @@ def test_catboost_adapter_reports_the_scoring_protocol_it_can_prove():
     # A run that records its seed has it carried through unchanged.
     result.selector_metadata = {"random_state": 9, "realized_random_state": 9}
     seeded = result.reproducibility_(input_features=["a", "b"])
+    assert seeded["configuration"]["captured_at"] == "selection"
     assert seeded["configuration"]["seeds"]["random_state"] == 9
     assert seeded["configuration"]["seeds"]["available"] is True
 

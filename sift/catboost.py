@@ -35,6 +35,12 @@ from sift.catboost_common import (
 )
 from sift.selection import orchestration as _selection_orchestration
 from sift.selection.orchestration import SelectionBackend
+from sift.selection.reproducibility import (
+    RUN_PROVENANCE_ATTR,
+    describe_splitter,
+    row_context_digest,
+    snapshot_selector_kwargs,
+)
 from sift.catboost_algorithms import (
     _aggregate_feature_lists,
     _bootstrap_indices,
@@ -693,6 +699,33 @@ def _compute_final_catboost_importances(
         return pd.Series(dtype=float)
 
 
+# Row data handed to catboost_select; the run record keeps none of it.
+_CATBOOST_ROW_CONTEXT = ("groups", "time", "sample_weight", "callback")
+
+
+def _catboost_run_provenance(prepared: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON-safe record of the requested options, for the manifest.
+
+    Holds descriptors and a ``time`` digest only, never X, y, weights,
+    groups or time values.  ``random_state`` is the configured value; an
+    explicit ``None`` leaves the seed to CatBoost and scikit-learn, so no
+    realized seed exists to record.
+    """
+    requested = {
+        key: value
+        for key, value in prepared["options"].items()
+        if key not in _CATBOOST_ROW_CONTEXT
+    }
+    cv = requested.get("cv")
+    requested["cv"] = None if cv is None else describe_splitter(cv)
+    configured = snapshot_selector_kwargs(requested)
+    configured["time_sha256"] = prepared["time_sha256"]
+    return {
+        "random_state": configured.get("random_state"),
+        "configured_options": configured,
+    }
+
+
 class _CatBoostNativePreset(SelectionBackend):
     """Native CatBoost backend on the shared F6 selection runner.
 
@@ -746,6 +779,11 @@ class _CatBoostNativePreset(SelectionBackend):
             metadata.time,
             X.index,
             argument="time",
+        )
+        time_sha256 = row_context_digest(
+            None if time_values is None else time_values.to_numpy(),
+            label="time",
+            n_rows=n_samples,
         )
         X_work, y, sample_weights, groups = _sort_catboost_rows_by_time(
             X_work,
@@ -829,6 +867,7 @@ class _CatBoostNativePreset(SelectionBackend):
             "resolved_hib": resolved_hib,
             "cat_features_final": cat_features_final,
             "text_feat": text_feat,
+            "time_sha256": time_sha256,
             "options": options,
         }
 
@@ -934,7 +973,7 @@ class _CatBoostNativePreset(SelectionBackend):
                 f"score={chosen['best_score']:.4f})"
             )
 
-        return CatBoostSelectionResult(
+        result = CatBoostSelectionResult(
             selected_features=selected_features,
             best_k=chosen["target_k"],
             scores_by_k=chosen["scores_mean"],
@@ -948,6 +987,8 @@ class _CatBoostNativePreset(SelectionBackend):
             all_scores=dict(evaluated["all_scores"]),
             selection_patience=options["selection_patience"],
         )
+        setattr(result, RUN_PROVENANCE_ATTR, _catboost_run_provenance(prepared))
+        return result
 
 
 # =============================================================================
