@@ -216,3 +216,24 @@ def test_repeated_configuration_has_one_handler_and_one_record(caplog):
     assert len(owned_handlers) == 1
     assert owned_handlers[0].level == logging.INFO
     assert len(records) == 1
+
+
+def test_library_code_never_calls_print() -> None:
+    """Progress goes through the ``sift`` logger (0.9 definition of done, item 4).
+
+    ``print(`` may appear only inside docstring examples, which are strings.
+    """
+    import ast
+
+    package = Path(sift.__file__).resolve().parent
+    calls = []
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        calls.extend(
+            f"{path.relative_to(package)}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        )
+    assert calls == []

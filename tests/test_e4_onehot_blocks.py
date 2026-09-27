@@ -491,6 +491,61 @@ def test_onehot_evaluate_and_gaussian_cv_are_fold_local(monkeypatch):
     assert any(holdout not in spec["fit_ids"] for spec in fold_vocabs)
 
 
+@pytest.mark.parametrize(
+    ("k_method", "strategy", "expected_fit_rows"),
+    [
+        ("evaluate", "group_cv", [90, 60, 60, 60]),
+        ("gaussian_cv", "group_cv", [90, 60, 60, 60]),
+        ("xfit_objective", "group_cv", [90, 60, 60, 60]),
+        ("evaluate", "time_holdout", [72, 72]),
+    ],
+)
+def test_onehot_prefix_only_path_encoder_fits_every_row_except_time_holdout(
+    monkeypatch, k_method, strategy, expected_fit_rows
+):
+    """The path-building encoder sees every row; held-out scoring refits per fold.
+
+    ``select_mrmr``'s ``cat_encoding`` docstring and the 0.10.0 release note
+    state this split; a time-holdout ``evaluate`` fits both on the train rows.
+    """
+    rng = np.random.default_rng(12)
+    n = 90
+    groups = np.repeat(np.arange(3), n // 3)
+    X = pd.DataFrame(
+        {
+            "cat": np.array(["a", "b", "c"] * (n // 3), dtype=object),
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = 0.3 * (X["cat"] == "a").astype(float) + X["noise"]
+    fits, _retained = _spy_onehot_fits(monkeypatch)
+    if strategy == "group_cv":
+        config = AutoKConfig(
+            k_method=k_method,
+            strategy=strategy,
+            **({"n_splits": 3} if k_method == "evaluate" else {"xfit_folds": 3}),
+            min_k=1,
+            max_k=2,
+        )
+        context = {"groups": groups}
+    else:
+        config = AutoKConfig(
+            k_method=k_method, strategy=strategy, min_k=1, max_k=2, val_frac=0.2
+        )
+        context = {"time": np.arange(n)}
+    select_cefsplus(
+        X,
+        y,
+        k="auto",
+        cat_encoding="onehot",
+        auto_k_config=config,
+        subsample=None,
+        verbose=False,
+        **context,
+    )
+    assert fits == expected_fit_rows
+
+
 def test_onehot_boruta_and_select_k_auto_dispatch():
     X, y = _onehot_frame()
     from sift import select_boruta

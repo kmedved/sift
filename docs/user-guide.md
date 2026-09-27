@@ -510,11 +510,10 @@ Read the guarantee metadata literally:
   knockoff power. Large `gamma` or tiny `s_mean` usually means highly correlated
   features; deduplicate near-copies before building the cache when power matters.
 
-`statistic="relevance"` is the fastest compatibility default for marginal
-signals and remains the 0.9 default. The retained
-[statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
-`relevance` for the 1.0 owner decision on its four Gaussian designs: ridge
-cut realized FDP but lost substantial power on AR(1) and block-correlated
+`statistic="relevance"` is the fastest default for marginal signals, and 1.0
+kept it (settled 2026-09-21) on the retained
+[statistic bakeoff](knockoff-statistic-bakeoff.md) over four Gaussian
+designs: ridge cut realized FDP but lost substantial power on AR(1) and block-correlated
 draws. That is scoped evidence, not a universal winner. `statistic="cefsplus"`
 enables a tie-safe greedy CEFS+ statistic with pair-coupled screening and
 objective-gain W magnitudes. It is an exploratory alternate statistic: it is

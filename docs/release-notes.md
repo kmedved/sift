@@ -6,6 +6,47 @@ Development resumed after v1.0.0. No additional changes have shipped yet.
 
 ## 1.0.0 (2026-09-21)
 
+### Breaking changes and migration
+
+This subsection was added after the release to spell out the upgrade; the
+behavior it describes is what 1.0.0 shipped. The README has a short
+[Upgrading to 1.0](https://github.com/kmedved/sift/blob/main/README.md#upgrading-to-10)
+guide.
+
+- Selector transforms now follow fitted input order. On the ten selector
+  classes, `transform`, `fit_transform`, `get_feature_names_out()`,
+  `get_support(indices=True)` and `inverse_transform` emit the selected
+  columns in ascending input position instead of selection order, and the
+  `sift.as_result` views of a fitted `StabilitySelector`, `ModelSelector` or
+  `Stabilized` (`features`, `indices`) follow the same order. Which features
+  are selected, `selected_features_`, result tables and the lists returned by
+  the function API are unchanged. Refit a downstream model that was trained on
+  0.10 transform output, or keep `output_order="legacy"`.
+- Omitted `random_state` on `StabilitySelector`, `permutation_importance` and
+  `catboost_select` (and the `stability_regression`, `stability_classif`,
+  `catboost_regression` and `catboost_classif` wrappers) is now seed `0`, so
+  those calls are reproducible, and the `FutureWarning` that 0.9 and 0.10
+  emitted for `random_state=None` is removed. An explicit `random_state=None`
+  still draws fresh entropy, now without a warning. The same entry points now
+  default to `n_jobs=1`. Because seed `0` and one worker are now translated
+  CatBoost settings, a `catboost_params` `random_seed` or `thread_count`
+  override now emits the existing collision `UserWarning`; the dictionary
+  value still wins.
+- Public `verbose` defaults are now `False`.
+
+To keep 0.10 behavior, pass the old values explicitly. Not every entry point
+has all four settings:
+
+| entry point | explicit 0.10 settings |
+| --- | --- |
+| `StabilitySelector` | `output_order="legacy", verbose=True, n_jobs=-1, random_state=None` |
+| `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `Stabilized` | `output_order="legacy", verbose=True` |
+| `BorutaSelector` | `verbose=True` (its legacy order already was input order) |
+| `ModelSelector` | `output_order="legacy"` (its `verbose` default was already `False`) |
+| `permutation_importance` | `n_jobs=-1, random_state=None` |
+| `catboost_select` | `n_jobs=-1, random_state=None, verbose=True` |
+| `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary`, `select_fdr`, `select_boruta`, `select_boruta_shap`, `SmartSamplerConfig` | `verbose=True` |
+
 ### Compatibility
 
 - Implemented the defaults announced in 0.10.1 for 1.0 development. Omitted
@@ -84,8 +125,14 @@ Development resumed after v1.0.0. No additional changes have shipped yet.
   mass, then label); remainder levels share `other`; unknown values join
   `other` when pooling created that remainder, otherwise they are all-zero;
   missing is its own level. Selected names/indices/support stay raw; encoded
-  transform names match dummy width. Nested `evaluate` and prefix-only
-  evaluate/Gaussian CV/xfit/auto learn vocabulary on training folds.
+  transform names match dummy width. Nested `evaluate` learns the vocabulary
+  inside training folds. Prefix-only evaluate, Gaussian CV, xfit and auto
+  routing refit the encoder on each training fold for held-out scoring, but
+  the path-building encoder that fixes the dummy columns is fit on every row
+  (on the training partition under `k_method="evaluate"` with
+  `strategy="time_holdout"`); the map is target-blind, so this is not target
+  leakage. (Corrected after release: this note first said the prefix-only
+  routes learn the vocabulary on training folds.)
   Caches, `within`, knockoffs, and Boruta raise. `target_cv` and no-encoding
   paths are unchanged.
 - Added additive `cat_encoding="ordinal"` and `"frequency"` on existing
@@ -224,6 +271,33 @@ Development resumed after v1.0.0. No additional changes have shipped yet.
   complex and fraction labels can be hashed again. Export metadata records
   Python, platform and repository dirtiness without absolute BLAS paths.
   Manifest schema `1` is documented before its first release.
+- `evaluate_feature_path` (a 0.9.0 API) gained keyword-only `time=` and
+  `event_end=`, forwarded to splitters that declare them, so the purged
+  splitters apply their label-horizon purge from there. It also accepts a
+  generator of `(train_idx, val_idx)` pairs as `splitter`, which 0.9.0
+  rejected with a `TypeError`.
+- `ModelSelector(method="forward")` raises a `ValueError` for a non-default
+  `importance` instead of silently ignoring it; forward selection ranks
+  columns by estimator score and never calls `importance`.
+- A `ClassicFeatureCache` passed to a Gaussian cache entry point
+  (`select_fdr`, `KnockoffSelector`, `sample_knockoffs`, `bootstrap_paths`,
+  `null_objective_paths`, `compute_objective_for_path`) raises a `TypeError`
+  that names both cache kinds and `sift.build_cache`, instead of a
+  `ValueError` about missing structural fields.
+- `StabilitySelector(store_proxies=True)` raises a `ValueError` when a
+  selected column is constant, because it has no finite copula correlation to
+  store. The message names the columns and the ways out (drop them from `X`
+  or fit without `store_proxies`) and no longer mentions feature blocks.
+  Without `store_proxies`, a constant column is accepted.
+- `SelectionView.redundancy_report` and `SelectionView.proxies_at` accept
+  `include_selected=True`, which also lists selected-to-selected edges (the
+  edges `proxy_clusters` merges on). The default output is unchanged.
+- The ordinal and frequency encoders keep every level observed with positive
+  weight, even when an extreme weight ratio underflows its share to zero;
+  such levels were previously dropped from the vocabulary and encoded as
+  unknown.
+- The "Non-numeric columns found" error lists every accepted `cat_encoding`,
+  including `ordinal` and `frequency`.
 
 ### Documentation
 
@@ -969,7 +1043,9 @@ was added to `pyproject.toml`.
 Reproduced verbatim from §4 of `docs/specs/0.9-product-layer.md`. The table
 started as a 0.9 proposal; its 1.0 column now records the narrower contract
 approved on 2026-09-21. The changes are announced in 0.10.x and take effect only
-in 1.0.
+in 1.0. The 0.9 column was edited on 2026-09-21 as well (reworded seed and
+return rows, a new seed-42 row); its `sift.__all__` cell, which then read
+"66 exports", was corrected back to the 58 that v0.9.0 shipped.
 
 | item | 0.9 state | 1.0 state |
 | --- | --- | --- |
@@ -978,7 +1054,7 @@ in 1.0.
 | `verbose` default | `True`, logging-backed; logging formatting/routing may differ, but selection/returns/default progress behavior does not | `False` |
 | `n_jobs=-1` defaults (stability, permutation, CatBoost) | unchanged, documented | `1` |
 | `transform` output order | `"legacy"` default: filter path/selection order, Boruta original order, Stability descending selection frequency with stable original-index ties; `"original"` opt-in | `"original"` default |
-| `sift.__all__` | 66 exports | retain all 66 exports and the existing `sift.experimental` access path |
+| `sift.__all__` | 58 exports (0.10.0 added 8, for 66) | retain all 66 exports and the existing `sift.experimental` access path |
 | list/tuple/result returns | `select_cached` keeps list/tuple forms and offers `return_result=True`; `as_result` is additive | unchanged; result objects remain opt-in |
 | CatBoost `group_col`/`sample_weight_col` | aliases beside arrays | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
 | stability `alpha` | joined by `penalty=` alias | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |

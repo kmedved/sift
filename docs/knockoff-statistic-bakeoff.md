@@ -147,8 +147,8 @@ This does **not** claim universal dominance, suppressor or mixed-sign
 support, or `p ≫ n` coverage. Standard errors describe Monte Carlo sampling
 variability of this fixed study; they are not a significance test. Adaptive
 CEFS+ and tied/truncated LSM still have no general sign-flip proof; their
-rows are quality/runtime measurements only. The 0.9 default remains
-`relevance`; any 1.0 change stays an owner decision.
+rows are quality/runtime measurements only. The owner kept `relevance` as the
+1.0 default on 2026-09-21, following this recommendation.
 
 LSM has strong measured quality here, but its missing general sign-flip
 guarantee prevents recommending it as a validity-preserving default replacement.

@@ -308,8 +308,9 @@ raw row slices of `Z` and call `weighted_correlation_matrix`".
   [filter_auto_k.py](../../sift/selection/filter_auto_k.py) following the
   existing `select_gaussian_elbow_path` template (build path via
   `_cached_filter_path`, compute k, emit `auto_k_summary`). Update
-  `auto_k_mode_label` in the same PR as the first new method; the current
-  label map raises before dispatch under the default `verbose=True`.
+  `auto_k_mode_label` in the same PR as the first new method; the label map
+  at the time raised before dispatch under `verbose=True`, then the default
+  (1.0 made `verbose=False` the default).
 - Method eligibility is explicit, not inferred from "has an objective path":
   CEFS+ gets all methods; Gaussian mRMR/JMI/JMIM get only predictive
   fold-scoring methods (`xfit_objective`, `gaussian_cv`, and possibly
