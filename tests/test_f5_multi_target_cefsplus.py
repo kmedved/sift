@@ -287,7 +287,8 @@ def test_unsupported_2d_combinations_are_rejected():
         select_fdr(X, Y, q=0.2)
 
 
-@pytest.mark.parametrize("encoding", ["target_cv", "loo_logit"])
+# "target" needs the optional category_encoders only once the target is valid.
+@pytest.mark.parametrize("encoding", ["target_cv", "loo_logit", "target"])
 @pytest.mark.parametrize("k", [2, "auto"])
 def test_selector_classes_reject_2d_y_with_the_function_api_message(encoding, k):
     X, Y = _shared_signal_frame()

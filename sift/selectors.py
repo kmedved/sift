@@ -649,6 +649,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
         if not cat_features:
             return X
 
+        # Validate the target first, as the function API does, so a 2-D y
+        # gets its own message whatever the encoder would raise.
+        y_enc = self._categorical_target(y)
         encoder = _make_category_encoder(
             cat_encoding,
             cat_features,
@@ -678,7 +681,6 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "('target_cv', 'loo_logit', 'onehot', 'ordinal', 'frequency'), "
                 "which do, or drop sample_weight."
             )
-        y_enc = self._categorical_target(y)
         with suppress_category_encoder_pandas_warnings():
             if isinstance(encoder, LeaveOneOutLogitEncoder):
                 X_encoded = encoder.fit_transform(
