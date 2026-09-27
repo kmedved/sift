@@ -135,8 +135,8 @@ the migration notes, and the deprecation ledger are in the
   normalized result view.
 - `cat_encoding="target_cv"` adds leakage-safe, fold-centered target encoding
   for DataFrames with string columns, with no optional dependency.
-  `cat_encoding="ordinal"` and `"frequency"` are target-blind numeric maps
-  (unknown `-1` / `0`; no extra dependency). Their surfaces differ from
+  Since 0.10.0, `cat_encoding="ordinal"` and `"frequency"` are target-blind
+  numeric maps (unknown `-1` / `0`; no extra dependency). Their surfaces differ from
   `target_cv`'s: `KnockoffSelector` and multi-target CEFS+ accept them but
   reject `target_cv`, while resampled auto-k (`stability`, `knockoff_path`,
   `consensus`) accepts `target_cv` but rejects them. The

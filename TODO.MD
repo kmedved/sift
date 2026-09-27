@@ -57,12 +57,15 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - The target-blind encodings added in 0.10.0 need no cross-fitting.
   `cat_encoding="onehot"` turns each raw categorical into `{column}__{level}`
   dummies selected as one block on the filter functions and wrappers;
-  prebuilt caches, `within`, knockoffs and Boruta reject it.
+  `within`, knockoffs and Boruta reject it, and so does a prebuilt cache
+  whenever there is a column to encode (with nothing to encode it is inert,
+  as without a cache).
   `"ordinal"` / `"frequency"` are numeric maps (unknown `-1` / `0`) on the
   filter functions and wrappers, binary and multi-target CEFS+,
   `KnockoffSelector` (no FDR upgrade) and Boruta with
-  `importance_data="train"`; prebuilt caches and resampled auto-k
-  (`stability`, `knockoff_path`, `consensus`) reject them. Held-out auto-k
+  `importance_data="train"`; resampled auto-k (`stability`,
+  `knockoff_path`, `consensus`) rejects them, and so does a prebuilt cache
+  whenever there is a column to encode. Held-out auto-k
   scoring refits all three per training fold, while a prefix-only path
   encoder is fit on every row (the train partition under time-holdout
   `evaluate`).

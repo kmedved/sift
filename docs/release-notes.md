@@ -128,8 +128,11 @@ input-dependent changes listed under Compatibility.
   notice, and a per-entry-point table of restore settings.
 - Corrected the 0.10.0 note on one-hot encoding (prefix-only auto-k fits the
   path-building encoder on every row; only held-out scoring refits per fold),
-  added seven 0.10.0 changes the notes had omitted, and restored the
-  deprecation ledger's 0.9 export count to the 58 names v0.9.0 shipped.
+  added the 0.10.0 changes to 0.9.0 APIs that the notes had omitted
+  (`evaluate_feature_path` `time=` / `event_end=` and generator splitters,
+  `proxies_at(include_selected=)`, the full encoding list in the non-numeric
+  error), and restored the deprecation ledger's 0.9 export count to the 58
+  names v0.9.0 shipped.
 - Documented the prebuilt-cache `cat_encoding` rule in one place (the cache
   section of the manual) and fixed the `CEFSPlusSelector` Raises entry that
   described it backwards; `compare` documents when its stratified default
@@ -415,26 +418,10 @@ has all four settings:
   splitters apply their label-horizon purge from there. It also accepts a
   generator of `(train_idx, val_idx)` pairs as `splitter`, which 0.9.0
   rejected with a `TypeError`.
-- `ModelSelector(method="forward")` raises a `ValueError` for a non-default
-  `importance` instead of silently ignoring it; forward selection ranks
-  columns by estimator score and never calls `importance`.
-- A `ClassicFeatureCache` passed to a Gaussian cache entry point
-  (`select_fdr`, `KnockoffSelector`, `sample_knockoffs`, `bootstrap_paths`,
-  `null_objective_paths`, `compute_objective_for_path`) raises a `TypeError`
-  that names both cache kinds and `sift.build_cache`, instead of a
-  `ValueError` about missing structural fields.
-- `StabilitySelector(store_proxies=True)` raises a `ValueError` when a
-  selected column is constant, because it has no finite copula correlation to
-  store. The message names the columns and the ways out (drop them from `X`
-  or fit without `store_proxies`) and no longer mentions feature blocks.
-  Without `store_proxies`, a constant column is accepted.
-- `SelectionView.redundancy_report` and `SelectionView.proxies_at` accept
-  `include_selected=True`, which also lists selected-to-selected edges (the
-  edges `proxy_clusters` merges on). The default output is unchanged.
-- The ordinal and frequency encoders keep every level observed with positive
-  weight, even when an extreme weight ratio underflows its share to zero;
-  such levels were previously dropped from the vocabulary and encoded as
-  unknown.
+- `SelectionView.proxies_at` (a 0.9.0 API) accepts `include_selected=True`,
+  which also lists selected-to-selected edges (the edges `proxy_clusters`
+  merges on), as the new `redundancy_report` does. The default output is
+  unchanged.
 - The "Non-numeric columns found" error lists every accepted `cat_encoding`,
   including `ordinal` and `frequency`.
 
