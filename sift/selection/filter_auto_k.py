@@ -12,10 +12,7 @@ import pandas as pd
 
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
-from sift.selection.auto_k_config import (
-    check_auto_dense_check_seed,
-    check_auto_k_seed,
-)
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.auto_k_knockoff import select_k_knockoff_path
 from sift.selection.auto_k_resample import (
     bootstrap_paths,
@@ -198,8 +195,6 @@ def _run_auto_dense_check(
         strategy = "kfold"
     if strategy == "group_cv" and groups is None:
         strategy = "kfold"
-    if strategy == "kfold":
-        check_auto_dense_check_seed(config)
     check_config = replace(
         config,
         k_method="gaussian_cv",
@@ -225,7 +220,10 @@ def _run_auto_dense_check(
             feature_blocks=feature_blocks,
         )
         cv_k, _diag = select_k_gaussian_cv(curves, check_config)
-    except Exception as exc:  # pragma: no cover - rare defensive diagnostics path
+    except Exception as exc:
+        # A diagnostic never fails the call. Shuffled k-fold rejects a seed it
+        # cannot use (not an integer, or outside [0, 2**32)) as it builds its
+        # folds, so such a seed skips the check with its reason, as in 1.0.
         route["dense_check"].update(
             {
                 "reason": "gaussian_cv_failed",

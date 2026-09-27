@@ -955,7 +955,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
                 "remain 'moving'"
             )
         base_seed = getattr(self.selector, "random_state", _EVALUE_DEFAULT_RANDOM_STATE)
-        if not isinstance(base_seed, (int, np.integer)):
+        if not isinstance(base_seed, (int, np.integer, np.bool_)):
             # Frequency mode derives seeds for an unset base parameter; this
             # mode runs the base once and never touches its parameters.
             raise ValueError(

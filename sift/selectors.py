@@ -3226,7 +3226,8 @@ class KnockoffSelector(_BaseSelector):
         Seed for the knockoff draw. Unlike the filter selectors this stays
         numeric, because it seeds a fresh draw even when a cache is reused;
         ``None`` or any other non-integer, and a negative value, raise
-        ``ValueError`` at ``fit``.
+        ``ValueError`` at ``fit``, and a boolean, NumPy booleans included,
+        seeds as the integer it equals.
     n_jobs : int, default=1
         Worker count for cache construction and statistic evaluation.
     verbose : bool, default=False

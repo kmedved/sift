@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Any, Container, List, Literal, Optional, Sequence, Tuple, get_args
 import warnings
 
@@ -1298,6 +1299,77 @@ def _is_onehot_missing(value: Any) -> bool:
     return bool(missing)
 
 
+_DAY_NS = 86_400 * 10**9
+# Nanoseconds per fixed numpy datetime unit. Units below a nanosecond stay
+# exact as fractions; a generic unit counts nanoseconds, as pandas reads it.
+_UNIT_NS: dict[str, int | Fraction] = {
+    "W": 7 * _DAY_NS,
+    "D": _DAY_NS,
+    "h": 3_600 * 10**9,
+    "m": 60 * 10**9,
+    "s": 10**9,
+    "ms": 10**6,
+    "us": 10**3,
+    "ns": 1,
+    "ps": Fraction(1, 10**3),
+    "fs": Fraction(1, 10**6),
+    "as": Fraction(1, 10**9),
+    "generic": 1,
+}
+# The resolutions a pd.Timedelta can have, finest first, in nanoseconds.
+_TIMEDELTA_RESOLUTIONS = (("ns", 1), ("us", 10**3), ("ms", 10**6), ("s", 10**9))
+# numpy's words for a duration's unit, coarsest first.
+_DURATION_WORDS = (
+    ("D", "days"),
+    ("h", "hours"),
+    ("m", "minutes"),
+    ("s", "seconds"),
+    ("ms", "milliseconds"),
+    ("us", "microseconds"),
+    ("ns", "nanoseconds"),
+    ("ps", "picoseconds"),
+    ("fs", "femtoseconds"),
+    ("as", "attoseconds"),
+)
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _numpy_duration_identity(value: np.timedelta64) -> tuple:
+    """Exact level identity of a non-missing ``np.timedelta64`` in any unit.
+
+    Equal durations are one level whatever their unit or count multiplier
+    (``m8[3D]``), and distinct durations never merge. A duration pandas can
+    hold is the ``pd.Timedelta`` a typed timedelta column yields, so the two
+    columns share one vocabulary; any other fixed duration (below a
+    nanosecond, or beyond pandas' range) is ``("duration", nanoseconds)``,
+    exact as an int or a ``Fraction``. Years and months have no fixed length
+    and numpy equates a year with twelve months, so they are
+    ``("calendar_duration", months)``, never equal to a fixed duration. The
+    identity is pure Python, so no mix of units can raise when compared.
+    """
+    unit, count = np.datetime_data(value.dtype)
+    steps = int(value.astype(np.int64)) * count
+    if unit in ("Y", "M"):
+        return ("calendar_duration", steps * 12 if unit == "Y" else steps)
+    nanoseconds = steps * _UNIT_NS[unit]
+    if isinstance(nanoseconds, Fraction) and nanoseconds.denominator == 1:
+        nanoseconds = nanoseconds.numerator
+    for resolution, per in _TIMEDELTA_RESOLUTIONS:
+        if nanoseconds % per == 0 and -(2**63) < nanoseconds // per < 2**63:
+            held = pd.Timedelta(np.timedelta64(nanoseconds // per, resolution))
+            return ("hashable", "Timedelta", held)
+    return ("duration", nanoseconds)
+
+
+def _duration_text(nanoseconds: int | Fraction) -> str:
+    """numpy's text for a duration, in the coarsest unit that holds it exactly."""
+    for unit, word in _DURATION_WORDS:
+        steps = Fraction(nanoseconds) / _UNIT_NS[unit]
+        if steps.denominator == 1:
+            return f"{steps.numerator} {word}"
+    return f"{nanoseconds} nanoseconds"
+
+
 def _onehot_level_identity(value: Any) -> tuple:
     """Hashable identity for a category value; distinct from display tokens."""
     if _is_onehot_missing(value):
@@ -1310,21 +1382,26 @@ def _onehot_level_identity(value: Any) -> tuple:
         return ("str", value)
     if isinstance(value, np.timedelta64):
         # np.timedelta64 subclasses np.integer, and int() of one fails for
-        # most units. Identify it as the pd.Timedelta a timedelta64 column
-        # yields, so equal durations in different units are one level.
-        # Pandas holds no calendar units; numpy equates a year with twelve
-        # months, so years and months become one level counted in months.
-        unit, count = np.datetime_data(value.dtype)
-        if unit in ("Y", "M"):
-            months = int(value.astype(np.int64)) * count * (12 if unit == "Y" else 1)
-            if -(2**63) < months < 2**63:  # -2**63 is NaT
-                value = np.timedelta64(months, "M")
-        else:
-            try:
-                value = pd.Timedelta(value)
-            except (TypeError, ValueError, OverflowError):
-                pass
-        return ("hashable", type(value).__name__, value)
+        # most units. Nor is the raw scalar a safe key: numpy hashes it as its
+        # raw count whatever the unit, and comparing months with femtoseconds
+        # raises.
+        return _numpy_duration_identity(value)
+    if isinstance(value, np.datetime64):
+        # Hashed as its raw count too, and comparing two units converts them,
+        # which overflows for years against attoseconds. The dtype (unit and
+        # count) precedes the value, so only values of one dtype are ever
+        # compared; each unit stays its own level, as in 1.0.
+        return ("hashable", value.dtype.str, value)
+    if (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and not isinstance(value, pd.Timestamp)
+        and value.utcoffset() is not None
+    ):
+        # Python equates the two readings of a repeated wall-clock hour (a DST
+        # fold) in one zone although they are an hour apart. The exact UTC
+        # instant keeps them two levels, so row order cannot decide the level.
+        return ("hashable", type(value).__name__, value, value - _UTC_EPOCH)
     if isinstance(value, (int, np.integer)):
         return ("int", int(value))
     if isinstance(value, (float, np.floating)):
@@ -1387,6 +1464,10 @@ def _onehot_display_token(identity: tuple) -> str:
     if kind == "bytes":
         decoded = identity[1].decode("utf-8", errors="replace")
         return decoded if decoded else "empty"
+    if kind == "duration":
+        return _duration_text(identity[1])
+    if kind == "calendar_duration":
+        return f"{identity[1]} months"
     if kind == "hashable":
         return str(identity[2]) if str(identity[2]) else "empty"
     return str(identity[-1]) if str(identity[-1]) else "empty"
@@ -1395,6 +1476,24 @@ def _onehot_display_token(identity: tuple) -> str:
 def _format_onehot_level(value: Any) -> str:
     """Display token for a non-missing value; identities stay separate."""
     return _onehot_display_token(_onehot_level_identity(value))
+
+
+def _level_sort_text(identity: tuple) -> str:
+    """``repr`` of a level identity: the deterministic tie-break between levels.
+
+    A hashable level is spelled ``("hashable", type name, value)`` without the
+    keys that only keep levels apart (a numpy datetime's dtype, an aware
+    datetime's instant), so levels tie-break exactly as in 1.0. pandas cannot
+    ``repr`` an aware non-nanosecond ``Timestamp`` outside years 1-9999
+    (``NotImplementedError``) although its ``str`` works, so such an identity
+    is spelled part by part with ``str``.
+    """
+    if identity[0] == "hashable":
+        identity = ("hashable", type(identity[2]).__name__, identity[2])
+    try:
+        return repr(identity)
+    except NotImplementedError:
+        return repr(tuple(str(part) for part in identity))
 
 
 def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
@@ -1415,7 +1514,8 @@ def _names_array_column(ref: Any, n_features: int) -> bool:
         return False
     if isinstance(ref, (int, np.integer)):
         return 0 <= int(ref) < n_features
-    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isdigit():
+    # ASCII digits only: str.isdigit() also accepts "²", which int() rejects.
+    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isascii() and ref[1:].isdigit():
         return ref == f"x{int(ref[1:])}" and int(ref[1:]) < n_features
     return False
 
@@ -1608,7 +1708,7 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
             raise ValueError(
                 f"onehot column {col!r} has no positive-weight rows to learn a vocabulary"
             )
-        ranked = sorted(mass.items(), key=lambda item: (-item[1], repr(item[0])))
+        ranked = sorted(mass.items(), key=lambda item: (-item[1], _level_sort_text(item[0])))
         retained = [ident for ident, _ in ranked[: self.max_levels]]
         pooled = [ident for ident, _ in ranked[self.max_levels :]]
         has_other = bool(pooled)

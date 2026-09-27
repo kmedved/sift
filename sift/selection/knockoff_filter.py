@@ -451,14 +451,18 @@ def _validate_offset(offset: int) -> int:
     return offset_int
 
 
-def _validate_knockoff_random_state(random_state: Any) -> None:
-    """Reject a knockoff seed that is not a non-negative integer.
+def _validate_knockoff_random_state(random_state: Any) -> Any:
+    """Return the knockoff seed, rejecting one that is not a non-negative integer.
 
     The public signatures document ``random_state: int``; ``None`` (and any
     other non-integer) used to surface as a bare ``TypeError`` from ``int()``
-    or ``SeedSequence`` deep inside the filter.  Booleans are left alone:
-    they are ``int`` instances and have always seeded the draw.
+    or ``SeedSequence`` deep inside the filter.  A boolean seeds as the
+    integer it equals: a Python ``bool`` is an ``int`` and has always seeded
+    the draw, and a NumPy boolean, which ``SeedSequence`` rejects, is
+    converted so it does the same.
     """
+    if isinstance(random_state, np.bool_):
+        return int(random_state)
     if not isinstance(random_state, (int, np.integer)):
         raise ValueError(
             f"random_state must be an integer, got {random_state!r}; knockoff "
@@ -466,24 +470,30 @@ def _validate_knockoff_random_state(random_state: Any) -> None:
         )
     if int(random_state) < 0:
         raise ValueError(f"random_state must be >= 0, got {random_state!r}")
+    return random_state
 
 
 def _sample_knockoffs_rng(random_state: Any) -> np.random.Generator:
     """Generator for ``sample_knockoffs``, with the ``select_fdr`` seed messages.
 
     Everything ``np.random.default_rng`` accepted keeps working, including
-    ``None`` (fresh entropy) and numpy's own ``Generator`` / ``SeedSequence``
-    objects; what it rejected with a raw ``TypeError`` or ``ValueError``
-    now names ``random_state``.
+    ``None`` (fresh entropy), sequences of integers and numpy's own
+    ``Generator`` / ``SeedSequence`` objects; what it rejected with a raw
+    ``TypeError`` or ``ValueError`` now names ``random_state``.  A NumPy
+    boolean, which numpy rejects, seeds like the Python ``bool`` it equals.
     """
+    if isinstance(random_state, np.bool_):
+        random_state = int(random_state)
     try:
         return np.random.default_rng(random_state)
     except (TypeError, ValueError):
         if isinstance(random_state, (int, np.integer)) and int(random_state) < 0:
             raise ValueError(f"random_state must be >= 0, got {random_state!r}") from None
         raise ValueError(
-            f"random_state must be an integer or None, got {random_state!r}; "
-            "pass an int such as random_state=0 for a reproducible draw"
+            "random_state must be None, a non-negative integer or a sequence of "
+            "them, or a numpy SeedSequence, BitGenerator or Generator, got "
+            f"{random_state!r}; pass an int such as random_state=0 for a "
+            "reproducible draw"
         ) from None
 
 
@@ -1857,8 +1867,10 @@ def sample_knockoffs(
         Seed for the knockoff noise draw.  The same seed and cache reproduce
         the same matrix exactly.  Unlike ``select_fdr``, ``None`` is accepted
         and draws from fresh entropy, so the matrix is not reproducible; a
-        numpy ``Generator`` or ``SeedSequence`` is also passed through to
-        ``numpy.random.default_rng``.  A float, a string or a negative
+        sequence of non-negative integers and a numpy ``Generator``,
+        ``BitGenerator`` or ``SeedSequence`` are also passed through to
+        ``numpy.random.default_rng``.  A boolean, NumPy booleans included,
+        seeds as the integer it equals.  A float, a string or a negative
         integer raises ``ValueError``.
 
     Returns
@@ -1874,8 +1886,9 @@ def sample_knockoffs(
         If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
         ``FeatureCache`` from ``build_cache``.
     ValueError
-        If ``random_state`` is not ``None``, a non-negative integer, or a
-        numpy seed object; if the cache fails its structural or provenance
+        If ``random_state`` is not ``None``, a non-negative integer, a
+        sequence of them, or a numpy seed object; if the cache fails its
+        structural or provenance
         checks, carries duplicate feature names, has weights that are
         non-finite, negative, or sum to zero, or retains no non-constant
         feature.
@@ -2585,7 +2598,8 @@ def select_fdr(
         knockoff draws.  Unlike ``sample_weight`` and ``subsample``, this
         stays meaningful with a prebuilt cache because it seeds a fresh draw.
         The draws are always seeded: ``None`` or any other non-integer, and a
-        negative value, raise ``ValueError``.
+        negative value, raise ``ValueError``; a boolean, NumPy booleans
+        included, seeds as the integer it equals.
     n_jobs : int, default 1
         Worker count for cache construction and for statistics that fit
         sklearn models.  Building a cache from ``X`` rejects ``0``; the
@@ -2752,7 +2766,7 @@ def select_fdr(
         aggregation, n_draws=n_draws_int, offset=offset_int
     )
     screen_pairs_int = _validate_screen_pairs(screen_pairs)
-    _validate_knockoff_random_state(random_state)
+    random_state = _validate_knockoff_random_state(random_state)
     stat_spec = _get_statistic(statistic)
     options = dict(statistic_options or {})
     unknown_options = set(options) - stat_spec.allowed_options

@@ -508,19 +508,26 @@ def test_knockoff_seed_rejects_generators_and_negative_integers_cleanly():
     assert str(excinfo.value) == "random_state must be >= 0, got -1"
 
 
+def _sample_knockoffs_seed_message(value) -> str:
+    return (
+        "random_state must be None, a non-negative integer or a sequence of them, "
+        f"or a numpy SeedSequence, BitGenerator or Generator, got {value!r}; pass "
+        "an int such as random_state=0 for a reproducible draw"
+    )
+
+
 @pytest.mark.parametrize(
     ("seed", "message"),
     [
-        (1.5, "random_state must be an integer or None, got 1.5; pass an int such as "
-              "random_state=0 for a reproducible draw"),
-        ("3", "random_state must be an integer or None, got '3'; pass an int such as "
-              "random_state=0 for a reproducible draw"),
-        (np.bool_(True), "random_state must be an integer or None, got True; pass an int "
-                         "such as random_state=0 for a reproducible draw"),
+        (1.5, _sample_knockoffs_seed_message(1.5)),
+        ("3", _sample_knockoffs_seed_message("3")),
+        ([1.5], _sample_knockoffs_seed_message([1.5])),
+        # A sequence is numpy's entropy, so a negative entry is named whole.
+        ([-1], _sample_knockoffs_seed_message([-1])),
         (-1, "random_state must be >= 0, got -1"),
         (np.int64(-2), "random_state must be >= 0, got -2"),
     ],
-    ids=["float", "str", "numpy-bool", "negative", "numpy-negative"],
+    ids=["float", "str", "float-sequence", "negative-sequence", "negative", "numpy-negative"],
 )
 def test_sample_knockoffs_rejects_an_unusable_seed_cleanly(seed, message):
     X, _y = _seed_frame()
@@ -543,9 +550,44 @@ def test_sample_knockoffs_keeps_every_seed_numpy_accepted():
     np.testing.assert_array_equal(
         sample_knockoffs(cache, random_state=True), sample_knockoffs(cache, random_state=1)
     )
+    np.testing.assert_array_equal(
+        sample_knockoffs(cache, random_state=[3, 4]),
+        sample_knockoffs(cache, random_state=np.random.SeedSequence([3, 4])),
+    )
     assert sample_knockoffs(cache, random_state=2**40).shape == cache.Z.shape
     # None is still an unseeded draw from fresh entropy.
     assert sample_knockoffs(cache, random_state=None).shape == cache.Z.shape
+
+
+def test_knockoff_seeds_take_a_numpy_bool_as_the_integer_it_equals():
+    # Python booleans have always seeded the draws; NumPy booleans failed in
+    # SeedSequence and now seed the same draws.
+    X, y = _seed_frame()
+    cache = build_cache(X)
+    for flag in (True, False):
+        np.testing.assert_array_equal(
+            sample_knockoffs(cache, random_state=np.bool_(flag)),
+            sample_knockoffs(cache, random_state=int(flag)),
+        )
+    one = select_fdr(X, y, q=0.5, n_draws=2, random_state=1)
+    numpy_true = select_fdr(X, y, q=0.5, n_draws=2, random_state=np.bool_(True))
+    assert numpy_true.selected_features == one.selected_features
+    np.testing.assert_array_equal(
+        numpy_true.W["W"].to_numpy(dtype=float), one.W["W"].to_numpy(dtype=float)
+    )
+    assert numpy_true.selector_metadata["random_state"] == 1
+    selector = KnockoffSelector(q=0.5, random_state=np.bool_(True)).fit(X, y)
+    assert list(selector.selected_features_) == list(
+        KnockoffSelector(q=0.5, random_state=1).fit(X, y).selected_features_
+    )
+
+    def stabilized(seed):
+        base = KnockoffSelector(q=0.5, n_draws=3, random_state=seed)
+        return Stabilized(base, aggregation="evalues", n_resamples=3).fit(X, y)
+
+    assert list(stabilized(np.bool_(True)).selected_features_) == list(
+        stabilized(1).selected_features_
+    )
 
 
 def test_knockoff_integer_seeds_are_unchanged_by_the_seed_check():

@@ -383,7 +383,8 @@ def test_prebuilt_cache_on_an_ndarray_counts_only_cat_features_naming_a_column(r
             assert str(caught.value) == _cache_rule_message(encoding, shown), encoding
         # Entries that name no column leave the cache nothing to encode. One-hot
         # then meets its own ndarray rule, which holds with or without a cache.
-        unresolved = [99, -1, "zzz", "x03", True]
+        # "x²" and "x٣" end in non-ASCII digits ("x²" used to crash in int()).
+        unresolved = [99, -1, "zzz", "x03", True, "x²", "x٣", "x"]
         if encoding == "onehot":
             with pytest.raises(TypeError) as caught:
                 run(arr, y, cache, cat_encoding=encoding, cat_features=unresolved)
