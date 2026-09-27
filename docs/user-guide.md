@@ -749,7 +749,12 @@ scores a fresh estimator on the held-out fold. All candidates use the same
 folds. For label-horizon purging, pass `time`, `event_end`, and a purged
 splitter. Pass `groups` for splitters
 that need them; fixed-`k` selectors and `KnockoffSelector` do not receive
-those metadata. Empty knockoff sets stay empty.
+those metadata. Empty knockoff sets stay empty. Classification without
+`groups` or `time` defaults to a shuffled `StratifiedKFold(5)`; a class with
+fewer members than folds makes scikit-learn emit its "least populated class"
+`UserWarning`, which `compare` does not suppress. Pass an explicit `cv=`
+splitter (for example `KFold(5, shuffle=True, random_state=0)`) when you run
+with warnings as errors.
 
 ```python
 import numpy as np

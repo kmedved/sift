@@ -729,6 +729,41 @@ def test_regression_and_grouped_and_time_routes_keep_the_unstratified_default():
     assert not timed.diagnostics["split"]["type"].endswith("StratifiedKFold")
 
 
+def test_stratified_default_keeps_the_rare_class_warning_and_cv_avoids_it():
+    rng = np.random.default_rng(19)
+    n = 60
+    X = pd.DataFrame(rng.normal(size=(n, 4)), columns=list("abcd"))
+    y = np.zeros(n, dtype=int)
+    y[:30] = 1
+    y[:2] = 2  # two members, fewer than the five default folds
+    selectors = {"kb": lambda: SelectKBest(f_classif, k=2)}
+    # compare does not suppress scikit-learn's own StratifiedKFold warning...
+    with pytest.warns(UserWarning) as record:
+        stratified = compare(selectors, X, y, task="classification")
+    assert [str(w.message) for w in record] == [
+        "The least populated class in y has only 2 members, which is less "
+        "than n_splits=5."
+    ]
+    assert stratified.diagnostics["split"]["type"].endswith(".StratifiedKFold")
+    # ...and the documented way out, an explicit splitter, runs clean under
+    # filterwarnings=error.
+    explicit = compare(
+        selectors,
+        X,
+        y,
+        task="classification",
+        cv=KFold(n_splits=5, shuffle=True, random_state=0),
+    )
+    assert explicit.diagnostics["split"]["type"].endswith(".KFold")
+    doc = " ".join(compare.__doc__.split())
+    assert (
+        "fewer members than folds, scikit-learn's ``StratifiedKFold`` emits its "
+        "\"least populated class\" ``UserWarning``"
+    ) in doc
+    assert "compare does not suppress it" in doc
+    assert "pass an explicit splitter through ``cv``" in doc
+
+
 # --------------------------------------------------------------------------
 # compare: generator splits (item 5) and empty-frame dtypes (item 6)
 # --------------------------------------------------------------------------
