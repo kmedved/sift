@@ -1282,11 +1282,19 @@ def _onehot_level_identity(value: Any) -> tuple:
     if isinstance(value, np.timedelta64):
         # np.timedelta64 subclasses np.integer, and int() of one fails for
         # most units. Identify it as the pd.Timedelta a timedelta64 column
-        # yields; a unit pandas cannot hold (years, months) stays as is.
-        try:
-            value = pd.Timedelta(value)
-        except (TypeError, ValueError, OverflowError):
-            pass
+        # yields, so equal durations in different units are one level.
+        # Pandas holds no calendar units; numpy equates a year with twelve
+        # months, so years and months become one level counted in months.
+        unit, count = np.datetime_data(value.dtype)
+        if unit in ("Y", "M"):
+            months = int(value.astype(np.int64)) * count * (12 if unit == "Y" else 1)
+            if -(2**63) < months < 2**63:  # -2**63 is NaT
+                value = np.timedelta64(months, "M")
+        else:
+            try:
+                value = pd.Timedelta(value)
+            except (TypeError, ValueError, OverflowError):
+                pass
         return ("hashable", type(value).__name__, value)
     if isinstance(value, (int, np.integer)):
         return ("int", int(value))

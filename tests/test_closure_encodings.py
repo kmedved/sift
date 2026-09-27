@@ -75,6 +75,154 @@ def test_datetimes_outside_the_nanosecond_range_order_by_value():
     assert _codes(["x", datetime(1500, 1, 1), 5, datetime(2000, 1, 1)]) == [3.0, 1.0, 0.0, 2.0]
 
 
+def test_datetime_likes_at_the_calendar_and_int64_extremes_order_by_value():
+    # An aware datetime whose UTC instant falls before year 1 used to rank
+    # after strings; a numpy scalar beyond int64 microseconds wrapped around;
+    # a non-nanosecond pd.Timedelta beyond int64 microseconds ranked "other".
+    east = timezone(timedelta(hours=5))
+    assert _codes([datetime(1, 1, 1, 2, tzinfo=east), datetime(1, 1, 1, 12), "x"]) == [
+        0.0, 1.0, 2.0,
+    ]
+    west = timezone(timedelta(hours=-5))
+    assert _codes([datetime(9999, 12, 31, 22, tzinfo=west), datetime(9999, 12, 31, 23)]) == [
+        1.0, 0.0,
+    ]
+    stamps = pd.Series(
+        [
+            np.datetime64(298030, "Y"),
+            np.datetime64("2020-01-01"),
+            np.datetime64("1500-01-01"),
+            np.datetime64(-(2**62), "D"),
+        ],
+        dtype=object,
+    )
+    assert _codes(stamps) == [3.0, 2.0, 1.0, 0.0]
+    td = np.timedelta64
+    durations = pd.Series(
+        [
+            td(2**62, "s"),
+            td(-(2**62), "s"),
+            td(2**62, "D"),
+            td(1, "D"),
+            td(2**63 - 1, "ns"),
+            td(-(2**63) + 1, "ns"),
+            pd.Timedelta(td(2**62, "ms")),
+        ],
+        dtype=object,
+    )
+    assert _codes(durations) == [5.0, 0.0, 6.0, 2.0, 3.0, 1.0, 4.0]
+    # Below a nanosecond stays exact.
+    assert _codes(pd.Series([td(2, "ns"), td(1500, "ps"), td(1, "ns")], dtype=object)) == [
+        2.0, 1.0, 0.0,
+    ]
+
+
+def _exact_order_key(value):
+    """Independent oracle: (0, instant) or (1, duration) in exact nanoseconds."""
+    ns_per = {
+        unit: int(np.timedelta64(1, unit).astype("timedelta64[ns]").astype(np.int64))
+        for unit in ("W", "D", "h", "m", "s", "ms", "us", "ns")
+    }
+    micro = timedelta(microseconds=1)
+    if isinstance(value, pd.Timestamp):
+        return (0, _exact_order_key(value.to_pydatetime(warn=False))[1] + value.nanosecond)
+    if isinstance(value, pd.Timedelta):
+        unit, _ = np.datetime_data(value.asm8.dtype)
+        return (1, int(value.asm8.astype(np.int64)) * ns_per[unit])
+    if isinstance(value, datetime):
+        offset = value.utcoffset() or timedelta(0)
+        since_year_one = (value.replace(tzinfo=None) - datetime(1, 1, 1)) // micro
+        epoch = (datetime(1970, 1, 1) - datetime(1, 1, 1)) // micro
+        return (0, (since_year_one - epoch - offset // micro) * 1000)
+    if isinstance(value, date):
+        return (0, (value - date(1970, 1, 1)).days * ns_per["D"])
+    if isinstance(value, timedelta):
+        return (1, (value // micro) * 1000)
+    unit, count = np.datetime_data(value.dtype)
+    ticks = int(value.astype(np.int64)) * count
+    if isinstance(value, np.timedelta64):
+        if unit in ("Y", "M"):
+            # numpy's own conversion of a calendar duration to seconds.
+            return (1, int(value.astype("timedelta64[s]").astype(np.int64)) * ns_per["s"])
+        return (1, ticks * ns_per[unit])
+    if unit in ("Y", "M"):
+        # numpy's own calendar arithmetic, exact while the days fit int64.
+        return (0, int(value.astype("datetime64[D]").astype(np.int64)) * ns_per["D"])
+    return (0, ticks * ns_per[unit])
+
+
+def _random_datetime_like(rng):
+    kind = int(rng.integers(9))
+    if kind == 0:
+        stamp = datetime(int(rng.integers(1, 10000)), int(rng.integers(1, 13)), 1)
+        return stamp + timedelta(days=int(rng.integers(28)), microseconds=int(rng.integers(86_400 * 10**6)))
+    if kind == 1:
+        base = datetime(1, 1, 1, 12) if rng.random() < 0.3 else datetime(9999, 12, 31, 12)
+        if rng.random() < 0.4:
+            base = datetime(int(rng.integers(1, 10000)), 6, 1)
+        minutes = int(rng.integers(-1439, 1440))
+        moved = base + timedelta(minutes=int(rng.integers(-600, 600)))
+        return moved.replace(tzinfo=timezone(timedelta(minutes=minutes)))
+    if kind == 2:
+        return date(int(rng.integers(1, 10000)), int(rng.integers(1, 13)), int(rng.integers(1, 29)))
+    if kind == 3:
+        return timedelta(
+            days=int(rng.integers(-999_999_999, 1_000_000_000)),
+            microseconds=int(rng.integers(86_400 * 10**6)),
+        )
+    if kind == 4:
+        unit = ["s", "ms", "us", "ns"][int(rng.integers(4))]
+        if unit == "ns":
+            ns = int(rng.integers(pd.Timestamp.min.value, pd.Timestamp.max.value))
+            return pd.Timestamp(ns, tz="UTC" if rng.random() < 0.5 else None)
+        naive = datetime(int(rng.integers(1, 10000)), int(rng.integers(1, 13)), 1, 7, 8, 9)
+        return pd.Timestamp(np.datetime64(naive, unit))
+    if kind == 5:
+        unit = ["s", "ms", "us", "ns"][int(rng.integers(4))]
+        return pd.Timedelta(np.timedelta64(int(rng.integers(-(2**63) + 1, 2**63)), unit))
+    if kind == 6:
+        unit = ["W", "D", "h", "m", "s", "ms", "us", "ns"][int(rng.integers(8))]
+        return np.datetime64(int(rng.integers(-(2**63) + 1, 2**63)), unit)
+    if kind == 7:
+        unit = ["Y", "M"][int(rng.integers(2))]
+        return np.datetime64(int(rng.integers(-(10**12), 10**12)), unit)
+    unit = ["Y", "M", "W", "D", "h", "m", "s", "ms", "us", "ns"][int(rng.integers(10))]
+    bound = 10**9 if unit in ("Y", "M") else 2**63
+    return np.timedelta64(int(rng.integers(-bound + 1, bound)), unit)
+
+
+def test_datetime_like_order_matches_an_exact_oracle_on_random_mixes():
+    rng = np.random.default_rng(20260927)
+    for _ in range(300):
+        values = [_random_datetime_like(rng) for _ in range(int(rng.integers(2, 8)))]
+        codes = _codes(pd.Series(values + ["x"], dtype=object))
+        assert codes[-1] == max(codes)
+        keys = [_exact_order_key(value) for value in values]
+        for key_a, code_a, a in zip(keys, codes, values):
+            for key_b, code_b, b in zip(keys, codes, values):
+                if key_a < key_b:
+                    assert code_a < code_b, (a, b)
+
+
+def test_datetime_like_keys_in_the_nanosecond_range_are_pandas_values():
+    # Everything pandas holds keeps exactly the key (and so the order) it had.
+    from sift._unsupervised_cat import _datetime_like_value
+
+    rng = np.random.default_rng(7)
+    tz = timezone(timedelta(hours=-7, minutes=-30))
+    for _ in range(300):
+        day = 86_400 * 10**9
+        ns = int(rng.integers(pd.Timestamp.min.value + day, pd.Timestamp.max.value - day))
+        stamp = pd.Timestamp(ns)
+        micro_stamp = stamp.floor("us").to_pydatetime()
+        for value in (stamp, micro_stamp, micro_stamp.replace(tzinfo=tz), stamp.date(),
+                      stamp.to_datetime64(), stamp.to_datetime64().astype("datetime64[s]")):
+            assert _datetime_like_value(value) == (0, pd.Timestamp(value).value), value
+        span = pd.Timedelta(int(rng.integers(-(2**63) + 1, 2**63)))
+        for value in (span, span.to_timedelta64(), span.floor("us").to_pytimedelta()):
+            assert _datetime_like_value(value) == (1, pd.Timedelta(value).value), value
+
+
 def test_decimal_and_fraction_levels_order_as_numbers():
     assert _codes([Decimal(10), Decimal(2), 3]) == [2.0, 0.0, 1.0]
     assert _codes([Fraction(1, 2), Fraction(1, 3), 1]) == [1.0, 0.0, 2.0]
@@ -114,6 +262,28 @@ def test_numpy_timedelta_scalars_in_an_object_column_encode_as_durations():
     np.testing.assert_array_equal(
         onehot.transform(pd.DataFrame({"c": typed})).to_numpy(), dummies.to_numpy()
     )
+
+
+def test_numpy_calendar_durations_equal_in_numpy_are_one_level():
+    td = np.timedelta64
+    # numpy equates a year with twelve months; pandas holds neither unit.
+    assert td(1, "Y") == td(12, "M")
+    values = pd.Series(
+        [td(1, "Y"), td(12, "M"), td(13, "M"), td(11, "M"), td(2, "Y"), td(24, "M")],
+        dtype=object,
+    )
+    assert _codes(values) == [1.0, 1.0, 2.0, 0.0, 3.0, 3.0]
+    frame = pd.DataFrame({"c": values})
+    freq = UnsupervisedCatEncoder(["c"], method="frequency").fit(frame)
+    assert freq.transform(frame)["c"].tolist() == [2 / 6, 2 / 6, 1 / 6, 1 / 6, 2 / 6, 2 / 6]
+    onehot = OneHotBlockEncoder(["c"]).fit(frame)
+    assert list(onehot.transform(frame).columns) == [
+        "c__12 months", "c__24 months", "c__11 months", "c__13 months",
+    ]
+    # A calendar duration still ranks among durations, at numpy's average
+    # month (365.2425 / 12 days), and never merges with an integer level.
+    mixed = pd.Series([td(1, "M"), pd.Timedelta(days=30), 1, pd.Timedelta(days=31)], dtype=object)
+    assert _codes(mixed) == [2.0, 1.0, 0.0, 3.0]
 
 
 def test_ordered_categorical_uses_declared_order():
