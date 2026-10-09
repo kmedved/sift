@@ -406,8 +406,8 @@ python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Release tags must match `v` plus the release version. The latest published tag
-is `v1.0.0`; development source is now `1.0.1.dev0` and is not tagged.
+Release tags must match `v` plus the release version. This source prepares
+`v1.0.1`; the latest published tag remains `v1.0.0` until publication.
 The release workflow verifies the exact wheel it attaches to the existing GitHub
 Release. There is no publication step and no package index: releasing SIFT means
 creating a GitHub Release with the checked source and wheel distributions

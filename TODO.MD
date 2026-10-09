@@ -6,7 +6,10 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 - `v1.0.0` is the latest GitHub release at `42c1e6d`; its wheel and source
   distribution passed the release workflow, Twine metadata checks and a clean
-  installed-wheel smoke. Development is now `1.0.1.dev0`.
+  installed-wheel smoke. This source prepares `v1.0.1`; publication is pending.
+- PR #105 merged the 1.0.1 fixes as `5489807` after all six active CI jobs
+  passed at head `484b0d7`. Its source-bound runtime evidence retains its
+  original commit ancestry.
 - PR #101 merged the reviewed 1.0 implementation as `a68695a`, and PR #103
   merged the release source as `42c1e6d`, after their exact-head and
   merged-main jobs passed. Seed-42/cache defaults, all 66 exports, returns,
