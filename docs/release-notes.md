@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.0.1 (unreleased)
+## 1.0.1 (2026-10-09)
 
 A patch release. The 1.0 defaults, all 66 exports and every public signature
 are unchanged, and calls that already worked select the same features, except
@@ -104,6 +104,11 @@ compares with 1.0.0.
 
 ### Fixes
 
+- Supported dependency versions share the same validation behavior: mixed
+  pandas Period frequencies raise SIFT's explanatory error, negative NumPy
+  integer seeds use the same message as Python integers, and coarse-resolution
+  pandas Timedeltas and signaling Decimal NaNs encode without hashing or
+  missing-value errors on the minimum supported pandas release.
 - `reproducibility_()` manifests report sift's own git state. When sift is
   installed into a virtualenv inside a different checkout (for example a
   git-ignored `.venv`), `environment.git_commit` and `git_dirty` are now
