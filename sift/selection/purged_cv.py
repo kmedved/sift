@@ -132,8 +132,16 @@ def _period_values(values, *, name: str) -> pd.PeriodIndex | None:
             return None
     elif inferred != "period":
         return None
+    frequencies = {
+        value.freqstr for value in arr if isinstance(value, pd.Period)
+    }
+    if len(frequencies) != 1:
+        raise ValueError(
+            f"{name} mixes pandas Period frequencies; pass Periods of one "
+            "frequency, for example by converting them with asfreq"
+        )
     try:
-        return pd.PeriodIndex(arr)
+        return pd.PeriodIndex(arr, freq=next(iter(frequencies)))
     except ValueError:
         raise ValueError(
             f"{name} mixes pandas Period frequencies; pass Periods of one "

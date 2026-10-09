@@ -469,7 +469,7 @@ def _validate_knockoff_random_state(random_state: Any) -> Any:
             "draws are always seeded, so pass an int such as random_state=0"
         )
     if int(random_state) < 0:
-        raise ValueError(f"random_state must be >= 0, got {random_state!r}")
+        raise ValueError(f"random_state must be >= 0, got {int(random_state)!r}")
     return random_state
 
 
@@ -488,7 +488,9 @@ def _sample_knockoffs_rng(random_state: Any) -> np.random.Generator:
         return np.random.default_rng(random_state)
     except (TypeError, ValueError):
         if isinstance(random_state, (int, np.integer)) and int(random_state) < 0:
-            raise ValueError(f"random_state must be >= 0, got {random_state!r}") from None
+            raise ValueError(
+                f"random_state must be >= 0, got {int(random_state)!r}"
+            ) from None
         raise ValueError(
             "random_state must be None, a non-negative integer or a sequence of "
             "them, or a numpy SeedSequence, BitGenerator or Generator, got "

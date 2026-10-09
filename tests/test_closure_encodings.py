@@ -287,7 +287,7 @@ def test_numpy_timedelta_scalars_in_an_object_column_encode_as_durations():
         np.timedelta64(36, "h"),
         np.timedelta64(1, "D"),
         np.timedelta64(24, "h"),
-        np.timedelta64("NaT"),
+        np.timedelta64("NaT", "ns"),
     ]
     values = pd.Series(raw, dtype=object)
     # One day and 24 hours are one level; NaT is missing and takes the last code.
@@ -460,17 +460,20 @@ def test_aware_timestamp_beyond_python_years_encodes():
     # which the level tie-break used, so every encoder raised
     # NotImplementedError; its str still works.
     late = pd.Timestamp(np.datetime64("12000-01-01T05:06:07", "s")).tz_localize("UTC")
-    ahead = late.tz_convert("America/New_York")
     early = pd.Timestamp(np.datetime64("0500-01-01", "s")).tz_localize("UTC")
     assert _encodings([late, "x", early, late]) == (
         [1.0, 2.0, 0.0, 1.0],
         [0.5, 0.25, 0.25, 0.5],
         ["c__12000-01-01 05:06:07+00:00", "c__0500-01-01 00:00:00+00:00", "c__x"],
     )
-    # One instant in two zones: equal Timestamps, one level, as in 1.0.
-    ordinal, _, names = _encodings([late, ahead])
+    # One instant in two zones: equal Timestamps, one level, as in 1.0. Use a
+    # Python-datetime-range instant because pandas cannot convert year 12000 to
+    # a non-fixed-offset zone on every supported dependency version.
+    instant = pd.Timestamp("2020-01-01T05:06:07", tz="UTC")
+    ahead = instant.tz_convert("America/New_York")
+    ordinal, _, names = _encodings([instant, ahead])
     assert ordinal == [0.0, 0.0]
-    assert names == ["c__12000-01-01 05:06:07+00:00"]
+    assert names == ["c__2020-01-01 05:06:07+00:00"]
 
 
 def test_repeated_wall_clock_hour_is_two_levels_in_any_row_order():

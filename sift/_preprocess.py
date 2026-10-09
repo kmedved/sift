@@ -451,6 +451,13 @@ def _category_missing_mask(series: pd.Series) -> np.ndarray:
     pandas finds a NaN ``Decimal`` by comparing it with itself, which raises
     for a signaling NaN; only then is each value checked on its own.
     """
+    if series.dtype == object:
+        values = series.to_numpy(dtype=object, copy=False)
+        return np.fromiter(
+            (_is_onehot_missing(value) for value in values),
+            dtype=bool,
+            count=len(values),
+        )
     try:
         return series.isna().to_numpy()
     except InvalidOperation:
@@ -1354,15 +1361,27 @@ def _numpy_duration_identity(value: np.timedelta64) -> tuple:
     nanoseconds = steps * _UNIT_NS[unit]
     if isinstance(nanoseconds, Fraction) and nanoseconds.denominator == 1:
         nanoseconds = nanoseconds.numerator
+    return ("duration", nanoseconds)
+
+
+def _pandas_timedelta(nanoseconds: int | Fraction) -> pd.Timedelta | None:
+    """A lossless pandas Timedelta when one supported resolution can hold it."""
     for resolution, per in _TIMEDELTA_RESOLUTIONS:
         if nanoseconds % per == 0 and -(2**63) < nanoseconds // per < 2**63:
-            held = pd.Timedelta(np.timedelta64(nanoseconds // per, resolution))
-            return ("hashable", "Timedelta", held)
-    return ("duration", nanoseconds)
+            try:
+                return pd.Timedelta(
+                    np.timedelta64(nanoseconds // per, resolution)
+                )
+            except (OverflowError, ValueError):
+                pass
+    return None
 
 
 def _duration_text(nanoseconds: int | Fraction) -> str:
     """numpy's text for a duration, in the coarsest unit that holds it exactly."""
+    held = _pandas_timedelta(nanoseconds)
+    if held is not None:
+        return str(held)
     for unit, word in _DURATION_WORDS:
         steps = Fraction(nanoseconds) / _UNIT_NS[unit]
         if steps.denominator == 1:
@@ -1386,6 +1405,11 @@ def _onehot_level_identity(value: Any) -> tuple:
         # raw count whatever the unit, and comparing months with femtoseconds
         # raises.
         return _numpy_duration_identity(value)
+    if isinstance(value, pd.Timedelta):
+        # Older pandas releases can construct and stringify a coarse-resolution
+        # Timedelta whose hash overflows while casting to a finer unit. Keep the
+        # exact duration as a pure-Python key instead.
+        return _numpy_duration_identity(value.asm8)
     if isinstance(value, np.datetime64):
         # Hashed as its raw count too, and comparing two units converts them,
         # which overflows for years against attoseconds. The dtype (unit and
@@ -1488,7 +1512,11 @@ def _level_sort_text(identity: tuple) -> str:
     (``NotImplementedError``) although its ``str`` works, so such an identity
     is spelled part by part with ``str``.
     """
-    if identity[0] == "hashable":
+    if identity[0] == "duration":
+        held = _pandas_timedelta(identity[1])
+        if held is not None:
+            identity = ("hashable", "Timedelta", held)
+    elif identity[0] == "hashable":
         identity = ("hashable", type(identity[2]).__name__, identity[2])
     try:
         return repr(identity)
