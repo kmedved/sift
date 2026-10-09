@@ -22,6 +22,7 @@ from sift._preprocess import (
     OneHotBlockEncoder,
     RelevanceMethod,
     Task,
+    reject_prebuilt_cache_encoding,
     resolve_jmi_estimator,
     validate_onehot_max_levels,
     validate_target_cv_encoding_flags,
@@ -87,8 +88,12 @@ from sift.selection.blocks import (
     require_atomic_conditioning,
     resolve_feature_blocks,
 )
-from sift.selection.conditioning import _as_refs, resolve_conditioning
-from sift.selection.within import validate_within
+from sift.selection.conditioning import UnusableIncludeError, _as_refs, resolve_conditioning
+from sift.selection.within import (
+    reject_conditioned_within_auto_k,
+    validate_within,
+    within_split_guidance,
+)
 from sift.selection.knockoff_filter import (
     _SUBSAMPLE_DEFAULT,
     _reject_duplicate_feature_names,
@@ -416,10 +421,10 @@ def select_mrmr(
         exactly the rows it was built from. Because a cache freezes its rows
         and weights, ``sample_weight``, ``subsample``, and ``random_state``
         cannot be passed alongside it. A cache also stores no encoding
-        provenance: a ``ClassicFeatureCache`` rejects every ``cat_encoding``
-        other than ``"none"``, and a ``FeatureCache`` rejects ``"onehot"``
-        (no cache can be built from a frame that still holds categorical
-        columns in the first place).
+        provenance, so any ``cat_encoding`` other than ``"none"`` raises once
+        it has a column to encode (a ``cat_features`` column present in
+        ``X``, else an object, category or string column); with nothing to
+        encode it is inert, as it is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -450,16 +455,19 @@ def select_mrmr(
         Optional panel transform applied *after* encoding and *before* ranks
         or classic relevance.  ``"groups"`` subtracts per-entity weighted
         means of ``X`` and ``y``.  ``"two_way"`` alternates entity and time
-        demeaning until the relative change falls below ``1e-10``, at most 200
-        passes.  Regression only; rejected with a prebuilt ``cache``,
-        classification, or auto-k methods that are not fold-backed.
+        demeaning until the largest entity or time mean removed in a pass,
+        divided by the column's weighted standard deviation, falls below
+        ``1e-10``, at most 200 passes.  Regression only; rejected with a
+        prebuilt ``cache``, classification, or auto-k methods that are not
+        fold-backed.
         Validation/resampling fits the means on training folds only:
         validation rows whose level was unseen fall back to the training grand
         mean and raise one ``UserWarning`` counting them, and a route on which
         no validation row has a seen level raises before any path work --
         always the case for ``strategy="group_cv"``, and for ``"two_way"``
         with ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.  Demeaning can remove all
         variation, including singleton-only groups, yielding an empty
@@ -516,13 +524,14 @@ def select_mrmr(
         columns is fit on every row, except under ``k_method="evaluate"``
         with ``strategy="time_holdout"``, where it is fit on the training
         partition; the map is target-blind, so this is not target leakage.
-        Prebuilt caches, ``within``, and knockoffs raise.
+        ``within`` and knockoffs raise, and so does a prebuilt cache when
+        there is a column to encode.
         ``"ordinal"`` and ``"frequency"`` are target-blind numeric maps over
         the levels observed in positive-weight training rows; pandas
         categories that are declared but never observed are skipped. Ordinal
         codes are ``0..C-1`` in natural order -- an ordered ``Categorical``
         keeps its declared category order, otherwise bool, then numeric
-        levels ascending by value (ints and floats together), then
+        levels ascending by value (all real numbers together), then
         datetime-like by value, then strings in ordinary string order, then
         other types, with a fitted missing level taking the last code -- and
         unknown levels map to ``-1``; frequency is the training-mass
@@ -544,8 +553,9 @@ def select_mrmr(
         auto-k routes such as in-sample EBIC still encode the call's ``X``.
         Prefix-only ranking on non-holdout splits may still use a full-data
         path -- use nested evaluate for holdout-blind selection assessment.
-        Prebuilt caches and resampled auto-k
-        (``stability`` / ``knockoff_path`` / ``consensus``) raise.
+        Resampled auto-k (``stability`` / ``knockoff_path`` /
+        ``consensus``) raises, and so does a prebuilt cache when there is a
+        column to encode.
     target_cv_n_splits : int, default 5
         Requested fold count for ``cat_encoding="target_cv"``.  Must be at
         least 2; the encoder reports the count it could actually use in
@@ -776,11 +786,11 @@ def select_jmi(
         and the column names are checked, never the row values, so a cache
         must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it. A cache also stores no encoding provenance: a
-        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
-        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
-        be built from a frame that still holds categorical columns in the
-        first place).
+        accompany it. A cache also stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises once it has a column to
+        encode (a ``cat_features`` column present in ``X``, else an object,
+        category or string column); with nothing to encode it is inert, as it
+        is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -806,9 +816,11 @@ def select_jmi(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a
@@ -816,7 +828,8 @@ def select_jmi(
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
@@ -1054,11 +1067,11 @@ def select_jmim(
         and the column names are checked, never the row values, so a cache
         must be used with exactly the rows it was built from.
         ``sample_weight``, ``subsample``, and ``random_state`` cannot
-        accompany it. A cache also stores no encoding provenance: a
-        ``ClassicFeatureCache`` rejects every ``cat_encoding`` other than
-        ``"none"``, and a ``FeatureCache`` rejects ``"onehot"`` (no cache can
-        be built from a frame that still holds categorical columns in the
-        first place).
+        accompany it. A cache also stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises once it has a column to
+        encode (a ``cat_features`` column present in ``X``, else an object,
+        category or string column); with nothing to encode it is inert, as it
+        is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1084,9 +1097,11 @@ def select_jmim(
     within : {"groups", "two_way"} or None, default None
         Optional panel transform applied after encoding and before ranks.
         ``"groups"`` subtracts per-entity weighted means of ``X`` and ``y``.
-        ``"two_way"`` alternates entity and time demeaning until the relative
-        change falls below ``1e-10``, at most 200 passes.  Regression only;
-        rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
+        ``"two_way"`` alternates entity and time demeaning until the largest
+        entity or time mean removed in a pass, divided by the column's
+        weighted standard deviation, falls below ``1e-10``, at most 200
+        passes.  Regression only; rejected with a prebuilt ``cache`` or
+        non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
         add no time effect. One ``UserWarning`` counts affected rows, and a
@@ -1094,7 +1109,8 @@ def select_jmim(
         has a seen level raises before any path work -- always the case for
         ``strategy="group_cv"``, and for ``"two_way"`` with
         ``strategy="time_holdout"``, where ``k_method="gaussian_cv"`` or
-        ``"xfit_objective"`` with ``strategy="kfold"`` is the working choice.
+        ``"xfit_objective"`` with ``strategy="kfold"`` (both need
+        ``estimator="gaussian"``) is the working choice.
         ``estimator="gaussian"`` needs finite ``X`` and ``y`` under ``within``;
         the classic estimators mean-impute first.
     estimator : {"auto", "binned", "r2", "ksg", "gaussian"}, default "auto"
@@ -1346,9 +1362,11 @@ def select_cefsplus(
         the row values, so a cache must be used with exactly the rows it was
         built from.  Because a cache freezes its rows and weights,
         ``sample_weight``, ``subsample``, and ``random_state`` cannot be
-        passed alongside it, and it stores no encoding provenance, so
-        ``cat_encoding="onehot"`` is rejected beside it (no cache can be built
-        from a frame that still holds categorical columns in the first place).
+        passed alongside it, and it stores no encoding provenance, so any
+        ``cat_encoding`` other than ``"none"`` raises beside it once it has a
+        column to encode (a ``cat_features`` column present in ``X``, else an
+        object, category or string column); with nothing to encode it is
+        inert, as it is without a cache.
     groups : ndarray of shape (n_samples,), str, or None, default None
         Group labels for ``within`` demeaning and for auto-k validation
         splits, or the name of a DataFrame column to use as such (the column
@@ -1379,7 +1397,9 @@ def select_cefsplus(
         Optional panel transform applied after encoding and before the rank
         transform.  ``"groups"`` subtracts per-entity weighted means of
         ``X`` and ``y``.  ``"two_way"`` alternates entity and time demeaning
-        until the relative change falls below ``1e-10``, at most 200 passes.
+        until the largest entity or time mean removed in a pass, divided by
+        the column's weighted standard deviation, falls below ``1e-10``, at
+        most 200 passes.
         Rejected with a prebuilt ``cache`` or non-fold auto-k methods.  Fold
         scoring fits the means on training folds only: unseen entity levels
         use the training grand mean for that effect, while unseen time levels
@@ -1882,7 +1902,12 @@ def _select_filter(
         if request.auto_k_config is None and spec.selector in {"cefsplus", "cefsplus_binary"}:
             resolved_config = AutoKConfig(k_method="auto")
         else:
-            resolved_config = resolve_auto_k_config(request.auto_k_config, ctx.time, ctx.groups)
+            resolved_config = resolve_auto_k_config(
+                request.auto_k_config,
+                ctx.time,
+                ctx.groups,
+                within=ctx.within,
+            )
         ctx = replace(
             ctx,
             auto_k_config=resolved_config,
@@ -1918,7 +1943,19 @@ def _select_filter(
             "store_proxies=True is currently supported only by Gaussian/cached "
             "filter routes; choose estimator='gaussian' or omit store_proxies"
         )
-    payload = handler(ctx)
+    # The handler's first within or conditioning rejection (gaussian_cv /
+    # xfit_objective refusing exact conditioning, or a split that can never
+    # leave a within level seen) would send a conditioned within call to the
+    # other rejection; say once that no such config serves both.
+    _reject_conditioned_within(ctx)
+    try:
+        payload = handler(ctx)
+    except UnusableIncludeError as exc:
+        if ctx.onehot_parents is None:
+            raise
+        # Report the raw column the caller wrote, not its one-hot dummies.
+        parent_of = dict(zip(ctx.feature_names, ctx.onehot_parents))
+        raise exc.relabel(lambda name: parent_of.get(name, name)) from None
     if ctx.onehot_encoder is not None:
         payload = _collapse_onehot_payload(ctx, payload)
         raw_names = list(ctx.raw_feature_names or [])
@@ -1961,11 +1998,6 @@ def _apply_onehot_encoding(ctx: FilterContext) -> FilterContext:
     encoding = (ctx.selector_kwargs or {}).get("cat_encoding", "none")
     if encoding != "onehot":
         return ctx
-    if ctx.request.cache is not None:
-        raise ValueError(
-            "cat_encoding='onehot' cannot be combined with a prebuilt cache "
-            "because the cache has no one-hot provenance"
-        )
     if ctx.within is not None:
         raise ValueError(
             "cat_encoding='onehot' is not supported with within panel demeaning"
@@ -2361,14 +2393,17 @@ def _validate_request_cache(
             )
         validate_classic_cache_compatibility(request.X, cache)
         _validate_classic_cache_overrides(request)
-        return
-    if spec.estimator == "gaussian":
+    elif spec.estimator == "gaussian":
         _validate_gaussian_cache_compatibility(
             request.X, cache, n_rows, n_features
         )
         _validate_gaussian_cache_overrides(request)
-        return
-    raise ValueError("cache is supported only with estimator='gaussian'")
+    else:
+        raise ValueError("cache is supported only with estimator='gaussian'")
+    kwargs = request.selector_kwargs or {}
+    reject_prebuilt_cache_encoding(
+        request.X, kwargs.get("cat_features"), kwargs.get("cat_encoding")
+    )
 
 
 def _require_fixed_filter_metadata(ctx: FilterContext) -> None:
@@ -2409,11 +2444,37 @@ def _require_within_support(ctx: FilterContext) -> None:
         assert ctx.auto_k_config is not None
         method = ctx.auto_k_config.k_method
         if method not in _WITHIN_AUTO_K_METHODS:
-            raise ValueError(
-                "within is supported only with auto-k methods 'evaluate', "
-                "'gaussian_cv', and 'xfit_objective'; "
-                f"got k_method={method!r}"
+            # With conditioning, the within methods named below reject it in
+            # turn, so the combined rejection takes this one's place.
+            _reject_conditioned_within(ctx)
+            # Only CEFS+ routes a config-less k="auto" to the router; mRMR,
+            # JMI and JMIM infer evaluate there.
+            router = (
+                " (the zero-config k='auto' router)"
+                if method == "auto" and ctx.spec.selector == "cefsplus"
+                else ""
             )
+            raise ValueError(
+                f"within={ctx.within!r} cannot score auto-k k_method={method!r}"
+                f"{router}; choose an auto_k_config it can validate. "
+                f"{within_split_guidance(ctx.within)}"
+            )
+
+
+def _reject_conditioned_within(ctx: FilterContext) -> None:
+    """Reject a within auto-k call whose conditioning no config can honor.
+
+    Any conditioning keyword counts, even an empty one: the fold-scored
+    routes reject include/exclude/candidates outright.
+    """
+    if ctx.k != "auto" or ctx.within is None:
+        return
+    assert ctx.auto_k_config is not None
+    reject_conditioned_within_auto_k(
+        ctx.within,
+        ctx.auto_k_config,
+        conditioning=ctx.conditioning is not None,
+    )
 
 
 def _format_payload(

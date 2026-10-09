@@ -11,8 +11,8 @@ The rest of the file pins the factual claims the docstrings of
 ``sift/selectors.py`` and ``sift/selection/filter_api.py`` now make: the
 sklearn parameter round trip, ``selector_metadata_``, the raw-namespace
 ``get_support()`` under one-hot, integer positions being DataFrame labels
-only, prebuilt caches refusing every encoding, and ``eta`` still driving the
-offset-zero counterfactual under e-value aggregation.
+only, prebuilt caches refusing every encoding they would have to apply, and
+``eta`` still driving the offset-zero counterfactual under e-value aggregation.
 """
 
 from __future__ import annotations
@@ -324,21 +324,33 @@ def test_onehot_unusable_include_reports_the_raw_column():
 
 
 @pytest.mark.parametrize("encoding", ["onehot", "ordinal", "frequency"])
-def test_prebuilt_caches_reject_every_target_blind_encoding(encoding):
+def test_prebuilt_caches_reject_every_target_blind_encoding_with_a_column(encoding):
     X, y = _frame()
+    expected = (
+        f"cat_encoding={encoding!r} cannot be combined with a prebuilt cache "
+        "because the cache has no encoding provenance, so it cannot encode ['f1']"
+    )
 
     gaussian = build_cache(X)
-    with pytest.raises(ValueError, match="prebuilt cache"):
-        CEFSPlusSelector(k=2, verbose=False, cat_encoding=encoding, cache=gaussian).fit(
-            X, y
-        )
+    with pytest.raises(ValueError) as caught:
+        CEFSPlusSelector(
+            k=2, verbose=False, cat_encoding=encoding, cat_features=["f1"],
+            cache=gaussian,
+        ).fit(X, y)
+    assert str(caught.value).startswith(expected)
 
     classic = build_classic_cache(X)
-    with pytest.raises(ValueError, match="prebuilt"):
+    with pytest.raises(ValueError) as caught:
         MRMRSelector(
             k=2, task="regression", estimator="classic", verbose=False,
-            cat_encoding=encoding, cache=classic,
+            cat_encoding=encoding, cat_features=["f1"], cache=classic,
         ).fit(X, y)
+    assert str(caught.value).startswith(expected)
+
+    # With no column to encode the encoding is inert, as it is without a cache.
+    inert = CEFSPlusSelector(k=2, verbose=False, cat_encoding=encoding, cache=gaussian)
+    plain = CEFSPlusSelector(k=2, verbose=False, cache=gaussian)
+    assert inert.fit(X, y).selected_features_ == plain.fit(X, y).selected_features_
 
 
 def test_eta_drives_the_offset_zero_counterfactual_under_evalue_aggregation():
@@ -367,3 +379,41 @@ def test_eta_drives_the_offset_zero_counterfactual_under_evalue_aggregation():
     assert low[1] >= high[1]
     assert low[1] == max(per_draw)
     assert low[1] != high[1], "eta still moves the frequency-vote counterfactual"
+
+
+def test_knockoff_selector_eta_contract_matches_its_docstring():
+    """``eta`` rescores only the offset-0 count; the per-draw record is fixed."""
+    rng = np.random.default_rng(8)
+    X = pd.DataFrame(rng.normal(size=(300, 12)), columns=[f"f{i}" for i in range(12)])
+    y = 2.0 * X["f0"].to_numpy() + X["f1"].to_numpy() + 0.5 * rng.normal(size=len(X))
+
+    runs = {}
+    for eta in (0.1, 0.5, 0.9):
+        est = KnockoffSelector(
+            q=0.5, n_draws=3, eta=eta, aggregation="evalues",
+            random_state=2, verbose=False,
+        ).fit(X, y)
+        runs[eta] = est
+    sets = runs[0.1].result_.diagnostics_["offset_zero_selection_sets"]
+    assert sets == [[0, 1], [0, 1, 2], [0, 1]]
+    for eta, est in runs.items():
+        assert list(est.selected_features_) == ["f0", "f1"]
+        assert est.result_.diagnostics_["offset_zero_selection_sets"] == sets
+        assert est.selector_metadata_["n_discoveries_offset_0_per_draw"] == [
+            len(chosen) for chosen in sets
+        ]
+        # Independent vote: features picked in at least ``eta`` of the draws.
+        counts = pd.Series([j for chosen in sets for j in chosen]).value_counts()
+        expected = int((counts / len(sets) >= eta).sum())
+        assert est.selector_metadata_["n_discoveries_offset_0"] == expected
+    assert [runs[eta].selector_metadata_["n_discoveries_offset_0"] for eta in runs] == [
+        3, 2, 2
+    ]
+
+    documented = inspect.getdoc(KnockoffSelector)
+    eta_entry = documented.split("\neta : ", 1)[1].split("\naggregation : ", 1)[0]
+    eta_entry = " ".join(eta_entry.split())
+    assert "it never changes the selection" in eta_entry
+    assert 'it only rescores the reported offset-zero frequency-vote counterfactual' in eta_entry
+    assert "per draw and do not depend on ``eta``" in eta_entry
+    assert "per-draw list" not in eta_entry

@@ -4,7 +4,7 @@ This guide covers local setup, validation, and release-oriented checks for SIFT.
 
 ## Setup
 
-Use Python 3.11 or 3.12.
+Use Python 3.11, 3.12, or 3.13; CI runs the full suite on all three.
 
 ```bash
 python -m pip install --upgrade pip
@@ -133,9 +133,9 @@ update `README.md`, [docs/user-guide.md](user-guide.md),
 
 Every name in `sift.__all__` carries a substantive
 [numpydoc](https://numpydoc.readthedocs.io/en/latest/format.html) docstring.
-This is a 0.9.0 release gate, not a style preference: the docstrings are the
-source the generated API reference will be built from in 0.9.1, so an export
-without one silently removes a page from that reference.
+This has been a release gate since 0.9.0, not a style preference: the
+docstrings are the source the generated API reference (`docs/reference/`) is
+built from.
 
 Two tests enforce the standard. `__version__` is exempt from both; every other
 name in `sift.__all__` is in scope.
@@ -179,8 +179,9 @@ naming the concrete type rather than a bare `object`, and `Raises` for the
 validation errors the entry point owns. A class documents its constructor
 parameters and its fitted attributes (the trailing-underscore ones) rather than
 repeating the function docstring it wraps. Keep parameter descriptions honest
-about defaults that are scheduled to change in 1.0 — the deprecation ledger in
-[docs/release-notes.md](release-notes.md) is the list.
+about defaults, since nothing checks them mechanically (see above); the 1.0.0
+section of [docs/release-notes.md](release-notes.md) lists the defaults 1.0
+changed.
 
 ### Executable documentation blocks
 
@@ -318,16 +319,15 @@ warnings-as-errors policy:
 | dependency set | result |
 | --- | --- |
 | floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
-| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 1,967 passed / 39 skipped (10 doc-block and 4 docstring-example skips are optional-dependency gates) |
+| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 3,742 passed / 41 skipped (26 need catboost or category_encoders, 8 are catboost doc blocks, 4 are literal docstring examples, 3 skip by contract) |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | Python 3.13 CI — numpy 2.5.3 / pandas 3.0.6 / sklearn 1.9.1 / scipy 1.18.1 / numba 0.67.0 | green — 2,792 passed / 34 skipped |
 
-Only the base row is re-measured every time this page is touched; it is the
-current count on this tree. Other rows are dated snapshots rather than counts
-re-measured per commit, so their absolute counts may trail the suite. Re-measure
-a row before quoting its number as current.
+Every row is a dated snapshot rather than a count re-measured per commit, so
+its absolute counts can trail the suite as tests are added. Re-measure a row
+before quoting its number as current.
 
 The previously recorded ceiling (scikit-learn `<1.8`, numpy `<2.5`) is gone. Its
 13 failures are closed and described in `docs/release-notes.md` under

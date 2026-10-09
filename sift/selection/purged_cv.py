@@ -56,7 +56,15 @@ def _reject_non_timeline_dtype(values, arr: np.ndarray, *, name: str) -> None:
     -- strings, bytes, booleans, complex numbers, categoricals -- is refused
     here instead of failing later inside a comparison ufunc.
     """
-    if isinstance(getattr(values, "dtype", None), pd.CategoricalDtype):
+    dtype = getattr(values, "dtype", None)
+    if isinstance(dtype, pd.CategoricalDtype):
+        categories = dtype.categories.dtype
+        if isinstance(categories, pd.PeriodDtype):
+            raise ValueError(
+                f"{name} must be {_TIMELINE_KIND_TEXT}, or pandas Periods of one "
+                "frequency; got a pandas Categorical of Periods. Pass the Periods "
+                f"themselves, for example {name}.astype({str(categories)!r})"
+            )
         raise ValueError(
             f"{name} must be {_TIMELINE_KIND_TEXT}; got a pandas Categorical. "
             f"Pass the underlying timestamps, for example "
@@ -100,6 +108,72 @@ def _as_1d(values, n_rows: int, *, name: str, role: str = "time") -> np.ndarray:
         if arr.dtype.kind == "f" and int(arr.dtype.itemsize) < 8:
             arr = np.asarray(arr, dtype=np.float64)
     return arr
+
+
+def _period_values(values, *, name: str) -> pd.PeriodIndex | None:
+    """The values as a ``PeriodIndex`` when they are pandas Periods, else None.
+
+    Periods of one frequency are ordered and map exactly onto integer
+    ordinals. A mix of frequencies has no common timeline and is rejected.
+    A pandas Categorical is never a Period timeline, even of Periods: it is
+    refused like every other categorical.
+    """
+    dtype = getattr(values, "dtype", None)
+    if isinstance(dtype, pd.PeriodDtype):
+        return pd.PeriodIndex(values)
+    if isinstance(dtype, pd.CategoricalDtype):
+        return None
+    arr = values.to_numpy() if isinstance(values, pd.Series) else np.asarray(values)
+    if arr.ndim != 1 or arr.dtype.kind != "O" or arr.size == 0:
+        return None
+    inferred = pd.api.types.infer_dtype(arr, skipna=True)
+    if inferred == "mixed":
+        if not all(isinstance(value, pd.Period) or value is pd.NaT for value in arr):
+            return None
+    elif inferred != "period":
+        return None
+    frequencies = {
+        value.freqstr for value in arr if isinstance(value, pd.Period)
+    }
+    if len(frequencies) != 1:
+        raise ValueError(
+            f"{name} mixes pandas Period frequencies; pass Periods of one "
+            "frequency, for example by converting them with asfreq"
+        )
+    try:
+        return pd.PeriodIndex(arr, freq=next(iter(frequencies)))
+    except ValueError:
+        raise ValueError(
+            f"{name} mixes pandas Period frequencies; pass Periods of one "
+            "frequency, for example by converting them with asfreq"
+        ) from None
+
+
+def _as_timeline(values, n_rows: int, *, name: str) -> tuple[np.ndarray, str | None]:
+    """``time`` / ``event_end`` as a comparable 1-D array, plus its Period frequency.
+
+    A pandas ``Period`` timeline is split on its integer ordinals, so the
+    integer rules apply to it: the embargo is an integer count of ordinal
+    steps, which count the frequency's base unit, not whole periods (months
+    for ``freq='M'`` and ``'2M'``, minutes for ``'15min'``).
+    """
+    periods = _period_values(values, name=name) if values is not None else None
+    if periods is None:
+        return _as_1d(values, n_rows, name=name), None
+    # Shape, row count and missing values are checked on the Periods.
+    _as_1d(values, n_rows, name=name, role="period")
+    return np.asarray(periods.asi8, dtype=np.int64), periods.freqstr
+
+
+def _require_period_embargo(embargo, freq: str) -> None:
+    if _is_zero_embargo(embargo):
+        return
+    if not isinstance(embargo, (int, np.integer)):
+        raise TypeError(
+            f"a pandas Period time (freq={freq!r}) is split on its integer "
+            "ordinals, so embargo must be a non-negative integer count of "
+            f"ordinal steps; got {embargo!r}"
+        )
 
 
 def _promote_event_end(start: np.ndarray, end: np.ndarray) -> np.ndarray:
@@ -310,8 +384,11 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         after purge, embargo, and group exclusion. Forward mode keeps
         the most recent eligible timestamps. ``purged_kfold`` keeps the
         ``max_train_size`` unique-time *indices* nearest the validation
-        block (index distance, not elapsed time). ``None`` keeps every
-        eligible training timestamp.
+        block (index distance, not elapsed time). The distance runs to the
+        nearer block edge on the full unique timeline, so purged and
+        embargoed timestamps still count, and a tie between a timestamp
+        before the block and one after it goes to the earlier one. ``None``
+        keeps every eligible training timestamp.
     test_size : int or None, default None
         Distinct timestamps in each validation block. In ``forward`` mode,
         ``None`` uses ``n_unique // (n_splits + 1)``, the sklearn
@@ -326,7 +403,12 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
         not from ``event_end``: a datetime ``time`` requires a timedelta
         embargo, an integer ``time`` requires an integer embargo, and a
         float ``time`` takes any finite number even when ``event_end`` is
-        integer. Forward mode only embargoes the past side of validation,
+        integer. A pandas ``Period`` ``time`` is split on its integer
+        ordinals, so it takes an integer count of ordinal steps. A step is
+        one unit of the frequency's base unit, not one period: a month for
+        ``freq='M'`` and also for ``'2M'`` (so ``embargo=2`` covers one
+        ``'2M'`` period and ``embargo=1`` none), a minute for ``'15min'``.
+        Forward mode only embargoes the past side of validation,
         which is the deliberate deviation from López de Prado's after-the-
         test-block embargo (forward training never follows validation, so
         an after-side embargo would drop nothing). ``purged_kfold`` keeps
@@ -439,12 +521,14 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
             Per-row start timestamps, keyword-only, aligned to original
             rows of this ``X``. Integer, unsigned, float, datetime64, or
             timedelta64 (or an object array of such values, for example
-            pandas ``Timestamp``); strings, bytes, booleans, complex
-            numbers, and categoricals are rejected. Not stored on the
-            instance.
+            pandas ``Timestamp``), or pandas ``Period`` values of one
+            frequency, which are split on their integer ordinals; strings,
+            bytes, booleans, complex numbers, and categoricals are
+            rejected. Not stored on the instance.
         event_end : array-like or None, default None
             Optional per-row information-interval ends, same length and
-            dtype family as ``time``. ``None`` means point observations.
+            dtype family as ``time`` (Periods of the same frequency for a
+            Period ``time``). ``None`` means point observations.
 
         Yields
         ------
@@ -464,11 +548,19 @@ class PurgedTimeSeriesSplit(BaseCrossValidator):
 
     def _iter_splits(self, X, *, groups, time, event_end, require_groups: bool):
         n = _n_samples(X)
-        start = _as_1d(time, n, name="time")
+        start, period_freq = _as_timeline(time, n, name="time")
+        if period_freq is not None:
+            _require_period_embargo(self.embargo, period_freq)
         if event_end is None:
             end = start
         else:
-            end = _as_1d(event_end, n, name="event_end")
+            end, end_period_freq = _as_timeline(event_end, n, name="event_end")
+            if end_period_freq != period_freq:
+                raise ValueError(
+                    "event_end must use the same timeline as time: pandas "
+                    "Period values of one frequency on both, or neither; got "
+                    f"time freq={period_freq!r} and event_end freq={end_period_freq!r}"
+                )
             end = _promote_event_end(start, end)
             try:
                 inverted = np.asarray(end < start, dtype=bool)
@@ -731,12 +823,16 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
     n_splits : int, default 5
         Number of train/validation folds. Must be at least 2.
     max_train_size : int or None, default None
-        Optional cap on distinct training timestamps after purge/embargo.
+        Optional cap on distinct training timestamps after purge, embargo,
+        and group exclusion. Which timestamps it keeps, including the
+        ``purged_kfold`` tie-break, follows ``PurgedTimeSeriesSplit``.
     test_size : int or None, default None
         Distinct timestamps in each validation block. See
         ``PurgedTimeSeriesSplit``.
     embargo : 0, number, or timedelta, default 0
-        Extra exclusion duration in the same domain as ``time``. Forward
+        Extra exclusion duration in the same domain as ``time`` (an integer
+        count of ordinal steps of the frequency's base unit for a pandas
+        ``Period`` ``time``; see ``PurgedTimeSeriesSplit``). Forward
         mode embargoes the past side of validation only, the same
         deliberate deviation from López de Prado described on
         ``PurgedTimeSeriesSplit``.
@@ -776,7 +872,8 @@ class GroupPurgedTimeSeriesSplit(PurgedTimeSeriesSplit):
         groups : array-like
             Per-row group identities, aligned to original rows. Required.
         time : array-like
-            Per-row start timestamps, keyword-only.
+            Per-row start timestamps, keyword-only; the accepted types,
+            pandas ``Period`` included, follow ``PurgedTimeSeriesSplit.split``.
         event_end : array-like or None, default None
             Optional information-interval ends.
 

@@ -2,9 +2,301 @@
 
 ## 1.0.1 (unreleased)
 
-Development resumed after v1.0.0. No additional changes have shipped yet.
+A patch release. The 1.0 defaults, all 66 exports and every public signature
+are unchanged, and calls that already worked select the same features, except
+for the input-dependent changes listed under Compatibility. Each item below
+compares with 1.0.0.
+
+### Compatibility
+
+- A prebuilt `FeatureCache` or `ClassicFeatureCache` meets `cat_encoding`
+  with one rule on `select_mrmr`, `select_jmi`, `select_jmim`,
+  `select_cefsplus`, their selector classes and `KnockoffSelector`: any
+  encoding other than `"none"` raises one message, naming the encoding and the
+  columns, once there is a column to encode (a `cat_features` column of a
+  DataFrame, else its object/category/string columns; for an ndarray, an
+  in-range `cat_features` position or its `x{i}` name). With nothing to
+  encode, the encoding is inert and the call returns the `cat_encoding="none"`
+  selection. Consequences:
+  - Calls that silently ignored a supervised encoding (`"target"`, `"loo"`,
+    `"james_stein"`, `"loo_logit"`) beside a cache and a column to encode now
+    raise: the Gaussian function APIs on a DataFrame or on an ndarray with
+    positional `cat_features`, and the selector classes and `KnockoffSelector`
+    on an ndarray with positional `cat_features`. The ignored encoding also
+    skipped the `allow_full_data_target_encoding` opt-in. Pass
+    `cat_encoding="none"` with a cache built from encoded data.
+  - Calls with nothing to encode that used to raise the cache error now run:
+    one-hot, ordinal and frequency on the filter selector classes, ordinal and
+    frequency on `KnockoffSelector`, one-hot on the function APIs, any encoding
+    with a classic cache, and any call whose `cat_features` names no column (a
+    misspelt name, an out-of-range position). For one-hot, a call of the last
+    kind instead reaches one-hot's own error: "onehot cat_features are not
+    columns of X" on a DataFrame, and a `TypeError` ("requires a pandas
+    DataFrame") instead of the cache `ValueError` on an ndarray.
+- `cat_encoding="target_cv"` encodes a column with a single positive-weight
+  level in its fitting rows (for example a constant or all-missing
+  categorical) as exactly zero, in every fold and at inference. It used to
+  become rounding noise (about 1e-17) that every route could select: the
+  Gaussian routes kept it and the rank transform inflated it, and the classic
+  MI and binary CEFS+ estimators ranked the noise as informative. It is now
+  dropped as constant on every route, which can change other picks and auto-k
+  choices, and naming it in `include` raises the "dropped as constant" error.
+- `AutoKConfig.random_state` is validated where a rule reads it: `perm_gap`,
+  `knockoff_path`, `stability`, `gaussian_cv` / `xfit_objective` with
+  `strategy="kfold"`, a `consensus` with any of those members (its
+  `gaussian_cv` / `xfit_objective` members read the seed whatever the
+  strategy), and the rule `k_method="auto"` routes to. A seed counts as the
+  integer it equals, so Python and NumPy integers and booleans, integral
+  floats, `Decimal` / `Fraction` values, 0-d arrays and `IntEnum` members work
+  exactly as before. `None`, a string and a non-integral number now raise a
+  `ValueError` naming the rule; they used to raise a bare or wrapped
+  `TypeError` (`None`) or be truncated by `int()` (`1.5`, `"7"`). A 1-d array,
+  which worked with NumPy's deprecation warning, raises too. The
+  `auto_dense_check=True` cross-check skips itself with its warning for such a
+  seed, naming the reason; 1.0.0 skipped it for `None` but ran it on the
+  truncated seed for `1.5` or `"7"`. The dense check is diagnostic, so the
+  selection is the same either way. Out-of-range integers that NumPy
+  rejected get a message naming the range. Rules that never read the seed
+  accept any value, and a `consensus` with a `gaussian_cv` / `xfit_objective`
+  member no longer warns that `random_state` is unused.
+- The ordinal, frequency and one-hot encoders identify datetime and duration
+  levels exactly:
+  - `cat_encoding="ordinal"` orders datetimes by instant and durations by
+    length at any magnitude. Datetimes outside pandas' nanosecond range
+    (before 1677 or after 2262, aware values included), `np.datetime64` /
+    `np.timedelta64` values beyond about ±292,000 years, large
+    non-nanosecond durations and count-multiplied units such as `m8[3D]` used
+    to rank after strings, wrap or misorder, as did `np.datetime64` values
+    with a count multiplier or in `ps` / `fs` / `as`. `Decimal` and `Fraction`
+    levels used to sort by their text and now sort numerically with ints and
+    floats. Other datetime and duration values, and every other level type,
+    keep their codes.
+  - An `np.timedelta64` in an object column is identified by its exact
+    length. Most units (`W`, `D`, `h`, `m`, `s`, `ms`, `us`) used to crash in
+    `int()`; nanosecond, generic, year, month and sub-nanosecond values used to
+    merge with the integer of the same count (`np.timedelta64(5, "ns")` and `5`
+    were one level). Equal lengths are one level in any unit (`5000 ps` and
+    `5 ns`), years and months count in months (one year is `...__12 months`),
+    and a count multiplier counts (one tick of `m8[2Y]` is 24 months, no longer
+    one year; one tick of `m8[3D]` is three days).
+  - An object column mixing `np.datetime64` units such as years and
+    attoseconds no longer raises `OverflowError`; each unit stays its own
+    level, and equal instants in two units, which 1.0.0 merged only when
+    NumPy's hash happened to collide (the epoch, raw counts -1 and -2), are now
+    always two levels. An aware non-nanosecond `pd.Timestamp` outside years
+    1-9999 no longer crashes, and the two readings of a repeated wall-clock
+    hour (a DST fold) are two levels instead of one whose code depended on row
+    order.
+- `evaluate_feature_path` imputes `+inf` / `-inf` like missing values and
+  computes the fill without overflow, so its scores change for a training
+  column that contains an infinity or whose finite values sum past the float
+  range (both used to be filled with `0.0`).
+- Several error and warning messages are reworded (listed under Fixes), and
+  some calls that fail for more than one reason report a different reason
+  first: `CEFSPlusBinarySelector` with a non-binary target reports the target
+  error before a category_encoders `ImportError` or a weight error, and an
+  invalid `within` value is reported before nested auto-k errors. View metadata gains `proxy_correlations_stale`
+  (`StabilitySelector`, `Stabilized`) and `proxy_input_numeric` (`Stabilized`
+  over non-numeric input), two-way results gain `within_two_way_converged` /
+  `within_two_way_max_residual`, and CatBoost manifests gain their resolved
+  `higher_is_better`. Tests that match old text or exact key sets need
+  updating.
+
+### Fixes
+
+- `reproducibility_()` manifests report sift's own git state. When sift is
+  installed into a virtualenv inside a different checkout (for example a
+  git-ignored `.venv`), `environment.git_commit` and `git_dirty` are now
+  `None`; they used to show that project's HEAD, and `git_dirty=False` even
+  after the installed sift was edited. An exported `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_COMMON_DIR` or other repository-selecting git variable
+  no longer redirects them, and a `status.showUntrackedFiles=no` setting no
+  longer hides a new untracked module from `git_dirty`. Checkouts, editable
+  installs and git worktrees of sift still report their commit and dirty
+  state.
+- `StabilitySelector.fit`, `stability_regression`, `stability_classif` and
+  `stability_select` accept a single-column target (an `(n, 1)` array or a
+  one-column DataFrame) and select exactly what the 1-D target selects; they
+  used to crash with a NumPy `TypeError` (regression) or emit scikit-learn's
+  `DataConversionWarning` (classification). A wider, 3-D, zero-width or
+  scalar target, or one whose length differs from `X`, raises a `ValueError`
+  naming the shape or both row counts, and `tune_threshold` rejects a wide
+  target too.
+- `select_fdr`, `KnockoffSelector` and `Stabilized(aggregation="evalues")`
+  raise a `ValueError` naming `random_state` for a `None` or non-integer
+  knockoff seed, which used to fail with a bare `TypeError` from inside the
+  filter; negative seeds, which already raised NumPy's `ValueError`, get the
+  same message. `sample_knockoffs` names `random_state` for a float, string or
+  negative seed and lists the forms it accepts. On all four, a NumPy boolean
+  now seeds as the integer it equals, as a Python `bool` does; it used to fail
+  inside `SeedSequence`. Integer seeds give identical draws.
+- `evaluate_feature_path` results record the estimator, the splitter (or the
+  default holdout with its `val_frac`), digests of `time` / `event_end`, and
+  `random_state` when it seeded the holdout in their reproducibility manifest
+  (`seeds.available` was `false`). `catboost_select` results record their
+  options and seed. A hand-assembled `FeaturePathEvaluationResult` or
+  `CatBoostSelectionResult` reports `captured_at="unknown"` instead of
+  claiming selection-time capture, and a CatBoost result whose column labels
+  have no deterministic token (a pandas `Interval`, say) records
+  `columns_hash: null` instead of raising.
+- `compare` accepts a pandas `Period` or a one-column `time`; hashing it for
+  the split record used to raise. Period values have a deterministic manifest
+  token (frequency and ordinal), and row metadata with no deterministic token
+  is recorded as `{"status": "opaque", "reason": "no_deterministic_token"}`.
+  `PurgedTimeSeriesSplit` and `GroupPurgedTimeSeriesSplit` accept a `Period`
+  time axis of one frequency and split on its ordinals, so `compare` and
+  `evaluate_feature_path` can purge on it. The embargo is an integer count of
+  ordinal steps of the frequency's base unit, not of periods: months for
+  `'M'` and for `'2M'` (so `embargo=2` covers one `'2M'` period), minutes for
+  `'15min'`. A Categorical of Periods is rejected like every categorical, with
+  a remedy.
+- `evaluate_feature_path` fills `+inf` / `-inf` cells, like missing ones, with
+  the mean of the column's finite training values; a column that contained an
+  infinity used to have all its non-finite cells filled with `0.0`, and some
+  columns leaked NumPy `RuntimeWarning`s despite the documented silent
+  imputation.
+- Panel `within=` auto-k errors and warnings name routes that work and never
+  recommend the route that produced them:
+  - `AutoKConfig(k_method="evaluate", strategy="kfold")` on the filter
+    functions and selector classes no longer answers "use time_holdout or
+    group_cv" (dead ends under `within`); the zero-config CEFS+ router,
+    non-fold methods such as `elbow`, and nested auto-k no longer suggest
+    `evaluate` for `within="two_way"`; `select_k_auto` no longer suggests
+    `select_k_elbow`, which takes no `within`.
+  - The guidance says that `gaussian_cv` / `xfit_objective` need the Gaussian
+    path (`estimator="gaussian"` for mRMR, JMI and JMIM), that they also
+    validate `within="groups"` under `time_holdout`, and that `select_k_auto`
+    cannot validate `within="two_way"`.
+  - Under `strategy="kfold"`, the partially-unseen-levels warning advises
+    pooling thin entities or periods or raising `AutoKConfig.xfit_folds`, and
+    the no-seen-level error explains that more folds make such a fold more
+    likely; under `time_holdout` both point to the Gaussian `kfold` route.
+  - Where the within and conditioning rejections used to point at each other
+    (`within` with `include` / `exclude` / `candidates` and `k="auto"`), one
+    message now says no auto-k method serves both under `"two_way"` (use a
+    fixed `k`, or drop the keywords on the Gaussian path) and names the one
+    route that does under `"groups"` (`k_method="evaluate"` with
+    `strategy="time_holdout"`, or a fixed `k` without `time`). Structural,
+    configuration, cache and conditioning errors still come first; errors
+    found while preparing the data (y length, non-finite y, negative weights,
+    non-numeric X) now follow this message.
+- `SelectionView.table` keeps `within_relevance` and `between_relevance`
+  whenever the filter ranking has them, so `view.table["between_relevance"]`
+  no longer raises `KeyError` when the score is NaN (two or fewer entities).
+  `within="two_way"` results also report `within_two_way_converged` and
+  `within_two_way_max_residual` next to `within_two_way_iterations`.
+- `include` errors name exactly the raw columns that cannot be conditioned on,
+  on every route, all of them, in the caller's `include` order: the one-hot
+  selector classes no longer blame every `include` column;
+  `select_cefsplus_binary` and `CEFSPlusBinarySelector` (including
+  `loss="brier"`) no longer quote a one-hot dummy such as `city__NY`; the
+  classic mRMR/JMI/JMIM routes name the column instead of an encoded
+  position; `select_fdr` / `KnockoffSelector` name the column and mention a
+  cache only when one was passed; and the low-level
+  `sift.selection.mrmr_select` / `jmi_select` say "include positions".
+- Cache errors come in the order a caller can act on:
+  `CEFSPlusBinarySelector` and nested auto-k reject a prebuilt cache before
+  the encoding rule advises re-encoding, a `cat_features` NumPy array no
+  longer fails with NumPy's truth-value error, and a bare `str`
+  `cat_features` gets a message explaining that each character was read as a
+  column name.
+- The filter selector classes with a 2-D `y` and a supervised `cat_encoding`
+  raise the function API's message instead of a shape error such as "X has
+  240 rows but y has 480".
+- A `Decimal("sNaN")` category value is missing, like `Decimal("NaN")`, for
+  the ordinal, frequency, one-hot, `target_cv` and `loo_logit` encoders
+  instead of crashing them.
+- `Stabilized(store_proxies=True)` suggests editing a block only when the
+  selected constant column is a member of a multi-member `feature_blocks`
+  entry of its base; otherwise it names the column.
+- `SelectionView.proxies`, `proxies_at`, `redundancy_report` and
+  `proxy_clusters` no longer blame a threshold change when proxies were never
+  stored. A source that cannot store proxies (classic or log-loss filter
+  routes, one-hot encoding, `ModelSelector`, knockoffs) is pointed only at the
+  `store_proxies=True` routes that take its kind of target, and a `Stabilized`
+  fit on non-numeric input is told to encode those columns first. A view whose
+  stored block was invalidated by `StabilitySelector.set_threshold` still
+  explains that the lower threshold needs a refit;
+  `metadata["proxy_correlations_stale"]` says which case applies.
+- The runtime-scaling benchmark records the version of the SIFT source it
+  measured rather than whatever distribution metadata is installed.
+
+### Documentation
+
+- Corrected the README's output-order example, which on 1.0 printed input
+  order for the selector it labelled as legacy; it now passes
+  `output_order="legacy"`, and a test binds its printed orders to its
+  comments. The README gains an "Upgrading to 1.0" section with the explicit
+  settings that restore 0.10 behavior.
+- Completed the 1.0.0 notes with a "Breaking changes and migration"
+  subsection: which transform methods and result views follow input order,
+  the removed `random_state=None` `FutureWarning`, the CatBoost collision
+  notice, and a per-entry-point table of restore settings.
+- Corrected the 0.10.0 note on one-hot encoding (prefix-only auto-k fits the
+  path-building encoder on every row; only held-out scoring refits per fold),
+  added the 0.10.0 changes to 0.9.0 APIs that the notes had omitted
+  (`evaluate_feature_path` `time=` / `event_end=` and generator splitters,
+  `proxies_at(include_selected=)`, the full encoding list in the non-numeric
+  error), and restored the deprecation ledger's 0.9 export count to the 58
+  names v0.9.0 shipped.
+- Documented the prebuilt-cache `cat_encoding` rule in one place (the cache
+  section of the manual) and fixed the `CEFSPlusSelector` Raises entry that
+  described it backwards; `compare` documents when its stratified default
+  passes through scikit-learn's "least populated class" warning and how an
+  explicit `cv=` avoids it.
+- Corrected docstrings: `include` / `exclude` / `candidates` references in
+  `select_fdr` and `select_cached`, the fold-local encoding in
+  `xfit_objective_curves` / `gaussian_cv_curves`, what `compare`'s
+  `random_state` seeds, `KnockoffSelector.eta` (it rescores only
+  `n_discoveries_offset_0`), the `purged_kfold` cap's distance rule and
+  tie-break, `AutoKConfig.random_state`, and the two-way demeaning
+  convergence criterion in every `within` docstring (largest removed level
+  mean scaled by the column's weighted SD, below `1e-10`, not a relative
+  change).
+- Updated pages and trackers that still described 0.9-era plans as current.
 
 ## 1.0.0 (2026-09-21)
+
+### Breaking changes and migration
+
+This subsection was added after the release to spell out the upgrade; the
+behavior it describes is what 1.0.0 shipped. The README has a short
+[Upgrading to 1.0](https://github.com/kmedved/sift/blob/main/README.md#upgrading-to-10)
+guide.
+
+- Selector transforms now follow fitted input order. On the ten selector
+  classes, `transform`, `fit_transform`, `get_feature_names_out()`,
+  `get_support(indices=True)` and `inverse_transform` emit the selected
+  columns in ascending input position instead of selection order, and the
+  `sift.as_result` views of a fitted `StabilitySelector`, `ModelSelector` or
+  `Stabilized` (`features`, `indices`) follow the same order. Which features
+  are selected, `selected_features_`, result tables and the lists returned by
+  the function API are unchanged. Refit a downstream model that was trained on
+  0.10 transform output, or keep `output_order="legacy"`.
+- Omitted `random_state` on `StabilitySelector`, `permutation_importance` and
+  `catboost_select` (and the `stability_regression`, `stability_classif`,
+  `catboost_regression` and `catboost_classif` wrappers) is now seed `0`, so
+  those calls are reproducible, and the `FutureWarning` that 0.9 and 0.10
+  emitted for `random_state=None` is removed. An explicit `random_state=None`
+  still draws fresh entropy, now without a warning. The same entry points now
+  default to `n_jobs=1`. Because seed `0` and one worker are now translated
+  CatBoost settings, a `catboost_params` `random_seed` or `thread_count`
+  override now emits the existing collision `UserWarning`; the dictionary
+  value still wins.
+- Public `verbose` defaults are now `False`.
+
+To keep 0.10 behavior, pass the old values explicitly. Not every entry point
+has all four settings:
+
+| entry point | explicit 0.10 settings |
+| --- | --- |
+| `StabilitySelector` | `output_order="legacy", verbose=True, n_jobs=-1, random_state=None` |
+| `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `Stabilized` | `output_order="legacy", verbose=True` |
+| `BorutaSelector` | `verbose=True` (its legacy order already was input order) |
+| `ModelSelector` | `output_order="legacy"` (its `verbose` default was already `False`) |
+| `permutation_importance` | `n_jobs=-1, random_state=None` |
+| `catboost_select` | `n_jobs=-1, random_state=None, verbose=True` |
+| `select_mrmr`, `select_jmi`, `select_jmim`, `select_cefsplus`, `select_cefsplus_binary`, `select_fdr`, `select_boruta`, `select_boruta_shap`, `SmartSamplerConfig` | `verbose=True` |
 
 ### Compatibility
 
@@ -84,8 +376,14 @@ Development resumed after v1.0.0. No additional changes have shipped yet.
   mass, then label); remainder levels share `other`; unknown values join
   `other` when pooling created that remainder, otherwise they are all-zero;
   missing is its own level. Selected names/indices/support stay raw; encoded
-  transform names match dummy width. Nested `evaluate` and prefix-only
-  evaluate/Gaussian CV/xfit/auto learn vocabulary on training folds.
+  transform names match dummy width. Nested `evaluate` learns the vocabulary
+  inside training folds. Prefix-only evaluate, Gaussian CV, xfit and auto
+  routing refit the encoder on each training fold for held-out scoring, but
+  the path-building encoder that fixes the dummy columns is fit on every row
+  (on the training partition under `k_method="evaluate"` with
+  `strategy="time_holdout"`); the map is target-blind, so this is not target
+  leakage. (Corrected after release: this note first said the prefix-only
+  routes learn the vocabulary on training folds.)
   Caches, `within`, knockoffs, and Boruta raise. `target_cv` and no-encoding
   paths are unchanged.
 - Added additive `cat_encoding="ordinal"` and `"frequency"` on existing
@@ -224,6 +522,17 @@ Development resumed after v1.0.0. No additional changes have shipped yet.
   complex and fraction labels can be hashed again. Export metadata records
   Python, platform and repository dirtiness without absolute BLAS paths.
   Manifest schema `1` is documented before its first release.
+- `evaluate_feature_path` (a 0.9.0 API) gained keyword-only `time=` and
+  `event_end=`, forwarded to splitters that declare them, so the purged
+  splitters apply their label-horizon purge from there. It also accepts a
+  generator of `(train_idx, val_idx)` pairs as `splitter`, which 0.9.0
+  rejected with a `TypeError`.
+- `SelectionView.proxies_at` (a 0.9.0 API) accepts `include_selected=True`,
+  which also lists selected-to-selected edges (the edges `proxy_clusters`
+  merges on), as the new `redundancy_report` does. The default output is
+  unchanged.
+- The "Non-numeric columns found" error lists every accepted `cat_encoding`,
+  including `ordinal` and `frequency`.
 
 ### Documentation
 
@@ -969,7 +1278,9 @@ was added to `pyproject.toml`.
 Reproduced verbatim from §4 of `docs/specs/0.9-product-layer.md`. The table
 started as a 0.9 proposal; its 1.0 column now records the narrower contract
 approved on 2026-09-21. The changes are announced in 0.10.x and take effect only
-in 1.0.
+in 1.0. The 0.9 column was edited on 2026-09-21 as well (reworded seed and
+return rows, a new seed-42 row); its `sift.__all__` cell, which then read
+"66 exports", was corrected back to the 58 that v0.9.0 shipped.
 
 | item | 0.9 state | 1.0 state |
 | --- | --- | --- |
@@ -978,7 +1289,7 @@ in 1.0.
 | `verbose` default | `True`, logging-backed; logging formatting/routing may differ, but selection/returns/default progress behavior does not | `False` |
 | `n_jobs=-1` defaults (stability, permutation, CatBoost) | unchanged, documented | `1` |
 | `transform` output order | `"legacy"` default: filter path/selection order, Boruta original order, Stability descending selection frequency with stable original-index ties; `"original"` opt-in | `"original"` default |
-| `sift.__all__` | 66 exports | retain all 66 exports and the existing `sift.experimental` access path |
+| `sift.__all__` | 58 exports (0.10.0 added 8, for 66) | retain all 66 exports and the existing `sift.experimental` access path |
 | list/tuple/result returns | `select_cached` keeps list/tuple forms and offers `return_result=True`; `as_result` is additive | unchanged; result objects remain opt-in |
 | CatBoost `group_col`/`sample_weight_col` | aliases beside arrays | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |
 | stability `alpha` | joined by `penalty=` alias | unchanged — permanent alias (removal struck 2026-09-02; any future removal needs a full warning cycle first) |

@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Mapping, Set
 from numbers import Real
 from pathlib import Path
@@ -91,6 +92,10 @@ def _label_token(value: Any) -> Any:
         payload = tokens
     elif isinstance(value, (pd.Timestamp, pd.Timedelta)):
         payload = value.isoformat()
+    elif isinstance(value, pd.Period):
+        # The frequency and ordinal identify a period exactly; ``str`` alone
+        # would conflate, say, a monthly and a business-monthly period.
+        payload = {"freq": value.freqstr, "ordinal": int(value.ordinal)}
     elif isinstance(value, datetime.timedelta):
         payload = {
             "days": value.days,
@@ -114,8 +119,8 @@ def _label_token(value: Any) -> Any:
     else:
         raise TypeError(
             f"{type_name} has no deterministic identity token; pass primitive, "
-            "datetime/timedelta, bytes, path, tuple, set, frozenset, Decimal, "
-            "Fraction, UUID, or complex values"
+            "datetime/timedelta, pandas Period, bytes, path, tuple, set, "
+            "frozenset, Decimal, Fraction, UUID, or complex values"
         )
     return {"type": type_name, "value": payload}
 
@@ -130,15 +135,31 @@ def _columns_hash(features: Iterable[Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+#: Label types compared by their identity token rather than by ``==``.
+_TOKEN_COMPARED_LABELS = (
+    bool,
+    int,
+    float,
+    str,
+    bytes,
+    pd.Timestamp,
+    pd.Timedelta,
+    np.datetime64,
+    np.timedelta64,
+)
+
+
+def _scalar_label(value: Any) -> Any:
+    if isinstance(value, np.generic) and not isinstance(
+        value, (np.datetime64, np.timedelta64)
+    ):
+        return value.item()
+    return value
+
+
 def _labels_equal(left: Any, right: Any) -> bool:
-    if isinstance(left, np.generic) and not isinstance(
-        left, (np.datetime64, np.timedelta64)
-    ):
-        left = left.item()
-    if isinstance(right, np.generic) and not isinstance(
-        right, (np.datetime64, np.timedelta64)
-    ):
-        right = right.item()
+    left = _scalar_label(left)
+    right = _scalar_label(right)
     if type(left) is not type(right):
         return False
     if isinstance(left, tuple):
@@ -146,20 +167,7 @@ def _labels_equal(left: Any, right: Any) -> bool:
             _labels_equal(left_item, right_item)
             for left_item, right_item in zip(left, right)
         )
-    if left is None or isinstance(
-        left,
-        (
-            bool,
-            int,
-            float,
-            str,
-            bytes,
-            pd.Timestamp,
-            pd.Timedelta,
-            np.datetime64,
-            np.timedelta64,
-        ),
-    ):
+    if left is None or isinstance(left, _TOKEN_COMPARED_LABELS):
         return _label_token(left) == _label_token(right)
     values = np.empty(2, dtype=object)
     values[:] = [left, right]
@@ -168,6 +176,62 @@ def _labels_equal(left: Any, right: Any) -> bool:
         return bool(index.duplicated()[1])
     except (TypeError, ValueError):
         return _label_token(left) == _label_token(right)
+
+
+def _frozen_token(token: Any) -> Any:
+    if isinstance(token, Mapping):
+        return tuple(sorted((key, _frozen_token(item)) for key, item in token.items()))
+    if isinstance(token, list):
+        return tuple(_frozen_token(item) for item in token)
+    return token
+
+
+def _nan_or_part(part: float) -> Any:
+    return "nan" if math.isnan(part) else part
+
+
+def _label_match_key(value: Any) -> Any:
+    """A hashable key that two labels share exactly when ``_labels_equal`` holds.
+
+    It follows ``_labels_equal`` branch by branch: the exact type, tuples item
+    by item, the frozen identity token for the token-compared types, and
+    otherwise the value itself, which a dict compares with ``hash`` and
+    ``==`` as the pandas hash table does; for an exact ``complex`` that table
+    also matches NaN parts, so the key does too.
+    """
+    value = _scalar_label(value)
+    kind = type(value)
+    if isinstance(value, tuple):
+        return (kind, "tuple", tuple(_label_match_key(item) for item in value))
+    if value is None or isinstance(value, _TOKEN_COMPARED_LABELS):
+        return (kind, "token", _frozen_token(_label_token(value)))
+    if kind is complex:
+        return (kind, "complex", _nan_or_part(value.real), _nan_or_part(value.imag))
+    return (kind, "value", value)
+
+
+def _labels_match_as_multisets(features: list[Any], rows: list[Any]) -> bool:
+    """Whether ``rows`` pair one to one with ``features`` under ``_labels_equal``.
+
+    Counting ``_label_match_key`` keys is linear.  Labels that cannot be
+    hashed fall back to pairing each feature with the first equal row.
+    """
+    try:
+        return Counter(map(_label_match_key, features)) == Counter(
+            map(_label_match_key, rows)
+        )
+    except (TypeError, ValueError):
+        pass
+    unmatched = list(rows)
+    for feature in features:
+        position = next(
+            (i for i, row in enumerate(unmatched) if _labels_equal(feature, row)),
+            None,
+        )
+        if position is None:
+            return False
+        del unmatched[position]
+    return not unmatched
 
 
 def _coerce_feature_names(input_features: Any) -> list[Any] | None:
@@ -456,15 +520,95 @@ def _validate_table_selection(
             if not _labels_equal(feature, by_position[position]):
                 raise ValueError("raw_table selected feature identities do not match features")
         return
-    expected = sorted(
-        (json.dumps(_label_token(feature), sort_keys=True) for feature in features)
-    )
-    observed = sorted(
-        json.dumps(_label_token(feature), sort_keys=True)
-        for feature in selected_rows["feature"]
-    )
+    try:
+        expected = sorted(
+            (json.dumps(_label_token(feature), sort_keys=True) for feature in features)
+        )
+        observed = sorted(
+            json.dumps(_label_token(feature), sort_keys=True)
+            for feature in selected_rows["feature"]
+        )
+    except TypeError:
+        # Labels without a deterministic token (a pandas Interval, say) are
+        # paired by equality instead; only the manifest's hash needs tokens.
+        if not _labels_match_as_multisets(features, list(selected_rows["feature"])):
+            raise ValueError(
+                "raw_table selected feature identities do not match features"
+            ) from None
+        return
     if observed != expected:
         raise ValueError("raw_table selected feature identities do not match features")
+
+
+#: The entry points that accept ``store_proxies=True``, by the target they
+#: take.  A view whose source is not one of them names the list for its task
+#: instead of advising a rerun that fails; select_cached, StabilitySelector
+#: and Stabilized compute proxies on the raw matrix, so they need it numeric.
+_REGRESSION_PROXY_ROUTES = (
+    "select_cefsplus, and select_mrmr, select_jmi and select_jmim with "
+    "estimator='gaussian' (none of these with cat_encoding='onehot'), and, on "
+    "an all-numeric X, select_cached, StabilitySelector and Stabilized"
+)
+_CLASSIFICATION_PROXY_ROUTES = (
+    "select_cefsplus_binary with loss='brier' for a two-class target (not "
+    "with cat_encoding='onehot'), and, on an all-numeric X, StabilitySelector "
+    "with task='classification' and Stabilized"
+)
+_FILTER_FUNCTIONS = {
+    "mrmr": "select_mrmr",
+    "jmi": "select_jmi",
+    "jmim": "select_jmim",
+    "cefsplus": "select_cefsplus",
+    "cefsplus_binary": "select_cefsplus_binary",
+}
+
+
+def _proxy_storing_routes(metadata: Mapping[str, Any]) -> str:
+    """Name the ``store_proxies=True`` routes that take the source's target."""
+    selector = metadata.get("selector")
+    task = {"cefsplus": "regression", "cefsplus_binary": "classification"}.get(
+        str(selector), metadata.get("task")
+    )
+    if task == "regression":
+        return f"on {_REGRESSION_PROXY_ROUTES}"
+    if task == "classification":
+        return f"on {_CLASSIFICATION_PROXY_ROUTES}"
+    # Sources that do not record their task get both lists.
+    return (
+        f"for regression on {_REGRESSION_PROXY_ROUTES}; for classification on "
+        f"{_CLASSIFICATION_PROXY_ROUTES}"
+    )
+
+
+def _proxy_storage_blocker(metadata: Mapping[str, Any]) -> str | None:
+    """Name the source that cannot store proxies, or ``None`` when it can.
+
+    ``None`` also covers sources the view cannot identify, which keep the
+    plain "rerun with store_proxies=True" advice.
+    """
+    adapter = metadata.get("adapter")
+    if adapter in {"StabilitySelector", "Stabilized"}:
+        return None
+    if adapter != "FilterSelectionResult":
+        return None if adapter in {None, "unknown"} else str(adapter)
+    selector = str(metadata.get("selector"))
+    if selector.startswith("cached_"):
+        return None
+    entry = _FILTER_FUNCTIONS.get(selector)
+    if entry is None:
+        return None
+    options = metadata.get("configured_options")
+    encoding = options.get("cat_encoding") if isinstance(options, Mapping) else None
+    if encoding is None:
+        encoding = metadata.get("cat_encoding")
+    if encoding == "onehot":
+        return f"{entry} with cat_encoding='onehot'"
+    estimator = metadata.get("estimator")
+    if selector in {"mrmr", "jmi", "jmim"} and isinstance(estimator, str) and estimator != "gaussian":
+        return f"{entry} with estimator={estimator!r}"
+    if selector == "cefsplus_binary" and metadata.get("delegate_selector") != "cefsplus":
+        return f"{entry} with loss={metadata.get('loss', 'logloss')!r}"
+    return None
 
 
 class SelectionView:
@@ -1020,7 +1164,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``feature`` is missing or ambiguous -- use ``proxies_at``
             for positional access -- or if ``r_min`` is outside ``[0, 1]``.
@@ -1103,7 +1249,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``selected_index`` is not an integer or is not a selected proxy
             position, or if ``r_min`` is not a finite number in ``[0, 1]``.
@@ -1193,7 +1341,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``r_min`` is not a finite number in ``[0, 1]``.
 
@@ -1252,7 +1402,9 @@ class SelectionView:
         Raises
         ------
         NotImplementedError
-            If proxy correlations were not stored.
+            If proxy correlations were not stored, or the stored block no
+            longer covers the selection because a threshold change added
+            features (``metadata["proxy_correlations_stale"]``).
         ValueError
             If ``r_min`` is not a finite number in ``[0, 1]``.
         """
@@ -1270,12 +1422,31 @@ class SelectionView:
 
     def _require_proxy_block(self) -> pd.DataFrame:
         if self._proxy_correlations is None:
+            if self._metadata.get("proxy_correlations_stale") is True:
+                raise NotImplementedError(
+                    "proxy correlations are unavailable for this selected set: the "
+                    "stored proxy block holds one column per feature selected when it "
+                    "was computed, and a threshold change added features it cannot "
+                    "describe; refit with the lower threshold and store_proxies=True"
+                )
+            blocker = _proxy_storage_blocker(self._metadata)
+            if blocker is not None:
+                raise NotImplementedError(
+                    "proxy correlations were not stored for this selection, and "
+                    f"its source ({blocker}) cannot store them; store_proxies=True "
+                    f"is available {_proxy_storing_routes(self._metadata)}"
+                )
+            if self._metadata.get("proxy_input_numeric") is False:
+                raise NotImplementedError(
+                    "proxy correlations were not stored for this selection, and "
+                    "Stabilized computes them on the raw feature matrix, which has "
+                    "non-numeric columns here, so a store_proxies=True refit on it "
+                    "fails; encode those columns as numbers before refitting with "
+                    "store_proxies=True"
+                )
             raise NotImplementedError(
-                "proxy correlations are unavailable for this selected set; rerun or "
-                "refit selection with store_proxies=True. A stored proxy block holds "
-                "one column per feature selected when it was computed, so a threshold "
-                "change added features it cannot describe; refit with the lower "
-                "threshold and store_proxies=True"
+                "proxy correlations were not stored for this selection; rerun or "
+                "refit selection with store_proxies=True"
             )
         return self._proxy_correlations
 

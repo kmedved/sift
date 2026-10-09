@@ -240,11 +240,13 @@ Categorical encoding:
   `full_fit_encoding - full_training_prior`. Unknown or unseen categories
   therefore map to a zero centered effect, i.e. the global-mean estimate before
   centering, so a unique-ID, group-proxy, or timestamp-proxy column cannot
-  identify its own fold through the complement folds' prior. Missing values
-  stay one learned category. The unweighted fixed-k folds reproduce sklearn's
-  `TargetEncoder` split construction and `smooth="auto"` empirical-Bayes
-  shrinkage; weighted, grouped, and time-aware calls use fold-local weighted
-  m-estimates.
+  identify its own fold through the complement folds' prior. A level that is
+  the only one its fitting rows observed has an effect of exactly zero, so a
+  constant categorical is a zero column that every route treats as constant.
+  Missing values stay one learned category. The unweighted fixed-k folds
+  reproduce sklearn's `TargetEncoder` split construction and `smooth="auto"`
+  empirical-Bayes shrinkage; weighted, grouped, and time-aware calls use
+  fold-local weighted m-estimates.
 - **What centering does and does not guarantee.** It neutralizes only
   *unseen-in-fold* emissions. It is not a defence against high cardinality as
   such: a level appearing two or more times in a fold's training rows still
@@ -635,11 +637,11 @@ Important options:
 
 - `q`: target false-discovery rate, validated in `(0, 1)`.
 - `statistic="relevance"`: marginal Gaussian-MI difference between each
-  original feature and its knockoff. It remains the 0.9 compatibility default.
-  The retained [statistic bakeoff](docs/knockoff-statistic-bakeoff.md)
-  recommends keeping `relevance` for the 1.0 owner decision on those four
-  Gaussian designs (ridge reduced realized FDP but lost power on correlated
-  draws). That is not a universal ranking.
+  original feature and its knockoff. It is the default, and 1.0 kept it
+  (settled 2026-09-21) on the retained
+  [statistic bakeoff](docs/knockoff-statistic-bakeoff.md) over four Gaussian
+  designs (ridge reduced realized FDP but lost power on correlated draws).
+  That is not a universal ranking.
 - `statistic="lsm"`: lasso signed-max computed from a Gram-form LARS path on
   the analytic augmented correlation and the observed original/knockoff
   target correlations. Truncated LARS paths and ties are **not** generally
@@ -1281,14 +1283,14 @@ assert caught[0].category is FutureWarning
 ```
 
 The staged helper is the same object as the top-level
-`sift.gaussian_cv_curves`, which stays warning-free through 0.9; only the
-`sift.experimental` spelling announces the 1.0 move.
+`sift.gaussian_cv_curves`, which stays warning-free; only the
+`sift.experimental` spelling emits the notice.
 
 Accessing one of the 16 names through `sift.experimental` emits a
-`FutureWarning` because those helpers may change before 1.0. Their existing
-top-level imports remain available and warning-free throughout 0.9;
-`sift.__all__` remains the ordered public surface (60 names after F9's additive
-`compare` / `CompareResult`). The option-group types
+`FutureWarning` marking it as a research-oriented helper whose behavior may
+evolve in later releases. 1.0 keeps both spellings: the top-level imports
+remain available and warning-free, and `sift.__all__` remains the ordered
+public surface (66 names since 0.10.0). The option-group types
 remain module-scoped and are not added to either top-level export list.
 
 ### Explicit feature-path evaluation
@@ -1342,7 +1344,12 @@ curve.
 Use `compare` to refit selector factories inside each training fold and score a
 fresh downstream estimator on the untouched fold. Empty selected sets remain
 empty and use an intercept-only predictor. `mode="in_sample_path"` is a labelled
-in-sample prefix diagnostic of a full-sample path.
+in-sample prefix diagnostic of a full-sample path. With `cv=None`, classification
+without `groups` or `time` uses a shuffled `StratifiedKFold(5)`; a class with
+fewer members than folds makes scikit-learn emit its "least populated class"
+`UserWarning`, which `compare` does not suppress. Pass an explicit `cv=` splitter
+(for example `KFold(5, shuffle=True, random_state=0)`) when running with
+warnings as errors.
 
 ```python
 import numpy as np
@@ -1380,6 +1387,12 @@ realized seeds, original vs used row counts measured from the cache or subsample
 requested non-data selector options separately from resolved metadata,
 routed/knockoff settings including AutoKConfig, and compare's instantiated
 selector, estimator (including empty Dummy fallback), and splitter snapshots.
+Row metadata that shaped the splits is recorded as `time_sha256` /
+`event_end_sha256` (compare's `diagnostics["split"]`, the
+`evaluate_feature_path` splitter record, and CatBoost's `time_sha256`): a
+SHA-256 hex string, `None` when not supplied, or
+`{"status": "opaque", "reason": "no_deterministic_token"}` for values with no
+deterministic token, such as a pandas `Interval`.
 Prebuilt FeatureCache parameters are compact provenance, not copied arrays.
 Caller `X` is validated against known original rows and ordered typed columns when
 those facts exist; data hashing is opt-in and never stores `X`. Legacy
@@ -1456,6 +1469,25 @@ If you persist or pickle caches across SIFT versions,
 rebuild or invalidate caches created before `feature_names_are_synthetic` was
 recorded; old objects cannot prove whether `x0`, `x1`, ... names were real
 DataFrame columns or generated positional names.
+
+A prebuilt cache (`FeatureCache` or `ClassicFeatureCache`) stores no encoding
+provenance, so it cannot apply a categorical encoding. Every cache consumer
+that also takes `cat_encoding` (`select_mrmr`, `select_jmi`, `select_jmim`,
+`select_cefsplus`, their selector classes, and `KnockoffSelector`) follows one
+rule: any `cat_encoding` other than `"none"`, supervised or target-blind,
+raises once it has a column to encode, meaning a `cat_features` entry that
+names a column of `X` or, without `cat_features`, an object, category or
+string column. For an ndarray `X` an entry names a column when it is an
+in-range integer position or that column's generated `x{i}` name. Pass
+`cat_features` as a list: a bare `str` is read one character per column
+name, here as in every encoder. `CEFSPlusBinarySelector` takes no cache and
+rejects one before this rule applies. The message names the encoding and the
+columns:
+`cat_encoding='ordinal' cannot be combined with a prebuilt cache because the
+cache has no encoding provenance, so it cannot encode ['city']`. With nothing
+to encode (a numeric frame and no `cat_features`) the encoding is inert,
+exactly as it is without a cache. To combine categoricals with a cache, encode
+them before building the cache and pass `cat_encoding="none"`.
 
 Pass `rank_backend="threads"` (preferred; the sort and quantile transform
 release the GIL, so no copies of `X` are made) or `"processes"` with `n_jobs`

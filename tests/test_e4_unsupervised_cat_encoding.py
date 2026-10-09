@@ -466,14 +466,28 @@ def test_wrapper_nested_evaluate_and_inference_map_fixed():
 
 
 def test_multi_target_cefsplus_accepts_unsupervised_maps():
-    X, y = _frame(n=48, seed=11)
-    noise = np.random.default_rng(12).normal(size=len(X))
+    X, _y = _frame(n=48, seed=11)
+    # First appearance is LA, NY, CHI, so NY, the level with the effect, is
+    # last in natural order (CHI, LA, NY) but would sit in the middle of a
+    # first-appearance order, which would weaken the monotone relevance.
+    X["city"] = np.array(["LA", "NY", "CHI", "NY"] * 12, dtype=object)
+    rng = np.random.default_rng(12)
+    y = X["city"].eq("NY").astype(float) * 1.8 + 0.4 * X["x0"] + 0.1 * rng.normal(size=48)
+    noise = rng.normal(size=len(X))
     Y = np.column_stack([np.asarray(y), 0.4 * X["x0"].to_numpy() + noise])
-    selected = select_cefsplus(
+    encoded = select_cefsplus(
         X, Y, k=1, cat_encoding="ordinal", subsample=None, verbose=False,
+        return_result=True,
     )
-    assert selected
-    assert set(selected) <= set(X.columns)
+    assert encoded.selected_features == ["city"]
+    by_hand = X.assign(city=X["city"].map({"CHI": 0.0, "LA": 1.0, "NY": 2.0}))
+    manual = select_cefsplus(
+        by_hand, Y, k=1, subsample=None, verbose=False, return_result=True,
+    )
+    pd.testing.assert_frame_equal(
+        encoded.ranking_[["feature", "relevance"]],
+        manual.ranking_[["feature", "relevance"]],
+    )
 
 
 def test_deferred_auto_k_wrapper_inference_is_numeric_and_fixed():

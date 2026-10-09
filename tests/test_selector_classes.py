@@ -814,7 +814,11 @@ def test_selector_supervised_encoding_rejects_prebuilt_cache():
         verbose=False,
     )
 
-    with pytest.raises(ValueError, match="prebuilt caches"):
+    with pytest.raises(
+        ValueError,
+        match=r"cat_encoding='target' cannot be combined with a prebuilt cache "
+        r"because the cache has no encoding provenance, so it cannot encode \['team'\]",
+    ):
         selector.fit(X, y)
 
 

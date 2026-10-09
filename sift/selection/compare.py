@@ -23,10 +23,10 @@ from sift.scoring import (
     sklearn_scorer_label,
 )
 from sift.selection.reproducibility import (
-    _context_hash,
     collapse_fold_snapshots,
     describe_estimator,
     describe_splitter,
+    row_context_digest,
 )
 from sift.selection.view import _columns_hash, _json_safe
 from sift.selection.path_eval import (
@@ -140,13 +140,6 @@ _REPR_SUMMARY_ROWS = 5
 def _fingerprint_indices(idx: np.ndarray) -> str:
     arr = np.ascontiguousarray(np.asarray(idx, dtype=np.int64).reshape(-1))
     return hashlib.sha256(arr.tobytes()).hexdigest()
-
-
-def _row_context_digest(values, *, label: str, n_rows: int) -> str | None:
-    """Digest fold-shaping row metadata; never retain the values themselves."""
-    if values is None:
-        return None
-    return _context_hash(values, label=label, n_rows=int(n_rows))
 
 
 def _as_2d(X) -> np.ndarray:
@@ -991,7 +984,13 @@ def compare(
         family with ``n`` folds. May also be an iterable -- including a
         generator -- of ``(train_idx, val_idx)`` pairs, which is
         materialized once. The splitter that actually ran is recorded in
-        ``diagnostics["split"]``.
+        ``diagnostics["split"]``. When the stratified default meets a class
+        with fewer members than folds, scikit-learn's ``StratifiedKFold``
+        emits its "least populated class" ``UserWarning``; compare does not
+        suppress it, so callers running with warnings as errors should pass
+        an explicit splitter through ``cv`` (for example
+        ``KFold(5, shuffle=True, random_state=0)``, or ``StratifiedKFold``
+        with fewer splits).
     scoring : str, sklearn scorer, or None, default None
         Scoring from ``sift.scoring`` names or an sklearn scorer object.
         Sklearn scorer outputs follow the maximize convention, so
@@ -1005,6 +1004,12 @@ def compare(
         Selector ``fit`` time when accepted, and forwarded to ``cv.split``
         when that splitter declares a ``time`` argument (purged time-series
         splitters require it). Not used to invent a time-series splitter.
+        A single column (an ``(n, 1)`` array or one-column DataFrame) is
+        used as its 1-D values. Only a SHA-256 digest reaches
+        ``diagnostics["split"]["time_sha256"]``; values with no
+        deterministic token (a pandas ``Interval``, say) are recorded as
+        ``{"status": "opaque", "reason": "no_deterministic_token"}``
+        instead of a digest string.
     sample_weight : array-like, optional
         Row weights sliced per train/validation fold and consumed by
         selectors, estimators, and scorers that accept them.
@@ -1014,7 +1019,12 @@ def compare(
     task : {'regression', 'classification'}, default 'regression'
         Downstream predictor family and default scorer.
     random_state : int, default 0
-        Shuffle seed for default ``KFold``.
+        Shuffle seed for the shuffled ``KFold`` or ``StratifiedKFold`` that
+        ``cv=None`` or an integer ``cv`` resolves to. It seeds nothing else:
+        not ``GroupKFold`` (which does not shuffle), not a caller-supplied
+        splitter, and not the selectors or the downstream estimator.
+        ``diagnostics["split"]["uses_compare_random_state"]`` records whether
+        it shaped the folds.
     val_frac : float, default 0.2
         Retained compatibility parameter, unused by compare's CV protocol.
         Only the default is accepted, compared with a tolerance so
@@ -1029,8 +1039,9 @@ def compare(
         ``time``, accepts the same DataFrame column-name shorthand, and
         raises ``ValueError`` when the chosen ``cv`` cannot consume it.
         Only a SHA-256 digest of the values reaches
-        ``diagnostics["split"]["event_end_sha256"]``; the values themselves
-        are never retained. Not passed to selectors.
+        ``diagnostics["split"]["event_end_sha256"]`` (or the same opaque
+        marker as ``time_sha256``); the values themselves are never
+        retained. Not passed to selectors.
 
     Returns
     -------
@@ -1166,8 +1177,11 @@ def compare(
     )
     # Row metadata that shaped the folds, recorded as a digest only: the
     # timestamps themselves are never retained on the result.
-    split_desc["time_sha256"] = _row_context_digest(time, label="time", n_rows=n)
-    split_desc["event_end_sha256"] = _row_context_digest(
+    # Digest fold-shaping row metadata; never retain the values themselves.
+    # A value with no deterministic token gets an opaque marker rather than
+    # failing the comparison it describes.
+    split_desc["time_sha256"] = row_context_digest(time, label="time", n_rows=n)
+    split_desc["event_end_sha256"] = row_context_digest(
         event_end, label="event_end", n_rows=n
     )
     splits = _build_splits(

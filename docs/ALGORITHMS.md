@@ -202,10 +202,10 @@ Gaussian-information difference between each original feature and its knockoff.
 `statistic="lsm"` is the lasso signed-max path statistic.
 `statistic="cefsplus"` enables a tie-safe greedy statistic that is slower and
 exploratory; its adaptive path is not covered by the approximate-plugin
-sign-flip claim. The 0.9 default stays `relevance`. The retained
-[statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
-`relevance` for the 1.0 owner decision on its four Gaussian designs; ridge
-did not earn a default flip there. That study reports realized FDP and power;
+sign-flip claim. The default is `relevance`, kept for 1.0 (settled
+2026-09-21) on the retained
+[statistic bakeoff](knockoff-statistic-bakeoff.md) over four Gaussian
+designs; ridge did not earn a default flip there. That study reports realized FDP and power;
 it does not upgrade `approximate_plugin`, and it does not treat LSM or CEFS+
 rows as a sign-flip proof.
 

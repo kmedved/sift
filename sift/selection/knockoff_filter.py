@@ -34,8 +34,10 @@ from sift.estimators.knockoffs import (
 from sift.selection.blocks import labels_for_columns, resolve_feature_blocks
 from sift.selection.conditioning import (
     FDR_COMPATIBLE_PROVENANCE,
+    UnusableIncludeError,
     compose_selected,
     conditioning_record,
+    map_original_to_valid,
     named_feature_space,
     require_include_provenance,
     resolve_conditioning,
@@ -447,6 +449,54 @@ def _validate_offset(offset: int) -> int:
     if offset_int not in (0, 1):
         raise ValueError("offset must be 0 or 1")
     return offset_int
+
+
+def _validate_knockoff_random_state(random_state: Any) -> Any:
+    """Return the knockoff seed, rejecting one that is not a non-negative integer.
+
+    The public signatures document ``random_state: int``; ``None`` (and any
+    other non-integer) used to surface as a bare ``TypeError`` from ``int()``
+    or ``SeedSequence`` deep inside the filter.  A boolean seeds as the
+    integer it equals: a Python ``bool`` is an ``int`` and has always seeded
+    the draw, and a NumPy boolean, which ``SeedSequence`` rejects, is
+    converted so it does the same.
+    """
+    if isinstance(random_state, np.bool_):
+        return int(random_state)
+    if not isinstance(random_state, (int, np.integer)):
+        raise ValueError(
+            f"random_state must be an integer, got {random_state!r}; knockoff "
+            "draws are always seeded, so pass an int such as random_state=0"
+        )
+    if int(random_state) < 0:
+        raise ValueError(f"random_state must be >= 0, got {int(random_state)!r}")
+    return random_state
+
+
+def _sample_knockoffs_rng(random_state: Any) -> np.random.Generator:
+    """Generator for ``sample_knockoffs``, with the ``select_fdr`` seed messages.
+
+    Everything ``np.random.default_rng`` accepted keeps working, including
+    ``None`` (fresh entropy), sequences of integers and numpy's own
+    ``Generator`` / ``SeedSequence`` objects; what it rejected with a raw
+    ``TypeError`` or ``ValueError`` now names ``random_state``.  A NumPy
+    boolean, which numpy rejects, seeds like the Python ``bool`` it equals.
+    """
+    if isinstance(random_state, np.bool_):
+        random_state = int(random_state)
+    try:
+        return np.random.default_rng(random_state)
+    except (TypeError, ValueError):
+        if isinstance(random_state, (int, np.integer)) and int(random_state) < 0:
+            raise ValueError(
+                f"random_state must be >= 0, got {int(random_state)!r}"
+            ) from None
+        raise ValueError(
+            "random_state must be None, a non-negative integer or a sequence of "
+            "them, or a numpy SeedSequence, BitGenerator or Generator, got "
+            f"{random_state!r}; pass an int such as random_state=0 for a "
+            "reproducible draw"
+        ) from None
 
 
 def _tested_unit_ids(
@@ -1817,7 +1867,13 @@ def sample_knockoffs(
         emitted.
     random_state : int, default 0
         Seed for the knockoff noise draw.  The same seed and cache reproduce
-        the same matrix exactly.
+        the same matrix exactly.  Unlike ``select_fdr``, ``None`` is accepted
+        and draws from fresh entropy, so the matrix is not reproducible; a
+        sequence of non-negative integers and a numpy ``Generator``,
+        ``BitGenerator`` or ``SeedSequence`` are also passed through to
+        ``numpy.random.default_rng``.  A boolean, NumPy booleans included,
+        seeds as the integer it equals.  A float, a string or a negative
+        integer raises ``ValueError``.
 
     Returns
     -------
@@ -1832,9 +1888,12 @@ def sample_knockoffs(
         If ``cache`` is a ``ClassicFeatureCache`` instead of a Gaussian
         ``FeatureCache`` from ``build_cache``.
     ValueError
-        If the cache fails its structural or provenance checks, carries
-        duplicate feature names, has weights that are non-finite, negative, or
-        sum to zero, or retains no non-constant feature.
+        If ``random_state`` is not ``None``, a non-negative integer, a
+        sequence of them, or a numpy seed object; if the cache fails its
+        structural or provenance
+        checks, carries duplicate feature names, has weights that are
+        non-finite, negative, or sum to zero, or retains no non-constant
+        feature.
 
     Warns
     -----
@@ -1875,6 +1934,8 @@ def sample_knockoffs(
     True
     """
 
+    # Checked first, as select_fdr does; building the generator draws nothing.
+    rng = _sample_knockoffs_rng(random_state)
     _validate_prebuilt_cache_structure(cache, validate_rxx=False)
     _reject_duplicate_feature_names(cache)
     w = np.asarray(cache.sample_weight, dtype=np.float64)
@@ -1886,7 +1947,6 @@ def sample_knockoffs(
         raise ValueError("No active non-constant features remain for knockoffs")
     R_active = _build_active_rxx(cache, active, verbose=False)
     model = fit_gaussian_knockoffs(R_active, s_method=s_method, min_eig=min_eig)
-    rng = np.random.default_rng(random_state)
     Z_active = (
         np.asarray(cache.Z, dtype=np.float32)
         if bool(active.all())
@@ -2539,6 +2599,9 @@ def select_fdr(
         Seed for cache subsampling when building from ``X``, and for the
         knockoff draws.  Unlike ``sample_weight`` and ``subsample``, this
         stays meaningful with a prebuilt cache because it seeds a fresh draw.
+        The draws are always seeded: ``None`` or any other non-integer, and a
+        negative value, raise ``ValueError``; a boolean, NumPy booleans
+        included, seeds as the integer it equals.
     n_jobs : int, default 1
         Worker count for cache construction and for statistics that fit
         sklearn models.  Building a cache from ``X`` rejects ``0``; the
@@ -2546,17 +2609,22 @@ def select_fdr(
     verbose : bool, default False
         Log the threshold, selected count, and ``s_mean`` at INFO on the
         ``"sift"`` logger.
-    include : sequence of names or positions, optional
+    include : sequence of column labels or positions, optional
         Conditioning set. These features are not tested; they are prepended
         to ``selected_features`` in caller order. Any of ``include``,
         ``exclude``, or ``candidates`` requires ``include_provenance``.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels or positions, optional
         Features removed from the tested discovery universe. Requires
         ``include_provenance``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels or positions, optional
         Hard allow-list for the tested discovery universe. ``include`` may
         sit outside it. Overlap with ``exclude`` is rejected. Requires
-        ``include_provenance``.
+        ``include_provenance``. With a DataFrame ``X``, or a cache built
+        from one, all three take column labels and reject an integer that
+        is not itself a label; integer positions (and the generated
+        ``x0``..``x{p-1}`` names) are accepted only for an ndarray ``X`` or
+        a cache built from one. Positions count columns of the original
+        matrix, not of the cache-dropped ``valid_cols``.
     include_provenance : {"prespecified", "sample_split", "data_derived"} or None
         Required when ``include``, ``exclude``, or ``candidates`` is
         provided. FDR-compatible wording is allowed only for
@@ -2587,6 +2655,7 @@ def select_fdr(
         is paired with ``n_draws == 1`` or ``offset != 1``,
         ``aggregation="selection_frequency"`` is paired with ``n_draws == 1``,
         or ``screen_pairs`` is not a positive integer or ``None``; if
+        ``random_state`` is not a non-negative integer; if
         ``statistic`` is unknown or reserved; if
         ``statistic_options`` carries keys the statistic does not accept; if
         ``feature_groups`` is a string other than ``"auto"``, has the wrong
@@ -2699,6 +2768,7 @@ def select_fdr(
         aggregation, n_draws=n_draws_int, offset=offset_int
     )
     screen_pairs_int = _validate_screen_pairs(screen_pairs)
+    random_state = _validate_knockoff_random_state(random_state)
     stat_spec = _get_statistic(statistic)
     options = dict(statistic_options or {})
     unknown_options = set(options) - stat_spec.allowed_options
@@ -2822,19 +2892,24 @@ def select_fdr(
     valid_cols_arr = np.asarray(resolved_cache.valid_cols, dtype=np.int64)
     include_valid = np.empty(0, dtype=np.int64)
     if resolved_sets is not None and resolved_sets.include:
+        map_original_to_valid(
+            resolved_sets.include,
+            valid_cols_arr,
+            feature_names=cache_names,
+            label="include",
+            prebuilt_cache=cache is not None,
+        )
         include_orig = {int(i) for i in resolved_sets.include}
         include_valid = np.array(
             [i for i, orig in enumerate(valid_cols_arr) if int(orig) in include_orig],
             dtype=np.int64,
         )
-        if include_valid.size != len(resolved_sets.include):
-            raise ValueError(
-                "include features are not present in the cache valid columns "
-                "(dropped as constant/non-finite or never cached)"
-            )
         if np.any(zero_var[include_valid]):
-            raise ValueError(
-                "include features have no usable variation for knockoff conditioning"
+            raise UnusableIncludeError(
+                "include features have no usable variation for knockoff "
+                "conditioning: {refs}. Drop them from include, or pass columns "
+                "that vary on the retained rows",
+                [feature_names[int(i)] for i in include_valid[zero_var[include_valid]]],
             )
     if resolved_sets is not None and resolved_sets.active:
         discovery_original = set(int(i) for i in resolved_sets.discovery)

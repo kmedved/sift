@@ -22,6 +22,7 @@ from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold
 from sift import (
     GroupPurgedTimeSeriesSplit,
     ModelSelector,
+    MRMRSelector,
     PurgedTimeSeriesSplit,
     compare,
 )
@@ -319,6 +320,33 @@ def test_max_train_size_cap_is_exact_and_keeps_tied_timestamps_together():
     assert val.tolist() == [12, 13, 14, 15, 16, 17]
 
 
+@pytest.mark.parametrize(
+    ("cap", "embargo", "kept_times"),
+    [
+        # Middle block 4..7: times 3 and 8 are both one step from an edge;
+        # the earlier one wins the single slot.
+        (1, 0, [3]),
+        (2, 0, [3, 8]),
+        # 2 and 9 tie at distance two; the third slot goes to 2.
+        (3, 0, [2, 3, 8]),
+        # The embargo removes 3 and 8, but distance still runs on the full
+        # timeline: 2 and 9 are two steps out, and 2 wins the tie.
+        (1, 1, [2]),
+        (2, 1, [2, 9]),
+    ],
+)
+def test_purged_kfold_cap_breaks_distance_ties_towards_the_earlier_time(
+    cap, embargo, kept_times
+):
+    time = np.arange(12, dtype=np.int64)
+    splitter = PurgedTimeSeriesSplit(
+        n_splits=3, mode="purged_kfold", max_train_size=cap, embargo=embargo
+    )
+    train, val = list(splitter.split(np.zeros((12, 1)), time=time))[1]
+    assert val.tolist() == [4, 5, 6, 7]
+    assert time[train].tolist() == kept_times
+
+
 # --------------------------------------------------------------------------
 # time / event_end dtype validation (item 10)
 # --------------------------------------------------------------------------
@@ -369,6 +397,170 @@ def test_supported_time_dtypes_still_build_folds():
         assert np.array_equal(a_tr, b_tr) and np.array_equal(a_va, b_va)
     deltas = (stamps - stamps[0]).to_numpy()
     assert len(list(PurgedTimeSeriesSplit(n_splits=2).split(np.zeros((n, 1)), time=deltas))) == 2
+
+
+def _fold_lists(splitter, **kwargs):
+    return [
+        (train.tolist(), val.tolist())
+        for train, val in splitter.split(np.zeros((24, 1)), **kwargs)
+    ]
+
+
+#: A fixed row shuffle: folds on shuffled rows catch any wrapper that sorts
+#: or realigns the values instead of splitting them in row order.
+_PERIOD_ROW_ORDER = np.random.default_rng(5).permutation(24)
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda p: p,
+        pd.Series,
+        lambda p: pd.Series(p, index=np.arange(100, 124)[_PERIOD_ROW_ORDER]),
+        np.asarray,
+        list,
+        lambda p: p.array,
+    ],
+    ids=["PeriodIndex", "Series", "Series-shuffled-index", "object-array", "list", "PeriodArray"],
+)
+@pytest.mark.parametrize("mode", ["forward", "purged_kfold"])
+@pytest.mark.parametrize("freq", ["M", "2M", "W-SUN", "Q-NOV", "D"])
+def test_period_time_splits_exactly_like_its_ordinals(wrap, mode, freq):
+    periods = pd.period_range("2020-01-01", periods=12, freq=freq).repeat(2)
+    periods = periods[_PERIOD_ROW_ORDER]
+    ordinals = np.asarray(periods.asi8)
+    # The oracle's folds follow the shuffled rows, not sorted time.
+    assert not np.all(np.diff(ordinals) >= 0)
+    splitter = PurgedTimeSeriesSplit(n_splits=3, embargo=1, mode=mode)
+    expected = _fold_lists(
+        splitter, time=ordinals, event_end=np.asarray((periods + 1).asi8)
+    )
+    assert _fold_lists(splitter, time=wrap(periods), event_end=wrap(periods + 1)) == expected
+    grouped = GroupPurgedTimeSeriesSplit(n_splits=2, test_size=2, mode=mode)
+    groups = np.repeat(np.arange(12), 2)[_PERIOD_ROW_ORDER]
+    assert _fold_lists(grouped, groups=groups, time=wrap(periods)) == _fold_lists(
+        grouped, groups=groups, time=ordinals
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        (
+            {"embargo": pd.Timedelta("31D")},
+            TypeError,
+            "a pandas Period time (freq='M') is split on its integer ordinals, so "
+            "embargo must be a non-negative integer count of ordinal steps; got "
+            "Timedelta('31 days 00:00:00')",
+        ),
+        (
+            {"embargo": 1.5},
+            TypeError,
+            "a pandas Period time (freq='M') is split on its integer ordinals, so "
+            "embargo must be a non-negative integer count of ordinal steps; got 1.5",
+        ),
+        (
+            {"event_end": "ordinals"},
+            ValueError,
+            "event_end must use the same timeline as time: pandas Period values of "
+            "one frequency on both, or neither; got time freq='M' and event_end "
+            "freq=None",
+        ),
+        (
+            {"event_end": "daily"},
+            ValueError,
+            "event_end must use the same timeline as time: pandas Period values of "
+            "one frequency on both, or neither; got time freq='M' and event_end "
+            "freq='D'",
+        ),
+        (
+            {"time": "mixed"},
+            ValueError,
+            "time mixes pandas Period frequencies; pass Periods of one frequency, "
+            "for example by converting them with asfreq",
+        ),
+        (
+            {"time": "mixed-base"},
+            ValueError,
+            "time mixes pandas Period frequencies; pass Periods of one frequency, "
+            "for example by converting them with asfreq",
+        ),
+        ({"time": "missing"}, ValueError, "time must not contain missing values"),
+        (
+            {"time": "categorical"},
+            ValueError,
+            "time must be integer, unsigned integer, float, datetime64, or "
+            "timedelta64, or pandas Periods of one frequency; got a pandas "
+            "Categorical of Periods. Pass the Periods themselves, for example "
+            "time.astype('period[M]')",
+        ),
+        (
+            {"event_end": "categorical"},
+            ValueError,
+            "event_end must be integer, unsigned integer, float, datetime64, or "
+            "timedelta64, or pandas Periods of one frequency; got a pandas "
+            "Categorical of Periods. Pass the Periods themselves, for example "
+            "event_end.astype('period[M]')",
+        ),
+    ],
+    ids=["timedelta-embargo", "float-embargo", "int-event-end", "other-freq-event-end",
+         "mixed-freq", "mixed-base-freq", "NaT", "categorical-time",
+         "categorical-event-end"],
+)
+def test_period_time_rejects_what_has_no_common_period_timeline(kwargs, error, message):
+    periods = pd.period_range("2020-01", periods=12, freq="M").repeat(2)
+    embargo = kwargs.get("embargo", 0)
+    time = {
+        None: periods,
+        "mixed": np.array(list(periods[:-1]) + [pd.Period("2022-01", "2M")], dtype=object),
+        # A monthly and a daily period share no ordinal scale at all.
+        "mixed-base": np.array(
+            list(periods[:-1]) + [pd.Period("2022-01-15", "D")], dtype=object
+        ),
+        "missing": periods.insert(0, pd.NaT)[:-1],
+        # A Categorical is refused like every other, even one of Periods.
+        "categorical": pd.Categorical(periods),
+    }[kwargs.get("time")]
+    event_end = {
+        None: None,
+        "ordinals": np.asarray(periods.asi8) + 1,
+        "daily": periods.asfreq("D"),
+        "categorical": pd.Categorical(periods + 1),
+    }[kwargs.get("event_end")]
+    with pytest.raises(error) as excinfo:
+        _fold_lists(
+            PurgedTimeSeriesSplit(n_splits=3, embargo=embargo),
+            time=time,
+            event_end=event_end,
+        )
+    assert str(excinfo.value) == message
+
+
+def test_compare_and_path_run_a_purged_splitter_on_a_period_time_axis():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(24, 3)), columns=list("abc"))
+    y = X["a"].to_numpy() + 0.1 * rng.normal(size=24)
+    periods = pd.period_range("2020-01", periods=12, freq="M").repeat(2)
+    ordinals = np.asarray(periods.asi8)
+    factories = {"mrmr": lambda: MRMRSelector(k=1, task="regression")}
+    on_periods = compare(
+        factories, X, y, time=periods, event_end=periods + 1,
+        cv=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    on_ordinals = compare(
+        factories, X, y, time=ordinals, event_end=ordinals + 1,
+        cv=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    assert on_periods.fold_bookkeeping == on_ordinals.fold_bookkeeping
+    path_periods = evaluate_feature_path(
+        X, y, ["a", "b"], [1, 2], time=periods, event_end=periods + 1,
+        splitter=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    path_ordinals = evaluate_feature_path(
+        X, y, ["a", "b"], [1, 2], time=ordinals, event_end=ordinals + 1,
+        splitter=PurgedTimeSeriesSplit(n_splits=3),
+    )
+    assert path_periods.scores == path_ordinals.scores
 
 
 # --------------------------------------------------------------------------
@@ -727,6 +919,41 @@ def test_regression_and_grouped_and_time_routes_keep_the_unstratified_default():
     )
     assert timed.diagnostics["split"]["type"].endswith("KFold")
     assert not timed.diagnostics["split"]["type"].endswith("StratifiedKFold")
+
+
+def test_stratified_default_keeps_the_rare_class_warning_and_cv_avoids_it():
+    rng = np.random.default_rng(19)
+    n = 60
+    X = pd.DataFrame(rng.normal(size=(n, 4)), columns=list("abcd"))
+    y = np.zeros(n, dtype=int)
+    y[:30] = 1
+    y[:2] = 2  # two members, fewer than the five default folds
+    selectors = {"kb": lambda: SelectKBest(f_classif, k=2)}
+    # compare does not suppress scikit-learn's own StratifiedKFold warning...
+    with pytest.warns(UserWarning) as record:
+        stratified = compare(selectors, X, y, task="classification")
+    assert [str(w.message) for w in record] == [
+        "The least populated class in y has only 2 members, which is less "
+        "than n_splits=5."
+    ]
+    assert stratified.diagnostics["split"]["type"].endswith(".StratifiedKFold")
+    # ...and the documented way out, an explicit splitter, runs clean under
+    # filterwarnings=error.
+    explicit = compare(
+        selectors,
+        X,
+        y,
+        task="classification",
+        cv=KFold(n_splits=5, shuffle=True, random_state=0),
+    )
+    assert explicit.diagnostics["split"]["type"].endswith(".KFold")
+    doc = " ".join(compare.__doc__.split())
+    assert (
+        "fewer members than folds, scikit-learn's ``StratifiedKFold`` emits its "
+        "\"least populated class\" ``UserWarning``"
+    ) in doc
+    assert "compare does not suppress it" in doc
+    assert "pass an explicit splitter through ``cv``" in doc
 
 
 # --------------------------------------------------------------------------

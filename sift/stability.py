@@ -103,25 +103,54 @@ def _exact_column_positions(columns, required_names) -> np.ndarray:
     return available.get_indexer(required)
 
 
-def _reject_multi_target_y(y) -> None:
-    """Reject a 2-D target before the bootstrap loop reaches numpy.
+def _single_target_y(y):
+    """Reject a wide target and flatten a single-column one.
 
     Stability selection fits one target per bootstrap run; a wide ``y`` used
     to die deep inside the weighted-average call with a bare numpy
     ``TypeError``. Mirrors the filter guard in
     ``sift.selection.filter_payloads._reject_multi_target_unless_cefsplus``.
-    A single-column ``y`` is left alone so its behaviour is unchanged.
+    A single-column ``y`` -- an ``(n, 1)`` array or a one-column DataFrame --
+    is the 1-D target it holds, as for the filter selectors, and selects
+    exactly what that 1-D target selects.
     """
     try:
         arr = np.asarray(y)
     except (TypeError, ValueError):
-        return
+        return y
     if arr.ndim >= 2 and int(arr.shape[1]) > 1:
         raise ValueError(
             "2-D y is only supported for select_cefsplus / CEFSPlusSelector "
             "and select_cached(method='cefsplus'); stability selection fits "
             f"one target per bootstrap run, but y has shape {tuple(arr.shape)}. "
             "Pass a 1-D y and run the selector once per target column"
+        )
+    if arr.ndim == 2 and int(arr.shape[1]) == 1:
+        return y.iloc[:, 0] if isinstance(y, pd.DataFrame) else arr[:, 0]
+    return y
+
+
+def _require_fit_target_shape(y, n_rows: int) -> None:
+    """Reject a ``y`` that ``_single_target_y`` left in a shape ``fit`` cannot use.
+
+    A zero-width, 3-D or scalar ``y``, or one whose length differs from the
+    rows of ``X``, used to surface as a numpy ``TypeError`` or ``IndexError``
+    from inside the bootstrap loop.
+    """
+    try:
+        shape = tuple(np.shape(y))
+    except (TypeError, ValueError):
+        return
+    if len(shape) != 1:
+        raise ValueError(
+            "y must be 1-D or a single column of shape (n_samples, 1); "
+            "stability selection fits one target per bootstrap run, but y has "
+            f"shape {shape}. Pass a 1-D y"
+        )
+    if shape[0] != int(n_rows):
+        raise ValueError(
+            f"X and y must have the same number of rows; X has {int(n_rows)} "
+            f"rows but y has {shape[0]}"
         )
 
 
@@ -371,8 +400,11 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         ----------
         X : array-like or DataFrame of shape (n_samples, n_features)
             Training data.
-        y : array-like of shape (n_samples,)
-            Target values.
+        y : array-like of shape (n_samples,) or (n_samples, 1)
+            Target values. A single-column 2-D target (including a
+            one-column DataFrame) is used as its 1-D column. Any other shape
+            (a wider, zero-width or 3-D target), or a length that differs
+            from the rows of ``X``, raises ``ValueError``.
         sample_weight : array-like of shape (n_samples,), optional
             Sample weights.
         groups : array, optional
@@ -389,7 +421,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         """
         self._clear_fit_state()
         try:
-            _reject_multi_target_y(y)
+            y = _single_target_y(y)
             metadata = resolve_row_metadata(X, groups=groups, time=time)
             X = metadata.X
             # Smart-sampler group/time columns live in X but are not candidate
@@ -415,6 +447,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             self._n_rows_original_ = int(
                 shape[0] if shape is not None else np.asarray(X).shape[0]
             )
+            _require_fit_target_shape(y, self._n_rows_original_)
             if isinstance(X, pd.DataFrame):
                 column_index = _feature_names_index(X.columns)
                 duplicate_mask = column_index.duplicated()
@@ -1113,7 +1146,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             raise ValueError(
                 f"X must have {self.n_features_in_} feature columns for threshold tuning"
             )
-        y_values = np.asarray(y).ravel()
+        y_values = np.asarray(_single_target_y(y)).ravel()
         if y_values.shape[0] != X_values.shape[0]:
             raise ValueError("X and y must have the same number of rows")
         n_rows = X_values.shape[0]
@@ -1917,8 +1950,9 @@ def stability_regression(
     ----------
     X : DataFrame or ndarray of shape (n_samples, n_features)
         Candidate feature matrix.
-    y : Series or ndarray of shape (n_samples,)
-        Continuous target.
+    y : Series or ndarray of shape (n_samples,) or (n_samples, 1)
+        Continuous target. A single-column 2-D target is used as its 1-D
+        column.
     k : int
         Upper bound on the number of returned features, forwarded as
         ``max_features``.
@@ -2012,8 +2046,9 @@ def stability_classif(
     ----------
     X : DataFrame or ndarray of shape (n_samples, n_features)
         Candidate feature matrix.
-    y : Series or ndarray of shape (n_samples,)
-        Class labels; they are label-encoded internally.
+    y : Series or ndarray of shape (n_samples,) or (n_samples, 1)
+        Class labels; they are label-encoded internally. A single-column 2-D
+        target is used as its 1-D column.
     k : int
         Upper bound on the number of returned features, forwarded as
         ``max_features``.

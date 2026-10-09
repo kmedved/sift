@@ -299,3 +299,142 @@ def test_evaluate_feature_path_invalid_scoring_metric_raises(bad_metric):
             estimator=LinearRegression(),
             scoring=bad_metric,  # type: ignore[arg-type]
         )
+
+
+class _MatrixSpy:
+    """Record the exact matrices evaluate_feature_path hands the estimator."""
+
+    def __init__(self, log):
+        self.log = log
+
+    def fit(self, X, y, sample_weight=None):
+        self.log.append(("fit", np.array(X, dtype=np.float64, copy=True)))
+        self.mean_ = float(np.mean(y))
+        return self
+
+    def predict(self, X):
+        self.log.append(("predict", np.array(X, dtype=np.float64, copy=True)))
+        return np.full(len(X), self.mean_)
+
+
+def _finite_training_mean_oracle(X_train, X_val):
+    """Fill every NaN/+-inf cell with its column's finite training mean.
+
+    Written cell by cell, independently of the implementation; a column with
+    no finite training value is filled with 0.0, the documented all-missing
+    rule.
+    """
+    train_out = [list(row) for row in X_train.tolist()]
+    val_out = [list(row) for row in X_val.tolist()]
+    for col in range(X_train.shape[1]):
+        finite = [row[col] for row in X_train.tolist() if np.isfinite(row[col])]
+        fill = sum(finite) / len(finite) if finite else 0.0
+        for rows in (train_out, val_out):
+            for row in rows:
+                if not np.isfinite(row[col]):
+                    row[col] = fill
+    return np.asarray(train_out), np.asarray(val_out)
+
+
+def test_infinite_cells_are_imputed_like_missing_ones_with_the_training_mean():
+    inf = np.inf
+    X = np.array(
+        [
+            # finite+inf, finite+-inf, all-NaN train, +-inf and one finite
+            [1.0, 10.0, np.nan, inf],
+            [inf, 20.0, np.nan, np.nan],
+            [3.0, -inf, np.nan, -inf],
+            [5.0, 40.0, np.nan, 4.0],
+            [np.nan, inf, 7.0, inf],
+            [-inf, 60.0, 8.0, -9.0],
+        ]
+    )
+    y = np.arange(6, dtype=np.float64)
+    train_idx, val_idx = np.array([0, 1, 2, 3]), np.array([4, 5])
+    log = []
+    # filterwarnings=error: the imputation is documented as silent, so no
+    # numpy "Mean of empty slice" / "invalid value" warning may escape.
+    evaluate_feature_path(
+        X,
+        y,
+        feature_path=[0, 1, 2, 3],
+        k_grid=[4],
+        estimator_factory=lambda: _MatrixSpy(log),
+        splitter=[(train_idx, val_idx)],
+    )
+    expected_train, expected_val = _finite_training_mean_oracle(
+        X[train_idx], X[val_idx]
+    )
+    assert [kind for kind, _ in log] == ["fit", "predict"]
+    np.testing.assert_allclose(log[0][1], expected_train, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(log[1][1], expected_val, rtol=0, atol=1e-12)
+    # Spot-check the oracle itself on the columns the bug zero-filled.
+    assert expected_train[1, 0] == pytest.approx(3.0)
+    assert expected_train[2, 1] == pytest.approx(70.0 / 3.0)
+    assert expected_val[0, 3] == pytest.approx(4.0)
+
+
+def test_training_means_near_the_float_limit_are_imputed_without_overflow():
+    from fractions import Fraction
+
+    inf, nan = np.inf, np.nan
+    X = np.array(
+        [
+            # finite sum overflows; mixed-sign sum hits inf - inf; negative
+            # overflow; an ordinary column that must stay on the plain path
+            [1.5e308, 1.7e308, -1.6e308, 1.0],
+            [1.5e308, 1.7e308, -1.6e308, 2.0],
+            [nan, -1.7e308, -1.6e308, nan],
+            [1.2e308, -1.7e308, nan, 4.0],
+            [inf, 1.0e308, -1.0e308, 5.0],
+            [1.3e308, nan, -inf, 6.0],
+            [nan, inf, nan, nan],
+            [-inf, nan, inf, 7.0],
+        ]
+    )
+    y = np.arange(8, dtype=np.float64)
+    train_idx, val_idx = np.arange(6), np.array([6, 7])
+    log = []
+    # filterwarnings=error: numpy's "overflow encountered in reduce" (and the
+    # "invalid value" of inf - inf) must not escape the documented silent
+    # imputation.
+    evaluate_feature_path(
+        X,
+        y,
+        feature_path=[0, 1, 2, 3],
+        k_grid=[4],
+        estimator_factory=lambda: _MatrixSpy(log),
+        splitter=[(train_idx, val_idx)],
+    )
+    # Exact oracle: rational mean of each column's finite training values.
+    fills = []
+    for col in range(X.shape[1]):
+        finite = [Fraction(float(v)) for v in X[train_idx, col] if np.isfinite(v)]
+        fills.append(float(sum(finite) / len(finite)))
+    assert fills[:3] == pytest.approx([1.375e308, 2e307, -1.45e308], rel=1e-15)
+    expected_train = np.where(np.isfinite(X[train_idx]), X[train_idx], fills)
+    expected_val = np.where(np.isfinite(X[val_idx]), X[val_idx], fills)
+    assert [kind for kind, _ in log] == ["fit", "predict"]
+    for actual, expected in ((log[0][1], expected_train), (log[1][1], expected_val)):
+        assert np.isfinite(actual).all()
+        np.testing.assert_allclose(actual, expected, rtol=4 * np.finfo(float).eps, atol=0)
+    # The ordinary column keeps the plain-sum mean bit for bit.
+    assert log[0][1][2, 3] == np.sum([1.0, 2.0, 4.0, 5.0, 6.0]) / 5
+
+
+def test_finite_matrices_are_passed_through_unchanged():
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(20, 3))
+    y = X[:, 0] + 0.1 * rng.normal(size=20)
+    log = []
+    train_idx, val_idx = np.arange(15), np.arange(15, 20)
+    evaluate_feature_path(
+        X,
+        y,
+        feature_path=[0, 1, 2],
+        k_grid=[3],
+        estimator_factory=lambda: _MatrixSpy(log),
+        splitter=[(train_idx, val_idx)],
+    )
+    np.testing.assert_array_equal(log[0][1], X[train_idx])
+    np.testing.assert_array_equal(log[1][1], X[val_idx])

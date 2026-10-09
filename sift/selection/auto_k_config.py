@@ -5,6 +5,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields as dataclass_fields, replace
+from decimal import Decimal
+import numbers
+import operator
 from typing import Any, Iterator, Literal, Optional
 
 import numpy as np
@@ -85,8 +88,21 @@ class AutoKConfig:
         Deliberately distinct from ``xfit_folds``.
     random_state : int, default 42
         Seed for the resampling rules (``'perm_gap'``, ``'knockoff_path'``,
-        ``'stability'``) and for the shuffled ``strategy='kfold'`` splits used
-        by the cross-fitted rules.
+        ``'stability'``), for the shuffled ``strategy='kfold'`` splits used
+        by the cross-fitted rules, and for the seeded members of a
+        ``'consensus'``. A rule that reads it needs an integer: Python and
+        NumPy integers and booleans, ``IntEnum`` members, 0-d arrays and
+        integral numbers such as ``7.0``, ``Decimal(7)`` or ``Fraction(7)``
+        count as the integer they equal, while ``None``, a string, a
+        non-integral number such as ``1.5`` or any other object raises
+        ``ValueError``. The resampling rules also need it to be non-negative
+        and the shuffled k-fold splits need ``0 <= random_state < 2**32``;
+        ``'consensus'`` accepts any integer, because each member's seed is
+        derived from it modulo ``2**32``. With ``auto_dense_check=True`` the
+        ``gaussian_cv`` cross-check reads it when it falls back to shuffled
+        k-fold (no ``time`` or ``groups`` for the configured strategy); a
+        seed it cannot use there skips the check with a ``UserWarning`` giving
+        the reason, and the selected k stands. The other rules never read it.
     elbow_min_rel_gain : float, default 0.02
         Relative-gain threshold for ``k_method='elbow'``; finite and >= 0.
     elbow_patience : int, default 3
@@ -566,10 +582,15 @@ def validate_auto_k_config(
             # two_way, time_holdout) can never satisfy the within fold guard.
             from sift.selection.within import within_split_guidance
 
+            # groups still validates evaluate with time_holdout; two_way
+            # validates neither remaining strategy.
+            remaining = (
+                "cannot be validated" if within == "two_way" else "cannot all be validated"
+            )
             raise ValueError(
                 "AutoKConfig.strategy='kfold' is only supported by gaussian_cv "
                 f"and xfit_objective, and with within={within!r} the remaining "
-                "evaluate strategies cannot all be validated. "
+                f"evaluate strategies {remaining}. "
                 f"{within_split_guidance(str(within))}"
             )
         raise ValueError(
@@ -818,6 +839,90 @@ def validate_auto_k_config(
         _warn_unused_method_fields(config)
 
 
+#: Method tags (see ``_auto_k_method_tags``) whose rule reads
+#: ``random_state``; the same set as ``random_state`` in the unused-field table.
+_SEEDED_METHOD_TAGS = frozenset(
+    {"perm_gap", "knockoff_path", "xfit_kfold_split", "xfit_consensus_split", "stability"}
+)
+#: Consensus members whose runner derives a seed from ``random_state``.
+_SEEDED_CONSENSUS_METHODS = ("perm_gap", "gaussian_cv", "xfit_objective", "stability")
+#: scikit-learn's shuffled ``KFold`` seeds a legacy ``RandomState``.
+_KFOLD_SEED_LIMIT = 2**32
+
+
+def _integer_seed(seed: Any) -> int | None:
+    """The integer a seed is exactly, or ``None`` when it is not an integer.
+
+    The rules read the seed through ``int()``, so every value that equals the
+    integer it converts to has always named that integer's stream: Python and
+    NumPy integers and booleans, ``IntEnum`` members, 0-d arrays of those,
+    and integral reals such as ``7.0``, ``np.float64(7.0)``, ``Decimal(7)``
+    or ``Fraction(7)``. ``None``, strings, reals that ``int()`` would
+    truncate (``1.5``) and any other object are not seeds.
+    """
+    if isinstance(seed, np.ndarray) and seed.ndim == 0:
+        seed = seed.item()
+    if isinstance(seed, (bool, np.bool_)):
+        return int(seed)
+    try:
+        return operator.index(seed)
+    except TypeError:
+        pass
+    if not isinstance(seed, (numbers.Real, Decimal)):
+        return None
+    try:
+        value = int(seed)
+        return value if value == seed else None
+    except (ValueError, OverflowError, ArithmeticError):
+        return None
+
+
+def check_auto_k_seed(config: AutoKConfig, *, auto_route: str | None = None) -> None:
+    """Reject a seed that the configured rule reads but cannot use.
+
+    Callers run this where the rule first reads ``random_state``, so every
+    earlier error (an unsupported ``k_method``, say) still comes first, and
+    rules that never read the seed accept any value, as before.  The rule
+    decides the range: ``consensus`` reduces the seed modulo ``2**32`` and
+    takes any integer, the resampling rules seed a ``SeedSequence`` (which
+    needs ``>= 0``), and shuffled k-fold seeds scikit-learn's ``KFold``
+    (``0 <= seed < 2**32``).  ``auto_route`` is the router's reason when
+    ``k_method='auto'`` chose the rule, so the message says why a seeded rule
+    is running at all.
+    """
+    tags = _auto_k_method_tags(config)
+    if not tags & _SEEDED_METHOD_TAGS:
+        return
+    seed = _integer_seed(config.random_state)
+    subject = f"k_method={config.k_method!r}"
+    if config.k_method == "consensus":
+        members = [
+            method
+            for method in config.consensus_methods
+            if method.lower() in _SEEDED_CONSENSUS_METHODS
+        ]
+        valid = seed is not None
+        requirement = "an integer"
+        purpose = f"whose members {members!r} derive their seeds from it"
+    elif "xfit_kfold_split" in tags:
+        valid = seed is not None and 0 <= seed < _KFOLD_SEED_LIMIT
+        requirement = "an integer in [0, 2**32 - 1]"
+        subject += " with strategy='kfold'"
+        purpose = "which seeds the shuffled folds"
+    else:
+        valid = seed is not None and seed >= 0
+        requirement = "a non-negative integer"
+        purpose = "which draws seeded resamples"
+    if valid:
+        return
+    if auto_route is not None:
+        subject += f" (chosen by k_method='auto': {auto_route})"
+    raise ValueError(
+        f"AutoKConfig.random_state must be {requirement} for {subject}, "
+        f"{purpose}; got {config.random_state!r}"
+    )
+
+
 def _warn_unused_method_fields(config: AutoKConfig) -> None:
     if config.k_method == "auto":
         return
@@ -830,12 +935,7 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
         "metric": {"evaluate"},
         "val_frac": {"evaluate", "gaussian_cv", "xfit_objective"},
         "n_splits": {"evaluate"},
-        "random_state": {
-            "perm_gap",
-            "knockoff_path",
-            "xfit_kfold_split",
-            "stability",
-        },
+        "random_state": _SEEDED_METHOD_TAGS,
         "elbow_min_rel_gain": {"elbow"},
         "elbow_patience": {"elbow"},
         "selection_rule": {"evaluate", "gaussian_cv", "xfit_objective"},
@@ -924,6 +1024,11 @@ def _auto_k_method_tags(config: AutoKConfig) -> set[str]:
                 tags.add("k_posterior")
             else:
                 tags.add(lower)
+            if lower in {"gaussian_cv", "xfit_objective"}:
+                # The consensus member always derives its fold seed from
+                # random_state, and falls back to shuffled kfold whenever
+                # the configured strategy has no time or groups to use.
+                tags.add("xfit_consensus_split")
     elif method == "penalized_objective":
         tags.add("direct_penalized_objective")
         tags.add(f"penalized_{config.objective_penalty}")

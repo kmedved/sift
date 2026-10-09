@@ -91,8 +91,9 @@ level, and unknown transform values join `other` when that remainder exists
 (otherwise they are all-zero). Selected names stay raw; sklearn `transform` /
 `get_feature_names_out` use the encoded width. Nested and prefix-only
 `evaluate` held-out scoring learns the vocabulary inside training folds;
-in-sample prefix rules can use a full-data vocabulary. Prebuilt caches,
-`within`, knockoffs, and Boruta raise.
+in-sample prefix rules can use a full-data vocabulary. `within`, knockoffs,
+and Boruta raise, and so does a prebuilt cache when there is a column to
+encode.
 
 Use `cat_encoding="ordinal"` or `"frequency"` for target-blind numeric
 maps (no extra dependency). Ordinal codes are `0..C-1` over identities
@@ -111,9 +112,9 @@ with `strategy="time_holdout"`, path and scoring maps use the train
 partition. In-sample auto-k that happens to see a `time` vector (for
 example routed EBIC) still encodes the call's `X`. Prefix-only evaluate
 on non-holdout splits can still rank on a full-data path — use nested
-evaluate when the selected path itself must be holdout-blind. Prebuilt
-caches and resampled auto-k (`stability`, `knockoff_path`, `consensus`)
-raise.
+evaluate when the selected path itself must be holdout-blind. Resampled
+auto-k (`stability`, `knockoff_path`, `consensus`) raises, and so does a
+prebuilt cache when there is a column to encode.
 
 `target_cv` emits **centered category effects**, not raw category means: each
 value is the category estimate minus the training prior that produced it. An
@@ -121,7 +122,9 @@ unknown or unseen category therefore maps to a zero centered effect (the
 global-mean estimate before centering). That is what makes the path safe for
 high-cardinality columns: a unique ID, a group proxy, or a timestamp proxy is
 never present in its own fold's training rows, so it emits a constant zero and
-carries no relevance instead of encoding a fold-identifying prior.
+carries no relevance instead of encoding a fold-identifying prior. A constant
+categorical emits exactly zero as well, in every fold and at inference, so
+every route treats it as a constant column.
 
 **Know the boundary of that guarantee.** Centering neutralizes only
 *unseen-in-fold* emissions. It removes the fold marker; it is not a defence
@@ -510,11 +513,10 @@ Read the guarantee metadata literally:
   knockoff power. Large `gamma` or tiny `s_mean` usually means highly correlated
   features; deduplicate near-copies before building the cache when power matters.
 
-`statistic="relevance"` is the fastest compatibility default for marginal
-signals and remains the 0.9 default. The retained
-[statistic bakeoff](knockoff-statistic-bakeoff.md) recommends keeping
-`relevance` for the 1.0 owner decision on its four Gaussian designs: ridge
-cut realized FDP but lost substantial power on AR(1) and block-correlated
+`statistic="relevance"` is the fastest default for marginal signals, and 1.0
+kept it (settled 2026-09-21) on the retained
+[statistic bakeoff](knockoff-statistic-bakeoff.md) over four Gaussian
+designs: ridge cut realized FDP but lost substantial power on AR(1) and block-correlated
 draws. That is scoped evidence, not a universal winner. `statistic="cefsplus"`
 enables a tie-safe greedy CEFS+ statistic with pair-coupled screening and
 objective-gain W magnitudes. It is an exploratory alternate statistic: it is
@@ -749,7 +751,12 @@ scores a fresh estimator on the held-out fold. All candidates use the same
 folds. For label-horizon purging, pass `time`, `event_end`, and a purged
 splitter. Pass `groups` for splitters
 that need them; fixed-`k` selectors and `KnockoffSelector` do not receive
-those metadata. Empty knockoff sets stay empty.
+those metadata. Empty knockoff sets stay empty. Classification without
+`groups` or `time` defaults to a shuffled `StratifiedKFold(5)`; a class with
+fewer members than folds makes scikit-learn emit its "least populated class"
+`UserWarning`, which `compare` does not suppress. Pass an explicit `cv=`
+splitter (for example `KFold(5, shuffle=True, random_state=0)`) when you run
+with warnings as errors.
 
 ```python
 import numpy as np

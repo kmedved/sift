@@ -131,9 +131,13 @@ def _capture_source_state() -> dict[str, object]:
 
 
 def _package_versions() -> dict[str, str | None]:
-    versions: dict[str, str | None] = {}
+    import sift
+
+    # The run measures the checkout on sys.path, not whatever distribution
+    # metadata the interpreter happens to have installed, so SIFT's version
+    # comes from the imported source.
+    versions: dict[str, str | None] = {"sift-feature-selection": sift.__version__}
     for distribution in (
-        "sift-feature-selection",
         "numpy",
         "pandas",
         "scikit-learn",

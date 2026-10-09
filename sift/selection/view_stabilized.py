@@ -182,6 +182,10 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
 
     proxy_correlations = getattr(selector, "_proxy_correlations", None)
     proxy_usable = False
+    # A block stored at fit time that no longer covers the selected set (a
+    # later threshold change added features) is dropped; the view says so
+    # instead of telling the caller to set store_proxies again.
+    proxy_stale = False
     if proxy_correlations is not None:
         stored_columns = [int(column) for column in proxy_correlations.columns.tolist()]
         if stored_columns == view_indices:
@@ -192,6 +196,7 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
             proxy_usable = True
         else:
             proxy_correlations = None
+            proxy_stale = True
     resample_selections = None
     if proxy_usable:
         stored_resamples = getattr(selector, "_resample_selections_", None)
@@ -241,11 +246,16 @@ def _as_stabilized_selector(selector: Any, input_features: Any) -> SelectionView
         ),
         "aggregation": "evalues" if mode == "evalues" else "frequency",
         "store_proxies": bool(getattr(selector, "store_proxies", False)),
+        "proxy_correlations_stale": proxy_stale,
         "n_features": n_features,
         "n_rows_original": None if n_rows is None else int(n_rows),
         "fdr_control": extra.get("fdr_control", "none"),
         "configured_options": configured,
     }
+    if getattr(selector, "_proxy_input_numeric_", True) is False:
+        # Proxies are computed on the raw matrix, which had non-numeric
+        # columns: a store_proxies=True refit on it would fail.
+        metadata["proxy_input_numeric"] = False
     if mode != "evalues":
         metadata["threshold"] = threshold
         metadata["resample"] = configured.get("resample", selector.resample)

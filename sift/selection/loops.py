@@ -13,6 +13,7 @@ from threadpoolctl import threadpool_limits
 from sift._numba import njit_optional_cache
 from sift._progress import ProgressCallback, report_progress
 from sift._preprocess import ensure_weights, validate_k
+from sift.selection.conditioning import UnusableIncludeError, no_variation_include_template
 
 FLOOR = 1e-6
 MrmrBackend = Literal["auto", "serial", "blas", "processes"]
@@ -206,15 +207,18 @@ def _require_usable_include_columns(
     w_sum = float(w_arr.sum())
     if w_sum <= 0.0:
         raise ValueError("include features have no usable weighted mass for conditioning")
+    unusable: list[int] = []
     for orig in np.asarray(include_idx, dtype=np.int64):
         col = np.asarray(X[:, int(orig)], dtype=np.float64)
         mean = float(np.dot(w_arr, col) / w_sum)
         var = float(np.dot(w_arr, (col - mean) ** 2) / w_sum)
         if not np.isfinite(var) or var <= eps:
-            raise ValueError(
-                f"include feature at position {int(orig)} has no usable variation "
-                "for conditioning"
-            )
+            unusable.append(int(orig))
+    if unusable:
+        # Positions of X; the filter layer relabels them to column names.
+        raise UnusableIncludeError(
+            no_variation_include_template(positions=True), unusable
+        )
 
 
 def _mrmr_loop_serial_conditioned(

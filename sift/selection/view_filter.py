@@ -51,11 +51,12 @@ def _normalize_filter_table(
         relevance = pd.to_numeric(ranking["relevance"], errors="coerce")
         if relevance.notna().any():
             table["relevance"] = relevance
+    # Panel columns exist only when ``within`` ran, and an all-NaN column is a
+    # real answer (``between_relevance`` is NaN with two or fewer entities),
+    # not a missing metric, so keep them whenever the ranking has them.
     for column in ("within_relevance", "between_relevance"):
         if column in ranking:
-            values = pd.to_numeric(ranking[column], errors="coerce")
-            if values.notna().any():
-                table[column] = values
+            table[column] = pd.to_numeric(ranking[column], errors="coerce")
     if "block_id" in ranking:
         table["block_id"] = ranking["block_id"].tolist()
 

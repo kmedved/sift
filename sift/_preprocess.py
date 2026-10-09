@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Any, Container, List, Literal, Optional, Sequence, Tuple, get_args
 import warnings
 
@@ -443,6 +445,28 @@ def subsample_xy(
 # --- Categorical encoding ---
 
 
+def _category_missing_mask(series: pd.Series) -> np.ndarray:
+    """``series.isna()`` that also reads a signaling-NaN ``Decimal`` as missing.
+
+    pandas finds a NaN ``Decimal`` by comparing it with itself, which raises
+    for a signaling NaN; only then is each value checked on its own.
+    """
+    if series.dtype == object:
+        values = series.to_numpy(dtype=object, copy=False)
+        return np.fromiter(
+            (_is_onehot_missing(value) for value in values),
+            dtype=bool,
+            count=len(values),
+        )
+    try:
+        return series.isna().to_numpy()
+    except InvalidOperation:
+        values = series.to_numpy(dtype=object)
+        return np.fromiter(
+            (_is_onehot_missing(value) for value in values), dtype=bool, count=len(values)
+        )
+
+
 @contextmanager
 def suppress_category_encoder_pandas_warnings():
     """Hide narrow pandas 3.0 deprecation warnings emitted by category_encoders."""
@@ -495,10 +519,11 @@ class LeaveOneOutLogitEncoder:
     @staticmethod
     def _series_with_missing_sentinel(series: pd.Series) -> pd.Series:
         sentinel = "__SIFT_MISSING_CATEGORY__"
-        values = set(series.dropna().astype(object).tolist())
+        missing = _category_missing_mask(series)
+        values = set(series[~missing].astype(object).tolist())
         while sentinel in values:
             sentinel += "_"
-        return series.astype(object).where(~series.isna(), sentinel)
+        return series.astype(object).where(~missing, sentinel)
 
     @staticmethod
     def _get_column_series(X: pd.DataFrame, col: str) -> pd.Series:
@@ -666,7 +691,9 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
     that the fitting rows never saw therefore emits a zero centered effect (the
     raw global-mean estimate before centering) instead of a fold-identifying
     prior, so unique-ID, group-proxy, and timestamp-proxy columns cannot become
-    fold markers.
+    fold markers.  When the fitting rows observe a single level, that level's
+    effect is exactly zero (its mean is the prior), not per-fold rounding
+    noise, so a constant categorical encodes to a constant zero column.
 
     **What centering does and does not guarantee.**  Centering neutralizes only
     *unseen-in-fold* emissions: a level absent from a fold's training rows emits
@@ -796,7 +823,7 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
     @staticmethod
     def _normalized_series(series: pd.Series) -> pd.Series:
-        return series.astype(object).where(~series.isna(), np.nan)
+        return series.astype(object).where(~_category_missing_mask(series), np.nan)
 
     @staticmethod
     def _centered_targets(
@@ -940,6 +967,13 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
                 sort=False,
                 use_na_sentinel=False,
             )
+            if len(categories) == 1:
+                # One level's mean is the prior itself, so its centered effect
+                # is exactly zero. Computed, it is rounding noise (~1e-17) that
+                # differs per fold, and a rank transform would inflate that
+                # noise into a full-variance column.
+                mappings[col] = {categories.tolist()[0]: 0.0}
+                continue
             counts = np.bincount(codes, weights=weights, minlength=len(categories))
             sums = np.bincount(
                 codes,
@@ -1260,6 +1294,9 @@ def _is_onehot_missing(value: Any) -> bool:
         return True
     if isinstance(value, (bytes, bytearray, str, list, dict, tuple, set)):
         return False
+    if isinstance(value, Decimal):
+        # Quiet or signaling; pd.isna raises on a signaling NaN.
+        return value.is_nan()
     try:
         missing = pd.isna(value)
     except (TypeError, ValueError):
@@ -1267,6 +1304,89 @@ def _is_onehot_missing(value: Any) -> bool:
     if isinstance(missing, np.ndarray):
         return bool(np.all(missing))
     return bool(missing)
+
+
+_DAY_NS = 86_400 * 10**9
+# Nanoseconds per fixed numpy datetime unit. Units below a nanosecond stay
+# exact as fractions; a generic unit counts nanoseconds, as pandas reads it.
+_UNIT_NS: dict[str, int | Fraction] = {
+    "W": 7 * _DAY_NS,
+    "D": _DAY_NS,
+    "h": 3_600 * 10**9,
+    "m": 60 * 10**9,
+    "s": 10**9,
+    "ms": 10**6,
+    "us": 10**3,
+    "ns": 1,
+    "ps": Fraction(1, 10**3),
+    "fs": Fraction(1, 10**6),
+    "as": Fraction(1, 10**9),
+    "generic": 1,
+}
+# The resolutions a pd.Timedelta can have, finest first, in nanoseconds.
+_TIMEDELTA_RESOLUTIONS = (("ns", 1), ("us", 10**3), ("ms", 10**6), ("s", 10**9))
+# numpy's words for a duration's unit, coarsest first.
+_DURATION_WORDS = (
+    ("D", "days"),
+    ("h", "hours"),
+    ("m", "minutes"),
+    ("s", "seconds"),
+    ("ms", "milliseconds"),
+    ("us", "microseconds"),
+    ("ns", "nanoseconds"),
+    ("ps", "picoseconds"),
+    ("fs", "femtoseconds"),
+    ("as", "attoseconds"),
+)
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _numpy_duration_identity(value: np.timedelta64) -> tuple:
+    """Exact level identity of a non-missing ``np.timedelta64`` in any unit.
+
+    Equal durations are one level whatever their unit or count multiplier
+    (``m8[3D]``), and distinct durations never merge. A duration pandas can
+    hold is the ``pd.Timedelta`` a typed timedelta column yields, so the two
+    columns share one vocabulary; any other fixed duration (below a
+    nanosecond, or beyond pandas' range) is ``("duration", nanoseconds)``,
+    exact as an int or a ``Fraction``. Years and months have no fixed length
+    and numpy equates a year with twelve months, so they are
+    ``("calendar_duration", months)``, never equal to a fixed duration. The
+    identity is pure Python, so no mix of units can raise when compared.
+    """
+    unit, count = np.datetime_data(value.dtype)
+    steps = int(value.astype(np.int64)) * count
+    if unit in ("Y", "M"):
+        return ("calendar_duration", steps * 12 if unit == "Y" else steps)
+    nanoseconds = steps * _UNIT_NS[unit]
+    if isinstance(nanoseconds, Fraction) and nanoseconds.denominator == 1:
+        nanoseconds = nanoseconds.numerator
+    return ("duration", nanoseconds)
+
+
+def _pandas_timedelta(nanoseconds: int | Fraction) -> pd.Timedelta | None:
+    """A lossless pandas Timedelta when one supported resolution can hold it."""
+    for resolution, per in _TIMEDELTA_RESOLUTIONS:
+        if nanoseconds % per == 0 and -(2**63) < nanoseconds // per < 2**63:
+            try:
+                return pd.Timedelta(
+                    np.timedelta64(nanoseconds // per, resolution)
+                )
+            except (OverflowError, ValueError):
+                pass
+    return None
+
+
+def _duration_text(nanoseconds: int | Fraction) -> str:
+    """numpy's text for a duration, in the coarsest unit that holds it exactly."""
+    held = _pandas_timedelta(nanoseconds)
+    if held is not None:
+        return str(held)
+    for unit, word in _DURATION_WORDS:
+        steps = Fraction(nanoseconds) / _UNIT_NS[unit]
+        if steps.denominator == 1:
+            return f"{steps.numerator} {word}"
+    return f"{nanoseconds} nanoseconds"
 
 
 def _onehot_level_identity(value: Any) -> tuple:
@@ -1279,6 +1399,33 @@ def _onehot_level_identity(value: Any) -> tuple:
         return ("bytes", bytes(value))
     if isinstance(value, str):
         return ("str", value)
+    if isinstance(value, np.timedelta64):
+        # np.timedelta64 subclasses np.integer, and int() of one fails for
+        # most units. Nor is the raw scalar a safe key: numpy hashes it as its
+        # raw count whatever the unit, and comparing months with femtoseconds
+        # raises.
+        return _numpy_duration_identity(value)
+    if isinstance(value, pd.Timedelta):
+        # Older pandas releases can construct and stringify a coarse-resolution
+        # Timedelta whose hash overflows while casting to a finer unit. Keep the
+        # exact duration as a pure-Python key instead.
+        return _numpy_duration_identity(value.asm8)
+    if isinstance(value, np.datetime64):
+        # Hashed as its raw count too, and comparing two units converts them,
+        # which overflows for years against attoseconds. The dtype (unit and
+        # count) precedes the value, so only values of one dtype are ever
+        # compared; each unit stays its own level, as in 1.0.
+        return ("hashable", value.dtype.str, value)
+    if (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and not isinstance(value, pd.Timestamp)
+        and value.utcoffset() is not None
+    ):
+        # Python equates the two readings of a repeated wall-clock hour (a DST
+        # fold) in one zone although they are an hour apart. The exact UTC
+        # instant keeps them two levels, so row order cannot decide the level.
+        return ("hashable", type(value).__name__, value, value - _UTC_EPOCH)
     if isinstance(value, (int, np.integer)):
         return ("int", int(value))
     if isinstance(value, (float, np.floating)):
@@ -1341,6 +1488,10 @@ def _onehot_display_token(identity: tuple) -> str:
     if kind == "bytes":
         decoded = identity[1].decode("utf-8", errors="replace")
         return decoded if decoded else "empty"
+    if kind == "duration":
+        return _duration_text(identity[1])
+    if kind == "calendar_duration":
+        return f"{identity[1]} months"
     if kind == "hashable":
         return str(identity[2]) if str(identity[2]) else "empty"
     return str(identity[-1]) if str(identity[-1]) else "empty"
@@ -1351,12 +1502,92 @@ def _format_onehot_level(value: Any) -> str:
     return _onehot_display_token(_onehot_level_identity(value))
 
 
+def _level_sort_text(identity: tuple) -> str:
+    """``repr`` of a level identity: the deterministic tie-break between levels.
+
+    A hashable level is spelled ``("hashable", type name, value)`` without the
+    keys that only keep levels apart (a numpy datetime's dtype, an aware
+    datetime's instant), so levels tie-break exactly as in 1.0. pandas cannot
+    ``repr`` an aware non-nanosecond ``Timestamp`` outside years 1-9999
+    (``NotImplementedError``) although its ``str`` works, so such an identity
+    is spelled part by part with ``str``.
+    """
+    if identity[0] == "duration":
+        held = _pandas_timedelta(identity[1])
+        if held is not None:
+            identity = ("hashable", "Timedelta", held)
+    elif identity[0] == "hashable":
+        identity = ("hashable", type(identity[2]).__name__, identity[2])
+    try:
+        return repr(identity)
+    except NotImplementedError:
+        return repr(tuple(str(part) for part in identity))
+
+
 def require_unique_encoding_columns(X: pd.DataFrame, *, encoding: str) -> None:
     """Reject duplicate labels before categorical encoding expands width."""
     if not X.columns.is_unique:
         raise ValueError(
             f"{encoding} encoding requires unique DataFrame column names"
         )
+
+
+def _names_array_column(ref: Any, n_features: int) -> bool:
+    """Whether ``ref`` names a column of an ndarray with ``n_features`` columns.
+
+    An in-range integer position or its generated ``x{i}`` name, the two
+    spellings ``include`` accepts for an ndarray.
+    """
+    if isinstance(ref, (bool, np.bool_)):
+        return False
+    if isinstance(ref, (int, np.integer)):
+        return 0 <= int(ref) < n_features
+    # ASCII digits only: str.isdigit() also accepts "²", which int() rejects.
+    if isinstance(ref, str) and ref[:1] == "x" and ref[1:].isascii() and ref[1:].isdigit():
+        return ref == f"x{int(ref[1:])}" and int(ref[1:]) < n_features
+    return False
+
+
+def reject_prebuilt_cache_encoding(X, cat_features, cat_encoding) -> None:
+    """Raise when a prebuilt cache would have to apply ``cat_encoding``.
+
+    A cache stores no encoding provenance, so it cannot encode a column: any
+    encoding other than ``"none"`` raises once it has a column to encode. A
+    column to encode is a ``cat_features`` entry that names a column of ``X``
+    (a DataFrame label; for an ndarray, an in-range integer position or its
+    generated ``x{i}`` name), or, without ``cat_features``, an
+    object/category/string column of a DataFrame. With no such column the
+    encoding is inert, exactly as it is without a cache. A ``str``
+    ``cat_features`` is read one character per column name, as every
+    encoder reads it. One rule and one message for every cache consumer.
+    """
+    if cat_encoding in (None, "none"):
+        return
+    requested = [] if cat_features is None else list(cat_features)
+    if isinstance(X, pd.DataFrame):
+        if cat_features is None:
+            columns = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+        else:
+            columns = [col for col in requested if col in X.columns]
+    else:
+        shape = np.shape(X)
+        n_features = int(shape[1]) if len(shape) == 2 else 0
+        columns = [ref for ref in requested if _names_array_column(ref, n_features)]
+    if not columns:
+        return
+    columns = [col.item() if isinstance(col, np.generic) else col for col in columns]
+    hint = ""
+    if isinstance(cat_features, str):
+        hint = (
+            f". cat_features={cat_features!r} is a str, so each character "
+            f"names a column; pass [{cat_features!r}] to name one column"
+        )
+    raise ValueError(
+        f"cat_encoding={cat_encoding!r} cannot be combined with a prebuilt "
+        "cache because the cache has no encoding provenance, so it cannot "
+        f"encode {columns!r}. Encode those columns before building the "
+        f"cache and pass cat_encoding='none', or omit the cache{hint}"
+    )
 
 
 class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
@@ -1505,7 +1736,7 @@ class OneHotBlockEncoder(BaseEstimator, TransformerMixin):
             raise ValueError(
                 f"onehot column {col!r} has no positive-weight rows to learn a vocabulary"
             )
-        ranked = sorted(mass.items(), key=lambda item: (-item[1], repr(item[0])))
+        ranked = sorted(mass.items(), key=lambda item: (-item[1], _level_sort_text(item[0])))
         retained = [ident for ident, _ in ranked[: self.max_levels]]
         pooled = [ident for ident, _ in ranked[self.max_levels :]]
         has_other = bool(pooled)

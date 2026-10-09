@@ -31,7 +31,14 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
       `94bae05`; the asset-only workflow attached both verified distributions
       and did not publish to PyPI.
 
-## Target encoding status
+## Open decisions
+
+- Multiclass helpers (`docs/specs/0.9-product-layer.md` §3 #4) stay deferred;
+  the data-type support matrix documents current support. No other campaign
+  decision is open: the owner approved the 1.0 defaults on 2026-09-21 and
+  confirmed that approval on 2026-09-27.
+
+## Categorical encoding status
 
 - `cat_encoding="target_cv"` is leakage-safe by fold centering: training rows
   emit `fold_encoding - fold_training_prior` and inference rows
@@ -47,6 +54,21 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 - The full-data supervised encoders (`loo`, `target`, `james_stein`,
   `loo_logit`) still need `allow_full_data_target_encoding=True` and are not
   cross-fitted; `KnockoffSelector` rejects `target_cv` outright.
+- The target-blind encodings added in 0.10.0 need no cross-fitting.
+  `cat_encoding="onehot"` turns each raw categorical into `{column}__{level}`
+  dummies selected as one block on the filter functions and wrappers;
+  `within`, knockoffs and Boruta reject it, and so does a prebuilt cache
+  whenever there is a column to encode (with nothing to encode it is inert,
+  as without a cache).
+  `"ordinal"` / `"frequency"` are numeric maps (unknown `-1` / `0`) on the
+  filter functions and wrappers, binary and multi-target CEFS+,
+  `KnockoffSelector` (no FDR upgrade) and Boruta with
+  `importance_data="train"`; resampled auto-k (`stability`,
+  `knockoff_path`, `consensus`) rejects them, and so does a prebuilt cache
+  whenever there is a column to encode. Held-out auto-k
+  scoring refits all three per training fold, while a prefix-only path
+  encoder is fit on every row (the train partition under time-holdout
+  `evaluate`).
 
 ## Re-scoped to 0.9.1 (owner decision, 2026-09-02)
 

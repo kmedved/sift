@@ -12,6 +12,7 @@ import pandas as pd
 
 from sift.selection import auto_k as auto_k_module
 from sift.selection.auto_k import AutoKConfig
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.auto_k_knockoff import select_k_knockoff_path
 from sift.selection.auto_k_resample import (
     bootstrap_paths,
@@ -219,7 +220,10 @@ def _run_auto_dense_check(
             feature_blocks=feature_blocks,
         )
         cv_k, _diag = select_k_gaussian_cv(curves, check_config)
-    except Exception as exc:  # pragma: no cover - rare defensive diagnostics path
+    except Exception as exc:
+        # A diagnostic never fails the call. Shuffled k-fold rejects a seed it
+        # cannot use (not an integer, or outside [0, 2**32)) as it builds its
+        # folds, so such a seed skips the check with its reason, as in 1.0.
         route["dense_check"].update(
             {
                 "reason": "gaussian_cv_failed",
@@ -803,6 +807,7 @@ def select_gaussian_perm_gap_path(
         candidates=_unused.get("candidates"),
         feature_blocks=_unused.get("feature_blocks"),
     )
+    check_auto_k_seed(auto_k_config)
     nulls = null_objective_paths(
         cache,
         y,
@@ -1122,6 +1127,7 @@ def select_gaussian_stability_path(
         candidates=_unused.get("candidates"),
         feature_blocks=_unused.get("feature_blocks"),
     )
+    check_auto_k_seed(auto_k_config)
     boot = bootstrap_paths(
         cache,
         y,
@@ -1247,6 +1253,7 @@ def select_gaussian_auto_path(
                 f"k_method={route['chosen']!r}. Use an explicit conditioned "
                 f"method such as {remedy}, or omit the conditioning keywords."
             ) from None
+    check_auto_k_seed(routed_config, auto_route=reason)
     runner_kwargs = {
         "cache": cache,
         "y": y,
@@ -1586,6 +1593,7 @@ def select_gaussian_consensus_path(
         candidates=_unused.get("candidates"),
         feature_blocks=_unused.get("feature_blocks"),
     )
+    check_auto_k_seed(auto_k_config)
     rows = []
     for name in auto_k_config.consensus_methods:
         start = time_module.perf_counter()

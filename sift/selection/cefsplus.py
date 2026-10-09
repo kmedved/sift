@@ -1288,16 +1288,21 @@ def select_cached(
         Selected blocks that expand to cache-dropped constant members still
         appear in the selection, but proxy retention then raises rather than
         inventing correlations.
-    include : sequence of names or positions, optional
+    include : sequence of column labels or positions, optional
         Conditioning set. The greedy state is initialized from these features
         before step 1. They are not discoveries; ``k`` counts additional
         features. Included names are prepended to the returned list in
         caller order.
-    exclude : sequence of names or positions, optional
+    exclude : sequence of column labels or positions, optional
         Features removed from the discovery pool. Cannot overlap ``include``.
-    candidates : sequence of names or positions, optional
+    candidates : sequence of column labels or positions, optional
         Hard allow-list for discovery. ``include`` may sit outside it.
         Overlap with ``exclude`` is rejected. An empty remaining pool raises.
+        For a cache built from a DataFrame, all three take its column
+        labels and reject an integer that is not itself a label; integer
+        positions (and the generated ``x0``..``x{p-1}`` names) are accepted
+        only for a cache built from an ndarray. Positions count columns of
+        the original matrix, not of the cache-dropped ``valid_cols``.
     feature_blocks : mapping, {"auto"} or None, default None
         Atomic column groups. A dict maps block labels to member names or
         positions; unlisted columns stay singletons. ``"auto"`` groups
@@ -1513,7 +1518,6 @@ def _select_cached_impl(
             cache.valid_cols,
             feature_names=cache_names,
             label="include",
-            raw_names=getattr(cache, "_raw_name_by_encoded", None),
             prebuilt_cache=not getattr(cache, "_built_for_filter_call", False),
         )
         pool_valid = map_original_to_valid(

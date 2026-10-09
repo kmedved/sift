@@ -459,6 +459,104 @@ def test_target_cv_single_category_time_column_carries_no_signal():
     np.testing.assert_allclose(training.to_numpy(), 0.0)
 
 
+def _constant_category_data(seed: int = 7, n: int = 300):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "const_cat": ["a"] * n,
+            "city": rng.choice(["NY", "LA"], size=n),
+        }
+    )
+    y = X["x1"].to_numpy() + 0.3 * rng.normal(size=n)
+    return X, y
+
+
+def test_target_cv_single_level_column_is_exactly_zero_on_every_fold_kind():
+    X, y = _constant_category_data()
+    n = len(X)
+    y_binary = (y > np.median(y)).astype(int)
+    contexts = (
+        {},
+        {"groups": np.arange(n) % 5},
+        {"time": np.arange(n) // 30},
+        {"sample_weight": np.random.default_rng(3).uniform(0.5, 2.0, size=n)},
+    )
+    for target, kind in ((y, "continuous"), (y_binary, "binary")):
+        for smooth in ("auto", 5.0):
+            for context in contexts:
+                encoder = TargetCVEncoder(
+                    ["const_cat", "city"], target_type=kind, smooth=smooth
+                )
+                training = encoder.fit_transform(X, target, **context)
+                # One level's mean is the prior, so its centered effect is
+                # exactly zero in every fold and in the inference map, not
+                # per-fold rounding noise.
+                assert training["const_cat"].tolist() == [0.0] * n, (kind, smooth, context)
+                assert encoder.category_maps_["const_cat"] == {"a": 0.0}
+                assert encoder.transform(X)["const_cat"].tolist() == [0.0] * n
+                assert training["city"].nunique() > 1
+
+
+def test_target_cv_level_seen_only_on_zero_weight_rows_leaves_the_column_single_level():
+    # Levels are counted on the positive-weight fitting rows. A second level
+    # that occurs only on zero-weight rows carries no fitting mass, so the
+    # column is still single-level: exactly zero in every fold, for the
+    # zero-weight rows too, and at inference.
+    X, y = _constant_category_data()
+    n = len(X)
+    zero_weight_rows = [3, 50, 120, 250]
+    X = X.assign(mostly_a=pd.Series(["a"] * n, dtype=object))
+    X.loc[zero_weight_rows, "mostly_a"] = "b"
+    weight = np.random.default_rng(3).uniform(0.5, 2.0, size=n)
+    weight[zero_weight_rows] = 0.0
+    y_binary = (y > np.median(y)).astype(int)
+    contexts = ({}, {"groups": np.arange(n) % 5}, {"time": np.arange(n) // 30})
+    for target, kind in ((y, "continuous"), (y_binary, "binary")):
+        for smooth in ("auto", 5.0):
+            for context in contexts:
+                encoder = TargetCVEncoder(
+                    ["mostly_a", "city"], target_type=kind, smooth=smooth
+                )
+                training = encoder.fit_transform(X, target, sample_weight=weight, **context)
+                assert training["mostly_a"].tolist() == [0.0] * n, (kind, smooth, context)
+                assert encoder.category_maps_["mostly_a"] == {"a": 0.0}
+                assert encoder.transform(X)["mostly_a"].tolist() == [0.0] * n
+                assert training["city"].nunique() > 1
+
+
+def test_target_cv_constant_categorical_is_constant_on_every_route():
+    X, y = _constant_category_data()
+    kw = {"cat_encoding": "target_cv", "subsample": None, "verbose": False}
+    # The noise column used to survive the Gaussian cache and be selected.
+    assert sift.select_cefsplus(X, y, 4, **kw) == ["x1", "city", "x2"]
+    assert sift.select_jmi(
+        X, y, 4, task="regression", estimator="gaussian", **kw
+    ) == ["x1", "city", "x2"]
+    assert sift.select_mrmr(X, y, 4, task="regression", **kw) == ["x1", "city", "x2"]
+    # Every route rejects it as an include column, as the classic route did.
+    dropped = (
+        "include features were dropped as constant or non-finite, so they carry "
+        "no information to condition on: 'const_cat'. Drop them from include, "
+        "or pass columns that vary on the retained rows"
+    )
+    include = {**kw, "include": ["x1", "const_cat"]}
+    with pytest.raises(ValueError) as caught:
+        sift.select_cefsplus(X, y, 3, **include)
+    assert str(caught.value) == dropped
+    with pytest.raises(ValueError) as caught:
+        sift.select_mrmr(X, y, 3, task="regression", estimator="gaussian", **include)
+    assert str(caught.value) == dropped
+    with pytest.raises(ValueError) as caught:
+        sift.select_mrmr(X, y, 3, task="regression", **include)
+    assert str(caught.value) == (
+        "include features have no usable variation for conditioning (constant "
+        "or non-finite): 'const_cat'. Drop them from include, or pass columns "
+        "that vary on the retained rows"
+    )
+
+
 def test_target_cv_time_prior_is_target_independent_and_keeps_warmup():
     X, y, time = _time_fold_fixture()
     encoder = TargetCVEncoder(

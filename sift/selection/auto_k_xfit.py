@@ -23,6 +23,7 @@ from sift.selection.auto_k import (
     validate_auto_k_config,
     with_effective_k_bounds,
 )
+from sift.selection.auto_k_config import check_auto_k_seed
 from sift.selection.auto_k_core import (
     build_score_curve_diagnostics,
     split_weights,
@@ -112,6 +113,7 @@ def _fold_splits(
         n_splits = min(int(config.xfit_folds), int(n_rows))
         if n_splits < 2:
             raise ValueError(f"kfold requires at least 2 rows, got {n_rows}")
+        check_auto_k_seed(config)
         splitter = KFold(n_splits=n_splits, shuffle=True, random_state=int(config.random_state))
         return [
             (train.astype(np.int64), val.astype(np.int64))
@@ -399,7 +401,9 @@ def _fold_score_arrays(
     y_fold = None
     # One tally for the whole call so partial level overlap warns once, not
     # once per fold.
-    within_tally = None if within is None else UnseenWithinLevelTally()
+    within_tally = (
+        None if within is None else UnseenWithinLevelTally(strategy=config.strategy)
+    )
     if within is not None:
         if within_X is None or within_y is None:
             raise ValueError("within fold scoring requires the encoded pre-rank matrix")
@@ -838,9 +842,14 @@ def xfit_objective_curves(
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
     unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
-        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
-        training rows only, then optionally applies ``within`` and scores
-        columns aligned to ``cache.valid_cols``.
+        When set with ``unsupervised_raw_X``, each fold fits this encoder on
+        its training rows only. Every raw categorical column becomes one
+        numeric column: ordinal codes ``0..C-1``, or the level's share of
+        training weight (so levels of equal weight share a value), with
+        levels unseen in the fold's training rows mapped to ``-1`` / ``0``.
+        The fold then optionally applies ``within`` and scores the columns
+        aligned to ``cache.valid_cols``; with ``feature_blocks`` a path step
+        is a complete block, so one step can add several encoded columns.
     unsupervised_raw_X : DataFrame or None, default None
         Original categorical frame with ``n_rows_original`` rows. Required
         when ``unsupervised_encoding`` is set.
@@ -1072,9 +1081,14 @@ def gaussian_cv_curves(
     onehot_raw_blocks : ResolvedBlocks or None, default None
         Raw-column blocks composed onto each fold's dummy columns.
     unsupervised_encoding : {'ordinal', 'frequency'} or None, default None
-        When set with ``unsupervised_raw_X``, each fold fits this 1:1 map on
-        training rows only, then optionally applies ``within`` and scores
-        columns aligned to ``cache.valid_cols``.
+        When set with ``unsupervised_raw_X``, each fold fits this encoder on
+        its training rows only. Every raw categorical column becomes one
+        numeric column: ordinal codes ``0..C-1``, or the level's share of
+        training weight (so levels of equal weight share a value), with
+        levels unseen in the fold's training rows mapped to ``-1`` / ``0``.
+        The fold then optionally applies ``within`` and scores the columns
+        aligned to ``cache.valid_cols``; with ``feature_blocks`` a path step
+        is a complete block, so one step can add several encoded columns.
     unsupervised_raw_X : DataFrame or None, default None
         Original categorical frame with ``n_rows_original`` rows. Required
         when ``unsupervised_encoding`` is set.

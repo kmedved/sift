@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Mapping
 from numbers import Real
@@ -10,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from sift.selection.reproducibility import RUN_PROVENANCE_ATTR
 from sift.selection.view import (
     SelectionView,
     _coerce_feature_names,
@@ -209,16 +211,19 @@ def _path_run_configuration(
     best_k: int,
     best_score: float,
     n_path_features: int,
+    provenance: Any,
 ) -> dict[str, Any]:
-    """Protocol the evaluation itself recorded, for the manifest.
+    """Protocol and run record of the evaluation, for the manifest.
 
-    ``evaluate_feature_path`` does not retain its ``random_state``, estimator
-    factory or splitter object, so the manifest reports the protocol it can
-    prove -- the k grid, the metric and the split count -- rather than
-    inventing the rest.
+    The k grid, the metric and the split count come from the result's own
+    fields.  ``evaluate_feature_path`` also attaches a run record
+    (``RUN_PROVENANCE_ATTR``): estimator and splitter snapshots,
+    ``time`` / ``event_end`` digests and the holdout seed.  A hand-assembled
+    result has no such record, so its manifest keeps the protocol but does
+    not claim the configuration was captured while a selection ran.
     """
     n_splits = int(diagnostics["n_splits"].iloc[0]) if len(diagnostics) else None
-    return {
+    carried: dict[str, Any] = {
         "configured_options": {
             "k_grid": list(tested_k),
             "scoring": _path_scoring_label(diagnostics),
@@ -230,8 +235,18 @@ def _path_run_configuration(
             "best_score": float(best_score),
             "n_splits": n_splits,
         },
-        "configuration_captured_at": "selection",
+        "configuration_captured_at": "unknown",
     }
+    if not isinstance(provenance, Mapping):
+        return carried
+    record = copy.deepcopy(dict(provenance))
+    for key in ("configured_options", "effective_options"):
+        if isinstance(record.get(key), Mapping):
+            carried[key].update(record[key])
+    if "random_state" in record:
+        carried["random_state"] = record["random_state"]
+    carried["configuration_captured_at"] = "selection"
+    return carried
 
 
 def _as_feature_path_result(result: Any, input_features: Any) -> SelectionView:
@@ -376,6 +391,7 @@ def _as_feature_path_result(result: Any, input_features: Any) -> SelectionView:
             best_k=best_k,
             best_score=expected_best_score,
             n_path_features=len(feature_path),
+            provenance=getattr(result, RUN_PROVENANCE_ATTR, None),
         )
     )
     return SelectionView(

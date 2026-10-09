@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from collections.abc import Hashable, Iterable, Mapping, Set
 from typing import Any
 
@@ -182,6 +183,39 @@ def _base_needs_named_frame(selector: Any) -> bool:
     return hasattr(selector, "_selector_fn") and str(
         type(selector).__module__
     ).startswith("sift.")
+
+
+def _declared_block_members(selector: Any, names: list, *, named: bool) -> set[int]:
+    """Raw positions inside a multi-member block the base (or a nested estimator) declares.
+
+    Only such a column can be pulled into the selection through an atomic
+    block; a singleton block or an undeclared column is selected on its own.
+    ``KnockoffSelector`` expands groups over cache-valid members only, so its
+    blocks never select a constant column.  A declaration that does not
+    resolve against these names contributes nothing.
+    """
+    if _is_knockoff_selector(selector):
+        return set()
+    from sift.selection.blocks import resolve_feature_blocks
+
+    try:
+        params = selector.get_params(deep=True)
+    except (AttributeError, TypeError, ValueError):
+        params = {"feature_blocks": getattr(selector, "feature_blocks", None)}
+    members: set[int] = set()
+    for key, value in params.items():
+        if value is None or not (key == "feature_blocks" or key.endswith("__feature_blocks")):
+            continue
+        try:
+            resolved = resolve_feature_blocks(value, feature_names=names, named=named)
+        except (TypeError, ValueError):
+            continue
+        if resolved is None:
+            continue
+        for block in resolved.members:
+            if len(block) > 1:
+                members.update(int(col) for col in block)
+    return members
 
 
 def _n_rows_used_from_fitted(fitted: Any) -> int | None:
@@ -388,6 +422,31 @@ def _support_mask_from_fitted(fitted: Any, n_features: int) -> np.ndarray:
     return mask
 
 
+def _proxy_matrix_is_numeric(X: Any) -> bool:
+    """Whether ``store_proxies=True`` could convert ``X`` to its float matrix.
+
+    NumPy integer, boolean and float columns always convert; any other
+    column (categorical, string, object) is tried the way the proxy payload
+    converts it.  Only called when ``store_proxies`` is off, so the view of
+    that fit can say whether a ``store_proxies=True`` refit on this ``X``
+    would work.
+    """
+    dtypes = list(X.dtypes) if isinstance(X, pd.DataFrame) else [np.asarray(X).dtype]
+    if all(isinstance(dtype, np.dtype) and dtype.kind in "biuf" for dtype in dtypes):
+        return True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            np.asarray(X, dtype=np.float64)
+    except (TypeError, ValueError, ArithmeticError):
+        # ArithmeticError covers an int beyond float range (OverflowError)
+        # and a signaling-NaN Decimal (InvalidOperation); the payload's own
+        # conversion fails on those too. This check only shapes a message, so
+        # it must never fail the fit.
+        return False
+    return True
+
+
 def _spawn_resample_rngs(random_state: int, n_resamples: int) -> list[np.random.Generator]:
     sequence = np.random.SeedSequence(int(random_state))
     return [np.random.default_rng(child) for child in sequence.spawn(int(n_resamples))]
@@ -439,8 +498,10 @@ class Stabilized(SelectorMixin, BaseEstimator):
 
     ``aggregation="evalues"`` is valid only for a ``KnockoffSelector`` base.
     It reuses that class's native full-data ``n_draws`` /
-    ``aggregation="evalues"`` path. It does not average e-values across
-    bootstrap datasets and does not claim FDR for frequency voting.
+    ``aggregation="evalues"`` path, seeded by the base's own integer
+    ``random_state`` (no seed is derived for a ``None`` base there). It does
+    not average e-values across bootstrap datasets and does not claim FDR for
+    frequency voting.
 
     Parameters
     ----------
@@ -475,7 +536,8 @@ class Stabilized(SelectorMixin, BaseEstimator):
         If True, retain the rank-Gaussian candidate-by-selected correlation
         block and, in frequency mode, per-resample boolean indicators for
         ``SelectionView`` proxy/cluster reports. Storage is capped; X is not
-        retained. Default False.
+        retained. The block is computed on the raw ``X``, so every column must
+        be numeric: encode categorical columns before fitting. Default False.
     output_order : {"legacy", "original"}, default="original"
         Transform order. ``"legacy"`` is descending frequency then original
         index in frequency mode, or the base discovery order for e-values.
@@ -756,6 +818,10 @@ class Stabilized(SelectorMixin, BaseEstimator):
 
         if self.store_proxies:
             self._store_proxy_payload(X, sample_weight)
+        else:
+            # Proxies are computed on this raw matrix, so the view can tell
+            # whether a store_proxies=True refit on the same X would work.
+            self._proxy_input_numeric_ = _proxy_matrix_is_numeric(X)
         self._fit_configured_options_ = self._snapshot_fit_configuration()
         return self
 
@@ -920,6 +986,14 @@ class Stabilized(SelectorMixin, BaseEstimator):
                 "remain 'moving'"
             )
         base_seed = getattr(self.selector, "random_state", _EVALUE_DEFAULT_RANDOM_STATE)
+        if not isinstance(base_seed, (int, np.integer, np.bool_)):
+            # Frequency mode derives seeds for an unset base parameter; this
+            # mode runs the base once and never touches its parameters.
+            raise ValueError(
+                "aggregation='evalues' seeds the knockoff draws from "
+                "KnockoffSelector.random_state, which must be an integer, got "
+                f"{base_seed!r}; set KnockoffSelector(random_state=0) or another int"
+            )
         if (
             int(self.random_state) != _EVALUE_DEFAULT_RANDOM_STATE
             and int(self.random_state) != int(base_seed)
@@ -1264,10 +1338,22 @@ class Stabilized(SelectorMixin, BaseEstimator):
         )
         selected = [int(i) for i in np.asarray(self.selected_indices_)]
         varying_raw = np.flatnonzero(varying).astype(np.int64)
+        constant_selected = [pos for pos in selected if not bool(varying[pos])]
+        # Only a constant column inside a declared multi-member block can have
+        # been forced in by that block; otherwise the remedy is the column.
+        blocks_in_play = bool(constant_selected) and bool(
+            set(constant_selected)
+            & _declared_block_members(
+                self.selector,
+                list(self.feature_names_in_),
+                named=isinstance(X, pd.DataFrame),
+            )
+        )
         reject_unavailable_proxy_positions(
             selected,
             available_original=varying_raw,
             feature_names=self.feature_names_in_,
+            blocks_in_play=blocks_in_play,
         )
         candidate_raw = sorted(set(varying_raw.tolist()) | set(selected))
         _check_storage_size(len(candidate_raw), len(selected))
@@ -1311,6 +1397,7 @@ class Stabilized(SelectorMixin, BaseEstimator):
             "_n_rows_original_",
             "_n_rows_used_",
             "_proxy_correlations",
+            "_proxy_input_numeric_",
             "_resample_row_counts_",
             "_resample_fit_policy_",
             "_resample_fitted_row_counts_",

@@ -91,6 +91,13 @@ def test_committed_runtime_evidence_and_documented_table_are_bound() -> None:
     assert provenance["git"]["commit"] in doc
 
 
+def test_package_versions_record_the_measured_sift_source() -> None:
+    import sift
+
+    assert sift.__file__ == str(ROOT / "sift" / "__init__.py")
+    assert runtime._package_versions()["sift-feature-selection"] == sift.__version__
+
+
 def test_worker_executes_a_seeded_selector_twice_with_one_fingerprint() -> None:
     measurement = runtime._measure_worker(
         method="mrmr_classic",

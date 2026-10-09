@@ -52,8 +52,10 @@ ran the selection.
     entry carries is dropped: it embeds the OS user name.  Empty list when
     threadpoolctl cannot inspect the process.
 ``git_commit`` : str or None
-    40-character commit of the tree the installed package lives in; ``None``
-    outside a git checkout or when git is unavailable.
+    40-character HEAD commit of the git checkout (or linked worktree) that
+    tracks the installed package directory.  ``None`` when no repository
+    tracks it -- a non-git install, or a copy installed into a virtualenv
+    inside some other project's checkout -- or when git is unavailable.
 ``git_commit_source`` : str
     Always ``"sift_package"``: the commit is resolved from the package
     directory, never from the caller's working directory.
@@ -133,6 +135,7 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import os
 import platform
 import subprocess
 from datetime import timedelta
@@ -236,6 +239,11 @@ _DESCRIPTOR_STATUSES = {
 # Twelve levels of nested estimators stay well inside this budget.
 _MAX_NESTING = 32
 _CAPTURED_AT_VALUES = ("selection", "compare", "export", "unknown")
+#: Private attribute on a result object holding the JSON-safe run record a
+#: selection attached for the manifest (``evaluate_feature_path``,
+#: ``catboost_select``).  It is not a dataclass field, so the public fields,
+#: equality and repr are unchanged; a hand-assembled result has none.
+RUN_PROVENANCE_ATTR = "_run_provenance"
 # Each ``threadpool_info()`` entry also carries an absolute ``filepath`` to the
 # loaded shared library, which commonly embeds the OS user name.  Only these
 # identity fields are exported.
@@ -378,22 +386,57 @@ def _module_version(module_name: str) -> str | None:
     return None if version is None else str(version)
 
 
-def _sift_source_root() -> Path:
+def _sift_package_dir() -> Path:
     import sift
 
-    path = Path(sift.__file__).resolve().parent
-    for candidate in (path, *path.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return path
+    return Path(sift.__file__).resolve().parent
+
+
+#: The repository-local variables git exports to hooks and subcommands (what
+#: ``git rev-parse --local-env-vars`` prints), less its configuration
+#: variables.  Inherited from the caller, an absolute ``GIT_DIR`` would point
+#: every command at that repository, with the package directory as its work
+#: tree.  ``GIT_CONFIG_PARAMETERS`` / ``GIT_CONFIG_COUNT`` (``git -c`` and the
+#: ``GIT_CONFIG_KEY_<n>`` pairs) never select a repository and are how a
+#: container supplies ``safe.directory``, so they pass through, as git itself
+#: keeps them when it runs a command in a submodule; ``GIT_CONFIG`` is read only
+#: by ``git config``.
+_GIT_LOCAL_ENV_VARS = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    }
+)
 
 
 def _git(*args: str) -> str | None:
-    """Run a short read-only git command in the package tree, or give up."""
+    """Run a short read-only git command in the package directory, or give up.
+
+    git itself finds the enclosing repository, including the ``.git`` file of
+    a linked worktree or submodule.  Repository-selecting variables in the
+    caller's environment (``GIT_DIR`` and friends) are dropped so that
+    discovery always starts from the package directory.
+    """
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_LOCAL_ENV_VARS
+    }
     try:
         proc = subprocess.run(
             ["git", "--no-optional-locks", *args],
-            cwd=str(_sift_source_root()),
+            cwd=str(_sift_package_dir()),
+            env=env,
             capture_output=True,
             text=True,
             timeout=2,
@@ -406,31 +449,43 @@ def _git(*args: str) -> str | None:
     return proc.stdout
 
 
-def _git_commit() -> str | None:
+def _git_state() -> dict[str, Any]:
+    """HEAD commit and dirty flag of the checkout that tracks the package.
+
+    Both are ``None`` unless the enclosing repository tracks at least one
+    file under the installed package directory.  A copy installed into a
+    virtualenv inside some other project's checkout sits under that
+    project's ``.git`` (usually git-ignored) without being part of its
+    history, so that project's HEAD says nothing about the sift source.
+    Only the package directory is inspected for changes, so unrelated edits
+    elsewhere in the repository do not flag the run.
+    """
+    unavailable: dict[str, Any] = {"git_commit": None, "git_dirty": None}
+    package_dir = str(_sift_package_dir())
+    tracked = _git("ls-files", "--", package_dir)
+    if not tracked or not tracked.strip():
+        return unavailable
     output = _git("rev-parse", "HEAD")
-    if output is None:
-        return None
-    commit = output.strip()
-    if len(commit) == 40 and all(char in "0123456789abcdef" for char in commit):
-        return commit
-    return None
+    commit = "" if output is None else output.strip()
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        return unavailable
+    # An explicit mode, so a status.showUntrackedFiles=no setting cannot
+    # hide a new module in the package.
+    status = _git("status", "--porcelain", "--untracked-files=normal", "--", package_dir)
+    return {
+        "git_commit": commit,
+        "git_dirty": None if status is None else bool(status.strip()),
+    }
 
 
 def _git_dirty() -> bool | None:
     """Whether the installed package directory has uncommitted changes.
 
-    ``None`` when sift does not run from a git checkout, when git is missing,
-    or when the command fails for any other reason.  Only the package
-    directory is inspected, so unrelated edits elsewhere in the repository do
-    not flag the run.
+    ``None`` when no git checkout tracks the package directory (see
+    ``_git_state``), when git is missing, or when the command fails for any
+    other reason.
     """
-    import sift
-
-    package_dir = Path(sift.__file__).resolve().parent
-    output = _git("status", "--porcelain", "--", str(package_dir))
-    if output is None:
-        return None
-    return bool(output.strip())
+    return _git_state()["git_dirty"]
 
 
 def _blas_identity() -> list[dict[str, Any]]:
@@ -451,6 +506,7 @@ def _blas_identity() -> list[dict[str, Any]]:
 def _export_environment() -> dict[str, Any]:
     import sift
 
+    git = _git_state()
     return {
         "captured_at": "export",
         "sift": str(sift.__version__),
@@ -463,9 +519,9 @@ def _export_environment() -> dict[str, Any]:
         "numba": _module_version("numba"),
         "threadpoolctl": _module_version("threadpoolctl"),
         "blas": _blas_identity(),
-        "git_commit": _git_commit(),
+        "git_commit": git["git_commit"],
         "git_commit_source": "sift_package",
-        "git_dirty": _git_dirty(),
+        "git_dirty": git["git_dirty"],
     }
 
 
@@ -951,6 +1007,30 @@ def _context_hash(value: Any, *, label: str, n_rows: int | None) -> str:
     else:
         digest.update(np.ascontiguousarray(array).tobytes())
     return digest.hexdigest()
+
+
+def row_context_digest(values: Any, *, label: str, n_rows: int) -> Any:
+    """Digest run-shaping row metadata (``time``, ``event_end``) for a run record.
+
+    ``None`` when the values were not supplied.  A single column (an
+    ``(n, 1)`` array or a one-column DataFrame) is the 1-D values it holds,
+    as for the fold construction, and gets the same digest.  Values without
+    a deterministic token (a pandas ``Interval``, say) give an opaque marker
+    instead of failing the selection that is being recorded.
+    """
+    if values is None:
+        return None
+    if isinstance(values, pd.DataFrame):
+        if values.shape[1] == 1:
+            values = values.iloc[:, 0]
+    elif not isinstance(values, (pd.Series, pd.Index)):
+        array = np.asarray(values)
+        if array.ndim == 2 and array.shape[1] == 1:
+            values = array[:, 0]
+    try:
+        return _context_hash(values, label=label, n_rows=int(n_rows))
+    except TypeError:
+        return {"status": "opaque", "reason": "no_deterministic_token"}
 
 
 def _context_input_fields(

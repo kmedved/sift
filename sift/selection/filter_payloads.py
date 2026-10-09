@@ -82,8 +82,10 @@ from sift.selection.filter_auto_k import (
     select_gaussian_xfit_objective_path,
 )
 from sift.selection.conditioning import (
+    UnusableIncludeError,
     compose_selected,
     conditioning_record,
+    no_variation_include_template,
     require_supported_auto_k,
 )
 from sift.selection.loops import jmi_select, mrmr_select
@@ -114,7 +116,7 @@ class ClassicPrepared:
     X_pre_within: np.ndarray | None = None
     y_pre_within: np.ndarray | None = None
     groups_sub: np.ndarray | None = None
-    within_two_way_iterations: int | None = None
+    within_two_way: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,21 @@ GaussianMethod = Callable[["FilterContext"], str]
 GaussianRunner = Callable[..., tuple[list[str], list[int], pd.DataFrame, dict]]
 
 
+def _run_classic_path(
+    path_func: ClassicPath, ctx: "FilterContext", prep: ClassicPrepared, k: int, top_m: int
+) -> np.ndarray:
+    try:
+        return path_func(ctx, prep, k, top_m)
+    except UnusableIncludeError as exc:
+        # The classic loops report positions of prep.X_arr, in block order
+        # when one-hot blocks are present. Name the columns, in the caller's
+        # include order.
+        rank = {int(position): r for r, position in enumerate(_include_indices(ctx))}
+        positions = sorted(exc.columns, key=lambda position: rank.get(int(position), len(rank)))
+        names = dict.fromkeys(prep.feature_names[int(position)] for position in positions)
+        raise UnusableIncludeError(no_variation_include_template(), list(names)) from None
+
+
 def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], SelectionPayload]:
     def fixed_classic(ctx: "FilterContext") -> SelectionPayload:
         prep = _prepare_xy_classic(ctx)
@@ -144,7 +161,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 f"{ctx.spec.display_name} classic: selecting {k} features from "
                 f"{prep.X_arr.shape[1]} (top_m={top_m})"
             )
-        selected_idx = path_func(ctx, prep, k, top_m)
+        selected_idx = _run_classic_path(path_func, ctx, prep, k, top_m)
         selected_idx, selected = _compose_classic_selection(ctx, prep, selected_idx)
         ranking = None
         diagnostics = None
@@ -184,8 +201,7 @@ def make_fixed_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Se
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
-                {"within_two_way_iterations": prep.within_two_way_iterations}
-                if prep.within_two_way_iterations is not None else None,
+                prep.within_two_way,
             ),
         )
 
@@ -203,7 +219,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 f"{ctx.spec.display_name} classic auto-k: building path to {max_k} "
                 f"features (top_m={top_m})"
             )
-        path_idx = path_func(ctx, prep, max_k, top_m)
+        path_idx = _run_classic_path(path_func, ctx, prep, max_k, top_m)
         X_eval = (
             ctx.request.X
             if isinstance(ctx.request.X, pd.DataFrame)
@@ -292,8 +308,7 @@ def make_auto_classic(path_func: ClassicPath) -> Callable[["FilterContext"], Sel
                 prep.target_cv_metadata,
                 _row_run_extra(ctx, prep.row_idx),
                 _classic_cache_run_extra(ctx),
-                {"within_two_way_iterations": prep.within_two_way_iterations}
-                if prep.within_two_way_iterations is not None else None,
+                prep.within_two_way,
             ),
         )
 
@@ -1163,6 +1178,15 @@ def _multi_target_run_extra(cache: FeatureCache, y) -> dict:
     return result_target_metadata(n_targets, target_condition=cond)
 
 
+def _two_way_metadata(fitted) -> dict:
+    """Result metadata for the path-building two-way demeaning fit."""
+    return {
+        "within_two_way_iterations": int(fitted.n_iterations),
+        "within_two_way_converged": bool(fitted.converged),
+        "within_two_way_max_residual": float(fitted.max_residual),
+    }
+
+
 def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
     n_used = int(np.asarray(cache.row_idx).reshape(-1).size)
     extra = {
@@ -1175,9 +1199,9 @@ def _cache_run_extra(cache: FeatureCache, *, prebuilt: bool) -> dict:
         extra["feature_names_are_synthetic"] = bool(
             getattr(cache, "feature_names_are_synthetic", False)
         )
-    within_iterations = getattr(cache, "_within_two_way_iterations", None)
-    if within_iterations is not None:
-        extra["within_two_way_iterations"] = int(within_iterations)
+    within_two_way = getattr(cache, "_within_two_way", None)
+    if within_two_way is not None:
+        extra.update(within_two_way)
     return extra
 
 
@@ -1219,16 +1243,8 @@ def _cache_for_gaussian(
     y_sel = ctx.request.y
     X_pre = ctx.request.X
     if ctx.request.cache is not None:
-        if (
-            _kw(ctx, "cat_encoding", "none")
-            in {"target_cv", "onehot", "ordinal", "frequency"}
-            and cat_features
-        ):
-            raise ValueError(
-                f"cat_encoding={_kw(ctx, 'cat_encoding')!r} cannot be combined "
-                "with a prebuilt Gaussian cache because the cache has no "
-                "encoding provenance"
-            )
+        # _validate_request_cache already rejected any encoding with a column
+        # to encode; what reaches here is inert.
         return (
             ctx.request.cache,
             cat_features,
@@ -1262,7 +1278,7 @@ def _cache_for_gaussian(
     ):
         effective_weight = ctx.request.sample_weight
     X_pre = X_encoded
-    within_iterations = None
+    within_two_way = None
     if ctx.within is not None:
         X_arr, template = as_float_feature_matrix(X_encoded)
         y_arr = to_numpy(ctx.request.y, dtype=np.float64).ravel()
@@ -1281,7 +1297,7 @@ def _cache_for_gaussian(
             weights,
         )
         if ctx.within == "two_way":
-            within_iterations = int(_fitted.n_iterations)
+            within_two_way = _two_way_metadata(_fitted)
         X_encoded = restore_feature_matrix(template, X_arr)
         y_sel = y_arr
         positive = weights > 0.0
@@ -1299,10 +1315,8 @@ def _cache_for_gaussian(
         rank_backend=ctx.rank_backend,
     )
     cache._built_for_filter_call = True
-    if within_iterations is not None:
-        cache._within_two_way_iterations = within_iterations
-    if ctx.onehot_parents is not None:
-        cache._raw_name_by_encoded = dict(zip(ctx.feature_names, ctx.onehot_parents))
+    if within_two_way is not None:
+        cache._within_two_way = within_two_way
     return (
         cache,
         cat_features,
@@ -1467,12 +1481,6 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     if cache is not None:
         if not is_classic_cache(cache):
             raise ValueError("cache is supported only with estimator='gaussian'")
-        encoding = _kw(ctx, "cat_encoding", "none")
-        if encoding not in (None, "none"):
-            raise ValueError(
-                f"cat_encoding={encoding!r} cannot be combined with a prebuilt "
-                "classic cache because the cache has no encoding provenance"
-            )
         y_arr = validate_target(
             ctx.request.y,
             ctx.request.task,
@@ -1556,7 +1564,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
     X_pre_within = None
     y_pre_within = None
     groups_sub = None
-    within_iterations = None
+    within_two_way = None
     if ctx.within is not None:
         X_pre_within = np.array(X_arr, dtype=np.float64, copy=True)
         y_pre_within = np.array(y_arr, dtype=np.float64, copy=True)
@@ -1571,7 +1579,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
             w,
         )
         if ctx.within == "two_way":
-            within_iterations = int(_fitted.n_iterations)
+            within_two_way = _two_way_metadata(_fitted)
         positive = np.asarray(w, dtype=np.float64) > 0.0
         if np.any(positive) and not np.any(np.ptp(X_arr[positive], axis=0) > 0.0):
             raise ValueError(
@@ -1590,7 +1598,7 @@ def _prepare_xy_classic(ctx: "FilterContext") -> ClassicPrepared:
         X_pre_within,
         y_pre_within,
         groups_sub,
-        within_iterations,
+        within_two_way,
     )
 
 

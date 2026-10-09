@@ -8,7 +8,10 @@ Public exports and one-hot behavior are unchanged.
 
 from __future__ import annotations
 
+import numbers
 from datetime import date, datetime, timedelta
+from decimal import Decimal
+from fractions import Fraction
 from typing import Any, List, Literal
 
 import numpy as np
@@ -17,7 +20,10 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 from sift._preprocess import (
+    _DAY_NS,
+    _UNIT_NS,
     _fitted_level_identity,
+    _level_sort_text,
     _onehot_level_identity,
     ensure_weights,
     require_unique_encoding_columns,
@@ -86,29 +92,111 @@ def _positive_mass(series: pd.Series, weights: np.ndarray) -> dict[tuple, float]
     return mass
 
 
-def _datetime_like_value(value: Any) -> tuple[int, int] | None:
-    """``(sub-kind, nanoseconds)`` for datetime-like/timedelta-like values."""
-    if isinstance(value, (datetime, date, np.datetime64)):
-        stamp, sub_kind = pd.Timestamp, 0
-    elif isinstance(value, (timedelta, np.timedelta64)):
-        stamp, sub_kind = pd.Timedelta, 1
-    else:
-        return None
+_EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
+_MICROSECOND = timedelta(microseconds=1)
+# A calendar duration (years, months) has no fixed length; numpy converts one
+# at the average Gregorian month of 365.2425 / 12 days.
+_MONTH_NS = 2_629_746 * 10**9
+_DAYS_BEFORE_MONTH = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+
+def _days_from_epoch(year: int, month: int) -> int:
+    """Days from 1970-01-01 to the first of ``month``, for any integer year.
+
+    Proleptic Gregorian with a year 0, as numpy counts, so it also covers the
+    years ``datetime`` cannot hold.
+    """
+    before = year - 1
+    days = before * 365 + before // 4 - before // 100 + before // 400
+    days += _DAYS_BEFORE_MONTH[month - 1]
+    if month > 2 and year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
+        days += 1
+    return days + 1 - _EPOCH_ORDINAL
+
+
+def _numpy_nanoseconds(value: np.datetime64 | np.timedelta64) -> int | Fraction | None:
+    """Exact nanoseconds of a numpy scalar in any unit, with no int64 overflow."""
+    unit, count = np.datetime_data(value.dtype)
+    steps = int(value.astype(np.int64)) * count
+    if unit in ("Y", "M"):
+        months = steps * 12 if unit == "Y" else steps
+        if isinstance(value, np.timedelta64):
+            return months * _MONTH_NS
+        years, month = divmod(months, 12)
+        return _days_from_epoch(1970 + years, month + 1) * _DAY_NS
+    factor = _UNIT_NS.get(unit)
+    return None if factor is None else steps * factor
+
+
+def _datetime_like_value(value: Any) -> tuple[int, int | Fraction] | None:
+    """``(sub-kind, nanoseconds)`` for datetime-like/timedelta-like values.
+
+    Exact integer arithmetic, so no year or duration is out of range: pandas'
+    nanosecond range, ``datetime``'s years 1-9999 and numpy's int64 ticks all
+    stop mattering. Instants are counted from the epoch, and an aware value
+    counts its UTC instant, as ``pd.Timestamp.value`` does wherever it exists.
+    """
     try:
-        return sub_kind, int(stamp(value).value)
+        if isinstance(value, (pd.Timestamp, pd.Timedelta)):
+            # Its own unit and, for an aware stamp, its UTC instant.
+            value = value.asm8
+        if isinstance(value, (np.datetime64, np.timedelta64)):
+            nanoseconds = _numpy_nanoseconds(value)
+            if nanoseconds is None:
+                return None
+            return (0 if isinstance(value, np.datetime64) else 1), nanoseconds
+        if isinstance(value, datetime):
+            naive = value.replace(tzinfo=None)
+            seconds = (naive.toordinal() - _EPOCH_ORDINAL) * 86_400 + (
+                naive.hour * 3_600 + naive.minute * 60 + naive.second
+            )
+            micros = seconds * 10**6 + naive.microsecond
+            offset = value.utcoffset()
+            if offset is not None:
+                micros -= offset // _MICROSECOND
+            return 0, micros * 1_000
+        if isinstance(value, date):
+            return 0, (value.toordinal() - _EPOCH_ORDINAL) * _DAY_NS
+        if isinstance(value, timedelta):
+            return 1, (value // _MICROSECOND) * 1_000
     except (TypeError, ValueError, OverflowError):
         return None
+    return None
+
+
+def _real_value(value: Any) -> Any | None:
+    """Exactly comparable value of a real number outside the int/float kinds.
+
+    ``Decimal`` (not registered as ``numbers.Real``) and rationals such as
+    ``Fraction`` compare exactly with ints and floats; any other real type is
+    compared through ``float``. A NaN has no place in the order.
+    """
+    try:
+        if isinstance(value, Decimal):
+            return None if value.is_nan() else value
+        if isinstance(value, numbers.Rational):
+            return Fraction(value.numerator, value.denominator)
+        if isinstance(value, numbers.Real):
+            as_float = float(value)
+            return None if np.isnan(as_float) else as_float
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
+        return None
+    return None
 
 
 def _natural_order_key(identity: tuple) -> tuple:
     """Sort key ordering one level the way its kind is normally ordered.
 
     Kinds rank bool < numeric < datetime-like < str < bytes < everything else,
-    so the key stays total across mixed columns. Integers and floats share the
-    numeric rank and compare by value (exactly, without a float cast), with the
-    integer first when both are numerically equal. The trailing ``repr`` only
-    breaks ties between identities a kind cannot separate, for example two
-    timestamps that denote the same instant in different time zones.
+    so the key stays total across mixed columns. Integers, floats and other
+    real numbers (``Decimal``, ``Fraction``) share the numeric rank and compare
+    by value (exactly, without a float cast); numerically equal levels order
+    int, then float, then the other real types. Datetime-likes compare by
+    instant and durations by length, exactly and at any magnitude, with every
+    datetime before every duration; a calendar duration counts numpy's
+    average month. The trailing ``repr`` only breaks ties between identities
+    a kind cannot separate, for example two timestamps that denote the same
+    instant in different time zones.
     """
     kind = identity[0]
     if kind == "bool":
@@ -119,13 +207,21 @@ def _natural_order_key(identity: tuple) -> tuple:
         primary = (3, identity[1])
     elif kind == "bytes":
         primary = (4, identity[1])
+    elif kind == "duration":
+        primary = (2, 1, identity[1])
+    elif kind == "calendar_duration":
+        primary = (2, 1, identity[1] * _MONTH_NS)
     else:
+        # Datetime-likes first: numpy registers np.timedelta64 as an integer.
         moment = _datetime_like_value(identity[2])
-        if moment is None:
-            primary = (5, identity[1])
-        else:
+        real = None if moment is not None else _real_value(identity[2])
+        if moment is not None:
             primary = (2,) + moment
-    return primary + (repr(identity),)
+        elif real is not None:
+            primary = (1, real, 2)
+        else:
+            primary = (5, identity[1])
+    return primary + (_level_sort_text(identity),)
 
 
 def _declared_order(series: pd.Series) -> dict[tuple, int] | None:
@@ -163,12 +259,17 @@ class UnsupervisedCatEncoder(BaseEstimator, TransformerMixin):
     with any strictly positive weight is kept, however small). Identities reuse
     one-hot level identity (missing is ``("missing",)`` when observed in that
     positive-weight mass), so ``1``, ``1.0``, ``"1"`` and ``True`` stay four
-    levels. Declared-but-unobserved pandas Categorical levels are ignored.
+    levels. Equal durations are one level in any unit (a ``np.timedelta64``
+    shares the level of the ``pd.Timedelta`` a typed column holds; years and
+    months count as months), while a ``np.datetime64`` is a level of its own
+    unit. Declared-but-unobserved pandas Categorical levels are ignored.
 
     Ordinal codes are ``0..C-1`` in natural level order, independent of row
     order: an ordered Categorical uses its declared category order, otherwise
-    levels group by kind as bool < numeric (ints and floats by value) <
-    datetime-like < str < bytes < everything else (by type name and ``repr``).
+    levels group by kind as bool < numeric (ints, floats, ``Decimal`` and
+    ``Fraction`` by value) < datetime-like (datetimes by instant, then
+    durations by length, exactly at any magnitude) < str < bytes <
+    everything else (by type name and ``repr``).
     Missing, when fitted, always takes the last code. Ordinal unknown is
     ``-1``; frequency unknown is ``0``. Frequency values are the level's share
     of positive training mass (scale-invariant), so equal-mass levels share one

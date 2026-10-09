@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression
 from sift import (
     AutoKConfig,
     CEFSPlusSelector,
+    MRMRSelector,
     build_cache,
     evaluate_feature_path,
     select_cached,
@@ -286,6 +287,36 @@ def test_unsupported_2d_combinations_are_rejected():
         select_fdr(X, Y, q=0.2)
 
 
+# "target" needs the optional category_encoders only once the target is valid.
+@pytest.mark.parametrize("encoding", ["target_cv", "loo_logit", "target"])
+@pytest.mark.parametrize("k", [2, "auto"])
+def test_selector_classes_reject_2d_y_with_the_function_api_message(encoding, k):
+    X, Y = _shared_signal_frame()
+    labeled = X.copy()
+    labeled["city"] = np.array(["a", "b", "c", "d"])[np.arange(len(X)) % 4]
+    with pytest.raises(ValueError) as function_error:
+        select_cefsplus(
+            labeled, Y, k=k, cat_encoding=encoding,
+            allow_full_data_target_encoding=encoding != "target_cv", verbose=False,
+        )
+    # The wrapper used to fit the encoder on the flattened 2-D y first
+    # ("X has 240 rows but y has 480").
+    with pytest.raises(ValueError) as wrapper_error:
+        CEFSPlusSelector(k=k, cat_encoding=encoding, verbose=False).fit(labeled, Y)
+    assert str(wrapper_error.value) == str(function_error.value) == (
+        f"2-D y is not supported with supervised cat_encoding={encoding!r}; use "
+        "'none', 'onehot', 'ordinal', or 'frequency', or encode first"
+    )
+    with pytest.raises(ValueError) as wrapper_error:
+        MRMRSelector(
+            k=2, estimator="gaussian", cat_encoding=encoding, verbose=False
+        ).fit(labeled, Y)
+    assert str(wrapper_error.value) == (
+        "2-D y is only supported for select_cefsplus / CEFSPlusSelector and "
+        "select_cached(method='cefsplus'); got selector='mrmr'"
+    )
+
+
 def test_select_k_auto_keeps_string_classification_labels():
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.normal(size=(200, 6)), columns=[f"f{i}" for i in range(6)])
@@ -526,15 +557,42 @@ def test_multi_target_penalized_curve_uses_q_times_k_dimensions(penalty):
     assert result.diagnostics_["auto_k"]["selected_k"] == chosen
 
 
-@pytest.mark.parametrize("encoding", ["ordinal", "frequency"])
-def test_multi_target_accepts_target_blind_numeric_encoding(encoding):
-    X, Y = _shared_signal_frame(n=120, p=6, q=2, seed=93)
-    X["category"] = np.where(X["f0"] > 0, "high", "low")
-    selected = select_cefsplus(
-        X, Y, 2, cat_features=["category"], cat_encoding=encoding,
-        verbose=False,
+@pytest.mark.parametrize(
+    ("encoding", "codes", "expected"),
+    [
+        # String order a < b < c keeps the symmetric effect monotone ...
+        ("ordinal", {"a": 0.0, "b": 1.0, "c": 2.0}, ["category", "f0"]),
+        # ... while equal-mass a and c share one frequency, which erases it.
+        ("frequency", {"a": 0.25, "b": 0.5, "c": 0.25}, ["f0", "f1"]),
+    ],
+)
+def test_multi_target_accepts_target_blind_numeric_encoding(encoding, codes, expected):
+    rng = np.random.default_rng(93)
+    n = 120
+    X = pd.DataFrame(rng.normal(size=(n, 4)), columns=[f"f{i}" for i in range(4)])
+    levels = np.array(["a"] * 30 + ["b"] * 60 + ["c"] * 30, dtype=object)
+    rng.shuffle(levels)
+    X["category"] = levels
+    effect = pd.Series(levels).map({"a": -1.5, "b": 0.0, "c": 1.5}).to_numpy()
+    Y = np.column_stack(
+        [
+            effect + 0.5 * X["f0"] + 0.3 * rng.normal(size=n),
+            effect + 0.5 * X["f1"] + 0.3 * rng.normal(size=n),
+        ]
     )
-    assert len(selected) == 2
+    encoded = select_cefsplus(
+        X, Y, 2, cat_features=["category"], cat_encoding=encoding,
+        verbose=False, return_result=True,
+    )
+    assert encoded.selected_features == expected
+    # The joint 2-D path saw exactly the hand-encoded column.
+    by_hand = X.assign(category=X["category"].map(codes).astype(float))
+    manual = select_cefsplus(by_hand, Y, 2, verbose=False, return_result=True)
+    assert manual.selected_features == expected
+    pd.testing.assert_frame_equal(
+        encoded.ranking_[["feature", "relevance"]],
+        manual.ranking_[["feature", "relevance"]],
+    )
     with pytest.raises(ValueError, match="multi-target|2-D|supervised"):
         select_cefsplus(
             X, Y, 2, cat_features=["category"], cat_encoding="target_cv",

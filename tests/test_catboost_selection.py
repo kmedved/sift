@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import Ridge
 
-from sift import ModelSelector, catboost as cb
+from sift import ModelSelector, SelectionView, catboost as cb
 from sift.selection import orchestration as _selection_orchestration
 from sift.selection.orchestration import SelectionBackend
 
@@ -407,3 +407,150 @@ def test_choose_target_k_shortfall_warning_points_to_helper_caller():
         )
     assert (target_k, best_k) == (3, 1)
     assert Path(caught[0].filename) == Path(__file__)
+
+
+def _stubbed_catboost_manifest(monkeypatch, **overrides):
+    _stub_native_catboost(monkeypatch)
+    X = pd.DataFrame(np.arange(40, dtype=float).reshape(10, 4), columns=list("abcd"))
+    y = pd.Series(np.arange(10, dtype=float))
+    kwargs = dict(
+        k=1,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=5,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    kwargs.update(overrides)
+    result = cb.catboost_select(X, y, **kwargs)
+    return result.reproducibility_(input_features=list(X.columns))["configuration"]
+
+
+def test_catboost_select_manifest_records_its_seed_and_options(monkeypatch):
+    from sift.selection.reproducibility import describe_splitter
+    from sklearn.model_selection import KFold
+
+    configuration = _stubbed_catboost_manifest(monkeypatch)
+    assert configuration["captured_at"] == "selection"
+    assert configuration["seeds"]["random_state"] == 5
+    assert configuration["seeds"]["available"] is True
+    configured = configuration["configured"]
+    assert configured["random_state"] == 5
+    assert configured["n_estimators"] == 10
+    assert configured["algorithm"] == "prediction"
+    assert configured["n_splits"] == 2
+    assert configured["cv"] is None
+    assert configured["time_sha256"] is None
+    assert configured["metric"] == "RMSE"
+    for data_argument in ("X", "y", "groups", "time", "sample_weight", "callback"):
+        assert data_argument not in configured
+
+    other = _stubbed_catboost_manifest(monkeypatch, random_state=6)
+    assert other["seeds"]["random_state"] == 6
+    assert other["configured"] != configured
+
+    splitter = KFold(n_splits=2, shuffle=True, random_state=4)
+    with_cv = _stubbed_catboost_manifest(monkeypatch, cv=splitter)
+    assert with_cv["configured"]["cv"] == describe_splitter(splitter)
+
+
+def test_catboost_select_manifest_reports_an_unseeded_run_honestly(monkeypatch):
+    from sift.selection.reproducibility import _context_hash
+
+    configuration = _stubbed_catboost_manifest(monkeypatch, random_state=None)
+    assert configuration["captured_at"] == "selection"
+    assert configuration["configured"]["random_state"] is None
+    assert configuration["seeds"]["random_state"] is None
+    assert configuration["seeds"]["available"] is False
+
+    time = np.arange(10)[::-1]
+    timed = _stubbed_catboost_manifest(monkeypatch, time=time)
+    assert timed["configured"]["time_sha256"] == _context_hash(
+        time, label="time", n_rows=10
+    )
+
+
+def test_catboost_manifest_gives_untokenizable_labels_a_null_columns_hash(monkeypatch):
+    from sift import select_cefsplus
+
+    columns = pd.interval_range(0, 4)
+    first, third = columns[0], columns[2]
+    _stub_native_catboost(
+        monkeypatch,
+        scores={2: [0.2, 0.3]},
+        paths={2: [[first, third], [first, third]]},
+        prefilter=[first, third],
+    )
+    X = pd.DataFrame(np.arange(40, dtype=float).reshape(10, 4), columns=columns)
+    y = pd.Series(np.arange(10, dtype=float))
+    result = cb.catboost_select(
+        X,
+        y,
+        k=2,
+        algorithm="prediction",
+        prefilter_k=None,
+        n_splits=2,
+        n_estimators=10,
+        random_state=5,
+        verbose=False,
+        train_early_stopping_rounds=3,
+        n_jobs=1,
+    )
+    assert result.selected_features == [first, third]
+
+    # Interval labels have no deterministic token: the filter views record a
+    # null column hash, and the CatBoost adapter now does the same.
+    rng = np.random.default_rng(0)
+    X_filter = pd.DataFrame(rng.normal(size=(60, 4)), columns=columns)
+    y_filter = X_filter[first] + 0.1 * rng.normal(size=60)
+    filter_manifest = select_cefsplus(
+        X_filter, y_filter, k=2, verbose=False, return_result=True
+    ).reproducibility_()
+    assert filter_manifest["input"]["columns_hash"] is None
+    manifest = result.reproducibility_(input_features=list(X.columns))
+    assert manifest["input"]["columns_hash"] is None
+    assert manifest["configuration"]["captured_at"] == "selection"
+    assert result.reproducibility_()["input"]["columns_hash"] is None
+
+    # Features are still matched to input positions, by equality.
+    view = result.result_view(input_features=list(X.columns))
+    assert view.indices == [0, 2]
+    assert view.table["selected"].tolist() == [True, False, True, False]
+    assert result.result_view(input_features=list(pd.interval_range(0, 4))).indices == [0, 2]
+    with pytest.raises(ValueError) as excinfo:
+        result.result_view(input_features=list(pd.interval_range(1, 5)))
+    assert str(excinfo.value) == (
+        "CatBoost feature Interval(0, 1, closed='right') is missing or ambiguous "
+        "in input_features"
+    )
+
+    # Without input_features the view pairs the table's selected rows with
+    # the features by equality, since Interval labels have no token.
+    unpositioned = result.result_view()
+    assert unpositioned.indices is None
+    table = unpositioned.table.loc[:, ["feature", "selected_index", "path_rank", "selected"]]
+    assert table["feature"].tolist() == [first, third]
+    assert table["selected"].tolist() == [True, True]
+
+    def rebuild(table_features, features=(first, third)):
+        return SelectionView(
+            features=list(features),
+            indices=None,
+            raw_features=None,
+            n_raw_features=None,
+            raw_table=table.assign(feature=table_features),
+        )
+
+    # The rows pair in any order, with fresh but equal Interval objects.
+    assert rebuild([pd.Interval(2, 3), pd.Interval(0, 1)]).features == [first, third]
+    # A selected row that names another label, or the same label twice,
+    # does not match the selected features.
+    for tampered in ([columns[1], third], [first, first], [third, pd.Interval(0, 1, "left")]):
+        with pytest.raises(ValueError) as excinfo:
+            rebuild(tampered)
+        assert str(excinfo.value) == (
+            "raw_table selected feature identities do not match features"
+        )

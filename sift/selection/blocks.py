@@ -34,9 +34,9 @@ Block auto-k support ledger (filter paths):
   auto-k: ``auto``, ``elbow``, ``penalized_objective``. Prefix-only
   ``evaluate``/``gaussian_cv``/``xfit_objective``/``auto`` learn dummy
   vocabulary on training folds. Nested ``evaluate`` remains the
-  selector-class path-per-fold route. Knockoffs, prebuilt caches, and
-  ``within`` panel demeaning reject one-hot. Binary Gaussian CV/xfit
-  stay unsupported.
+  selector-class path-per-fold route. Knockoffs and ``within`` panel
+  demeaning reject one-hot, and so does a prebuilt cache when there is a
+  column to encode. Binary Gaussian CV/xfit stay unsupported.
 """
 
 from __future__ import annotations

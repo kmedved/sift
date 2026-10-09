@@ -185,7 +185,23 @@ the selected raw columns. Auto-k evaluate, Gaussian CV, and xfit-objective
 fit those means on training rows only. Unseen entity levels use the training
 grand mean for the entity effect; unseen time levels add no time effect. A
 warning reports affected rows. Routes where none can be seen are
-rejected up front.
+rejected up front: `within="two_way"` validates only under
+`k_method="gaussian_cv"` or `"xfit_objective"` with `strategy="kfold"`, which
+run on the Gaussian path (`select_cefsplus`, or `estimator="gaussian"` for
+mRMR, JMI and JMIM). `within="groups"` also validates those two methods with
+`strategy="time_holdout"`, and `evaluate` with `time_holdout`, when entities
+persist across the holdout boundary. The `kfold` route still warns when every
+row of an entity or period lands in one validation fold; drop or pool such
+thin levels, or raise `AutoKConfig.xfit_folds`. When thin levels dominate, a
+whole validation fold can hold no seen level, which raises; more folds make
+that likelier, so drop or pool those levels or lower `xfit_folds`.
+
+`include`, `exclude` and `candidates` need an auto-k method that truncates the
+conditioned path, while `gaussian_cv` and `xfit_objective` rebuild an
+unconditioned one. Combined with `within`, `k="auto"` therefore works only for
+`within="groups"` with `evaluate` and `time_holdout`. Otherwise pass a fixed
+`k` (a fixed-`k` `within="groups"` call takes no `time`), or drop the
+conditioning keywords and use one of the Gaussian-path methods above.
 
 ```python
 import numpy as np
@@ -219,7 +235,10 @@ positive-mass entities, and is not on the same scale as `within_relevance`.
 Demeaning can remove all variation, including singleton-only groups; the
 result is then an empty selection or a no-within-signal error. Prebuilt
 caches, classification, datetime/timedelta columns, and non-fold auto-k
-methods are rejected rather than silently ignored.
+methods are rejected rather than silently ignored. Two-way result metadata
+reports the path-building fit as `within_two_way_iterations`,
+`within_two_way_converged`, and `within_two_way_max_residual`; a fit that
+stops at the 200-pass cap also warns.
 
 When both `groups` and `time` are supplied, stability selection uses grouped
 block bootstrap.
@@ -527,10 +546,11 @@ result = select_fdr(
 )
 ```
 
-The 0.9 default statistic remains `relevance`. The seeded public-API
-comparison that informs a possible 1.0 `ridge` default lives in the
-[knockoff statistic bakeoff](knockoff-statistic-bakeoff.md). That study is
-not a validity upgrade.
+The default statistic is `relevance`, and 1.0 kept it (settled 2026-09-21)
+after the seeded public-API comparison in the
+[knockoff statistic bakeoff](knockoff-statistic-bakeoff.md), where `ridge`
+reduced realized FDP but lost power on correlated designs. That study is not
+a validity upgrade.
 
 For `n_draws > 1`, SIFT samples multiple knockoff draws and selects features
 whose selection frequency is at least `eta`. This improves run-to-run stability

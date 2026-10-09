@@ -38,24 +38,24 @@ warm-up, and timing—not incremental selector allocation.
 <!-- runtime-scaling-table:start -->
 | workload | n | p | method | p50 s | p95 s | peak RSS MB | M cells/s | selected |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| baseline | 2,000 | 100 | `mrmr_classic` | 0.0011 | 0.0013 | 255.0 | 187.63 | 10 |
-| baseline | 2,000 | 100 | `jmi_r2` | 0.0035 | 0.0037 | 259.0 | 57.38 | 10 |
-| baseline | 2,000 | 100 | `jmim_r2` | 0.0036 | 0.0038 | 269.5 | 55.94 | 10 |
-| baseline | 2,000 | 100 | `cefsplus` | 0.0103 | 0.0108 | 264.8 | 19.38 | 10 |
-| baseline | 2,000 | 100 | `cefsplus_binary` | 0.0164 | 0.0169 | 267.5 | 12.19 | 10 |
-| baseline | 2,000 | 100 | `fdr_relevance` | 0.0131 | 0.0132 | 281.4 | 15.29 | 0 |
-| tall | 20,000 | 100 | `mrmr_classic` | 0.0071 | 0.0075 | 300.2 | 280.11 | 10 |
-| tall | 20,000 | 100 | `jmi_r2` | 0.0165 | 0.0168 | 334.0 | 121.24 | 10 |
-| tall | 20,000 | 100 | `jmim_r2` | 0.0165 | 0.0174 | 332.5 | 121.04 | 10 |
-| tall | 20,000 | 100 | `cefsplus` | 0.1166 | 0.1197 | 344.8 | 17.16 | 10 |
-| tall | 20,000 | 100 | `cefsplus_binary` | 0.1340 | 0.1358 | 372.2 | 14.92 | 10 |
-| tall | 20,000 | 100 | `fdr_relevance` | 0.1343 | 0.1354 | 493.7 | 14.89 | 0 |
-| wide | 2,000 | 500 | `mrmr_classic` | 0.0047 | 0.0051 | 356.6 | 214.93 | 10 |
-| wide | 2,000 | 500 | `jmi_r2` | 0.0078 | 0.0079 | 347.5 | 128.56 | 10 |
-| wide | 2,000 | 500 | `jmim_r2` | 0.0080 | 0.0081 | 370.1 | 125.34 | 10 |
-| wide | 2,000 | 500 | `cefsplus` | 0.0491 | 0.0498 | 362.2 | 20.38 | 10 |
-| wide | 2,000 | 500 | `cefsplus_binary` | 0.0553 | 0.0576 | 577.6 | 18.08 | 10 |
-| wide | 2,000 | 500 | `fdr_relevance` | 0.1052 | 0.1065 | 424.7 | 9.51 | 0 |
+| baseline | 2,000 | 100 | `mrmr_classic` | 0.0010 | 0.0012 | 256.5 | 202.05 | 10 |
+| baseline | 2,000 | 100 | `jmi_r2` | 0.0030 | 0.0033 | 253.6 | 66.05 | 10 |
+| baseline | 2,000 | 100 | `jmim_r2` | 0.0031 | 0.0033 | 260.4 | 63.76 | 10 |
+| baseline | 2,000 | 100 | `cefsplus` | 0.0106 | 0.0113 | 278.0 | 18.93 | 10 |
+| baseline | 2,000 | 100 | `cefsplus_binary` | 0.0149 | 0.0154 | 243.8 | 13.39 | 10 |
+| baseline | 2,000 | 100 | `fdr_relevance` | 0.0119 | 0.0121 | 261.2 | 16.76 | 0 |
+| tall | 20,000 | 100 | `mrmr_classic` | 0.0068 | 0.0070 | 302.9 | 293.99 | 10 |
+| tall | 20,000 | 100 | `jmi_r2` | 0.0151 | 0.0160 | 330.9 | 132.17 | 10 |
+| tall | 20,000 | 100 | `jmim_r2` | 0.0151 | 0.0155 | 327.3 | 132.17 | 10 |
+| tall | 20,000 | 100 | `cefsplus` | 0.1117 | 0.1171 | 358.7 | 17.90 | 10 |
+| tall | 20,000 | 100 | `cefsplus_binary` | 0.1229 | 0.1284 | 375.4 | 16.27 | 10 |
+| tall | 20,000 | 100 | `fdr_relevance` | 0.1288 | 0.1327 | 519.8 | 15.53 | 0 |
+| wide | 2,000 | 500 | `mrmr_classic` | 0.0042 | 0.0047 | 319.1 | 235.58 | 10 |
+| wide | 2,000 | 500 | `jmi_r2` | 0.0067 | 0.0073 | 298.9 | 149.34 | 10 |
+| wide | 2,000 | 500 | `jmim_r2` | 0.0067 | 0.0071 | 299.3 | 150.16 | 10 |
+| wide | 2,000 | 500 | `cefsplus` | 0.0498 | 0.0511 | 368.7 | 20.10 | 10 |
+| wide | 2,000 | 500 | `cefsplus_binary` | 0.0492 | 0.0518 | 514.2 | 20.33 | 10 |
+| wide | 2,000 | 500 | `fdr_relevance` | 0.0999 | 0.1007 | 511.5 | 10.01 | 0 |
 <!-- runtime-scaling-table:end -->
 
 On this design, classic mRMR is the fastest path. R2 JMI and JMIM cluster
@@ -91,8 +91,8 @@ contracts.
 The recorded run used CPython 3.12.7 on macOS arm64, NumPy 1.26.4, pandas
 2.2.2, scikit-learn 1.5.1, SciPy 1.13.1, Numba 0.60.0, and one OpenBLAS
 0.3.23.dev thread. It ran from clean implementation commit
-`edfa6b2b93194f0430bb177ba8f74c287ea3c717`; `dirty=false`, captured at
-`2026-09-21T21:59:33.592151+00:00` before measurement and artifact creation.
+`3bd0821d8a30353aed9dc76943224e83c4fd73da`; `dirty=false`, captured at
+`2026-10-09T21:47:38.326863+00:00` before measurement and artifact creation.
 This is clean-source local runtime evidence for 1.0.1.dev0 development source,
 not a release or CI approval. All 18 data and selection fingerprints match
 the previous reference. No SIFT tests or review runs were launched during
@@ -100,7 +100,7 @@ timing; normal desktop background activity remained. This refresh is not a
 controlled before/after speed comparison.
 
 The [CSV artifact](https://github.com/kmedved/sift/blob/main/benchmarks/results/runtime_scaling_2026-09-03.csv) is
-SHA-256 `09207f8d075dc86bf25e5e3058bde8266502db5b30a9fe610234434599b3aaea`.
+SHA-256 `92bc7fac95460ce14edd704a13598957c7d149720546bfb5fd1976b3b077abf5`.
 Its [provenance sidecar](https://github.com/kmedved/sift/blob/main/benchmarks/results/runtime_scaling_2026-09-03.provenance.json)
 binds that checksum, the command, environment, raw samples, effective options,
 data and selection fingerprints, thread-pool state, Git status, and SHA-256 for
