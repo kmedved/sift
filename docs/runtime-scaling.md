@@ -35,6 +35,11 @@ warm-up, and timing—not incremental selector allocation.
 
 ## Recorded run
 
+This table is a historical reference for commit
+`b615108f9f52c8b6d5de50894eaa87869d81d8cd`, not a measurement of SIFT 1.0.2.
+Its source hashes are checked against that Git snapshot. Later source changes
+do not update or inherit these timings; measuring them requires a new run.
+
 <!-- runtime-scaling-table:start -->
 | workload | n | p | method | p50 s | p95 s | peak RSS MB | M cells/s | selected |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |

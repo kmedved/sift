@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -78,11 +79,13 @@ def test_committed_runtime_evidence_and_documented_table_are_bound() -> None:
     assert rows == expected_rows
 
     for relative, expected_hash in provenance["source_sha256"].items():
-        # Packaging constraints do not change the measured implementation; the
-        # provenance records the actual package versions used by the run.
-        if relative == "pyproject.toml":
-            continue
-        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == expected_hash
+        # This is historical evidence for its recorded commit, not a benchmark
+        # of today's checkout. Validate the exact measured blobs, including
+        # packaging, without relabelling their hashes as new measurements.
+        measured_source = subprocess.check_output(
+            ["git", "show", f"{provenance['git']['commit']}:{relative}"], cwd=ROOT,
+        )
+        assert hashlib.sha256(measured_source).hexdigest() == expected_hash
 
     doc = DOC.read_text(encoding="utf-8")
     documented_table = doc.split(TABLE_START, 1)[1].split(TABLE_END, 1)[0]

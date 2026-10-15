@@ -34,12 +34,6 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
 
 ## Installation
 
-For wide numeric data, `build_cache(X, column_batch_size=32)` bounds temporary
-preparation arrays while preserving the default rank transform and feature
-filtering. Batches contain at least two columns when the input does; a final
-singleton joins the preceding batch to retain NumPy's reduction order.
-Reuse the cache only with targets aligned to exactly the same input rows.
-
 Install from the repository root:
 
 ```bash
@@ -1405,6 +1399,12 @@ those facts exist; data hashing is opt-in and never stores `X`. Legacy
 manually constructed results stay explicitly partial.
 
 ## Gaussian Feature Cache
+
+For wide numeric data, `build_cache(X, column_batch_size=32)` bounds temporary
+preparation arrays while preserving the default rank transform and feature
+filtering. Batches contain at least two columns when the input does; a final
+singleton joins the preceding batch to retain NumPy's reduction order.
+Reuse the cache only with targets aligned to exactly the same input rows.
 
 Use `build_cache` when selecting against many targets or comparing several
 Gaussian/cache methods on the same `X`.
