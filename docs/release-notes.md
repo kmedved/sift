@@ -8,6 +8,9 @@
   nearly constant features and imputed values.
 - Slice candidate columns before float64 conversion and check cache finiteness
   in row chunks, reducing temporary allocations without changing selection.
+- The runtime table remains historical evidence for its recorded commit, not
+  a measurement of this release. Release performance qualification requires
+  a new benchmark before publishing current-version timing claims.
 
 ## 1.0.1 (2026-10-09)
 
