@@ -225,7 +225,7 @@ def _panel_from_corr(
         R_full = np.asarray(R_all, dtype=np.float64)
         R_cand = np.ascontiguousarray(R_full[np.ix_(cand, cand)], dtype=np.float64)
     else:
-        Z_cand = np.ascontiguousarray(np.asarray(Z, dtype=np.float64)[:, cand])
+        Z_cand = np.ascontiguousarray(np.asarray(Z)[:, cand], dtype=np.float64)
         R_cand = weighted_correlation_matrix(
             Z_cand,
             np.asarray(w, dtype=np.float64),
@@ -290,7 +290,7 @@ def _panel_from_corr(
             R_full = np.asarray(R_all, dtype=np.float64)
             R_cand = np.ascontiguousarray(R_full[np.ix_(ordered, ordered)], dtype=np.float64)
         elif ordered.size:
-            Z_cand = np.ascontiguousarray(np.asarray(Z, dtype=np.float64)[:, ordered])
+            Z_cand = np.ascontiguousarray(np.asarray(Z)[:, ordered], dtype=np.float64)
             R_cand = weighted_correlation_matrix(
                 Z_cand,
                 np.asarray(w, dtype=np.float64),

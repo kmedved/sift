@@ -138,6 +138,7 @@ def build_cache(
     min_std: float = 0.0,
     n_jobs: int = 1,
     rank_backend: RankBackend = "serial",
+    column_batch_size: int | None = None,
 ) -> FeatureCache:
     """Build a feature-side copula cache.
 
@@ -194,6 +195,10 @@ def build_cache(
         the right choice for wide matrices because the sort and the normal
         quantile release the GIL; ``"processes"`` isolates workers but copies
         ``X`` into each one.
+    column_batch_size : int or None, default None
+        Prepare this many columns at a time, avoiding full-width retained-row
+        and imputation copies. The rank transform and retained rows are
+        unchanged. ``None`` keeps the original preparation path.
 
     Returns
     -------
@@ -290,22 +295,44 @@ def build_cache(
     else:
         row_idx = positive
 
-    Xs = X_arr[row_idx]
     ws = w[row_idx]
     weight_mean = float(ws.mean())
     if not np.isfinite(weight_mean) or weight_mean <= 0.0:
         raise ValueError("Subsample has zero total weight; check sample_weight/subsample.")
     ws = ws / weight_mean
-    Xs = mean_impute(Xs, copy=False)
-
-    stds = np.std(Xs, axis=0)
-    valid_mask = stds > min_std
-    valid_cols = np.where(valid_mask)[0]
-    Xs = Xs[:, valid_mask]
-    if Xs.shape[1] == 0:
-        raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
-
-    Z = weighted_rank_gauss_2d(Xs, ws, n_jobs=n_jobs, rank_backend=rank_backend)
+    if column_batch_size is None:
+        Xs = mean_impute(X_arr[row_idx], copy=False)
+        valid_mask = np.std(Xs, axis=0) > min_std
+        valid_cols = np.where(valid_mask)[0]
+        Xs = Xs[:, valid_mask]
+        if Xs.shape[1] == 0:
+            raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
+        Z = weighted_rank_gauss_2d(Xs, ws, n_jobs=n_jobs, rank_backend=rank_backend)
+    else:
+        if (isinstance(column_batch_size, (bool, np.bool_))
+                or not isinstance(column_batch_size, (int, np.integer))
+                or column_batch_size < 1):
+            raise ValueError("column_batch_size must be a positive integer or None")
+        Z = np.empty((len(row_idx), p), dtype=np.float32)
+        kept = []
+        offset = 0
+        for start in range(0, p, int(column_batch_size)):
+            stop = min(p, start + int(column_batch_size))
+            block = mean_impute(X_arr[row_idx, start:stop], copy=False)
+            valid = np.flatnonzero(np.std(block, axis=0) > min_std)
+            if valid.size:
+                scores = weighted_rank_gauss_2d(
+                    block[:, valid], ws, n_jobs=n_jobs, rank_backend=rank_backend,
+                )
+                Z[:, offset:offset + valid.size] = scores
+                offset += valid.size
+                kept.extend(start + valid)
+                del scores
+            del block
+        if not kept:
+            raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
+        valid_cols = np.asarray(kept, dtype=np.int64)
+        Z = Z[:, :offset]
 
     Rxx = weighted_correlation_matrix(Z, ws) if compute_Rxx else None
 

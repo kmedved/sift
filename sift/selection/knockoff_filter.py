@@ -1116,7 +1116,9 @@ def _validate_prebuilt_cache_structure(
         raise ValueError("prebuilt cache is missing required structural fields") from exc
     if Z.ndim != 2:
         raise ValueError("cache.Z must be a 2-D array")
-    if not np.issubdtype(Z.dtype, np.number) or not np.isrealobj(Z) or not np.isfinite(Z).all():
+    if (not np.issubdtype(Z.dtype, np.number) or not np.isrealobj(Z)
+            or any(not np.isfinite(Z[start:start + 50_000]).all()
+                   for start in range(0, len(Z), 50_000))):
         raise ValueError("cache.Z must contain only finite real numeric values")
     if valid_cols_raw.ndim != 1 or not np.issubdtype(valid_cols_raw.dtype, np.integer):
         raise ValueError("cache.valid_cols must be a 1-D integer array")
