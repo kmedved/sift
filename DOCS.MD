@@ -34,6 +34,12 @@ imports are exposed from `sift`; advanced utilities live in submodules such as
 
 ## Installation
 
+For wide numeric data, `build_cache(X, column_batch_size=32)` bounds temporary
+preparation arrays while preserving the default rank transform and feature
+filtering. Batches contain at least two columns when the input does; a final
+singleton joins the preceding batch to retain NumPy's reduction order.
+Reuse the cache only with targets aligned to exactly the same input rows.
+
 Install from the repository root:
 
 ```bash

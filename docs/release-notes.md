@@ -1,5 +1,14 @@
 # Release Notes
 
+## 1.0.2 (unreleased)
+
+- Add optional `build_cache(column_batch_size=...)` for bounded-column numeric
+  preparation. The default path is unchanged. Multi-column inputs never use
+  singleton batches, preserving the column reduction order for constant and
+  nearly constant features and imputed values.
+- Slice candidate columns before float64 conversion and check cache finiteness
+  in row chunks, reducing temporary allocations without changing selection.
+
 ## 1.0.1 (2026-10-09)
 
 A patch release. The 1.0 defaults, all 66 exports and every public signature

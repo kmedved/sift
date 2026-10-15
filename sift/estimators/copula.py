@@ -198,7 +198,9 @@ def build_cache(
     column_batch_size : int or None, default None
         Prepare this many columns at a time, avoiding full-width retained-row
         and imputation copies. The rank transform and retained rows are
-        unchanged. ``None`` keeps the original preparation path.
+        unchanged. Batches have at least two columns when the input does, and
+        a final single column is included in the preceding batch to preserve
+        NumPy's column-reduction order. ``None`` keeps the original path.
 
     Returns
     -------
@@ -316,8 +318,12 @@ def build_cache(
         Z = np.empty((len(row_idx), p), dtype=np.float32)
         kept = []
         offset = 0
-        for start in range(0, p, int(column_batch_size)):
-            stop = min(p, start + int(column_batch_size))
+        batch_size = max(2, int(column_batch_size))
+        start = 0
+        while start < p:
+            stop = min(p, start + batch_size)
+            if p - stop == 1:
+                stop = p
             block = mean_impute(X_arr[row_idx, start:stop], copy=False)
             valid = np.flatnonzero(np.std(block, axis=0) > min_std)
             if valid.size:
@@ -329,6 +335,7 @@ def build_cache(
                 kept.extend(start + valid)
                 del scores
             del block
+            start = stop
         if not kept:
             raise ValueError("All features were filtered out (constant or invalid). Cannot build cache.")
         valid_cols = np.asarray(kept, dtype=np.int64)
