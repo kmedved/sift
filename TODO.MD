@@ -4,10 +4,10 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v1.0.1` (2026-10-09, `b3fe977`) is the latest GitHub release; its wheel and
-  source distribution passed the release workflow, Twine metadata checks and a
-  clean installed-wheel smoke, with no PyPI publication. `main` is
-  `1.0.2.dev0` and untagged.
+- `v1.0.2` (2026-10-26) is the latest GitHub release; the release workflow
+  builds its wheel and source distribution, checks their metadata with Twine
+  and smoke-tests a clean wheel install, with no PyPI publication. `v1.0.1`
+  (2026-10-09, `b3fe977`) preceded it.
 - PR #105 merged the 1.0.1 fixes as `5489807` after all six active CI jobs
   passed at head `484b0d7`. Its source-bound runtime evidence retains its
   original commit ancestry.

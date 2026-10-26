@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.0.2 (unreleased)
+## 1.0.2 (2026-10-26)
 
 - Add optional `build_cache(column_batch_size=...)` for bounded-column numeric
   preparation. The default path is unchanged. Multi-column inputs never use
@@ -8,9 +8,8 @@
   nearly constant features and imputed values.
 - Slice candidate columns before float64 conversion and check cache finiteness
   in row chunks, reducing temporary allocations without changing selection.
-- The runtime table remains historical evidence for its recorded commit, not
-  a measurement of this release. Release performance qualification requires
-  a new benchmark before publishing current-version timing claims.
+- The runtime table was re-measured from the clean 1.0.2 release source; all
+  18 data and selection fingerprints match the 1.0.1 reference.
 - `cat_encoding="target_cv"` and `"loo_logit"` give an object column that
   mixes `np.datetime64` values with the `pd.Timestamp` / `datetime` of the
   same instants one level per instant. NumPy datetimes hash differently from
