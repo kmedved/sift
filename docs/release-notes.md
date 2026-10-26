@@ -1,6 +1,6 @@
 # Release Notes
 
-## 1.0.2 (unreleased)
+## 1.0.2 (2026-10-26)
 
 - Add optional `build_cache(column_batch_size=...)` for bounded-column numeric
   preparation. The default path is unchanged. Multi-column inputs never use

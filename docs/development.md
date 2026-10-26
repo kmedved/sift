@@ -407,7 +407,7 @@ git diff --check
 ```
 
 Release tags must match `v` plus the release version. The latest published tag
-is `v1.0.1`; development source is now `1.0.2.dev0` and is not tagged.
+is `v1.0.2` (2026-10-26); later source stays untagged until the next release.
 The release workflow verifies the exact wheel it attaches to the existing GitHub
 Release. There is no publication step and no package index: releasing SIFT means
 creating a GitHub Release with the checked source and wheel distributions
