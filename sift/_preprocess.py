@@ -445,6 +445,83 @@ def subsample_xy(
 # --- Categorical encoding ---
 
 
+def category_encoders_input(encoder: Any, X: Any) -> Any:
+    """``X`` as a category_encoders encoder may safely receive it.
+
+    category_encoders hashes raw category values, and a signaling-NaN
+    ``Decimal`` cannot be hashed. Its encoders already treat a quiet NaN
+    ``Decimal``, ``None`` and ``np.nan`` alike as missing, so NaN ``Decimal``
+    values in the encoder's columns become ``np.nan``; nothing else changes.
+    SIFT's own encoders read such values as missing themselves and get ``X``
+    unchanged.
+    """
+    if (
+        type(encoder).__module__.split(".", 1)[0] != "category_encoders"
+        or not isinstance(X, pd.DataFrame)
+    ):
+        return X
+    out = X
+    for col in list(getattr(encoder, "cols", None) or []):
+        if col not in X.columns:
+            continue
+        series = X[col]
+        if not isinstance(series, pd.Series) or series.dtype != object:
+            continue
+        values = series.to_numpy(dtype=object, copy=False)
+        mask = np.fromiter(
+            (isinstance(value, Decimal) and value.is_nan() for value in values),
+            dtype=bool,
+            count=len(values),
+        )
+        if mask.any():
+            if out is X:
+                out = X.copy()
+            out[col] = series.where(~mask, np.nan)
+    return out
+
+
+_PANDAS_EXACT_DATETIME_UNITS = frozenset({"Y", "M", "W", "D", "h", "m", "s", "ms", "us", "ns"})
+_PANDAS_EXACT_TIMEDELTA_UNITS = frozenset({"W", "D", "h", "m", "s", "ms", "us", "ns"})
+
+
+def _pandas_datetime_scalars(series: pd.Series) -> pd.Series:
+    """NumPy datetime and duration scalars as the pandas scalars they equal.
+
+    ``np.datetime64`` compares equal to the ``pd.Timestamp`` / ``datetime``
+    of the same instant but hashes differently (as a ``date``, a ``datetime``
+    or an int, by unit), so a hash table merges such levels only when their
+    hashes happen to collide, which varies with ``PYTHONHASHSEED``. As pandas
+    scalars they hash like the Python values they equal, so equal instants and
+    durations are always one level. Units pandas cannot hold exactly (count
+    multipliers, sub-nanosecond units, calendar durations) and values out of
+    its range stay as they are.
+    """
+    if series.dtype != object:
+        return series
+    values = series.to_numpy(dtype=object)
+    converted = None
+    for position, value in enumerate(values):
+        if isinstance(value, np.datetime64):
+            convert, units = pd.Timestamp, _PANDAS_EXACT_DATETIME_UNITS
+        elif isinstance(value, np.timedelta64):
+            convert, units = pd.Timedelta, _PANDAS_EXACT_TIMEDELTA_UNITS
+        else:
+            continue
+        unit, count = np.datetime_data(value.dtype)
+        if count != 1 or unit not in units:
+            continue
+        try:
+            scalar = convert(value)
+        except (ValueError, OverflowError):
+            continue
+        if converted is None:
+            converted = np.array(values, dtype=object, copy=True)
+        converted[position] = scalar
+    if converted is None:
+        return series
+    return pd.Series(converted, index=series.index, name=series.name, dtype=object)
+
+
 def _category_missing_mask(series: pd.Series) -> np.ndarray:
     """``series.isna()`` that also reads a signaling-NaN ``Decimal`` as missing.
 
@@ -520,10 +597,11 @@ class LeaveOneOutLogitEncoder:
     def _series_with_missing_sentinel(series: pd.Series) -> pd.Series:
         sentinel = "__SIFT_MISSING_CATEGORY__"
         missing = _category_missing_mask(series)
-        values = set(series[~missing].astype(object).tolist())
+        series = _pandas_datetime_scalars(series.astype(object))
+        values = set(series[~missing].tolist())
         while sentinel in values:
             sentinel += "_"
-        return series.astype(object).where(~missing, sentinel)
+        return series.where(~missing, sentinel)
 
     @staticmethod
     def _get_column_series(X: pd.DataFrame, col: str) -> pd.Series:
@@ -823,7 +901,9 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
 
     @staticmethod
     def _normalized_series(series: pd.Series) -> pd.Series:
-        return series.astype(object).where(~_category_missing_mask(series), np.nan)
+        return _pandas_datetime_scalars(series.astype(object)).where(
+            ~_category_missing_mask(series), np.nan
+        )
 
     @staticmethod
     def _centered_targets(
@@ -1005,7 +1085,31 @@ class TargetCVEncoder(TransformerMixin, BaseEstimator):
         X_out = X.copy()
         for col in self.cols:
             series = self._normalized_series(X_out[col])
-            X_out[col] = series.map(mappings[col]).fillna(0.0).astype(np.float64)
+            mapping = mappings[col]
+            # Look levels up with plain dict semantics, as ``fit`` keyed them.
+            # ``Series.map`` with a mapping reindexes on the keys, and pandas
+            # turns that index into a datetime index for datetime-like values,
+            # merging a ``date`` level into the ``Timestamp`` of the same day
+            # and failing as a duplicate.
+            codes, uniques = pd.factorize(series, sort=False, use_na_sentinel=False)
+            missing_effect = next(
+                (
+                    value
+                    for key, value in mapping.items()
+                    if isinstance(key, float) and key != key
+                ),
+                0.0,
+            )
+            effects = np.array(
+                [
+                    missing_effect
+                    if isinstance(level, float) and level != level
+                    else mapping.get(level, 0.0)
+                    for level in uniques.tolist()
+                ],
+                dtype=np.float64,
+            )
+            X_out[col] = pd.Series(effects[codes], index=series.index, dtype=np.float64)
         return X_out
 
     def _active_split_count(
@@ -1879,4 +1983,4 @@ def encode_categoricals(
     }
     encoder = encoders[method](cols=cat_features, handle_missing="return_nan")
     with suppress_category_encoder_pandas_warnings():
-        return encoder.fit_transform(X, y)
+        return encoder.fit_transform(category_encoders_input(encoder, X), y)

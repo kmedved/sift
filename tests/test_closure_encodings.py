@@ -649,6 +649,133 @@ def test_numpy_duration_levels_match_numpy_lengths_on_random_mixes():
     )) == [4.0, 3.0, 2.0, 0.0, 1.0]
 
 
+@pytest.mark.categorical
+@pytest.mark.parametrize("method", ["target", "loo", "james_stein"])
+def test_signaling_nan_decimal_is_missing_for_category_encoders(method):
+    # category_encoders hashes raw values and cannot hash a signaling NaN;
+    # it reads None, np.nan and a quiet NaN Decimal alike as missing.
+    pytest.importorskip("category_encoders")
+    rng = np.random.default_rng(5)
+    n = 80
+    x = rng.normal(size=n)
+    z = rng.normal(size=n)
+    levels = np.where(rng.random(n) < 0.5, "u", "v")
+    y = x + 0.8 * (levels == "u") + rng.normal(size=n)
+
+    def frame(missing):
+        values = list(levels)
+        for i in range(0, n, 7):
+            values[i] = missing
+        return pd.DataFrame({"c": pd.Series(values, dtype=object), "x": x, "z": z})
+
+    def fit(missing):
+        selector = MRMRSelector(
+            k=2,
+            task="regression",
+            cat_features=["c"],
+            cat_encoding=method,
+            allow_full_data_target_encoding=True,
+            verbose=False,
+        ).fit(frame(missing), y)
+        return selector.transform(frame(missing))
+
+    expected = fit(np.nan)
+    for missing in (Decimal("sNaN"), Decimal("-sNaN12"), Decimal("NaN"), None):
+        pd.testing.assert_frame_equal(fit(missing), expected)
+
+
+_SAME_DAYS = ("2020-01-01", "2020-06-01", "2021-03-04")
+
+
+def _mixed_datetime_column(n: int, seed: int) -> pd.Series:
+    """Equal instants as numpy (three units), pandas and Python objects, plus dates."""
+    makers = (
+        lambda d: np.datetime64(d, "D"),
+        lambda d: np.datetime64(d + "T00:00:00", "s"),
+        lambda d: np.datetime64(d + "T00:00:00", "ns"),
+        lambda d: pd.Timestamp(d),
+        lambda d: datetime.fromisoformat(d),
+        lambda d: date.fromisoformat(d),
+    )
+    rng = np.random.default_rng(seed)
+    return pd.Series(
+        [
+            makers[rng.integers(len(makers))](_SAME_DAYS[rng.integers(len(_SAME_DAYS))])
+            for _ in range(n)
+        ],
+        dtype=object,
+    )
+
+
+def test_supervised_encoders_merge_numpy_datetimes_with_the_instants_they_equal():
+    # np.datetime64 equals the Timestamp/datetime of its instant but hashes
+    # differently, so pandas merged such levels only when hashes collided --
+    # an InvalidIndexError or a split level, depending on PYTHONHASHSEED.
+    from sift._preprocess import LeaveOneOutLogitEncoder, TargetCVEncoder
+
+    n = 150
+    for seed in range(8):
+        raw = _mixed_datetime_column(n, seed)
+        # The same levels with every numpy value as the Timestamp it equals;
+        # dates stay dates, a level of their own as in Python.
+        canonical = pd.Series(
+            [pd.Timestamp(v) if isinstance(v, np.datetime64) else v for v in raw],
+            dtype=object,
+        )
+        rng = np.random.default_rng(100 + seed)
+        x = rng.normal(size=n)
+        y = x + rng.normal(size=n)
+        y_binary = (y > np.median(y)).astype(int)
+        frame = pd.DataFrame({"t": raw, "x": x})
+        expected = pd.DataFrame({"t": canonical, "x": x})
+        pd.testing.assert_frame_equal(
+            TargetCVEncoder(["t"], cv=3).fit_transform(frame, y),
+            TargetCVEncoder(["t"], cv=3).fit_transform(expected, y),
+        )
+        fitted = TargetCVEncoder(["t"], cv=3).fit(frame, y)
+        pd.testing.assert_frame_equal(
+            fitted.transform(frame), fitted.transform(expected)
+        )
+        pd.testing.assert_frame_equal(
+            LeaveOneOutLogitEncoder(["t"]).fit_transform(frame, y_binary),
+            LeaveOneOutLogitEncoder(["t"]).fit_transform(expected, y_binary),
+        )
+        # A date is not equal to the Timestamp of its day, so it keeps its own
+        # effect rather than being merged by pandas' datetime index inference.
+        assert select_cefsplus(
+            frame.assign(z=rng.normal(size=n)), y, 2,
+            cat_features=["t"], cat_encoding="target_cv", verbose=False,
+        )
+
+
+def test_target_cv_on_mixed_datetimes_is_identical_across_hash_seeds():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = (
+        "import hashlib, numpy as np, pandas as pd\n"
+        "from tests.test_closure_encodings import _mixed_datetime_column\n"
+        "from sift._preprocess import TargetCVEncoder\n"
+        "rng = np.random.default_rng(1)\n"
+        "x = rng.normal(size=150); y = x + rng.normal(size=150)\n"
+        "frame = pd.DataFrame({'t': _mixed_datetime_column(150, 3), 'x': x})\n"
+        "out = TargetCVEncoder(['t'], cv=3).fit_transform(frame, y)['t'].to_numpy()\n"
+        "print(hashlib.sha256(out.tobytes()).hexdigest())\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    digests = set()
+    for hash_seed in ("0", "1", "7"):
+        env = {**os.environ, "PYTHONHASHSEED": hash_seed, "PYTHONPATH": str(root)}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=root, env=env, capture_output=True, text=True, check=True,
+        )
+        digests.add(result.stdout.strip())
+    assert len(digests) == 1
+
+
 def test_ordered_categorical_uses_declared_order():
     ordered = pd.Categorical(
         ["mid", "low", "high", "mid"],

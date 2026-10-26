@@ -45,6 +45,7 @@ from sift._preprocess import (
     CatEncoding,
     LeaveOneOutLogitEncoder,
     TargetCVEncoder,
+    category_encoders_input,
     ensure_weights,
     extract_feature_names,
     reject_datetime_like_features,
@@ -681,7 +682,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                     "encoding; transform also requires a DataFrame."
                 )
             with suppress_category_encoder_pandas_warnings():
-                X = self.categorical_encoder_.transform(X)
+                X = self.categorical_encoder_.transform(
+                    category_encoders_input(self.categorical_encoder_, X)
+                )
         keep_idx = self.get_support(indices=True)
         if isinstance(X, pd.DataFrame):
             cols = [self.feature_names_in_[i] for i in keep_idx]
@@ -992,7 +995,9 @@ class BorutaSelector(SelectorMixin, BaseEstimator):
                                 cols=cat_features, handle_missing="return_nan"
                             )
                         with suppress_category_encoder_pandas_warnings():
-                            X = encoder.fit_transform(X, y_for_encoder)
+                            X = encoder.fit_transform(
+                                category_encoders_input(encoder, X), y_for_encoder
+                            )
                     self.categorical_encoder_ = encoder
                     if hasattr(encoder, "encoding_cv_"):
                         self.categorical_encoding_metadata_ = dict(encoder.encoding_cv_)
