@@ -1,4 +1,4 @@
-# SIFT v1.0.2 release — complete; fork detachment awaiting confirmation
+# SIFT v1.0.2 release and fork detachment — complete
 
 Objective: finish PR #108 and publish GitHub-only v1.0.2, verify the uploaded distributions, remove the release branch/worktree, and inspect fork detachment. PyPI publication is excluded.
 
@@ -10,4 +10,4 @@ Published artifact SHA-256: wheel `120686542e579029ac3b7b59fc7faf23720bc17780acd
 
 Cleanup: the clean, fully merged release worktree and local/remote `claude/1.0.2-release` branches were removed. Only the main checkout and main branch remain. No upstream remote exists.
 
-Release work is complete. Separate pending action: GitHub Settings offers Leave fork network, but warns that detachment is permanent and cannot be reversed; awaiting the user confirmation requested in this chat before executing it. The signed-in in-app browser has that confirmation dialog open.
+Fork detachment completed on 2026-10-26 after the owner explicitly confirmed the permanent action. GitHub Settings performed Leave fork network; repository metadata now reports `fork=false`, `parent=null`, and `source=null`. SIFT is standalone at the same repository URL. Release and fork-detachment work are complete; no pending actions remain.
