@@ -15,6 +15,7 @@ from sift._metadata import resolve_row_metadata
 from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     TargetCVEncoder,
+    category_encoders_input,
     ensure_weights,
     reject_datetime_like_features,
     suppress_category_encoder_pandas_warnings,
@@ -327,8 +328,8 @@ def _evaluate_prefix_split(
         except TypeError:
             enc = Encoder(cols=fold_cat, handle_missing="return_nan")
         with suppress_category_encoder_pandas_warnings():
-            Xtr_df = enc.fit_transform(Xtr_df, ytr)
-            Xva_df = enc.transform(Xva_df)
+            Xtr_df = enc.fit_transform(category_encoders_input(enc, Xtr_df), ytr)
+            Xva_df = enc.transform(category_encoders_input(enc, Xva_df))
 
     if within is not None:
         from sift.selection.within import (

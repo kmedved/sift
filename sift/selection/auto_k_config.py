@@ -923,6 +923,18 @@ def check_auto_k_seed(config: AutoKConfig, *, auto_route: str | None = None) -> 
     )
 
 
+def _differs_from_default(value: Any, default: Any) -> bool:
+    """``value != default``, reading a value that cannot be compared as set.
+
+    A signaling-NaN ``Decimal`` raises on comparison and an array makes ``!=``
+    ambiguous; neither may fail a call over a field its rule never reads.
+    """
+    try:
+        return bool(value != default)
+    except (TypeError, ValueError, ArithmeticError):
+        return True
+
+
 def _warn_unused_method_fields(config: AutoKConfig) -> None:
     if config.k_method == "auto":
         return
@@ -1000,7 +1012,7 @@ def _warn_unused_method_fields(config: AutoKConfig) -> None:
     for field_name, methods in used_by.items():
         if method_tags & methods:
             continue
-        if getattr(config, field_name) != getattr(defaults, field_name):
+        if _differs_from_default(getattr(config, field_name), getattr(defaults, field_name)):
             warn_external(
                 f"AutoKConfig.{field_name} is set but k_method={config.k_method!r} "
                 "does not use it.",

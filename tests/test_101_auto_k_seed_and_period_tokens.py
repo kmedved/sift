@@ -618,3 +618,20 @@ def test_path_row_metadata_without_a_token_is_recorded_as_opaque():
         "reason": "no_deterministic_token",
     }
     assert splitter_record["event_end_sha256"] is None
+
+
+def test_an_uncomparable_seed_on_a_rule_that_never_reads_it_only_warns():
+    # Decimal("sNaN") raises on comparison; the unused-option check compared
+    # it with the default and failed a call whose rule ignores the seed.
+    X, y = _regression_data()
+    config = AutoKConfig(k_method="evaluate", random_state=Decimal("sNaN"))
+    with pytest.warns(UserWarning) as record:
+        selected = select_cefsplus(X, y, k="auto", time=np.arange(len(y)), auto_k_config=config)
+    assert any(
+        str(w.message)
+        == "AutoKConfig.random_state is set but k_method='evaluate' does not use it."
+        for w in record
+    )
+    assert selected == select_cefsplus(
+        X, y, k="auto", time=np.arange(len(y)), auto_k_config=AutoKConfig(k_method="evaluate")
+    )

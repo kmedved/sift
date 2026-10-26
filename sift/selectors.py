@@ -32,6 +32,7 @@ from sift._preprocess import (
     LeaveOneOutLogitEncoder,
     OneHotBlockEncoder,
     TargetCVEncoder,
+    category_encoders_input,
     ensure_weights,
     extract_feature_names,
     reject_prebuilt_cache_encoding,
@@ -702,7 +703,7 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
             elif isinstance(encoder, (OneHotBlockEncoder, UnsupervisedCatEncoder)):
                 X_encoded = encoder.fit_transform(X, sample_weight=sample_weight)
             else:
-                X_encoded = encoder.fit_transform(X, y_enc)
+                X_encoded = encoder.fit_transform(category_encoders_input(encoder, X), y_enc)
 
         self.categorical_encoder_ = encoder
         if hasattr(encoder, "encoding_cv_"):
@@ -719,7 +720,9 @@ class _BaseSelector(SelectorMixin, BaseEstimator):
                 "transform also requires a DataFrame with matching columns."
             )
         with suppress_category_encoder_pandas_warnings():
-            return self.categorical_encoder_.transform(X)
+            return self.categorical_encoder_.transform(
+                category_encoders_input(self.categorical_encoder_, X)
+            )
 
     def _restore_deferred_unsupervised_encoder(self, X, sample_weight=None) -> bool:
         """Fit the train-only target-blind inference map after deferred auto-k.

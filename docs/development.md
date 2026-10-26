@@ -319,7 +319,7 @@ warnings-as-errors policy:
 | dependency set | result |
 | --- | --- |
 | floors (numpy 1.24.4 / pandas 2.0.3 / sklearn 1.3.2 / scipy 1.10.1 / numba 0.59.1), Python 3.11 | green — 1,566 passed / 30 skipped |
-| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 3,742 passed / 41 skipped (26 need catboost or category_encoders, 8 are catboost doc blocks, 4 are literal docstring examples, 3 skip by contract) |
+| **base** (numpy 1.26.4 / pandas 2.2.2 / sklearn 1.5.1), Python 3.12 | green — 3,745 passed / 44 skipped (29 need catboost or category_encoders, 8 are catboost doc blocks, 4 are literal docstring examples, 3 skip by contract) |
 | numpy 2.4.6 / pandas 2.3.3 / sklearn 1.7.2 | green |
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
@@ -406,8 +406,8 @@ python benchmarks/run_benchmarks.py --quick --output /tmp/sift-benchmarks.json
 git diff --check
 ```
 
-Release tags must match `v` plus the release version. This source prepares
-`v1.0.1`; the latest published tag remains `v1.0.0` until publication.
+Release tags must match `v` plus the release version. The latest published tag
+is `v1.0.1`; development source is now `1.0.2.dev0` and is not tagged.
 The release workflow verifies the exact wheel it attaches to the existing GitHub
 Release. There is no publication step and no package index: releasing SIFT means
 creating a GitHub Release with the checked source and wheel distributions

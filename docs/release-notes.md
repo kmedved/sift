@@ -11,6 +11,21 @@
 - The runtime table remains historical evidence for its recorded commit, not
   a measurement of this release. Release performance qualification requires
   a new benchmark before publishing current-version timing claims.
+- `cat_encoding="target_cv"` and `"loo_logit"` give an object column that
+  mixes `np.datetime64` values with the `pd.Timestamp` / `datetime` of the
+  same instants one level per instant. NumPy datetimes hash differently from
+  the pandas and Python values they equal, so such a column used to raise
+  pandas' `InvalidIndexError` or split a level, depending on
+  `PYTHONHASHSEED`; a `datetime.date` beside the `Timestamp` of its day
+  could also fail when pandas inferred a datetime index. Other columns encode
+  exactly as before.
+- The category_encoders-backed encodings (`"target"`, `"loo"`,
+  `"james_stein"`) read a signaling-NaN `Decimal` as missing, like a quiet
+  NaN, `None` or `np.nan`, instead of failing to hash it.
+- An `AutoKConfig` field that cannot be compared with its default, such as
+  `random_state=Decimal("sNaN")`, no longer fails a call whose auto-k rule
+  never reads it; the call warns that the field is unused, as for any other
+  non-default value.
 
 ## 1.0.1 (2026-10-09)
 
