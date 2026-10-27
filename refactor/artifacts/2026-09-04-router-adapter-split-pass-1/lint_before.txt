@@ -1,3 +1,0 @@
-Command: /opt/anaconda3/bin/python -m ruff check sift tests scripts benchmarks
-Result: All checks passed.
-Complete-suite warning ceiling: zero (-W error).
