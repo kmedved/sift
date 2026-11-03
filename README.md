@@ -11,7 +11,7 @@ The package is a single Python library. Public entry points are exported from
 
 ## Quickstart
 
-SIFT is not published to PyPI. Python 3.11, 3.12, and 3.13 are tested in CI.
+SIFT is not published to PyPI. Python 3.11 through 3.15 are tested in CI.
 Install it from a repository checkout:
 
 ```bash
@@ -330,3 +330,5 @@ benchmarks, documentation checks, and release notes.
 ## License
 
 SIFT is released under the [MIT License](https://github.com/kmedved/sift/blob/main/LICENSE).
+It began as a fork of [`smazzanti/mrmr`](https://github.com/smazzanti/mrmr), whose
+copyright notice the license keeps.

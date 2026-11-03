@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.0.3 (unreleased)
+
+- CI runs the full suite on Python 3.14 and 3.15, and the package classifiers
+  list both.
+
 ## 1.0.2 (2026-10-26)
 
 - Add optional `build_cache(column_batch_size=...)` for bounded-column numeric

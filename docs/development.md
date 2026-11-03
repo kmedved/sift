@@ -4,7 +4,7 @@ This guide covers local setup, validation, and release-oriented checks for SIFT.
 
 ## Setup
 
-Use Python 3.11, 3.12, or 3.13; CI runs the full suite on all three.
+Use Python 3.11 through 3.15; CI runs the full suite on all five.
 
 ```bash
 python -m pip install --upgrade pip
@@ -265,7 +265,7 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.11, 3.12, and 3.13, plus a `min-pins` job on
+GitHub Actions run tests on Python 3.11 through 3.15, plus a `min-pins` job on
 the declared dependency floors, optional CatBoost coverage, a clean-wheel
 installation smoke test, a scheduled latest-dependency canary, and a scheduled
 quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
@@ -310,6 +310,14 @@ and Numba 0.67.0: [2,792 passed, 34 skipped](https://github.com/kmedved/sift/act
 The Python 3.12 job still owns the optional PyArrow and generated-reference
 checks, so the 3.13 result does not claim those optional paths.
 
+### Python 3.14 and 3.15
+
+Python 3.14 and 3.15 run the full suite in the same CI matrix, with no install
+pin: pip selects the newest Numba, and Numba ships wheels for them from 0.63.0
+and 0.68.0. The declared `numba>=0.59` floor and the Python 3.11 `min-pins` job
+are unchanged. As with 3.13, the Python 3.12 job owns the optional PyArrow and
+generated-reference checks.
+
 ### Verified dependency band
 
 **The whole declared band is supported — there is no ceiling below what
@@ -324,6 +332,8 @@ warnings-as-errors policy:
 | numpy 2.5.2 / pandas 2.3.3 / sklearn 1.7.2 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | **latest** — numpy 2.5.2 / pandas 3.0.5 / sklearn 1.9.0 / scipy 1.18.1 / numba 0.67.0, Python 3.12 | green — 1,680 passed / 30 skipped |
 | Python 3.13 CI — numpy 2.5.3 / pandas 3.0.6 / sklearn 1.9.1 / scipy 1.18.1 / numba 0.67.0 | green — 2,792 passed / 34 skipped |
+| Python 3.14.10, local macOS — numpy 2.5.4 / pandas 3.1.0 / sklearn 1.9.1 / scipy 1.18.1 / numba 0.68.1 | green — 3,755 passed / 34 skipped |
+| Python 3.15.2, local macOS — numpy 2.5.4 / pandas 3.1.0 / sklearn 1.9.1 / scipy 1.18.1 / numba 0.68.1 | green — 3,755 passed / 34 skipped |
 
 Every row is a dated snapshot rather than a count re-measured per commit, so
 its absolute counts can trail the suite as tests are added. Re-measure a row

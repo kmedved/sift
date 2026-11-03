@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # full history: tests/test_auto_k_gate_summary.py verifies the committed
           # gate table against source hashes at its provenance commit
@@ -53,9 +53,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
+        python-version: ['3.11', '3.12', '3.13', '3.14', '3.15']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # full history: tests/test_auto_k_gate_summary.py verifies the committed
           # gate table against source hashes at its provenance commit
@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # full history: tests/test_auto_k_gate_summary.py verifies the committed
           # gate table against source hashes at its provenance commit
@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # full history: tests/test_auto_k_gate_summary.py verifies the committed
           # gate table against source hashes at its provenance commit
@@ -201,7 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # full history: tests/test_auto_k_gate_summary.py verifies the committed
           # gate table against source hashes at its provenance commit
@@ -233,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # summarize_auto_k_gates.py verifies the recorded path-timing provenance
           # by hashing its source files at the commit named in the sidecar, so the
@@ -257,7 +257,7 @@ jobs:
       - name: Run quick benchmark promotion gate
         run: python benchmarks/run_benchmarks.py --quick --output benchmark-results.json
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sift-quick-benchmark-results
           path: benchmark-results.json
@@ -277,7 +277,7 @@ jobs:
             --output auto_k_v2_gates_mean_oracle.csv \
             --verify-against benchmarks/results/auto_k_v2_gates_mean_oracle_2026-08-31.csv
       - name: Upload Auto-K gate table
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sift-auto-k-gate-table
           path: auto_k_v2_gates_mean_oracle.csv
