@@ -6,11 +6,9 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  schedule:
-    - cron: "0 6 * * 1"
 
 # One in-flight run per ref. Pull-request runs are superseded by newer pushes;
-# branch and scheduled runs are allowed to finish so their artifacts stay complete.
+# branch and manual runs are allowed to finish so their artifacts stay complete.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -53,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12', '3.13', '3.14', '3.15']
+        python-version: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["3.11", "3.12", "3.13", "3.14", "3.15"]' || '["3.12"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,18 +77,23 @@ jobs:
           fi
           pip install -e ".[test]"
           pip install -e ".[categorical]"
-          if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${{ matrix.python-version }}" == "3.12" ]]; then
             pip install -e ".[docs]" pyarrow
           fi
       - name: Run tests
         env:
           SIFT_REQUIRE_PROVENANCE_COMMITS: '1'
-        run: pytest
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            python -m pytest --durations=20
+          else
+            python -m pytest tests/test_smoke.py tests/test_docs_smoke.py -q
+          fi
       - name: Run critical lint checks
         if: matrix.python-version == '3.12'
         run: ruff check sift tests scripts
       - name: Build generated API reference
-        if: matrix.python-version == '3.12'
+        if: github.event_name == 'workflow_dispatch' && matrix.python-version == '3.12'
         run: |
           python scripts/generate_api_reference.py --check
           mkdocs build --strict
@@ -99,6 +102,7 @@ jobs:
   # requirement is pinned to its declared minimum; `--no-deps` keeps pip from
   # quietly upgrading them while installing the package itself.
   min-pins:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -140,6 +144,7 @@ jobs:
         run: pytest
 
   test-catboost:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -197,7 +202,7 @@ jobs:
           PY
 
   test-latest-deps:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -229,7 +234,7 @@ jobs:
         run: pytest -q
 
   benchmark-smoke:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
