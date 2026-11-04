@@ -4,7 +4,8 @@ This guide covers local setup, validation, and release-oriented checks for SIFT.
 
 ## Setup
 
-Use Python 3.11 through 3.15; CI runs the full suite on all five.
+Use Python 3.11 through 3.15. Routine CI checks Python 3.12. Run the full
+five-version matrix on demand from the Actions tab before a release.
 
 ```bash
 python -m pip install --upgrade pip
@@ -21,6 +22,12 @@ python -m pip install -e ".[all]"
 ```
 
 ## Validation
+
+Pull requests and main pushes run the smoke and documentation-smoke tests,
+critical lint checks, and a clean wheel install. Use **Run workflow** on the
+**Tests** workflow for the full Python matrix, dependency-floor, optional
+CatBoost, latest-dependency, documentation-build, and benchmark checks before
+releases or for numerical changes.
 
 Run the full test suite:
 
