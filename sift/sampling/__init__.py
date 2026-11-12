@@ -1,4 +1,5 @@
 from sift.sampling.smart import SmartSamplerConfig, smart_sample
+from sift.sampling.chronological import chronological_sample
 from sift.sampling.anchors import (
     no_anchors,
     first_per_group,
@@ -16,6 +17,7 @@ from sift.sampling.anchors import (
 __all__ = [
     "SmartSamplerConfig",
     "smart_sample",
+    "chronological_sample",
     "no_anchors",
     "first_per_group",
     "first_and_last_per_group",
