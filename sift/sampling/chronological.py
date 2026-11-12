@@ -52,6 +52,10 @@ def chronological_sample(
         return np.arange(n_samples, dtype=np.intp)
 
     rng = np.random.default_rng(random_state)
+    if stratum_col is not None:
+        # Shuffle group-stratum pairs so identical strata do not reuse
+        # the same group order and rounded allocations.
+        groups, group_values = pd.factorize(pd.MultiIndex.from_arrays([strata, groups]))
     group_order = rng.permutation(len(group_values))[groups]
     order = pd.DataFrame(
         {"stratum": strata, "group": group_order, "time": times.array}

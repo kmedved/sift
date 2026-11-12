@@ -49,3 +49,24 @@ def test_many_small_groups_and_missing_ids():
         chronological_sample(frame, 7, **kwargs)
     with pytest.raises(ValueError, match="missing"):
         chronological_sample(frame.assign(time=np.nan), 2, **kwargs)
+
+
+def test_identical_strata_can_sample_different_small_groups():
+    frame = pd.DataFrame({
+        "season": np.repeat([2020, 2021], 10),
+        "player": np.tile(np.arange(10), 2),
+        "time": np.arange(20),
+    })
+    for seed in range(8):
+        positions = chronological_sample(
+            frame, 6, group_col="player", time_col="time",
+            stratum_col="season", random_state=seed,
+        )
+        picked = frame.iloc[positions]
+        a = set(picked.loc[picked["season"] == 2020, "player"])
+        b = set(picked.loc[picked["season"] == 2021, "player"])
+        assert len(a) == len(b) == 3
+        if a != b:
+            break
+    else:
+        pytest.fail("Identical strata always drew the same groups")
