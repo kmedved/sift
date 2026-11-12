@@ -13,6 +13,8 @@ from sift.sampling.anchors import (
     medical_config,
 )
 
+from sift.sampling.stratified import stratified_sample
+
 __all__ = [
     "SmartSamplerConfig",
     "smart_sample",
@@ -27,4 +29,5 @@ __all__ = [
     "cross_section_config",
     "financial_config",
     "medical_config",
+    "stratified_sample",
 ]

@@ -418,6 +418,27 @@ selector.fit(df, y, feature_names=feature_cols)
 Do not pass external `sample_weight` with `use_smart_sampler=True`; the sampler
 creates weights for the retained rows.
 
+### Sampling by target and predictor bands
+
+Use `stratified_sample` to preserve the frequency of joint target and
+predictor bands at a fixed row budget. Choose up to two predictors that
+matter for coverage, such as a measure of exposure or opportunity.
+
+```python
+from sift.sampling import stratified_sample
+
+positions = stratified_sample(
+    train_df, len(train_df) // 10, target_col="target",
+    balance_cols=["exposure", "role_score"], random_state=42,
+)
+sampled = train_df.iloc[positions]
+```
+
+Pass only eligible training rows with observed targets. The sampler draws
+proportionally within each cell, so an equal-row training objective uses
+equal weights. It preserves cell counts to within rounding and can still
+miss useful interactions involving predictors outside the chosen columns.
+
 ## Repeated Targets and Caches
 
 Use `build_cache` when the same `X` feeds many target vectors.
