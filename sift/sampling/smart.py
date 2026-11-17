@@ -6,16 +6,19 @@ pilot prediction.  Half of each row's inclusion probability is proportional to
 ``g`` and half is spread evenly (a defensive mixture; Hesterberg, 1995).  The
 draw runs systematically along each group's timeline, so it keeps an exact size
 and an even spread, and every kept row carries the inverse of its inclusion
-probability as a weight.  Fitting on the weighted sample is an unbiased
-estimate of fitting on all rows, with lower variance than a uniform sample of
-the same size.
+probability as a weight.  Weighted sums over the sample are unbiased for the
+full-data sums (Horvitz-Thompson).  A model fitted with the weights is
+consistent for the full-data fit but not exactly unbiased: the fit divides by
+the realized weight total, and nonlinear models add their own bias.
 
-When labels are observed, the realized gradient magnitude is the
-variance-optimal sampling score (Wang, Zhu & Ma, 2018; Ai et al., 2021; Ting &
-Brochu, 2018); smoothing it, for example with isotonic regression, discards
-information.  The even half keeps every row drawable, bounds every weight, and
-keeps the draw from chasing noise on targets that are mostly noise.  The
-defaults come from a benchmark on a ~770k-row player panel; see
+Optimal-subsampling results for observed labels (Wang, Zhu & Ma, 2018; Ai et
+al., 2021; Ting & Brochu, 2018) make a row's probability grow with its
+residual, usually times a term that depends on its features and the model.
+The gradient alone is the model-agnostic part of that rule.  It is an
+empirical choice that beat smoothed scores in the benchmark, not a proven
+optimum for every model.  The even half keeps every row drawable, bounds every
+weight, and keeps the draw from chasing noise on targets that are mostly
+noise.  The defaults come from a benchmark on a ~770k-row player panel; see
 ``docs/ADVANCED.md``.
 """
 
@@ -106,7 +109,7 @@ def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -
     if not (0 < uniform_mix <= 1):
         raise ValueError(
             "uniform_mix must be in (0, 1]; a positive share keeps every row drawable, "
-            "which the inverse-probability weights need to stay unbiased."
+            "which inverse-probability weighting needs."
         )
     if random_state is not None and not _is_int_like(random_state):
         raise TypeError("random_state must be an integer or None.")
@@ -250,6 +253,26 @@ def _draw_order(n: int, groups, time, rng: np.random.Generator) -> np.ndarray:
     return np.lexsort(tuple(keys))
 
 
+def _shuffle_blocks(order: np.ndarray, groups, block: int, rng: np.random.Generator) -> np.ndarray:
+    """Shuffle rows within consecutive blocks of ``block`` rows inside each group.
+
+    An evenly spaced draw along the result takes a random row from each block
+    rather than the same position every time, so a schedule that repeats every
+    ``block`` rows cannot line up with it.  Group order and block order stay.
+    """
+    if block <= 1 or order.size == 0:
+        return order
+    if groups is None:
+        run = np.zeros(order.size, dtype=np.int64)
+        rank = np.arange(order.size)
+    else:
+        codes = pd.factorize(pd.Series(groups), use_na_sentinel=False)[0][order]
+        start = np.r_[True, codes[1:] != codes[:-1]]
+        run = np.cumsum(start) - 1
+        rank = np.arange(order.size) - np.flatnonzero(start)[run]
+    return order[np.lexsort((rng.random(order.size), rank // block, run))]
+
+
 def _systematic(order: np.ndarray, pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
     """Systematic PPS along ``order``: exactly ``k`` rows with inclusion probability ``pi``."""
     if k <= 0 or order.size == 0:
@@ -325,6 +348,17 @@ def _pilot_gradient(X, y, task, pilot, pilot_size, rng, random_state, verbose) -
         raise ValueError("X is required to fit a pilot model.")
     p_rows = max(_resolve_count(pilot_size, n), min(n, MIN_PILOT_ROWS))
     pidx = np.sort(rng.choice(n, size=p_rows, replace=False))
+    if task == "classification" and np.unique(y[pidx]).size == 1:
+        # A slice that misses every rare class cannot train a classifier.
+        # Predict its one class everywhere, so rows of other classes score highest.
+        warnings.warn(
+            "pilot slice holds a single class; scoring rows by whether they differ from it.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+        full = np.zeros((n, classes.size))
+        full[:, np.searchsorted(classes, y[pidx][0])] = 1.0
+        return _class_gradient(y, full, classes)
     if isinstance(pilot, str):  # "auto"
         from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 
@@ -369,7 +403,7 @@ def sample_rows(
     random_state: Optional[int] = 42,
     verbose: bool = False,
 ) -> RowSample:
-    """Choose the most informative training rows and weight them for unbiased fits.
+    """Choose the most informative training rows and weight them by inverse inclusion probability.
 
     Fits a cheap pilot model on ``pilot_size`` of the rows and scores every
     row by the magnitude ``g`` of the pilot's loss gradient (the absolute
@@ -390,8 +424,8 @@ def sample_rows(
         Target. Required unless ``pilot`` is None.
     size : float or int, default=0.2
         Rows to keep: a float fraction in ``(0, 1]`` or an int row count.
-        20-25% landed within about 0.2% of full-data RMSE in the panel
-        benchmark; 5-10% is enough for a rough feature screen.
+        20-25% landed within about 0.2% of full-data RMSE on the stable
+        targets of the panel benchmark.
     groups : array-like of shape (n_rows,), optional
         Entity of each row (player, customer, ticker). Spreads the draw across
         entities.
@@ -408,7 +442,10 @@ def sample_rows(
         ``predict_proba``. An array of length ``n_rows`` is used as
         precomputed predictions (probabilities for classification), for
         example yesterday's production model. ``None`` skips the pilot and
-        draws with equal probability, still spread along groups and time.
+        draws with equal probability, still spread along groups and time:
+        one random row from each block of about ``1 / fraction`` consecutive
+        rows, so a repeating schedule (weekday data at 20%, say) cannot line
+        up with the draw.
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot: a fraction or a count. At least 1,000
         rows (or all rows, if fewer) are used.
@@ -420,7 +457,8 @@ def sample_rows(
     always_include : array-like of bool, optional
         Rows that must be kept (probability 1). They count against ``size``.
     random_state : int or None, default=42
-        Seed for the pilot slice, the group order and the systematic start.
+        Seed for the pilot slice, the group order, the systematic start and,
+        for equal-probability draws, the shuffle within blocks.
     verbose : bool, default=False
         Log progress at INFO on the ``sift`` logger.
 
@@ -532,7 +570,12 @@ def _sample_rows(
             pi_free = (1.0 - uniform_mix) * pi_free + uniform_mix * k_free / free.sum()
         pi[free] = pi_free
         order = _draw_order(n, groups, time, rng)
-        drawn = _systematic(order[free[order]], pi, k_free, rng)
+        order = order[free[order]]
+        if (groups is not None or time is not None) and np.all(pi_free == pi_free[0]):
+            # Equal probabilities give evenly spaced picks; shuffle within blocks
+            # of about one pick each so a repeating schedule cannot line up.
+            order = _shuffle_blocks(order, groups, int(round(order.size / k_free)), rng)
+        drawn = _systematic(order, pi, k_free, rng)
     else:
         drawn = np.array([], dtype=np.int64)
     idx = np.sort(np.r_[np.flatnonzero(anchors), drawn]).astype(np.int64)

@@ -355,13 +355,15 @@ Use nested mode when the validation estimate matters more than runtime.
 
 ## Smart Sampling
 
-Smart sampling keeps the rows a model learns the most from, so feature
-selection and model training run on a fraction of a large table. Rows are drawn
-in proportion to how wrong a cheap pilot model is on them, and each kept row
-carries an exact inverse-probability weight.
+Smart sampling keeps the rows a model learns the most from, so an expensive
+model trains on a fraction of a large table. Rows are drawn in proportion to
+how wrong a cheap pilot model is on them, and each kept row carries an exact
+inverse-probability weight.
 
-Typical workflow on a large panel: select features on a 10-20% smart sample,
-then train the final model on a 20-25% smart sample of the selected features.
+Typical workflow on a large panel: select features on all eligible rows when
+that is affordable, then train the final model on a 20-25% smart sample of the
+selected features. The evidence for selecting on a sample is thinner (see
+below); the example selects on one for when the full table is too slow.
 
 ```python
 import numpy as np
@@ -377,7 +379,7 @@ df["entity_id"] = np.repeat(np.arange(200), 100)
 df["timestamp"] = np.tile(np.arange(100), 200)
 df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.standard_t(3, size=len(df))
 
-# 1. Select on a weighted 10% sample.
+# 1. If selection on every row is too slow, select on a weighted sample.
 screen = smart_sample(df, feature_cols, "target",
                       panel_config("entity_id", "timestamp", size=0.1))
 chosen = select_mrmr(screen[feature_cols], screen["target"], k=3, task="regression",
@@ -393,10 +395,11 @@ model = HistGradientBoostingRegressor().fit(
 
 ### How much to sample
 
-These numbers come from a benchmark on 12 targets from a ~770k-row
-player-season panel, refitting a gradient-boosted model with the learning rate
-pinned. Each figure is the mean RMSE gap to a full-data fit on the 9 stable
-targets, over 20 fresh seeds, for `sample_rows` with its defaults.
+These numbers come from a benchmark on a ~770k-row player-season panel: 5
+targets, scored in 12 target/window combinations, refitting a gradient-boosted
+model on 50 features chosen beforehand, with the learning rate pinned. Each
+figure is the mean RMSE gap to a full-data fit on the 9 stable combinations,
+over 20 fresh seeds, for `sample_rows` with its defaults.
 
 | Rows kept | `sample_rows` | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
@@ -405,16 +408,21 @@ targets, over 20 fresh seeds, for `sample_rows` with its defaults.
 | 20% | +0.17% | +0.39% | about +0.8% |
 | 25% | +0.19% | +0.37% | about +0.7% |
 
-- **It beat chronological sampling on the stable targets:** by 0.40%, 0.30%,
-  0.21% and 0.17% at 10%, 15%, 20% and 25% of rows. The 25% interval just
-  reaches 0.
-- **On the 3 noise-dominated targets, the gap to full data means little.**
-  Chronological samples and the default's samples both beat the full-data fit
-  there, by 2-5%. The default's test RMSE was 0.9% below chronological's, pooled over
-  budgets (interval −1.9% to +0.1%).
+- **It beat chronological sampling on the stable combinations:** by 0.40%,
+  0.30%, 0.21% and 0.17% at 10%, 15%, 20% and 25% of rows. The 25% interval
+  just reaches 0.
+- **On the 3 noise-dominated combinations (all forward windows), the gap to
+  full data means little.** Chronological samples and the default's samples
+  both beat the full-data fit there, by 2-5%. Against chronological sampling
+  the default's test RMSE was +1.2% at 10% (interval −0.4% to +2.7%), then
+  −1.5%, −2.1% and −1.1% at 15%, 20% and 25%. So at 10% it only ties
+  chronological sampling across all 12 combinations (−0.02%); at 20% it is
+  0.68% better.
 - **Every draw had exactly the requested number of rows.**
-- **Drawing the sample, pilot included, takes about 2.7 s on 770k rows** with
-  one thread. A full-data fit there takes about 47 s.
+- **Count the pilot's time.** Drawing the sample, pilot included, takes about
+  2.7 s on 770k rows with one thread; a full-data fit there takes about 47 s.
+  Matched for total time instead of rows, the edge over chronological sampling
+  on the stable combinations was 0.1-0.25%.
 
 Outside that panel, `benchmarks/bench_row_sampling.py` compared a smart sample
 with a uniform sample of the same size over 10 seeds. Three datasets were used:
@@ -427,7 +435,18 @@ classification) and California housing (20k rows).
 | Linear models, test loss | about −0.05%; California −0.6% | about −0.04%; California +1.2% |
 | `select_mrmr`, downstream score | −0.8% (synthetic) to +0.25% (CDC) | about 0 |
 
-None of the selection differences was significant. The one cell where the
+The pilot pays for itself only when the downstream fit is expensive. On all
+three datasets, the pilot plus a 20% linear fit took longer than a linear fit
+on every row (CDC: 0.29 s against 0.07 s), and on California boosting saved no
+time either.
+
+None of the selection differences was significant, but the selection
+evidence is thin: weighted `select_mrmr` on the synthetic panel and CDC only,
+with the downstream model trained on all rows. At 10% on CDC the interval
+reaches +0.7%, so a small loss is not ruled out, and the panel benchmark above
+fixed its features before sampling. The quality of
+`StabilitySelector(use_smart_sampler=True)` has not been benchmarked. The one
+cell where the
 smart sample did worse is a linear model on California housing at 20%: 1.2%
 worse than a uniform sample, though not significantly over 10 seeds. The smart
 sample landed at the full-data fit, while the uniform samples beat the
@@ -437,8 +456,8 @@ estimates the full-data fit, so it inherits that fit's weaknesses, but these
 runs did not establish why uniform subsamples do better.
 
 Filter selectors cap their input at `subsample=50_000` rows by default. They
-reach the cap by thinning uniformly and keeping the weights, which leaves a
-smart sample unbiased. Draw about 50k rows for selection, or pass
+reach the cap by thinning uniformly and keeping the weights, which leaves the
+smart sample's weighting intact. Draw about 50k rows for selection, or pass
 `subsample=None` to use the whole sample.
 
 ### What did not work
@@ -451,10 +470,11 @@ None of the following beat the pilot residual in that benchmark:
 - two-round resampling;
 - keeping the hardest rows outright instead of sampling them.
 
-When the labels are observed, the realized gradient is the variance-optimal
-score. The MVS score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used
-instead of the even share, was about 0.1% better on the stable targets but
-0.9% (12-seed screen) to 2.2% (20-seed run) worse on the noise-dominated ones,
+Optimal-subsampling theory for observed labels scales a row's probability with
+its residual, usually times a term that depends on its features and the model;
+the default keeps only the residual part, an empirical choice. The MVS score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used
+instead of the even share, was about 0.1% better on the stable combinations
+but 0.9% (12-seed screen) to 2.2% (20-seed run) worse on the noise-dominated ones,
 so it is not the default.
 
 ### Cautions
@@ -468,6 +488,10 @@ so it is not the default.
   sample can beat the full-data fit, so distance to the full fit is the wrong
   yardstick. The even share is what keeps the draw from chasing noise; 0.5 is
   the only benchmarked `uniform_mix`.
+- **Weighted fits are consistent, not unbiased.** The weights make weighted
+  sums unbiased for the full-data sums. A fit divides by the realized weight
+  total, so in a small sample it is pulled toward the rows that were likely to
+  be drawn.
 - **External weights.** Do not pass external `sample_weight` with
   `StabilitySelector(use_smart_sampler=True)`; the sampler creates the weights
   for the rows it keeps.

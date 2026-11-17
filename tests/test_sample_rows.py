@@ -156,10 +156,48 @@ def test_time_order_spreads_draw_along_each_timeline():
     groups = np.repeat(np.arange(10), 100)
     time = np.tile(np.arange(100), 10)[::-1].copy()
     s = sample_rows(None, None, 100, groups=groups, time=time, pilot=None, random_state=2)
+    offsets = []
     for g in range(10):
         t = np.sort(time[s.indices][groups[s.indices] == g])
-        assert len(t) == 10
-        assert np.all(np.diff(t) == 10)
+        np.testing.assert_array_equal(t // 10, np.arange(10))  # one row per block of 10
+        offsets.append(t % 10)
+    assert np.unique(np.concatenate(offsets)).size > 5  # not the same slot in every block
+
+
+def test_equal_probability_draw_does_not_lock_onto_a_repeating_schedule():
+    # 100 groups of 20 rows with a flag on every 10th row, sampled at 10%: one
+    # evenly spaced start would keep either every flagged row or none.
+    groups = np.repeat(np.arange(100), 20)
+    time = np.tile(np.arange(20), 100)
+    flag = time % 10 == 0
+    shares = [
+        flag[sample_rows(None, None, 0.1, groups=groups, time=time, pilot=None,
+                         random_state=seed).indices].mean()
+        for seed in range(100)
+    ]
+    assert abs(np.mean(shares) - 0.1) < 0.01
+    assert np.std(shares) < 0.04
+    # One weekday series at 20%: each draw keeps about a fifth of each weekday.
+    n = 5_000
+    weekday = np.arange(n) % 5
+    for seed in range(5):
+        s = sample_rows(None, None, 0.2, time=np.arange(n), pilot=None, random_state=seed)
+        assert np.all(np.abs(np.bincount(weekday[s.indices], minlength=5) / len(s) - 0.2) < 0.05)
+
+
+def test_equal_probability_block_shuffle_keeps_inclusion_equal():
+    rng = np.random.default_rng(1)
+    n = 90
+    groups = rng.integers(0, 7, n)
+    time = rng.integers(0, 30, n)
+    counts = np.zeros(n)
+    draws = 6_000
+    for seed in range(draws):
+        s = sample_rows(None, None, 0.15, groups=groups, time=time, pilot=None, random_state=seed)
+        assert len(s) == 13
+        counts[s.indices] += 1
+    p = 13 / n
+    assert np.abs(counts / draws - p).max() < 5 * np.sqrt(p * (1 - p) / draws)
 
 
 def test_missing_groups_are_a_group_not_dropped():
@@ -219,6 +257,22 @@ def test_classification_pilot_survives_class_missing_from_pilot_slice():
                         pilot_size=1_000, random_state=seed)
         assert len(s) == 1_000
         assert np.isfinite(s.weights).all()
+
+
+@pytest.mark.parametrize("pilot", ["auto", LogisticRegression()])
+@pytest.mark.parametrize("rare_label", [0, 1])
+def test_pilot_slice_with_one_class_scores_the_other_class_highest(pilot, rare_label):
+    rng = np.random.default_rng(0)
+    n = 6_000
+    X = rng.normal(size=(n, 4))
+    y = np.full(n, 1 - rare_label)
+    y[1234] = rare_label
+    with pytest.warns(RuntimeWarning, match="single class"):
+        s = sample_rows(X, y, 0.2, task="classification", pilot=pilot, random_state=0)
+    assert len(s) == 1_200
+    common = s.indices != 1234
+    np.testing.assert_allclose(s.inclusion_prob[common], 0.5 * 1_199 / 5_999 + 0.5 * 0.2)
+    assert s.inclusion_prob[~common] == pytest.approx([0.5 + 0.5 * 0.2] * (~common).sum())
 
 
 def test_custom_pilot_estimator_is_cloned_not_fitted():

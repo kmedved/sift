@@ -48,8 +48,8 @@ def main() -> None:
     leaked = sorted({path.parts[0] for path in paths if path.parts} & forbidden)
     if leaked:
         raise SystemExit(f"wheel leaked repository-only top-level packages: {leaked}")
-    if len(sift.__all__) != 66 or "ImportanceResult" in sift.__all__:
-        raise SystemExit("installed wheel changed the pinned 66-name top-level surface")
+    if len(sift.__all__) != 67 or "ImportanceResult" in sift.__all__:
+        raise SystemExit("installed wheel changed the pinned 67-name top-level surface")
     if "ClassicFeatureCache" not in sift.__all__ or "build_classic_cache" not in sift.__all__:
         raise SystemExit("installed wheel is missing the classic-cache exports")
     if "Stabilized" not in sift.__all__:
@@ -58,6 +58,8 @@ def main() -> None:
         raise SystemExit("installed wheel is missing the purged-split exports")
     if "ModelSelector" not in sift.__all__:
         raise SystemExit("installed wheel is missing the ModelSelector export")
+    if {"sample_rows", "RowSample"} - set(sift.__all__) or "cross_section_config" in sift.__all__:
+        raise SystemExit("installed wheel does not match the 2.0 row-sampling exports")
     if hasattr(sift, "ImportanceResult"):
         raise SystemExit("ImportanceResult must remain module-only")
     if inspect.signature(sift.select_cached).parameters["return_result"].default is not False:

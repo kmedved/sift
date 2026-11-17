@@ -1776,8 +1776,9 @@ full-panel draw budget used by earlier releases.
 
 ## Smart Sampling
 
-Smart sampling keeps the rows that teach a model the most, so selection and
-training run on a fraction of the data with little accuracy lost. It works in three steps:
+Smart sampling keeps the rows that teach a model the most, so training (and,
+less tested, selection) runs on a fraction of the data with little accuracy
+lost. It works in three steps:
 
 1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores every
    row by how wrong it is: the size of its loss gradient, which is the residual
@@ -1788,8 +1789,21 @@ training run on a fraction of the data with little accuracy lost. It works in th
    chasing noise. The draw runs systematically along groups (in random order)
    and time (in order), so every entity's timeline is covered evenly.
 3. **Weights.** Each kept row carries `1 / inclusion probability`, rescaled to
-   mean 1. A model fitted with those weights is an unbiased estimate of the
-   full-data fit, with less variance than a uniform sample of the same size.
+   mean 1. Weighted sums are unbiased for the full-data sums. A model fitted
+   with the weights is consistent for the full-data fit but not exactly
+   unbiased, and how much variance it saves depends on the model and data.
+
+Where it pays off: expensive learners, or several fits on one draw. The pilot
+costs more than fitting a linear model on every row, so a cheap learner gains
+nothing. The evidence is strongest for training a model after its features
+are chosen; for feature selection it is limited (see
+[docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all
+rows when that is affordable.
+
+With `pilot=None` every row has the same probability. The draw then takes one
+random row from each block of about `1 / fraction` consecutive rows of a
+timeline, so a repeating schedule (weekday data at 20%, say) cannot line up
+with it.
 
 The array-level entry point is `sample_rows`. It returns indices and weights,
 so it works with any model:

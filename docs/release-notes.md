@@ -4,8 +4,9 @@
 
 ### Smart sampling, rebuilt
 
-The previous sampler mixed leverage scores with a capped residual share, drew
-a Poisson sample that overshot its budget, and clipped weights. On a 770k-row
+The previous sampler mixed leverage scores with a capped residual share and
+clipped weights. Its per-group draws kept any extra rows and topped up short
+ones with the highest-scoring rows, so it overshot its budget. On a 770k-row
 panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
 
 - **New: `sample_rows(X, y, size=0.2, ...) -> RowSample`.** This is the
@@ -18,7 +19,9 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
   - It returns indices, exact inverse-probability weights (mean 1) and
     inclusion probabilities.
   - The pilot can be `"auto"` (HistGradientBoosting), any estimator, an array
-    of precomputed predictions, or `None` for an equal-probability draw.
+    of precomputed predictions, or `None` for an equal-probability draw. That
+    draw takes one random row from each block of about `1 / fraction` rows
+    of a timeline, so a repeating schedule cannot line up with it.
   - Classification uses the log-loss gradient.
 - **`smart_sample` runs on the new engine.** It keeps its DataFrame signature,
   and `StabilitySelector(use_smart_sampler=True)` uses it with the selector's

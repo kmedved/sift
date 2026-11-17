@@ -151,8 +151,9 @@ scores prefixes of that path. Every returned table sets `in_sample=True` and
 ## Inclusion weights
 
 Exact inverse-probability (Horvitz–Thompson) weights from `sample_rows`, or
-the `sample_weight` column written by `smart_sample`, rescaled to mean 1. A
-fit that uses them is an unbiased estimate of the full-data fit. Downstream
+the `sample_weight` column written by `smart_sample`, rescaled to mean 1.
+Weighted sums are unbiased for the full-data sums; a weighted model fit is
+consistent for the full-data fit but not exactly unbiased. Downstream
 selectors and models consume them as ordinary
 [sample weights](#sample-weight).
 
