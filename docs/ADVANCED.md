@@ -408,6 +408,30 @@ pinned. Each figure is the stable-cell mean RMSE gap to a full-data fit, over
 At equal wall-clock time, a 20% smart sample beats a 25% chronological sample
 by 0.23%, and the pilot costs about 1.5 s on 770k rows.
 
+`sample_rows` itself, with its default HistGradientBoosting pilot, was rerun on
+the same 20 seeds:
+
+- **It matched the benchmarked method** within 0.13% at every budget.
+- **It beat chronological sampling at every budget:** by 0.49% at 10% and 0.20%
+  at 25% of rows.
+- **Every draw had exactly the requested number of rows.**
+
+Outside that panel, `benchmarks/bench_row_sampling.py` compared a smart sample
+with a uniform sample of the same size over 10 seeds. Three datasets were used:
+a 400k-row synthetic panel, the CDC diabetes survey (250k rows, binary
+classification) and California housing (20k rows).
+
+| Fit on the sample | Smart vs uniform, 10% of rows | Smart vs uniform, 20% of rows |
+|---|---|---|
+| Gradient boosting, test loss | −1.1% to −2.1% | −0.7% to −1.2% |
+| Linear models, test loss | about −0.05% | about 0 |
+| `select_mrmr`, downstream score | −0.8% (synthetic) to 0 | about 0 |
+
+The exception is a linear model on California housing. Fifty-six
+extreme-leverage rows make the full-data linear fit worse than a uniform 20%
+subsample. The smart sample reproduces the full-data fit, outliers included,
+because it is built to estimate the full-data fit and cannot improve on it.
+
 ### What did not work
 
 None of the following beat the pilot residual in that benchmark:
