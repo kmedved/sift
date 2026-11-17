@@ -1782,10 +1782,11 @@ training run on a fraction of the data with little accuracy lost. It works in th
 1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores every
    row by how wrong it is: the size of its loss gradient, which is the residual
    for regression and `||onehot(y) - p||` for classification.
-2. **Exact draw.** Exactly `size` rows are drawn, with probability proportional
-   to `sqrt(g**2 + mean(g**2))`. The draw runs systematically along groups (in
-   random order) and time (in order), so every entity's timeline is covered
-   evenly.
+2. **Exact draw.** Exactly `size` rows are drawn. Half of each row's inclusion
+   probability is proportional to `g` and half is spread evenly
+   (`uniform_mix=0.5`), which keeps every row drawable and keeps the draw from
+   chasing noise. The draw runs systematically along groups (in random order)
+   and time (in order), so every entity's timeline is covered evenly.
 3. **Weights.** Each kept row carries `1 / inclusion probability`, rescaled to
    mean 1. A model fitted with those weights is an unbiased estimate of the
    full-data fit, with less variance than a uniform sample of the same size.
@@ -1832,7 +1833,7 @@ sampled = smart_sample(
 Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 
 - `size` (default 0.2): rows to keep, as a float fraction in `(0, 1]` or an int
-  row count. On a 770k-row panel, 20-25% landed within about 0.1-0.15% of
+  row count. On a 770k-row panel, 20-25% landed within about 0.2% of
   full-data RMSE. Use 5-10% for a rough feature screen.
 - `groups` / `group_col` and `time` / `time_col`: spread the draw across
   entities and along their timelines.
@@ -1848,8 +1849,10 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
   - `None`, for an equal-probability draw that still spreads along groups and
     time.
 - `pilot_size` (default 0.02): rows used to fit the pilot, at least 1,000.
-- `uniform_mix` (default 0.0): share of probability spread evenly. Raise it
-  toward 0.5 for targets that are mostly noise.
+- `uniform_mix` (default 0.5): share of probability spread evenly, in
+  `(0, 1]`. It keeps every row drawable and caps each raw weight at
+  `1 / (uniform_mix * fraction)`; `1.0` is an equal-probability draw. 0.5 is
+  the benchmarked value.
 - `always_include` / `anchor_fn`: rows that must be kept. They count against
   `size`.
 - `random_state` (default 42) and `verbose`.

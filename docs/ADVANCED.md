@@ -395,26 +395,26 @@ model = HistGradientBoostingRegressor().fit(
 
 These numbers come from a benchmark on 12 targets from a ~770k-row
 player-season panel, refitting a gradient-boosted model with the learning rate
-pinned. Each figure is the stable-cell mean RMSE gap to a full-data fit, over
-20 fresh seeds.
+pinned. Each figure is the mean RMSE gap to a full-data fit on the 9 stable
+targets, over 20 fresh seeds, for `sample_rows` with its defaults.
 
-| Rows kept | Smart sample | Chronological (equal-probability) | Uniform random (12-seed screen) |
+| Rows kept | `sample_rows` | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
-| 10% | +0.46% | +0.99% | about +1.7% |
-| 15% | +0.24% | +0.61% | about +1.2% |
-| 20% | +0.14% | +0.39% | about +0.8% |
-| 25% | +0.12% | +0.37% | about +0.7% |
+| 10% | +0.58% | +0.99% | about +1.7% |
+| 15% | +0.30% | +0.61% | about +1.2% |
+| 20% | +0.17% | +0.39% | about +0.8% |
+| 25% | +0.19% | +0.37% | about +0.7% |
 
-At equal wall-clock time, a 20% smart sample beats a 25% chronological sample
-by 0.23%, and the pilot costs about 1.5 s on 770k rows.
-
-`sample_rows` itself, with its default HistGradientBoosting pilot, was rerun on
-the same 20 seeds:
-
-- **It matched the benchmarked method** within 0.13% at every budget.
-- **It beat chronological sampling at every budget:** by 0.49% at 10% and 0.20%
-  at 25% of rows.
+- **It beat chronological sampling on the stable targets:** by 0.40%, 0.30%,
+  0.21% and 0.17% at 10%, 15%, 20% and 25% of rows. The 25% interval just
+  reaches 0.
+- **On the 3 noise-dominated targets, the gap to full data means little.**
+  Chronological samples and the default's samples both beat the full-data fit
+  there, by 2-5%. The default's test RMSE was 0.9% below chronological's, pooled over
+  budgets (interval −1.9% to +0.1%).
 - **Every draw had exactly the requested number of rows.**
+- **Drawing the sample, pilot included, takes about 2.7 s on 770k rows** with
+  one thread. A full-data fit there takes about 47 s.
 
 Outside that panel, `benchmarks/bench_row_sampling.py` compared a smart sample
 with a uniform sample of the same size over 10 seeds. Three datasets were used:
@@ -423,17 +423,18 @@ classification) and California housing (20k rows).
 
 | Fit on the sample | Smart vs uniform, 10% of rows | Smart vs uniform, 20% of rows |
 |---|---|---|
-| Gradient boosting, test loss | −0.8% to −2.1% | −0.7% to −1.2% |
-| Linear models, test loss | about −0.05% | about 0 |
-| `select_mrmr`, downstream score | −0.8% (synthetic) to 0 | about 0 |
+| Gradient boosting, test loss | −0.7% to −2.3% | −0.6% to −2.0% |
+| Linear models, test loss | about −0.05%; California −0.6% | about −0.04%; California +1.2% |
+| `select_mrmr`, downstream score | −0.8% (synthetic) to +0.25% (CDC) | about 0 |
 
-The exception is a linear model on California housing at 20%. There the
-smart sample was 1.3% worse than a uniform sample: it landed 0.1% from the
-full-data fit, while the uniform samples beat the full-data fit by 1.2%.
-Dropping the 56 training rows with an extreme feature value (|z| > 8) improves
-the full-data linear fit by 2.5%. The smart sample estimates the full-data
-fit, so it inherits that fit's weaknesses, but these runs did not establish
-why uniform subsamples do better.
+None of the selection differences was significant. The one cell where the
+smart sample did worse is a linear model on California housing at 20%: 1.2%
+worse than a uniform sample, though not significantly over 10 seeds. The smart
+sample landed at the full-data fit, while the uniform samples beat the
+full-data fit by 1.2%. Dropping the 56 training rows with an extreme feature
+value (|z| > 8) improves the full-data linear fit by 2.5%. The smart sample
+estimates the full-data fit, so it inherits that fit's weaknesses, but these
+runs did not establish why uniform subsamples do better.
 
 Filter selectors cap their input at `subsample=50_000` rows by default. They
 reach the cap by thinning uniformly and keeping the weights, which leaves a
@@ -451,7 +452,9 @@ None of the following beat the pilot residual in that benchmark:
 - keeping the hardest rows outright instead of sampling them.
 
 When the labels are observed, the realized gradient is the variance-optimal
-score.
+score. The MVS score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used
+instead of the even share, was about 0.1% better on the stable targets but
+2.2% worse on the noise-dominated ones, so it is not the default.
 
 ### Cautions
 
@@ -460,8 +463,10 @@ score.
 - **Pin automatic hyperparameters.** If a learner derives its learning rate or
   leaf regularisation from the weights' effective sample size, set them to what
   an unweighted fit of the same size would use.
-- **Watch targets that are mostly noise.** On noise-dominated targets, the
-  residual mostly measures noise. Set `uniform_mix=0.5` there.
+- **Judge noisy targets by test error.** On targets that are mostly noise, a
+  sample can beat the full-data fit, so distance to the full fit is the wrong
+  yardstick. The even share is what keeps the draw from chasing noise; 0.5 is
+  the only benchmarked `uniform_mix`.
 - **External weights.** Do not pass external `sample_weight` with
   `StabilitySelector(use_smart_sampler=True)`; the sampler creates the weights
   for the rows it keeps.

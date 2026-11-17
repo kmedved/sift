@@ -390,7 +390,7 @@ def sample_rows(
         Target. Required unless ``pilot`` is None.
     size : float or int, default=0.2
         Rows to keep: a float fraction in ``(0, 1]`` or an int row count.
-        20-25% matched full-data accuracy to about 0.1-0.15% in the panel
+        20-25% landed within about 0.2% of full-data RMSE in the panel
         benchmark; 5-10% is enough for a rough feature screen.
     groups : array-like of shape (n_rows,), optional
         Entity of each row (player, customer, ticker). Spreads the draw across

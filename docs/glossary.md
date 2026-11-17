@@ -354,9 +354,9 @@ baseline. Beating shadows is an all-relevant heuristic, not FDR control.
 
 ## Smart sampling
 
-`sample_rows` / `smart_sample`: keep a fixed number of rows, drawn in
-proportion to how wrong a cheap pilot model is on them and spread along
-optional group/time columns. They do not select features. See
+`sample_rows` / `smart_sample`: keep a fixed number of rows, drawn half in
+proportion to how wrong a cheap pilot model is on them and half evenly, spread
+along optional group/time columns. They do not select features. See
 [inclusion weights](#inclusion-weights).
 
 ## Stability frequency

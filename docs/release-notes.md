@@ -10,8 +10,9 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
 
 - **New: `sample_rows(X, y, size=0.2, ...) -> RowSample`.** This is the
   array-level sampler for any model:
-  - It fits a cheap pilot on 2% of rows and scores rows by
-    `sqrt(g**2 + mean(g**2))` of the loss gradient.
+  - It fits a cheap pilot on 2% of rows and scores rows by the size of the
+    loss gradient. Half of the inclusion probability follows that score and
+    half is spread evenly (`uniform_mix=0.5`).
   - It draws exactly `size` rows (a fraction or a count), systematically along
     `groups` and `time`.
   - It returns indices, exact inverse-probability weights (mean 1) and
