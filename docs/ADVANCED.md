@@ -355,40 +355,88 @@ Use nested mode when the validation estimate matters more than runtime.
 
 ## Smart Sampling
 
-Smart sampling reduces large data before selection while keeping influential
-rows and preserving group/time anchors.
+Smart sampling keeps the rows a model learns the most from, so feature
+selection and model training run on a fraction of a large table. Rows are drawn
+in proportion to how wrong a cheap pilot model is on them, and each kept row
+carries an exact inverse-probability weight.
+
+Typical workflow on a large panel: select features on a 10-20% smart sample,
+then train the final model on a 20-25% smart sample of the selected features.
 
 ```python
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
 
-from sift import panel_config, smart_sample
+from sift import panel_config, sample_rows, select_mrmr, smart_sample
 
 rng = np.random.default_rng(0)
 feature_cols = [f"x{i}" for i in range(10)]
-df = pd.DataFrame(rng.normal(size=(200, 10)), columns=feature_cols)
-df["entity_id"] = np.repeat(np.arange(20), 10)
-df["timestamp"] = np.tile(np.arange(10), 20)
-df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.normal(scale=0.3, size=len(df))
+df = pd.DataFrame(rng.normal(size=(20_000, 10)), columns=feature_cols)
+df["entity_id"] = np.repeat(np.arange(200), 100)
+df["timestamp"] = np.tile(np.arange(100), 200)
+df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.standard_t(3, size=len(df))
 
-config = panel_config(
-    group_col="entity_id",
-    time_col="timestamp",
-    sample_frac=0.3,
-)
+# 1. Select on a weighted 10% sample.
+screen = smart_sample(df, feature_cols, "target",
+                      panel_config("entity_id", "timestamp", size=0.1))
+chosen = select_mrmr(screen[feature_cols], screen["target"], k=3, task="regression",
+                     sample_weight=screen["sample_weight"].to_numpy())
 
-sampled = smart_sample(
-    df,
-    feature_cols=feature_cols,
-    y_col="target",
-    config=config,
-    verbose=False,
+# 2. Train on a weighted 25% sample of the chosen features.
+s = sample_rows(df[chosen], df["target"], size=0.25,
+                groups=df["entity_id"], time=df["timestamp"], random_state=1)
+model = HistGradientBoostingRegressor().fit(
+    s.take(df[chosen]), s.take(df["target"]), sample_weight=s.weights
 )
 ```
 
-For stability selection, name the feature subset explicitly: the sampler needs
-the group and time columns to stay in the frame, and `feature_names` is what
-keeps them (and the target) out of the candidate set.
+### How much to sample
+
+These numbers come from a benchmark on 12 targets from a ~770k-row
+player-season panel, refitting a gradient-boosted model with the learning rate
+pinned. Each figure is the stable-cell mean RMSE gap to a full-data fit, over
+20 fresh seeds.
+
+| Rows kept | Smart sample | Chronological (equal-probability) | Uniform random |
+|---|---|---|---|
+| 10% | +0.46% | +0.99% | about +1.7% |
+| 15% | +0.24% | +0.61% | about +1.2% |
+| 20% | +0.14% | +0.39% | about +0.8% |
+| 25% | +0.12% | +0.37% | about +0.7% |
+
+At equal wall-clock time, a 20% smart sample beats a 25% chronological sample
+by 0.23%, and the pilot costs about 1.5 s on 770k rows.
+
+### What did not work
+
+None of the following beat the pilot residual in that benchmark:
+
+- smoothing the residual score (isotonic or gradient-boosted variance models);
+- better or ensembled pilots, including the full-data model;
+- leverage scores, covariate-shift weights or change-point scores;
+- two-round resampling;
+- keeping the hardest rows outright instead of sampling them.
+
+When the labels are observed, the realized gradient is the variance-optimal
+score.
+
+### Cautions
+
+- **Pass the weights to every downstream fit.** Unweighted, the model
+  over-represents the rows the pilot found hard.
+- **Pin automatic hyperparameters.** If a learner derives its learning rate or
+  leaf regularisation from the weights' effective sample size, set them to what
+  an unweighted fit of the same size would use.
+- **Watch targets that are mostly noise.** On noise-dominated targets, the
+  residual mostly measures noise. Set `uniform_mix=0.5` there.
+- **External weights.** Do not pass external `sample_weight` with
+  `StabilitySelector(use_smart_sampler=True)`; the sampler creates the weights
+  for the rows it keeps.
+
+For stability selection, name the feature subset explicitly. The sampler needs
+the group and time columns to stay in the frame, and `feature_names` keeps them
+(and the target) out of the candidate set.
 
 ```python
 import numpy as np
@@ -398,25 +446,22 @@ from sift import StabilitySelector, panel_config
 
 rng = np.random.default_rng(0)
 feature_cols = [f"x{i}" for i in range(10)]
-df = pd.DataFrame(rng.normal(size=(200, 10)), columns=feature_cols)
-df["entity_id"] = np.repeat(np.arange(20), 10)
-df["timestamp"] = np.tile(np.arange(10), 20)
+df = pd.DataFrame(rng.normal(size=(2_000, 10)), columns=feature_cols)
+df["entity_id"] = np.repeat(np.arange(200), 10)
+df["timestamp"] = np.tile(np.arange(10), 200)
 y = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.normal(scale=0.3, size=len(df))
 
 selector = StabilitySelector(
     threshold=0.6,
     n_bootstrap=20,
     use_smart_sampler=True,
-    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.3),
+    sampler_config=panel_config("entity_id", "timestamp", size=0.3),
     random_state=0,
     verbose=False,
 )
 
 selector.fit(df, y, feature_names=feature_cols)
 ```
-
-Do not pass external `sample_weight` with `use_smart_sampler=True`; the sampler
-creates weights for the retained rows.
 
 ## Repeated Targets and Caches
 

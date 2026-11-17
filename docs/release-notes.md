@@ -1,6 +1,47 @@
 # Release Notes
 
-## 1.0.3 (unreleased)
+## 2.0.0 (unreleased)
+
+### Smart sampling, rebuilt
+
+The previous sampler mixed leverage scores with a capped residual share, drew
+a Poisson sample that overshot its budget, and clipped weights. On a 770k-row
+panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
+
+- **New: `sample_rows(X, y, size=0.2, ...) -> RowSample`.** This is the
+  array-level sampler for any model:
+  - It fits a cheap pilot on 2% of rows and scores rows by
+    `sqrt(g**2 + mean(g**2))` of the loss gradient.
+  - It draws exactly `size` rows (a fraction or a count), systematically along
+    `groups` and `time`.
+  - It returns indices, exact inverse-probability weights (mean 1) and
+    inclusion probabilities.
+  - The pilot can be `"auto"` (HistGradientBoosting), any estimator, an array
+    of precomputed predictions, or `None` for an equal-probability draw.
+  - Classification uses the log-loss gradient.
+- **`smart_sample` runs on the new engine.** It keeps its DataFrame signature,
+  and `StabilitySelector(use_smart_sampler=True)` uses it with the selector's
+  own `task`. Classification no longer falls back to geometry-only sampling.
+
+### Breaking changes
+
+- **`SmartSamplerConfig` fields are now** `size`, `group_col`, `time_col`,
+  `task`, `pilot`, `pilot_size`, `uniform_mix`, `anchor_fn`, `random_state`
+  and `verbose`. Removed: `sample_frac` (now `size`), `pilot_sample_size`,
+  `min_per_group`, `leverage_batch_size`, `svd_sample_size`,
+  `weight_clip_quantile`, `residual_weight_cap`, `uniform_floor` and
+  `anchor_max_share`. Passing a removed field raises `TypeError` that names its
+  replacement.
+- **The default size is 20% of rows,** up from 10%.
+- **Presets:** `panel_config(group_col, time_col=None, size=0.2)` no longer
+  anchors the first and last row of each group. `cross_section_config`,
+  `financial_config` and `medical_config` are removed.
+- **`smart_sample` output:** it keeps the input index instead of resetting it,
+  writes `float64` weights, and rejects datetime or non-numeric feature columns
+  when the default pilot is used.
+- **The same seed now draws different rows** than in 1.x.
+
+### Other
 
 - CI runs the full suite on Python 3.14 and 3.15, and the package classifiers
   list both.

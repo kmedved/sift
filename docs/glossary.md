@@ -150,10 +150,11 @@ scores prefixes of that path. Every returned table sets `in_sample=True` and
 
 ## Inclusion weights
 
-Approximate inverse-probability weights written by `smart_sample` into a
-`sample_weight` column (mean-normalized). They reduce sampling bias; they
-are not exact Horvitz–Thompson weights. Downstream selectors consume them as
-ordinary [sample weights](#sample-weight).
+Exact inverse-probability (Horvitz–Thompson) weights from `sample_rows`, or
+the `sample_weight` column written by `smart_sample`, rescaled to mean 1. A
+fit that uses them is an unbiased estimate of the full-data fit. Downstream
+selectors and models consume them as ordinary
+[sample weights](#sample-weight).
 
 ## Joint mutual information
 
@@ -353,8 +354,9 @@ baseline. Beating shadows is an all-relevant heuristic, not FDR control.
 
 ## Smart sampling
 
-`smart_sample`: row reduction by leverage and residual hard cases, with
-optional group/time columns. It does not select features. See
+`sample_rows` / `smart_sample`: keep a fixed number of rows, drawn in
+proportion to how wrong a cheap pilot model is on them and spread along
+optional group/time columns. They do not select features. See
 [inclusion weights](#inclusion-weights).
 
 ## Stability frequency

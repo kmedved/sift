@@ -114,7 +114,7 @@ def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -
 
 @dataclass(frozen=True)
 class RowSample:
-    """Rows chosen by :func:`sample_rows` and their inverse-probability weights.
+    """Rows chosen by ``sample_rows`` and their inverse-probability weights.
 
     Attributes
     ----------
@@ -563,9 +563,9 @@ def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
 
 @dataclass
 class SmartSamplerConfig:
-    """Settings for :func:`smart_sample` and ``StabilitySelector(use_smart_sampler=True)``.
+    """Settings for ``smart_sample`` and ``StabilitySelector(use_smart_sampler=True)``.
 
-    Every field mirrors the keyword of the same name in :func:`sample_rows`;
+    Every field mirrors the keyword of the same name in ``sample_rows``;
     ``group_col``, ``time_col`` and ``anchor_fn`` name DataFrame columns and
     an anchor rule instead of passing arrays.
 
@@ -580,14 +580,14 @@ class SmartSamplerConfig:
     task : {"auto", "regression", "classification"}, default="auto"
         How the pilot's gradient is computed.
     pilot : "auto", estimator, array-like or None, default="auto"
-        Pilot model; see :func:`sample_rows`.
+        Pilot model; see ``sample_rows``.
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot.
     uniform_mix : float, default=0.0
         Share of probability spread evenly over rows.
     anchor_fn : callable, optional
         ``anchor_fn(df, group_col, time_col) -> bool mask`` of rows that must
-        be kept, e.g. :func:`sift.sampling.first_per_group`.
+        be kept, e.g. ``sift.sampling.first_per_group``.
     random_state : int or None, default=42
         Seed.
     verbose : bool, default=False
@@ -657,7 +657,7 @@ def smart_sample(
 ) -> pd.DataFrame:
     """Keep the most informative rows of a DataFrame, with a ``sample_weight`` column.
 
-    DataFrame front end to :func:`sample_rows`: fits a pilot on
+    DataFrame front end to ``sample_rows``: fits a pilot on
     ``feature_cols``, draws exactly ``size`` rows weighted toward the rows the
     pilot gets wrong, and returns them (original index preserved) with exact
     inverse-probability weights rescaled to mean 1.
