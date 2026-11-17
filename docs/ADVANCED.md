@@ -386,6 +386,27 @@ sampled = smart_sample(
 )
 ```
 
+### Chronological sampling at a fixed row budget
+
+Use `chronological_sample` when nearby observations for the same entity
+are often similar. It allocates a proportional share within each season
+and entity, then spreads the draws over the ordered observations.
+
+```python
+from sift.sampling import chronological_sample
+
+positions = chronological_sample(
+    train_df, len(train_df) // 10, group_col="entity_id",
+    time_col="timestamp", stratum_col="season", random_state=42,
+)
+sampled = train_df.iloc[positions]
+```
+
+Split off validation first. Omit `stratum_col` to allocate across whole
+entity histories. Groups with fewer rows than the sampling interval
+may receive zero slots. Every row has the same marginal inclusion
+probability, so an equal-row training objective uses equal weights.
+
 For stability selection, name the feature subset explicitly: the sampler needs
 the group and time columns to stay in the frame, and `feature_names` is what
 keeps them (and the target) out of the candidate set.
