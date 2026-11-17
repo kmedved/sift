@@ -398,7 +398,7 @@ player-season panel, refitting a gradient-boosted model with the learning rate
 pinned. Each figure is the stable-cell mean RMSE gap to a full-data fit, over
 20 fresh seeds.
 
-| Rows kept | Smart sample | Chronological (equal-probability) | Uniform random |
+| Rows kept | Smart sample | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
 | 10% | +0.46% | +0.99% | about +1.7% |
 | 15% | +0.24% | +0.61% | about +1.2% |
@@ -423,14 +423,22 @@ classification) and California housing (20k rows).
 
 | Fit on the sample | Smart vs uniform, 10% of rows | Smart vs uniform, 20% of rows |
 |---|---|---|
-| Gradient boosting, test loss | −1.1% to −2.1% | −0.7% to −1.2% |
+| Gradient boosting, test loss | −0.8% to −2.1% | −0.7% to −1.2% |
 | Linear models, test loss | about −0.05% | about 0 |
 | `select_mrmr`, downstream score | −0.8% (synthetic) to 0 | about 0 |
 
-The exception is a linear model on California housing. Fifty-six
-extreme-leverage rows make the full-data linear fit worse than a uniform 20%
-subsample. The smart sample reproduces the full-data fit, outliers included,
-because it is built to estimate the full-data fit and cannot improve on it.
+The exception is a linear model on California housing at 20%. There the
+smart sample was 1.3% worse than a uniform sample: it landed 0.1% from the
+full-data fit, while the uniform samples beat the full-data fit by 1.2%.
+Dropping the 56 training rows with an extreme feature value (|z| > 8) improves
+the full-data linear fit by 2.5%. The smart sample estimates the full-data
+fit, so it inherits that fit's weaknesses, but these runs did not establish
+why uniform subsamples do better.
+
+Filter selectors cap their input at `subsample=50_000` rows by default. They
+reach the cap by thinning uniformly and keeping the weights, which leaves a
+smart sample unbiased. Draw about 50k rows for selection, or pass
+`subsample=None` to use the whole sample.
 
 ### What did not work
 

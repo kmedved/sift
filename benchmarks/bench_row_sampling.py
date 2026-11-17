@@ -19,7 +19,7 @@ Rule fixed before running (see docs/ADVANCED.md for the outcome):
   than uniform; selection passes if smart is not significantly worse than
   uniform on downstream score in any dataset at 10% or 20%.
 
-Usage: python benchmarks/bench_row_sampling.py OUT_DIR [--seeds N] [--quick]
+Usage: python benchmarks/bench_row_sampling.py OUT_DIR [--seeds N] [--quick] [--cdc PATH]
 """
 
 from __future__ import annotations
@@ -42,7 +42,8 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sift  # noqa: E402
 
-CDC = Path.home() / "code/darkofit/.cache/r21-binary-fresh-reserve-v2-20260807/cdc_diabetes_health_indicators.csv"
+# UCI 891 "CDC Diabetes Health Indicators" CSV; pass --cdc PATH (skipped when absent).
+CDC_DEFAULT = Path.home() / "code/darkofit/.cache/r21-binary-fresh-reserve-v2-20260807/cdc_diabetes_health_indicators.csv"
 FRACS = (0.1, 0.2)
 
 
@@ -64,8 +65,8 @@ def synth(seed: int = 0, n: int = 400_000, p: int = 60):
                 test=test, true=set(cols[:12]), k=12)
 
 
-def cdc():
-    df = pd.read_csv(CDC).drop(columns=["ID"])
+def cdc(path):
+    df = pd.read_csv(path).drop(columns=["ID"])
     y = df.pop("Diabetes_binary").to_numpy()
     test = np.random.default_rng(1).random(len(df)) < 0.2
     return dict(name="cdc_diabetes", task="classification", X=df.astype(np.float64), y=y,
@@ -112,11 +113,16 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--cdc", type=Path, default=CDC_DEFAULT)
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     log = open(out / "rows.jsonl", "a")
-    datasets = [synth(n=60_000) if a.quick else synth(), cdc(), calif()]
+    datasets = [synth(n=60_000) if a.quick else synth(), calif()]
+    if a.cdc.exists():
+        datasets.insert(1, cdc(a.cdc))
+    else:
+        print(f"skipping CDC diabetes: {a.cdc} not found", flush=True)
     for ds in datasets:
         tr, te = ~ds["test"], ds["test"]
         Xtr, Xte = ds["X"][tr].reset_index(drop=True), ds["X"][te].reset_index(drop=True)
