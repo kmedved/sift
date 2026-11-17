@@ -477,8 +477,13 @@ def sample_rows(
     uniform_mix : float, default=0.5
         ``method="residual"`` only. Share of the inclusion probability spread
         evenly over rows, in ``(0, 1]``. The even share keeps every row
-        drawable and caps each raw weight at
-        ``1 / (uniform_mix * fraction)``. 0.5 is the benchmarked value.
+        drawable and caps each raw weight at ``1 / (uniform_mix * f)``, where
+        ``f`` is the fraction of the non-forced rows that is drawn:
+        ``(k - n_forced) / (n_rows - n_forced)`` for a budget of ``k`` rows.
+        Without ``always_include`` this is the sampling fraction
+        ``k / n_rows``; forced rows can raise the cap sharply (100 rows,
+        ``k = 20`` and 19 forced rows give ``f = 1/81`` and a cap of 162,
+        not 10). 0.5 is the benchmarked value.
     always_include : array-like of bool, optional
         Rows that must be kept (probability 1). They count against ``size``
         and must leave room for at least one drawn row. The other rows share

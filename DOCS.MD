@@ -1879,7 +1879,11 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 - `pilot`, `pilot_size` and `uniform_mix` raise if set with another method.
 - `uniform_mix` (default 0.5, residual only): share of probability spread
   evenly, in `(0, 1]`. It keeps every row drawable and caps each raw weight at
-  `1 / (uniform_mix * fraction)`. 0.5 is the benchmarked value.
+  `1 / (uniform_mix * f)`, where `f = (k - n_forced) / (n - n_forced)` is the
+  fraction of the non-forced rows that is drawn. Without `always_include`, `f`
+  is the sampling fraction `k / n`. Forced rows can raise the cap sharply: 100
+  rows, `k = 20` and 19 forced rows give `f = 1/81` and a cap of 162, not 10.
+  0.5 is the benchmarked value.
 - `always_include` / `anchor_fn`: rows that must be kept. They count against
   `size` and must leave room for at least one drawn row. Forced rows have
   inclusion probability 1 and the other rows share the rest of the budget, so

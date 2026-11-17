@@ -150,6 +150,28 @@ def test_uniform_share_bounds_weights_even_with_outliers():
     np.testing.assert_allclose(s.inclusion_prob[outliers], 0.6)
 
 
+def test_forced_rows_raise_the_raw_weight_cap_to_the_remaining_fraction():
+    # 100 rows, k = 20, 19 forced: one draw from the 81 other rows, so the
+    # remaining fraction is 1/81, not k/n = 0.2.
+    rng = np.random.default_rng(0)
+    n, k, n_forced = 100, 20, 19
+    X, y = rng.normal(size=(n, 3)), rng.normal(size=n)
+    forced = np.arange(n) < n_forced
+    f = (k - n_forced) / (n - n_forced)
+    for method, extra in (("uniform", {}), ("chronological", {"time": np.arange(n)})):
+        s = sample_rows(X, y, k, method=method, always_include=forced, random_state=1, **extra)
+        raw = 1.0 / s.inclusion_prob
+        np.testing.assert_allclose(raw[np.isin(s.indices, np.flatnonzero(forced))], 1.0)
+        assert raw.max() == pytest.approx(1 / f)
+    worst = 0.0
+    for seed in range(50):
+        noise = np.random.default_rng(seed).normal(size=n)
+        s = sample_rows(X, y, k, method="residual", pilot=y + noise**3, always_include=forced,
+                        random_state=seed)
+        worst = max(worst, (1.0 / s.inclusion_prob).max())
+    assert 1 / (0.5 * k / n) < worst <= 1 / (0.5 * f) + 1e-9
+
+
 def test_rows_the_pilot_fits_exactly_stay_drawable():
     rng = np.random.default_rng(0)
     y = rng.normal(size=2_000)
