@@ -4,10 +4,11 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v1.0.2` (2026-10-26) is the latest GitHub release; the release workflow
-  builds its wheel and source distribution, checks their metadata with Twine
-  and smoke-tests a clean wheel install, with no PyPI publication. `v1.0.1`
-  (2026-10-09, `b3fe977`) preceded it.
+- `v2.0.0` (2026-11-17) is the latest GitHub release: the rebuilt
+  `sample_rows` / `smart_sample` sampler (PRs #112, #113, #114). The release
+  workflow builds its wheel and source distribution, checks their metadata with
+  Twine and smoke-tests a clean wheel install, with no PyPI publication.
+  `v1.0.2` (2026-10-26) and `v1.0.1` (2026-10-09, `b3fe977`) preceded it.
 - PR #105 merged the 1.0.1 fixes as `5489807` after all six active CI jobs
   passed at head `484b0d7`. Its source-bound runtime evidence retains its
   original commit ancestry.

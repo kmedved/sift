@@ -1,6 +1,6 @@
 # Release Notes
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-11-17)
 
 ### Smart sampling, rebuilt
 
@@ -30,8 +30,7 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
 
   It returns indices, mean-one fitting weights (`1 / inclusion_prob` rescaled
   to mean 1; all 1 for the equal-probability methods unless rows are forced
-  in), inclusion
-  probabilities and the method. Weighting by the raw `1 / inclusion_prob`
+  in), inclusion probabilities and the method. Weighting by the raw `1 / inclusion_prob`
   estimates a fixed full-data total without bias. Rows in `always_include`
   are always kept, but they may not take the whole budget while other rows
   remain; the other rows share the rest of the budget, so chronological
@@ -76,8 +75,12 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
 
 ### Other
 
-- CI runs the full suite on Python 3.14 and 3.15, and the package classifiers
-  list both.
+- Pull requests and pushes to main run smoke checks, documentation smoke
+  tests, critical lint and a clean wheel install. The full matrix, run on
+  demand from the Actions tab, covers Python 3.11 through 3.15, and the
+  package classifiers list 3.14 and 3.15.
+- No benchmarked selector changed, so the runtime table is still the one
+  measured from the clean 1.0.2 release source.
 
 ## 1.0.2 (2026-10-26)
 

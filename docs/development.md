@@ -272,13 +272,14 @@ python benchmarks/bench_stability.py --quick --output /tmp/bench-stability.json
 
 ## CI and Releases
 
-GitHub Actions run tests on Python 3.11 through 3.15, plus a `min-pins` job on
-the declared dependency floors, optional CatBoost coverage, a clean-wheel
-installation smoke test, a scheduled latest-dependency canary, and a scheduled
-quick benchmark gate. Every job sets `timeout-minutes` and uses `cache: pip`, and
-the workflow declares a `concurrency` group that cancels superseded pull-request
-runs while letting branch and scheduled runs finish so their artifacts stay
-complete. Published GitHub releases build and metadata-check source and wheel
+Pull requests and pushes to main run the Python 3.12 smoke checks and a
+clean-wheel installation smoke test. A manual run of the **Tests** workflow adds
+the full suite on Python 3.11 through 3.15, a `min-pins` job on the declared
+dependency floors, optional CatBoost coverage, a latest-dependency canary, and a
+quick benchmark gate. Nothing runs on a schedule. Every job sets
+`timeout-minutes` and uses `cache: pip`, and the workflow declares a
+`concurrency` group that cancels superseded pull-request runs while letting
+branch and manual runs finish so their artifacts stay complete. Published GitHub releases build and metadata-check source and wheel
 distributions, clean-install the exact wheel, and attach those distributions to
 the GitHub Release. This project does not publish those artifacts to PyPI.
 
@@ -377,7 +378,7 @@ exactly.
 
 ### Auto-K gate summarizer
 
-The scheduled `benchmark-smoke` job regenerates the Auto-K G1-G6 gate table from
+The manual `benchmark-smoke` job regenerates the Auto-K G1-G6 gate table from
 the committed raw campaign CSVs and uploads it as the `sift-auto-k-gate-table`
 artifact. The summarizer is deterministic — `tests/test_auto_k_gate_summary.py`
 pins the exact output bytes of a synthetic fixture — so the job also verifies the
@@ -424,7 +425,7 @@ git diff --check
 ```
 
 Release tags must match `v` plus the release version. The latest published tag
-is `v1.0.2` (2026-10-26); later source stays untagged until the next release.
+is `v2.0.0` (2026-11-17); later source stays untagged until the next release.
 The release workflow verifies the exact wheel it attaches to the existing GitHub
 Release. There is no publication step and no package index: releasing SIFT means
 creating a GitHub Release with the checked source and wheel distributions
