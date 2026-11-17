@@ -454,7 +454,8 @@ None of the following beat the pilot residual in that benchmark:
 When the labels are observed, the realized gradient is the variance-optimal
 score. The MVS score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used
 instead of the even share, was about 0.1% better on the stable targets but
-2.2% worse on the noise-dominated ones, so it is not the default.
+0.9% (12-seed screen) to 2.2% (20-seed run) worse on the noise-dominated ones,
+so it is not the default.
 
 ### Cautions
 
