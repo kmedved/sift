@@ -393,7 +393,16 @@ are often similar. It allocates a proportional share within each season
 and entity, then spreads the draws over the ordered observations.
 
 ```python
+import numpy as np
+import pandas as pd
+
 from sift.sampling import chronological_sample
+
+train_df = pd.DataFrame({
+    "entity_id": np.repeat(np.arange(50), 40),
+    "timestamp": np.tile(np.arange(40), 50),
+})
+train_df["season"] = train_df["timestamp"] // 10
 
 positions = chronological_sample(
     train_df, len(train_df) // 10, group_col="entity_id",
