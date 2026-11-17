@@ -573,9 +573,9 @@ def test_smart_sampler_config_is_not_mutated():
     X = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"f{i}" for i in range(p)])
     y = np.where(X["f0"] > 0, "win", "loss")
     config = SmartSamplerConfig(
-        sample_frac=0.5,
-        min_per_group=1,
-        residual_weight_cap=0.4,
+        size=0.5,
+        method="residual",
+        task="regression",
         random_state=None,
         verbose=True,
     )
@@ -593,7 +593,7 @@ def test_smart_sampler_config_is_not_mutated():
     )
     selector.fit(X, y)
 
-    assert config.residual_weight_cap == 0.4
+    assert config.task == "regression"
     assert config.random_state is None
     assert config.verbose is True
 
@@ -608,8 +608,8 @@ def test_smart_sample_full_fraction_keeps_all_rows_without_residual_y_check():
         }
     )
     config = SmartSamplerConfig(
-        sample_frac=1.0,
-        residual_weight_cap=0.0,
+        size=1.0,
+        method="residual",
         random_state=5,
         verbose=False,
     )
@@ -641,10 +641,9 @@ def test_smart_sample_accepts_list_anchor_mask():
         ["f0", "f1"],
         "y",
         SmartSamplerConfig(
-            sample_frac=0.2,
+            size=0.2,
             anchor_fn=anchor_fn,
-            anchor_max_share=1.0,
-            residual_weight_cap=0.0,
+            method="uniform",
             random_state=6,
             verbose=False,
         ),
@@ -673,7 +672,7 @@ def test_smart_sample_rejects_wrong_length_anchor_mask():
             "y",
             SmartSamplerConfig(
                 anchor_fn=anchor_fn,
-                residual_weight_cap=0.0,
+                method="uniform",
                 verbose=False,
             ),
         )
@@ -690,7 +689,7 @@ def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
     X['timestamp'] = np.tile(np.arange(10), 10)
     y = X['f0'] + np.random.randn(n) * 0.3
 
-    config = SmartSamplerConfig(group_col='group_id', time_col='timestamp')
+    config = SmartSamplerConfig(method='chronological', group_col='group_id', time_col='timestamp')
 
     # With use_smart_sampler=False, group_id and timestamp should be treated as features
     selector = StabilitySelector(
@@ -744,33 +743,6 @@ def test_periodic_anchors_respects_time_order():
     # For month 2: time 1 (row 3) is first
     expected = np.array([False, True, False, True])
     np.testing.assert_array_equal(mask, expected)
-
-
-def test_anchor_max_share_zero_excludes_all_anchors():
-    """Test that anchor_max_share=0 excludes all anchors."""
-    from sift.sampling.smart import SmartSamplerConfig, smart_sample
-    from sift.sampling.anchors import first_per_group
-
-    np.random.seed(42)
-    n = 100
-    df = pd.DataFrame({
-        'f0': np.random.randn(n),
-        'f1': np.random.randn(n),
-        'group': np.repeat(np.arange(10), 10),
-        'y': np.random.randn(n)
-    })
-
-    config = SmartSamplerConfig(
-        sample_frac=0.5,
-        group_col='group',
-        anchor_fn=first_per_group,
-        anchor_max_share=0.0,  # Should exclude all anchors
-        verbose=False
-    )
-
-    # Should not raise and should return samples
-    result = smart_sample(df, ['f0', 'f1'], 'y', config)
-    assert len(result) > 0
 
 
 def test_selected_features_sorted_by_frequency():

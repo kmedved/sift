@@ -40,28 +40,28 @@ def test_all_package_warning_calls_declare_category_and_stacklevel():
     assert missing == []
 
 
-def test_smart_sample_runtime_warning_points_to_public_caller(monkeypatch):
-    def fail_svd(*args, **kwargs):
-        del args, kwargs
-        raise RuntimeError("forced SVD failure")
-
-    monkeypatch.setattr(smart_module, "randomized_svd", fail_svd)
+def test_smart_sample_runtime_warning_points_to_public_caller():
     frame = pd.DataFrame(
         {
             "x": np.linspace(-1.0, 1.0, 24),
             "y": np.linspace(0.0, 2.0, 24),
+            "pred": np.linspace(0.0, 2.0, 24),
         }
     )
     config = smart_module.SmartSamplerConfig(
-        sample_frac=0.5,
-        residual_weight_cap=0.0,
+        size=0.5,
+        method="residual",
+        pilot=frame["pred"].to_numpy(),
         random_state=0,
         verbose=False,
     )
 
-    with pytest.warns(RuntimeWarning, match="forced SVD failure") as caught:
+    with pytest.warns(RuntimeWarning, match="pilot fits every row exactly") as caught:
         smart_module.smart_sample(frame, ["x"], "y", config=config)
+    assert Path(caught[0].filename) == Path(__file__)
 
+    with pytest.warns(RuntimeWarning, match="pilot fits every row exactly") as caught:
+        smart_module.sample_rows(None, frame["y"], 0.5, method="residual", pilot=frame["pred"])
     assert Path(caught[0].filename) == Path(__file__)
 
 

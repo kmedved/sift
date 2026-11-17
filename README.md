@@ -302,7 +302,7 @@ itself without a warning, and 1.0 keeps all 66.
 | Result objects and views | `as_result`, `SelectionView`, `FilterSelectionResult`, `KnockoffSelectionResult`, `BorutaResult`, `FeaturePathEvaluationResult`, `CompareResult` |
 | Selector classes | `MRMRSelector`, `JMISelector`, `JMIMSelector`, `CEFSPlusSelector`, `CEFSPlusBinarySelector`, `KnockoffSelector`, `BorutaSelector`, `StabilitySelector`, `Stabilized`, `ModelSelector` |
 | Cache-backed paths | `build_cache`, `select_cached`, `FeatureCache`, `build_classic_cache`, `ClassicFeatureCache` |
-| Sampling and stability | `smart_sample`, `SmartSamplerConfig`, `StabilitySelector`, `stability_regression`, `stability_classif`, `Stabilized` |
+| Sampling and stability | `sample_rows`, `RowSample`, `smart_sample`, `SmartSamplerConfig`, `panel_config`, `StabilitySelector`, `stability_regression`, `stability_classif`, `Stabilized` |
 | Model-based importance | `permutation_importance`, `BorutaSelector`, `select_boruta`, `select_boruta_shap`, CatBoost helpers |
 | Diagnostics and comparison | `set_verbosity`, `evaluate_feature_path`, `compare`, `sift.experimental` |
 | Time-aware splits | `PurgedTimeSeriesSplit`, `GroupPurgedTimeSeriesSplit` |

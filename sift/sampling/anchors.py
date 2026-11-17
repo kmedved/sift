@@ -185,191 +185,59 @@ def combine_anchors(*anchor_fns):
 
 
 # =============================================================================
-# Domain-Specific Presets
+# Presets
 # =============================================================================
 
 
 def panel_config(
     group_col: str,
     time_col: Optional[str] = None,
-    sample_frac: float = 0.15
+    size: float | int = 0.2,
+    strata_col: Optional[str] = None,
 ) -> SmartSamplerConfig:
-    """Generic preset for panel/longitudinal data.
+    """Preset for a chronological draw from panel (entity-over-time) data.
 
-    Builds a ``sift.SmartSamplerConfig`` for repeated observations of the
-    same entities: rows are grouped by ``group_col``, at least two rows per
-    group survive, and the first and last observation of every group are
-    anchored so each entity keeps its endpoints instead of being reduced to a
-    random interior slice. Use it whenever ``smart_sample`` runs on
-    entity-over-time data (customers, patients, tickers, players); use
-    ``cross_section_config`` when rows are independent.
+    Builds a ``sift.SmartSamplerConfig`` with ``method="chronological"``:
+    every row has the same probability, each entity in ``group_col`` (inside
+    each stratum in ``strata_col``, such as a season) gets its proportional
+    share rounded up or down, and the draw is spread along each entity's
+    timeline in ``time_col``.  If an ``anchor_fn`` is added, its rows are
+    kept outside these quotas and the weights are no longer all 1.  For the
+    residual draw, use ``SmartSamplerConfig(method="residual")``; it ignores
+    entity and time structure.
 
     Parameters
     ----------
     group_col : str
         Column naming the entity each row belongs to.
     time_col : str, optional
-        Column ordering rows inside a group. When given, "first" and "last"
-        anchors follow that order; when omitted, they fall back to the frame's
-        own row order.
-    sample_frac : float, default=0.15
-        Target fraction of rows to keep, a finite float in ``(0, 1]``. Anchors
-        and the per-group minimum can push the realized fraction above it.
+        Column ordering rows inside an entity; input order when omitted.
+    size : float or int, default=0.2
+        Rows to keep: a fraction in ``(0, 1]`` or a row count.
+    strata_col : str, optional
+        Outer level whose shares are allocated first, such as a season.
 
     Returns
     -------
     SmartSamplerConfig
-        A config with ``sample_frac``, ``group_col`` and ``time_col`` set from
-        the arguments, ``anchor_fn=first_and_last_per_group`` and
-        ``min_per_group=2``. Every other field keeps the dataclass default:
-        ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
-        ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
-        ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
-        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=False``.
-        The returned config is a mutable dataclass, so override any of those
-        in place or through ``dataclasses.replace``.
-
-    Raises
-    ------
-    TypeError
-        If ``group_col`` or ``time_col`` is not a string or None, raised by the
-        config's own validation.
-    ValueError
-        If ``sample_frac`` is not a finite value in ``(0, 1]``.
+        A config with ``method="chronological"``, ``size``, ``group_col``,
+        ``time_col`` and ``strata_col`` set and every other field at its
+        default. Add ``anchor_fn=first_per_group`` (or any anchor rule) to
+        guarantee that each entity keeps at least one row.
 
     See Also
     --------
-    cross_section_config : Preset for independent, non-grouped rows.
     sift.smart_sample : Consumer of this config.
-    sift.SmartSamplerConfig : The dataclass and its full field list.
-
-    Notes
-    -----
-    ``smart_sample`` combines leverage-based geometric sampling with
-    residual-based hard-case detection and attaches an approximate
-    inverse-probability ``sample_weight`` column, so downstream selectors
-    should pass those weights on. Anchored rows are kept with probability one
-    but are capped at ``anchor_max_share`` of each group's quota. Keyword
-    overrides passed to ``smart_sample`` win over the config's fields.
+    sift.sample_rows : Array-level sampler.
 
     Examples
     --------
     >>> from sift import panel_config
-    >>> config = panel_config("entity_id", "date", sample_frac=0.25)
-    >>> config.sample_frac, config.group_col, config.time_col
-    (0.25, 'entity_id', 'date')
-    >>> config.min_per_group, config.anchor_fn.__name__
-    (2, 'first_and_last_per_group')
+    >>> config = panel_config("entity_id", "date", size=0.25, strata_col="season")
+    >>> config.method, config.size, config.group_col, config.time_col, config.strata_col
+    ('chronological', 0.25, 'entity_id', 'date', 'season')
     """
     return SmartSamplerConfig(
-        sample_frac=sample_frac,
-        group_col=group_col,
-        time_col=time_col,
-        anchor_fn=first_and_last_per_group,
-        min_per_group=2,
-    )
-
-
-def cross_section_config(sample_frac: float = 0.15) -> SmartSamplerConfig:
-    """Preset for cross-sectional (non-grouped) data.
-
-    Builds a ``sift.SmartSamplerConfig`` for independent rows: no entity
-    column, no time ordering and no anchoring, so ``smart_sample`` treats the
-    whole frame as one group and keeps rows purely on leverage and residual
-    evidence. Use it for one-row-per-subject tables; use
-    ``panel_config`` when the same entity appears repeatedly, because
-    ignoring that structure lets a large entity crowd the sample.
-
-    Parameters
-    ----------
-    sample_frac : float, default=0.15
-        Target fraction of rows to keep, a finite float in ``(0, 1]``. The
-        realized fraction can exceed it slightly, because deterministic top-up
-        enforces the per-group minimum.
-
-    Returns
-    -------
-    SmartSamplerConfig
-        A config with ``sample_frac`` set from the argument, ``group_col``,
-        ``time_col`` and ``anchor_fn`` all None, and ``min_per_group=1``.
-        Every other field keeps the dataclass default:
-        ``pilot_sample_size=50_000``, ``leverage_batch_size=200_000``,
-        ``svd_sample_size=None``, ``weight_clip_quantile=0.99``,
-        ``residual_weight_cap=0.4``, ``uniform_floor=0.05``,
-        ``anchor_max_share=0.4``, ``random_state=42`` and ``verbose=False``.
-        The returned config is a mutable dataclass, so override any of those
-        in place or through ``dataclasses.replace``.
-
-    Raises
-    ------
-    ValueError
-        If ``sample_frac`` is not a finite value in ``(0, 1]``.
-    TypeError
-        If ``sample_frac`` is not a real number, raised by the config's own
-        validation.
-
-    See Also
-    --------
-    panel_config : Preset for grouped, repeated-observation data.
-    sift.smart_sample : Consumer of this config.
-    sift.SmartSamplerConfig : The dataclass and its full field list.
-
-    Notes
-    -----
-    ``smart_sample`` attaches an approximate inverse-probability
-    ``sample_weight`` column, so downstream selectors should pass those weights
-    on. With no ``anchor_fn`` the ``anchor_max_share`` field is inert here.
-    Keyword overrides passed to ``smart_sample`` win over the config's fields.
-
-    Examples
-    --------
-    >>> from sift import cross_section_config
-    >>> config = cross_section_config(sample_frac=0.2)
-    >>> config.sample_frac, config.group_col, config.time_col
-    (0.2, None, None)
-    >>> config.min_per_group, config.anchor_fn is None
-    (1, True)
-    """
-    return SmartSamplerConfig(
-        sample_frac=sample_frac,
-        group_col=None,
-        time_col=None,
-        anchor_fn=None,
-        min_per_group=1,
-    )
-
-
-def financial_config(
-    ticker_col: str = 'ticker',
-    date_col: str = 'date',
-    sample_frac: float = 0.15
-) -> SmartSamplerConfig:
-    """Preset for financial panel data (stock returns, etc.)."""
-    return SmartSamplerConfig(
-        sample_frac=sample_frac,
-        group_col=ticker_col,
-        time_col=date_col,
-        anchor_fn=combine_anchors(
-            first_and_last_per_group,
-            periodic_anchors('year'),
-        ),
-        min_per_group=5,
-    )
-
-
-def medical_config(
-    patient_col: str = 'patient_id',
-    time_col: Optional[str] = 'visit_date',
-    sample_frac: float = 0.20
-) -> SmartSamplerConfig:
-    """Preset for medical/clinical longitudinal data."""
-    return SmartSamplerConfig(
-        sample_frac=sample_frac,
-        group_col=patient_col,
-        time_col=time_col,
-        anchor_fn=first_and_last_per_group,
-        min_per_group=2,
-        # More conservative for medical data
-        residual_weight_cap=0.3,
-        weight_clip_quantile=0.95,
+        size=size, method="chronological", group_col=group_col, time_col=time_col,
+        strata_col=strata_col,
     )

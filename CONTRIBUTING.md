@@ -79,7 +79,7 @@ python -m pytest -q tests/test_knockoff_sampler.py
 python -m pytest -q tests/test_knockoff_fdr_control.py
 python -m pytest -q tests/test_boruta.py
 python -m pytest -q tests/test_catboost_selection.py
-python -m pytest -q tests/test_smart_sample_basic.py
+python -m pytest -q tests/test_sample_rows.py
 ```
 
 Before a release-oriented patch, run:

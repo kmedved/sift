@@ -100,10 +100,11 @@ python scripts/generate_api_reference.py
 
 ## Smart sampling
 
-- [`sift.SmartSamplerConfig`](smartsamplerconfig.md)
+- [`sift.sample_rows`](sample_rows.md)
+- [`sift.RowSample`](rowsample.md)
 - [`sift.smart_sample`](smart_sample.md)
+- [`sift.SmartSamplerConfig`](smartsamplerconfig.md)
 - [`sift.panel_config`](panel_config.md)
-- [`sift.cross_section_config`](cross_section_config.md)
 
 ## Purged time-series CV
 

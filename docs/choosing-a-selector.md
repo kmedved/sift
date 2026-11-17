@@ -71,8 +71,10 @@ flowchart TD
 - `permutation_importance` ranks columns for an already-fitted estimator on the
   data supplied to it. Use held-out data when the ranking should describe
   out-of-sample behavior.
-- `smart_sample` reduces rows, not columns. Apply it before a selector when the
-  full panel is too large for the chosen method.
+- `smart_sample` and `sample_rows` reduce rows, not columns. Apply them before a
+  selector only when the full panel is too large for the chosen method
+  (selecting on all rows is better tested), and to train the final model on a
+  20% sample drawn from all eligible rows (chronological on panels).
 
 ## Apply the workflow modifiers
 

@@ -38,6 +38,7 @@ its `--output` JSON, and reports any rows whose `promotion_status` starts with
 | `bench_knockoffs.py` | Gaussian-copula knockoff cache/model/mean/sample/stat/threshold timing, including derandomized draws and a CEFS+ smoke case. |
 | `bench_knockoff_statistic_bakeoff.py` | Seeded public `select_fdr` quality/runtime bakeoff: independent / AR(1) / block / dense-weak × relevance / lsm / ridge / cefsplus, with provenance. Informational; does not change 0.9 defaults. |
 | `bench_stability.py` | Stability-selection split streaming and fit memory. |
+| `bench_row_sampling.py` | `sample_rows` acceptance: smart vs uniform samples for training and `select_mrmr` (synthetic panel, CDC diabetes, California housing). |
 | `bench_catboost.py` | CatBoost split helpers and optional tiny selector smoke cases (skipped without CatBoost). |
 | `auto_k_designs.py` | Shared synthetic DGP registry and support-scoring helpers for auto-k gates. |
 | `bench_auto_k.py` | Auto-k synthetic DGP harness with oracle-risk rows and support-recovery metrics. |

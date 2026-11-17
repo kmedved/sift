@@ -148,10 +148,11 @@ from sift import (
     CEFSPlusBinarySelector,
     KnockoffSelector,
     permutation_importance,
+    RowSample,
     SmartSamplerConfig,
+    sample_rows,
     smart_sample,
     panel_config,
-    cross_section_config,
     StabilitySelector,
     stability_regression,
     stability_classif,
@@ -1775,87 +1776,133 @@ full-panel draw budget used by earlier releases.
 
 ## Smart Sampling
 
-Smart sampling is an informative subsampler for large datasets. It combines
-leverage-score sampling, optional residual-based sampling, uniform coverage, and
-anchor rows. It returns a sampled DataFrame with an approximate inverse
-probability `sample_weight` column.
+`sample_rows` draws exactly `size` training rows and returns mean-one fitting
+weights. It has three methods:
+
+- **`method="uniform"` (default).** A simple random sample; every weight is 1
+  unless rows are forced in.
+- **`method="chronological"`.** Equal probability, spread over time. Each
+  entity in `groups`, inside each stratum in `strata` (such as a season), gets
+  its proportional share rounded up or down, drawn along its timeline. This is
+  `sift.sampling.chronological_sample`; every weight is 1 unless rows are
+  forced in. Start here on entity-over-time panels.
+- **`method="residual"` (opt-in).** Keeps the rows a model learns the most
+  from:
+  1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores
+     every row by how wrong it is: the size of its loss gradient, which is the
+     residual for regression and `||onehot(y) - p||` for classification.
+  2. **Exact draw.** Half of each row's inclusion probability is proportional
+     to that score and half is spread evenly (`uniform_mix=0.5`), which keeps
+     every row drawable and keeps the draw from chasing noise. Rows are drawn
+     systematically along a random order, so a repeating pattern in the data
+     cannot line up with the draw.
+  3. **Weights.** Each kept row carries a mean-one fitting weight:
+     `1 / inclusion probability`, rescaled to mean 1, for the downstream fit.
+     What a weighted fit gains or loses against a full-data fit depends on the
+     learner and the data.
+
+Every row can be drawn, so weighting by the raw `1 / inclusion_prob` (not the
+returned weights) estimates a fixed full-data total without bias.
+
+Where the residual draw can pay off: expensive, weight-aware learners, or
+several fits on one draw. The pilot costs more than fitting a linear model on
+every row, so a cheap learner gains nothing. On a large player panel, the
+residual draw tied chronological sampling at 20% of rows over all targets,
+was 0.18% worse on the stable ones, and took longer; an earlier time-ordered
+draw that beat chronological sampling is described in
+[docs/ADVANCED.md](docs/ADVANCED.md#how-much-to-sample). The evidence is for training a model after its
+features are chosen; for feature selection it is thin (see
+[docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all rows
+when that is affordable. Draw the training sample from all eligible rows,
+not from a selection sample, or a 20% sample of a 20% sample leaves 4%.
+
+The array-level entry point is `sample_rows`. It returns indices and weights,
+so it works with any model:
+
+```python
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sift import sample_rows
+
+rng = np.random.default_rng(0)
+X = rng.normal(size=(20_000, 8))
+y = X[:, 0] + np.sin(2 * X[:, 1]) + rng.standard_t(3, size=20_000)
+
+s = sample_rows(X, y, size=0.2, method="residual", random_state=0)  # or size=4_000
+model = HistGradientBoostingRegressor().fit(s.take(X), s.take(y), sample_weight=s.weights)
+```
+
+`smart_sample` is the DataFrame front end. It returns the kept rows, with the
+original index, plus a `sample_weight` column. `panel_config` sets up a
+chronological draw by entity, time and, optionally, season:
 
 ```python
 import numpy as np
 import pandas as pd
-from sift import smart_sample, panel_config
+from sift import panel_config, smart_sample
 
 rng = np.random.default_rng(0)
-df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
-df["user_id"] = np.repeat(np.arange(30), 10)
-day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df = pd.DataFrame(rng.normal(size=(3_000, 8)), columns=[f"f{i}" for i in range(8)])
+df["user_id"] = np.repeat(np.arange(300), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 300), "D")
 df["timestamp"] = pd.Timestamp("2024-01-01") + day_offsets
-df["target"] = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
-
-config = panel_config(
-    group_col="user_id",
-    time_col="timestamp",
-    sample_frac=0.3,
-)
+df["target"] = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=3_000)
 
 sampled = smart_sample(
     df,
     feature_cols=[c for c in df.columns if c.startswith("f")],
     y_col="target",
-    config=config,
+    config=panel_config("user_id", "timestamp", size=0.2),
 )
 ```
 
-`SmartSamplerConfig` fields:
+Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 
-- `sample_frac`: target fraction of rows to sample.
-- `group_col`, `time_col`: optional grouping and ordering columns.
-- `min_per_group`: minimum rows to keep per group.
-- `pilot_sample_size`: rows used for residual pilot model.
-- `leverage_batch_size`: memory/speed tradeoff for leverage scores.
-- `svd_sample_size`: optional row subsample for approximate SVD.
-- `weight_clip_quantile`: cap extreme inverse-probability weights.
-- `residual_weight_cap`: maximum blend weight for residual scores.
-- `uniform_floor`: minimum base probability for coverage.
-- `anchor_fn`: callable that marks rows to keep preferentially.
-- `anchor_max_share`: cap on anchor share within each group quota.
-- `random_state`, `verbose`: reproducibility and logging.
+- `size` (default 0.2): rows to keep, as a float fraction in `(0, 1]` or an int
+  row count.
+- `method` (default `"uniform"`): `"uniform"`, `"chronological"` or
+  `"residual"`.
+- `groups` / `group_col`, `time` / `time_col` and `strata` / `strata_col`:
+  shape `method="chronological"` only; other methods raise if they are given
+  (in `smart_sample`, `group_col` and `time_col` may also feed `anchor_fn`).
+- `task` (default `"auto"`, residual only): `"auto"` treats non-numeric,
+  boolean and two-valued targets as classification. Pass `"classification"`
+  for integer-coded multiclass labels.
+- `pilot` (default `"auto"`, residual only): one of
+  - `"auto"`, a 100-iteration scikit-learn HistGradientBoosting model;
+  - any estimator, which is cloned and fitted (classification pilots need
+    `predict_proba`);
+  - an array of precomputed predictions, for example yesterday's production
+    model, which makes the pilot free.
+- `pilot_size` (default 0.02, residual only): rows used to fit the pilot, at
+  least 1,000.
+- `pilot`, `pilot_size` and `uniform_mix` raise if set with another method.
+- `uniform_mix` (default 0.5, residual only): share of probability spread
+  evenly, in `(0, 1]`. It keeps every row drawable and caps each raw weight at
+  `1 / (uniform_mix * f)`, where `f = (k - n_forced) / (n - n_forced)` is the
+  fraction of the non-forced rows that is drawn. Without `always_include`, `f`
+  is the sampling fraction `k / n`. Forced rows can raise the cap sharply: 100
+  rows, `k = 20` and 19 forced rows give `f = 1/81` and a cap of 162, not 10.
+  0.5 is the benchmarked value.
+- `always_include` / `anchor_fn`: rows that must be kept. They count against
+  `size` and must leave room for at least one drawn row. Forced rows have
+  inclusion probability 1 and the other rows share the rest of the budget, so
+  with forced rows the weights are not all 1, even for the uniform and
+  chronological methods, and chronological quotas cover only the drawn rows.
+- `random_state` (default 42) and `verbose`.
 
-Residual-enabled sampling keeps regression targets in float64 and estimates
-row difficulty with a two-fold cross-fitted pilot, so no row receives a
-residual from a model trained on that row. Non-pilot rows are assigned to one
-unseen fold model so their residual scale matches the pilot rows; predictions
-are not ensembled. Constant pilot targets disable the residual blend.
+Two cautions for fits on a residual sample:
 
-Advanced helper:
+- **Always pass the weights.** Without them the fit over-represents the rows
+  the pilot found hard.
+- **Pin any automatic hyperparameter that depends on the weights.** Some
+  learners derive a learning rate or leaf regularisation from the effective
+  sample size of the weights. Set those to what an unweighted fit of the same
+  size would use. Otherwise a comparison against a full-data fit is
+  confounded.
 
-```python
-import numpy as np
-from sklearn.utils.extmath import randomized_svd
-from sift.sampling.smart import leverage_scores_multi_alpha
-
-rng = np.random.default_rng(0)
-Xs = rng.normal(size=(300, 20))
-U, S, Vt = randomized_svd(Xs, n_components=8, random_state=0)
-V = Vt.T
-s2 = S**2
-
-scores = leverage_scores_multi_alpha(
-    Xs,
-    V,
-    S,
-    s2,
-    leverage_batch_size=200_000,
-)
-```
-
-`leverage_scores_multi_alpha` computes ridge-style leverage scores across
-multiple regularization strengths. `V` and `S` are the right singular vectors
-and singular values of the (already centered/scaled) feature block and `s2` is
-`S ** 2`; the ridge grid is derived from `s2` internally. The main sampler
-calls it after its own randomized SVD.
-
-Use smart sampling inside stability selection:
+If stability selection is too slow on every row, sample once before it. This
+example uses a chronological 30% sample:
 
 ```python
 import numpy as np
@@ -1863,16 +1910,16 @@ import pandas as pd
 from sift import StabilitySelector, panel_config
 
 rng = np.random.default_rng(0)
-df = pd.DataFrame(rng.normal(size=(300, 8)), columns=[f"f{i}" for i in range(8)])
-df["user_id"] = np.repeat(np.arange(30), 10)
-day_offsets = pd.to_timedelta(np.tile(np.arange(10), 30), "D")
+df = pd.DataFrame(rng.normal(size=(3_000, 8)), columns=[f"f{i}" for i in range(8)])
+df["user_id"] = np.repeat(np.arange(300), 10)
+day_offsets = pd.to_timedelta(np.tile(np.arange(10), 300), "D")
 df["timestamp"] = pd.Timestamp("2024-01-01") + day_offsets
-y = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
+y = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=3_000)
 
 selector = StabilitySelector(
     task="regression",
     use_smart_sampler=True,
-    sampler_config=panel_config("user_id", "timestamp", sample_frac=0.3),
+    sampler_config=panel_config("user_id", "timestamp", size=0.3),
     threshold=0.6,
     n_bootstrap=20,
     random_state=0,
@@ -1881,6 +1928,9 @@ selector = StabilitySelector(
 selector.fit(df, y)
 ```
 
+`StabilitySelector` draws the sample once, before its resamples, and always
+passes its own `task` to the pilot of a residual draw.
+
 When `use_smart_sampler=True`, `X` must be a DataFrame. An explicit
 `fit(..., feature_names=[...])` sequence is preserved as an ordered feature
 subset rather than widened to every numeric column. Explicit feature names must
@@ -1888,18 +1938,19 @@ refer to numeric columns after the sampler's metadata exclusions. Pass an
 ordered iterable such as a list, tuple, pandas Index, or one-dimensional NumPy
 array; strings, bytes-like objects, mappings, sets, scalar arrays, and
 matrix-like containers are rejected. Tuple and MultiIndex column labels remain
-single feature names in `get_feature_names_out`. Configured `group_col` and
-`time_col` columns remain metadata and are excluded from the feature matrix even
+single feature names in `get_feature_names_out`. Configured `group_col`,
+`time_col` and `strata_col` columns remain metadata and are excluded from the feature matrix even
 if they appear in `feature_names`. Without explicit names, the sampler uses
 numeric columns other than those group/time columns. Datetime and timedelta
 feature columns are rejected before numeric coercion; a configured datetime
 `time_col` remains valid sampler metadata. Fold-local `tune_threshold` fits
 retain the configured group/time metadata while scoring only fitted features.
 
-### Anchor utilities and presets
+### Anchors and the panel preset
 
-The root package exposes `panel_config` and `cross_section_config`. All sampler
-presets and anchors are available from `sift.sampling`:
+`panel_config(group_col, time_col=None, size=0.2, strata_col=None)` is the
+root-level preset for a chronological draw from entity-over-time data. Anchor
+rules come from `sift.sampling`:
 
 ```python
 from sift.sampling import (
@@ -1910,10 +1961,6 @@ from sift.sampling import (
     quantile_anchors,
     event_window_anchors,
     combine_anchors,
-    panel_config,
-    cross_section_config,
-    financial_config,
-    medical_config,
 )
 
 anchor_fn = combine_anchors(
@@ -1924,20 +1971,29 @@ anchor_fn = combine_anchors(
 )
 ```
 
-`no_anchors` is the do-nothing default; `first_per_group` keeps only the first
-row per group. The combined `anchor_fn` above becomes the `anchor_fn` field of a
-`SmartSamplerConfig`, and the columns it names (`month`, `usage`,
-`team_change`) must exist in the sampled frame.
+The combined `anchor_fn` above becomes the `anchor_fn` field of a
+`SmartSamplerConfig`. The columns it names (`month`, `usage`, `team_change`)
+must exist in the sampled frame. Anchored rows are kept with probability 1, so
+their weight is the smallest in the sample.
 
-Preset configs:
+### Migrating from sift 1.x
 
-- `panel_config(group_col, time_col=None, sample_frac=0.15)`: generic grouped
-  longitudinal data; anchors first and last per group.
-- `cross_section_config(sample_frac=0.15)`: non-grouped cross-sectional data.
-- `financial_config(ticker_col="ticker", date_col="date", sample_frac=0.15)`:
-  panel data with first/last plus yearly anchors.
-- `medical_config(patient_col="patient_id", time_col="visit_date",
-  sample_frac=0.20)`: conservative medical longitudinal preset.
+| 1.x | 2.0 |
+|---|---|
+| `sample_frac=0.1` | `size=0.1` (or a row count) |
+| leverage scoring, `leverage_batch_size`, `svd_sample_size` | removed |
+| `residual_weight_cap`, `uniform_floor` | `uniform_mix` |
+| `pilot_sample_size` | `pilot_size` (default 2% of rows) |
+| `weight_clip_quantile` | removed; weights are exact |
+| `min_per_group`, `anchor_max_share` | `anchor_fn=first_per_group`; anchors always kept |
+| `SmartSamplerConfig()` or a bare `smart_sample(...)`: smart draw | a uniform random sample; pass `method="residual"` for the pilot-weighted draw |
+| `cross_section_config()` | `SmartSamplerConfig(method="residual")` |
+| `financial_config`, `medical_config` | `SmartSamplerConfig(method="residual", anchor_fn=...)` |
+| `panel_config(..., sample_frac=)`: smart draw spread by group and time, first and last rows anchored | `panel_config(..., size=)`: an equal-probability chronological draw, no anchors unless set; for the residual draw use `SmartSamplerConfig(method="residual")`, which ignores group and time |
+| `pilot=None` | `method="uniform"` or `method="chronological"` |
+| output index reset, float32 weights | input index kept, float64 weights |
+
+Passing a removed field raises `TypeError` with the replacement in the message.
 
 ## Boruta and Boruta-Shap
 
@@ -2862,7 +2918,7 @@ y = df["f0"] + 0.7 * df["f1"] - 0.5 * df["f2"] + rng.normal(size=300)
 selector = StabilitySelector(
     task="regression",
     use_smart_sampler=True,
-    sampler_config=panel_config("entity_id", "timestamp", sample_frac=0.3),
+    sampler_config=panel_config("entity_id", "timestamp", size=0.3),
     threshold=0.6,
     n_bootstrap=20,
     max_features=5,
@@ -2933,6 +2989,8 @@ CatBoost:
   `top_m` to `max(5*k, 250)`. `select_cefsplus_binary` leaves `top_m=None` as
   "all finite candidates"; for `k="auto"` it builds the binary path to
   `AutoKConfig.max_k`. Set `top_m` explicitly for wide binary screens.
+- Use `sample_rows` / `smart_sample` to keep the informative 20% of a large
+  table before selection or training; pass the returned weights downstream.
 - Use `subsample` for large row counts. Most filter selectors default to a
   `50_000` row cap; `select_cefsplus_binary` defaults to `subsample=None`.
 - Build a `FeatureCache` once when running multiple Gaussian/cache selectors or
@@ -2959,7 +3017,7 @@ Set `random_state` wherever available:
 - `build_cache`
 - `AutoKConfig`
 - `StabilitySelector` and wrappers
-- `smart_sample`
+- `sample_rows` and `smart_sample`
 - `select_boruta` / `BorutaSelector`
 - `permutation_importance`
 - `catboost_select` and wrappers

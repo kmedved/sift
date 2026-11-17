@@ -638,8 +638,7 @@ def call_smart_sample(payload: Payload) -> None:
             "y",
             random_state=SEED,
             verbose=False,
-            sample_frac=0.5,
-            min_per_group=1,
+            size=0.5,
         )
         return
 
@@ -650,13 +649,14 @@ def call_smart_sample(payload: Payload) -> None:
     kwargs = {
         "random_state": SEED,
         "verbose": False,
-        "sample_frac": 0.5,
-        "min_per_group": 1,
+        "size": 0.5,
     }
     if payload.groups is not None:
         kwargs["group_col"] = "entity"
     if payload.time is not None:
         kwargs["time_col"] = "as_of"
+    if payload.groups is not None or payload.time is not None:
+        kwargs["method"] = "chronological"
     if payload.sample_weight is not None:
         kwargs["sample_weight"] = payload.sample_weight
     smart_sample(df, feature_cols, y_col, **kwargs)
@@ -1016,11 +1016,13 @@ def _stable_note(
             "dtype-tolerant fitted estimator the public call completes. Support "
             "is model-dependent"
         )
-    if status == SUPPORTED and axis == "datetime_timedelta" and entry.name == "smart_sample":
+    if status == SUPPORTED and axis in {"categorical", "datetime_timedelta"} and (
+        entry.name == "smart_sample"
+    ):
         return (
-            "the baseline call completes after coercing datetime/timedelta "
-            "feature columns to epoch-scale float32 values, which can be "
-            "lossy; convert them to numeric features explicitly"
+            'the default `method="uniform"` only subsets rows, so any column '
+            'passes through; `method="residual"` with the default pilot needs '
+            "numeric features"
         )
     if status == SUPPORTED and axis == "categorical":
         return "string/category columns are consumed by the seeded baseline call"
@@ -1030,8 +1032,8 @@ def _stable_note(
         if entry.name == "smart_sample":
             col = "group_col" if axis == "groups" else "time_col"
             return (
-                f"`{axis}` is accepted as `{col}` on `SmartSamplerConfig`, "
-                f"not as a `{axis}=` array argument"
+                f"`{axis}` is accepted as `{col}` on `SmartSamplerConfig` with "
+                f'`method="chronological"`, not as a `{axis}=` array argument'
             )
         return f"`{axis}` is accepted on the seeded baseline call"
     if status == SUPPORTED:
@@ -1082,7 +1084,6 @@ def _stable_note(
             "stability_regression",
             "stability_classif",
             "Stabilized",
-            "smart_sample",
         }:
             return "string/category columns are not accepted as numeric features"
         return "string/category columns are rejected on the seeded baseline call"

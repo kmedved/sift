@@ -102,21 +102,34 @@ def main() -> int:
     df["label"] = np.where(y > np.median(y), "hi", "lo")
     smart_cases = [
         (
-            "smart_sample_residual_off",
+            "smart_sample_no_pilot",
             lambda: smart_sample(
                 df,
                 [f"f{i}" for i in range(p)],
                 "label",
                 config=SmartSamplerConfig(
-                    sample_frac=0.25,
+                    size=0.25,
+                    method="chronological",
                     group_col="group",
-                    min_per_group=1,
-                    residual_weight_cap=0.0,
                     random_state=0,
                     verbose=False,
                 ),
             ),
-        )
+        ),
+        (
+            "smart_sample_default_pilot",
+            lambda: smart_sample(
+                df,
+                [f"f{i}" for i in range(p)],
+                "label",
+                config=SmartSamplerConfig(
+                    size=0.25,
+                    method="residual",
+                    random_state=0,
+                    verbose=False,
+                ),
+            ),
+        ),
     ]
 
     records: list[dict] = []

@@ -76,7 +76,7 @@ tests pin those post-install outcomes and do not rewrite the page.
 | `Stabilized` | yes | yes | cond | no | no | yes | cond | cond |
 | `ModelSelector` | yes | yes | cond | no | no | yes | cond | cond |
 | `permutation_importance` | yes | yes | yes | no | yes | yes | yes | yes |
-| `smart_sample` | no | yes | no | no | yes | no | yes | yes |
+| `smart_sample` | no | yes | yes | no | yes | no | yes | yes |
 | `catboost_select` | no | dep | dep | no | no | dep | dep | dep |
 | `catboost_regression` | no | dep | dep | no | no | dep | dep | dep |
 | `catboost_classif` | no | dep | dep | no | no | dep | dep | dep |
@@ -222,12 +222,12 @@ copied onto this page.
 | `permutation_importance` | groups | supported | `groups` is accepted on the seeded baseline call |
 | `permutation_importance` | time | supported | `time` is accepted on the seeded baseline call |
 | `smart_sample` | ndarray | rejected | requires a pandas DataFrame; ndarray input is rejected |
-| `smart_sample` | categorical | rejected | string/category columns are not accepted as numeric features |
+| `smart_sample` | categorical | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric features |
 | `smart_sample` | sparse | rejected | requires a pandas DataFrame; sparse input is rejected |
-| `smart_sample` | datetime/timedelta | supported | the baseline call completes after coercing datetime/timedelta feature columns to epoch-scale float32 values, which can be lossy; convert them to numeric features explicitly |
+| `smart_sample` | datetime/timedelta | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric features |
 | `smart_sample` | weights | rejected | there is no input `sample_weight` argument; the sampler writes its own `sample_weight` column |
-| `smart_sample` | groups | supported | `groups` is accepted as `group_col` on `SmartSamplerConfig`, not as a `groups=` array argument |
-| `smart_sample` | time | supported | `time` is accepted as `time_col` on `SmartSamplerConfig`, not as a `time=` array argument |
+| `smart_sample` | groups | supported | `groups` is accepted as `group_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `groups=` array argument |
+| `smart_sample` | time | supported | `time` is accepted as `time_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `time=` array argument |
 | `catboost_select` | ndarray | rejected | ndarray input is rejected; pass a pandas DataFrame |
 | `catboost_select` | DataFrame | dependency-gated | requires the optional `catboost` extra; installing it unlocks this axis |
 | `catboost_select` | categorical | dependency-gated | requires the optional `catboost` extra; installing it unlocks this axis |

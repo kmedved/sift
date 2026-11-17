@@ -232,15 +232,14 @@ def test_published_catboost_cells_bind_live_missing_extra_attempts(
             )
 
 
-def test_smart_sample_datetime_coercion_is_recorded(
+def test_smart_sample_default_passes_datetime_and_categorical_features(
     matrix_mod, published_cells
 ) -> None:
     grid = {(cell.entry, cell.axis): cell for cell in published_cells}
-    cell = grid[("smart_sample", "datetime_timedelta")]
-    assert cell.status == matrix_mod.SUPPORTED
-    assert "float32" in cell.note
-    assert "lossy" in cell.note
-    assert "explicitly" in cell.note
+    for axis in ("datetime_timedelta", "categorical"):
+        cell = grid[("smart_sample", axis)]
+        assert cell.status == matrix_mod.SUPPORTED
+        assert 'method="residual"' in cell.note
 
 
 def test_smart_sample_groups_and_time_use_config_columns(
