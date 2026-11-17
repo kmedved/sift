@@ -124,6 +124,7 @@ def main() -> int:
                 "label",
                 config=SmartSamplerConfig(
                     size=0.25,
+                    method="residual",
                     random_state=0,
                     verbose=False,
                 ),

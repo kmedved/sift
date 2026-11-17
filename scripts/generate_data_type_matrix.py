@@ -1016,6 +1016,14 @@ def _stable_note(
             "dtype-tolerant fitted estimator the public call completes. Support "
             "is model-dependent"
         )
+    if status == SUPPORTED and axis in {"categorical", "datetime_timedelta"} and (
+        entry.name == "smart_sample"
+    ):
+        return (
+            'the default `method="uniform"` only subsets rows, so any column '
+            'passes through; `method="residual"` with the default pilot needs '
+            "numeric features"
+        )
     if status == SUPPORTED and axis == "categorical":
         return "string/category columns are consumed by the seeded baseline call"
     if status == SUPPORTED and axis == "sample_weight":
@@ -1076,7 +1084,6 @@ def _stable_note(
             "stability_regression",
             "stability_classif",
             "Stabilized",
-            "smart_sample",
         }:
             return "string/category columns are not accepted as numeric features"
         return "string/category columns are rejected on the seeded baseline call"

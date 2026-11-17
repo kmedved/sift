@@ -12,7 +12,7 @@ from sift.sampling import first_per_group
 
 EXPECTED_DEFAULTS = {
     "size": 0.2,
-    "method": "residual",
+    "method": "uniform",
     "group_col": None,
     "time_col": None,
     "strata_col": None,
@@ -88,10 +88,14 @@ def test_keyword_overrides_equal_explicit_config_and_are_warning_free():
 
 def test_default_pilot_sample_is_exact_and_preserves_input_rows():
     source = _frame()
-    out = sift.smart_sample(source, ["f0", "f1"], "y", size=240, random_state=1)
+    out = sift.smart_sample(source, ["f0", "f1"], "y", size=240, method="residual",
+                            random_state=1)
     assert len(out) == 240
     pd.testing.assert_frame_equal(out.drop(columns="sample_weight"), source.loc[out.index])
     assert "sample_weight" not in source.columns
+    plain = sift.smart_sample(source, ["f0", "f1"], "y", size=240, random_state=1)
+    assert len(plain) == 240
+    np.testing.assert_array_equal(plain["sample_weight"].to_numpy(), np.ones(240))
 
 
 def test_full_size_keeps_every_row_in_order_with_unit_weights():
@@ -102,7 +106,7 @@ def test_full_size_keeps_every_row_in_order_with_unit_weights():
 
 
 def test_overrides_do_not_mutate_the_callers_config():
-    config = sift.SmartSamplerConfig(size=0.5, random_state=3)
+    config = sift.SmartSamplerConfig(size=0.5, method="residual", random_state=3)
     sift.smart_sample(_frame(), ["f0", "f1"], "y", config, size=0.1, method="uniform")
     assert config.size == 0.5
     assert config.method == "residual"
@@ -128,6 +132,8 @@ def test_config_validates_on_construction_replace_and_use():
     with pytest.raises(ValueError, match="needs group_col or time_col"):
         sift.SmartSamplerConfig(method="chronological")
     with pytest.raises(ValueError, match="needs a pilot"):
+        sift.SmartSamplerConfig(method="residual", pilot=None)
+    with pytest.raises(ValueError, match="apply only to method='residual'"):
         sift.SmartSamplerConfig(pilot=None)
     with pytest.raises(TypeError, match="anchor_fn"):
         sift.SmartSamplerConfig(anchor_fn="first")
@@ -160,17 +166,19 @@ def test_rejects_unknown_columns_and_options(change, message):
 
 def test_default_pilot_rejects_non_numeric_features_and_non_frames():
     with pytest.raises(TypeError, match="non-numeric: \\['label'\\]"):
-        sift.smart_sample(_frame(), ["f0", "label"], "y")
+        sift.smart_sample(_frame(), ["f0", "label"], "y", method="residual")
+    assert len(sift.smart_sample(_frame(), ["f0", "label"], "y", size=0.1)) == 120
     with pytest.raises(TypeError, match="requires a pandas DataFrame"):
         sift.smart_sample(_frame().to_numpy(), ["f0"], "y")
     with pytest.raises(ValueError, match="at least one column"):
-        sift.smart_sample(_frame(), [], "y")
+        sift.smart_sample(_frame(), [], "y", method="residual")
 
 
 def test_anchor_fn_rows_are_always_kept():
     source = _frame()
-    out = sift.smart_sample(source, ["f0", "f1"], "y", size=60, group_col="group",
-                            time_col="time", anchor_fn=first_per_group, random_state=0)
+    out = sift.smart_sample(source, ["f0", "f1"], "y", size=60, method="residual",
+                            group_col="group", time_col="time", anchor_fn=first_per_group,
+                            random_state=0)
     assert len(out) == 60
     first = source.sort_values(["group", "time"]).groupby("group").head(1).index
     assert set(first) <= set(out.index)
@@ -200,6 +208,7 @@ def test_panel_config_is_a_chronological_preset():
 def test_classification_target_uses_the_class_gradient():
     source = _frame()
     source["cls"] = np.where(source["y"] > 0, "pos", "neg")
-    out = sift.smart_sample(source, ["f0", "f1"], "cls", size=0.25, random_state=0)
+    out = sift.smart_sample(source, ["f0", "f1"], "cls", size=0.25, method="residual",
+                            random_state=0)
     assert len(out) == 300
     assert set(out["cls"]) == {"pos", "neg"}

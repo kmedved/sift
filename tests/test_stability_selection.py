@@ -574,6 +574,7 @@ def test_smart_sampler_config_is_not_mutated():
     y = np.where(X["f0"] > 0, "win", "loss")
     config = SmartSamplerConfig(
         size=0.5,
+        method="residual",
         task="regression",
         random_state=None,
         verbose=True,
@@ -608,6 +609,7 @@ def test_smart_sample_full_fraction_keeps_all_rows_without_residual_y_check():
     )
     config = SmartSamplerConfig(
         size=1.0,
+        method="residual",
         random_state=5,
         verbose=False,
     )

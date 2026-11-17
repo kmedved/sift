@@ -1,30 +1,38 @@
-"""Pilot-residual importance sampling of training rows.
+"""Row sampling for training a model on a fraction of a large table.
 
-A cheap pilot model is fitted on a small random slice of the data and scores
-every row by how wrong it is: the magnitude ``g`` of the loss gradient at the
-pilot prediction.  Half of each row's inclusion probability is proportional to
-``g`` and half is spread evenly (a defensive mixture; Hesterberg, 1995).  The
-draw runs systematically along a random order of the rows, so it keeps an exact
-size and cannot line up with a repeating pattern in the data, and every kept
-row carries the inverse of its inclusion probability as a weight.
-``sample_rows(method="chronological")`` instead draws with equal probability,
-spread along each entity's timeline (``sift.sampling.chronological_sample``).
-Weighted sums over the sample are unbiased for the full-data sums
-(Horvitz-Thompson).  A model fitted with the weights is
-consistent for the full-data fit but not exactly unbiased: the fit divides by
-the realized weight total, and nonlinear models add their own bias.
+``sample_rows`` draws exactly ``size`` rows by one of three methods:
+
+``"uniform"`` (default)
+    A simple random sample.
+``"chronological"``
+    Equal probability, spread along each entity's timeline with entity and
+    stratum quotas (``sift.sampling.chronological_sample``).
+``"residual"``
+    A cheap pilot model is fitted on a small random slice of the data and
+    scores every row by how wrong it is: the magnitude ``g`` of the loss
+    gradient at the pilot prediction.  Half of each row's inclusion
+    probability is proportional to ``g`` and half is spread evenly (a
+    defensive mixture; Hesterberg, 1995).  The draw runs systematically along
+    a random order of the rows, so it keeps an exact size and cannot line up
+    with a repeating pattern in the data.
+
+Every row has a positive inclusion probability, so weighting by the raw
+``1 / inclusion_prob`` estimates a fixed full-data total without bias
+(Horvitz-Thompson).  The returned weights are those values rescaled to mean
+one, for model fitting; how a weighted fit relates to the full-data fit
+depends on the learner.
 
 Optimal-subsampling results for observed labels (Wang, Zhu & Ma, 2018; Ai et
 al., 2021; Ting & Brochu, 2018) make a row's probability grow with its
 residual, usually times a term that depends on its features and the model.
-The gradient alone is the model-agnostic part of that rule.  It is an
-empirical choice that beat smoothed scores in the benchmark, not a proven
-optimum for every model.  The even half keeps every row drawable, bounds every
-weight, and keeps the draw from chasing noise on targets that are mostly
-noise.  The defaults come from a benchmark on a ~770k-row player panel that
-used an earlier draw along each entity's timeline; the random-order draw was
-checked there only at 20% of rows, where it tied chronological sampling
-overall.  See ``docs/ADVANCED.md``.
+The gradient alone is the model-agnostic part of that rule, an empirical
+choice rather than a proven optimum.  The even half keeps every row drawable,
+bounds every weight, and keeps the draw from chasing noise on targets that are
+mostly noise.  The residual settings come from a benchmark on a ~770k-row
+player panel that used an earlier draw along each entity's timeline.  The
+random-order draw was checked there only at 20% of rows: it tied
+chronological sampling across all targets and trailed it on the stable ones.
+See ``docs/ADVANCED.md``.
 """
 
 from __future__ import annotations
@@ -117,10 +125,19 @@ def _validate_common(size, method, task, pilot, pilot_size, uniform_mix, random_
     if not (0 < uniform_mix <= 1):
         raise ValueError(
             "uniform_mix must be in (0, 1]; a positive share keeps every row drawable, "
-            "which inverse-probability weighting needs."
+            "which the weights need."
         )
     if random_state is not None and not _is_int_like(random_state):
         raise TypeError("random_state must be an integer or None.")
+    if method != "residual" and (
+        not (isinstance(pilot, str) and pilot == "auto")
+        or pilot_size != DEFAULT_PILOT_SIZE
+        or uniform_mix != DEFAULT_UNIFORM_MIX
+    ):
+        raise ValueError(
+            f"pilot, pilot_size and uniform_mix apply only to method='residual'; "
+            f"method={method!r} draws with equal probability."
+        )
 
 
 # =============================================================================
@@ -375,7 +392,7 @@ def sample_rows(
     y=None,
     size: float | int = DEFAULT_SIZE,
     *,
-    method: str = "residual",
+    method: str = "uniform",
     groups=None,
     time=None,
     strata=None,
@@ -391,7 +408,15 @@ def sample_rows(
 
     Three methods:
 
-    ``"residual"`` (default)
+    ``"uniform"`` (default)
+        A simple random sample.  The weights are all 1.
+    ``"chronological"``
+        Equal probability, spread over time: each entity in ``groups`` (and
+        each stratum, such as a season) gets its proportional share rounded
+        up or down, drawn evenly along its timeline.  This is
+        ``sift.sampling.chronological_sample``, and the weights are all 1.
+        On entity-over-time panels it is the method to start with.
+    ``"residual"``
         Fits a cheap pilot model on ``pilot_size`` of the rows and scores
         every row by the magnitude ``g`` of the pilot's loss gradient (the
         absolute residual for regression, ``||onehot(y) - p||`` for
@@ -399,14 +424,8 @@ def sample_rows(
         ``(1 - uniform_mix)`` times a share proportional to ``g`` (capped at
         1) plus ``uniform_mix`` times the sampling fraction.  Rows are drawn
         systematically along a random order, so a repeating pattern in the
-        data cannot line up with the draw.
-    ``"chronological"``
-        Equal probability, spread over time: each entity in ``groups`` (and
-        each stratum, such as a season) gets its proportional share rounded
-        up or down, drawn evenly along its timeline.  This is
-        ``sift.sampling.chronological_sample``.
-    ``"uniform"``
-        A simple random sample.
+        data cannot line up with the draw.  The pilot costs time, so it pays
+        off only for expensive, weight-aware fits.
 
     Fit downstream models with ``sample_weight=weights``.
 
@@ -415,14 +434,14 @@ def sample_rows(
     X : array-like of shape (n_rows, n_features), optional
         Features for the pilot. DataFrame, ndarray or anything your pilot
         estimator accepts. Needed only for ``method="residual"`` with a
-        fitted pilot.
+        fitted pilot; other methods use it only to count rows.
     y : array-like of shape (n_rows,), optional
         Target. Needed only for ``method="residual"``.
     size : float or int, default=0.2
         Rows to keep: a float fraction in ``(0, 1]`` or an int row count.
         Draw it from all eligible training rows: sampling a sample (20% of
         a 20% selection sample, say) leaves a much smaller fit.
-    method : {"residual", "chronological", "uniform"}, default="residual"
+    method : {"uniform", "chronological", "residual"}, default="uniform"
         How rows are chosen; see above.
     groups : array-like of shape (n_rows,), optional
         ``method="chronological"`` only. Entity of each row (player,
@@ -469,11 +488,16 @@ def sample_rows(
 
     Notes
     -----
-    Learners whose automatic hyperparameters depend on the weights (for
+    The weights are ``1 / inclusion_prob`` rescaled to mean one, so
+    ``sum(weights) == len(sample)``.  Use them to fit; how a weighted fit
+    relates to the full-data fit depends on the learner.  To estimate a fixed
+    full-data total, weight by the raw ``1 / inclusion_prob``, which is
+    unbiased because every row can be drawn.  With ``method="residual"``,
+    learners whose automatic hyperparameters depend on the weights (for
     example a learning rate or leaf regularisation scaled by the effective
-    sample size) must have those pinned to what an unweighted fit of the
-    same size would use; otherwise the comparison with a full-data fit is
-    confounded. The weights are mean-one, so ``sum(weights) == len(sample)``.
+    sample size) must have those pinned to what an unweighted fit of the same
+    size would use; otherwise the comparison with a full-data fit is
+    confounded.
 
     Examples
     --------
@@ -483,10 +507,12 @@ def sample_rows(
     >>> rng = np.random.default_rng(0)
     >>> X = rng.normal(size=(5_000, 4))
     >>> y = X @ [1.0, -2.0, 0.5, 0.0] + rng.standard_t(3, size=5_000)
-    >>> s = sample_rows(X, y, size=1_000, random_state=0)
+    >>> s = sample_rows(X, y, size=1_000, method="residual", random_state=0)
     >>> model = Ridge().fit(s.take(X), s.take(y), sample_weight=s.weights)
     >>> len(s), s.method
     (1000, 'residual')
+    >>> sample_rows(X, y, size=0.1).method
+    'uniform'
     >>> players = np.repeat(np.arange(50), 100)
     >>> days = np.tile(np.arange(100), 50)
     >>> len(sample_rows(size=0.1, method="chronological", groups=players, time=days))
@@ -666,7 +692,7 @@ class SmartSamplerConfig:
     ----------
     size : float or int, default=0.2
         Rows to keep: a fraction in ``(0, 1]`` or a row count.
-    method : {"residual", "chronological", "uniform"}, default="residual"
+    method : {"uniform", "chronological", "residual"}, default="uniform"
         How rows are chosen; see ``sample_rows``.
     group_col : str, optional
         Entity column. Shapes ``method="chronological"``; other methods use
@@ -704,13 +730,13 @@ class SmartSamplerConfig:
     >>> from sift import SmartSamplerConfig
     >>> config = SmartSamplerConfig(size=0.25)
     >>> config.size, config.method, config.pilot, config.uniform_mix
-    (0.25, 'residual', 'auto', 0.5)
+    (0.25, 'uniform', 'auto', 0.5)
     >>> dataclasses.replace(config, size=10_000).size
     10000
     """
 
     size: float | int = DEFAULT_SIZE
-    method: str = "residual"
+    method: str = "uniform"
     group_col: Optional[str] = None
     time_col: Optional[str] = None
     strata_col: Optional[str] = None
@@ -758,19 +784,21 @@ def smart_sample(
 ) -> pd.DataFrame:
     """Draw training rows of a DataFrame, with a ``sample_weight`` column.
 
-    DataFrame front end to ``sample_rows``. With the default
-    ``method="residual"`` it fits a pilot on ``feature_cols`` and draws
-    exactly ``size`` rows weighted toward the rows the pilot gets wrong;
-    ``method="chronological"`` and ``"uniform"`` draw with equal probability.
-    It returns the kept rows (original index preserved) with mean-one
-    fitting weights.
+    DataFrame front end to ``sample_rows``. The default ``method="uniform"``
+    draws a simple random sample and ``method="chronological"`` an
+    equal-probability draw along each entity's timeline (see
+    ``sift.panel_config``); both write weights of 1. ``method="residual"``
+    fits a pilot on ``feature_cols`` and draws exactly ``size`` rows weighted
+    toward the rows the pilot gets wrong. It returns the kept rows (original
+    index preserved) with mean-one fitting weights.
 
     Parameters
     ----------
     df : DataFrame
         Input data.
     feature_cols : list of str
-        Numeric feature columns for the pilot (NaN allowed).
+        Feature columns. With ``method="residual"`` they feed the pilot and,
+        for the default pilot, must be numeric (NaN allowed).
     y_col : str
         Target column.
     config : SmartSamplerConfig, optional
@@ -800,7 +828,8 @@ def smart_sample(
     ...     "team": np.repeat([f"t{i}" for i in range(6)], 1_000),
     ... })
     >>> df["y"] = 2.0 * df["x0"] - df["x1"] + rng.standard_t(3, size=6_000)
-    >>> sample = smart_sample(df, ["x0", "x1"], "y", size=0.25, random_state=0)
+    >>> sample = smart_sample(df, ["x0", "x1"], "y", size=0.25, method="residual",
+    ...                       random_state=0)
     >>> len(sample), list(sample.columns)
     (1500, ['x0', 'x1', 'team', 'y', 'sample_weight'])
     >>> spread = smart_sample(df, ["x0", "x1"], "y", size=0.25, method="chronological",
@@ -823,7 +852,7 @@ def smart_sample(
         raise ValueError(f"Missing columns: {sorted(missing)}")
     if "sample_weight" in df.columns:
         raise ValueError(
-            "smart_sample writes its inverse-probability weights to a "
+            "smart_sample writes its fitting weights to a "
             "'sample_weight' column, but the input already has one. Rename or "
             "drop that column first so a feature is not silently overwritten."
         )

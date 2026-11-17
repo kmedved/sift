@@ -1779,7 +1779,13 @@ full-panel draw budget used by earlier releases.
 `sample_rows` draws exactly `size` training rows and returns mean-one fitting
 weights. It has three methods:
 
-- **`method="residual"` (default).** Keeps the rows a model learns the most
+- **`method="uniform"` (default).** A simple random sample; every weight is 1.
+- **`method="chronological"`.** Equal probability, spread over time. Each
+  entity in `groups`, inside each stratum in `strata` (such as a season), gets
+  its proportional share rounded up or down, drawn along its timeline. This is
+  `sift.sampling.chronological_sample`; every weight is 1. Start here on
+  entity-over-time panels.
+- **`method="residual"` (opt-in).** Keeps the rows a model learns the most
   from:
   1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores
      every row by how wrong it is: the size of its loss gradient, which is the
@@ -1790,22 +1796,20 @@ weights. It has three methods:
      systematically along a random order, so a repeating pattern in the data
      cannot line up with the draw.
   3. **Weights.** Each kept row carries a mean-one fitting weight:
-     `1 / inclusion probability`, rescaled to mean 1. Sums weighted by the raw
-     `1 / inclusion_prob` are unbiased for the full-data sums. A model fitted
-     with the weights is consistent for the full-data fit but not exactly
-     unbiased, and how much variance it saves depends on the model and data.
-- **`method="chronological"`.** Equal probability, spread over time. Each
-  entity in `groups`, inside each stratum in `strata` (such as a season), gets
-  its proportional share rounded up or down, drawn along its timeline. This is
-  `sift.sampling.chronological_sample`.
-- **`method="uniform"`.** A simple random sample.
+     `1 / inclusion probability`, rescaled to mean 1, for the downstream fit.
+     What a weighted fit gains or loses against a full-data fit depends on the
+     learner and the data.
 
-Where the residual draw can pay off: expensive learners, or several fits on
-one draw. The pilot costs more than fitting a linear model on every row, so a
-cheap learner gains nothing. On a large player panel, the random-order draw
-tied chronological sampling at 20% of rows over all targets and was 0.18%
-worse on the stable ones; an earlier time-ordered draw that beat it is
-described in [docs/ADVANCED.md](docs/ADVANCED.md#how-much-to-sample). The evidence is for training a model after its
+Every row can be drawn, so weighting by the raw `1 / inclusion_prob` (not the
+returned weights) estimates a fixed full-data total without bias.
+
+Where the residual draw can pay off: expensive, weight-aware learners, or
+several fits on one draw. The pilot costs more than fitting a linear model on
+every row, so a cheap learner gains nothing. On a large player panel, the
+residual draw tied chronological sampling at 20% of rows over all targets,
+was 0.18% worse on the stable ones, and took longer; an earlier time-ordered
+draw that beat chronological sampling is described in
+[docs/ADVANCED.md](docs/ADVANCED.md#how-much-to-sample). The evidence is for training a model after its
 features are chosen; for feature selection it is thin (see
 [docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all rows
 when that is affordable. Draw the training sample from all eligible rows,
@@ -1823,7 +1827,7 @@ rng = np.random.default_rng(0)
 X = rng.normal(size=(20_000, 8))
 y = X[:, 0] + np.sin(2 * X[:, 1]) + rng.standard_t(3, size=20_000)
 
-s = sample_rows(X, y, size=0.2, random_state=0)  # or size=4_000 rows
+s = sample_rows(X, y, size=0.2, method="residual", random_state=0)  # or size=4_000
 model = HistGradientBoostingRegressor().fit(s.take(X), s.take(y), sample_weight=s.weights)
 ```
 
@@ -1855,8 +1859,8 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 
 - `size` (default 0.2): rows to keep, as a float fraction in `(0, 1]` or an int
   row count.
-- `method` (default `"residual"`): `"residual"`, `"chronological"` or
-  `"uniform"`.
+- `method` (default `"uniform"`): `"uniform"`, `"chronological"` or
+  `"residual"`.
 - `groups` / `group_col`, `time` / `time_col` and `strata` / `strata_col`:
   shape `method="chronological"` only; other methods raise if they are given
   (in `smart_sample`, `group_col` and `time_col` may also feed `anchor_fn`).
@@ -1871,6 +1875,7 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
     model, which makes the pilot free.
 - `pilot_size` (default 0.02, residual only): rows used to fit the pilot, at
   least 1,000.
+- `pilot`, `pilot_size` and `uniform_mix` raise if set with another method.
 - `uniform_mix` (default 0.5, residual only): share of probability spread
   evenly, in `(0, 1]`. It keeps every row drawable and caps each raw weight at
   `1 / (uniform_mix * fraction)`. 0.5 is the benchmarked value.
@@ -1878,9 +1883,9 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
   `size` and must leave room for at least one drawn row.
 - `random_state` (default 42) and `verbose`.
 
-Two cautions for downstream fits:
+Two cautions for fits on a residual sample:
 
-- **Always pass the weights.** Without them the fit is biased toward the rows
+- **Always pass the weights.** Without them the fit over-represents the rows
   the pilot found hard.
 - **Pin any automatic hyperparameter that depends on the weights.** Some
   learners derive a learning rate or leaf regularisation from the effective
@@ -1973,9 +1978,10 @@ their weight is the smallest in the sample.
 | `pilot_sample_size` | `pilot_size` (default 2% of rows) |
 | `weight_clip_quantile` | removed; weights are exact |
 | `min_per_group`, `anchor_max_share` | `anchor_fn=first_per_group`; anchors always kept |
-| `cross_section_config()` | `SmartSamplerConfig()` |
-| `financial_config`, `medical_config` | `SmartSamplerConfig(anchor_fn=...)` |
-| `panel_config(..., sample_frac=)`: smart draw spread by group and time, first and last rows anchored | `panel_config(..., size=)`: an equal-probability chronological draw, no anchors unless set; for the residual draw use `SmartSamplerConfig()`, which ignores group and time |
+| `SmartSamplerConfig()` or a bare `smart_sample(...)`: smart draw | a uniform random sample; pass `method="residual"` for the pilot-weighted draw |
+| `cross_section_config()` | `SmartSamplerConfig(method="residual")` |
+| `financial_config`, `medical_config` | `SmartSamplerConfig(method="residual", anchor_fn=...)` |
+| `panel_config(..., sample_frac=)`: smart draw spread by group and time, first and last rows anchored | `panel_config(..., size=)`: an equal-probability chronological draw, no anchors unless set; for the residual draw use `SmartSamplerConfig(method="residual")`, which ignores group and time |
 | `pilot=None` | `method="uniform"` or `method="chronological"` |
 | output index reset, float32 weights | input index kept, float64 weights |
 

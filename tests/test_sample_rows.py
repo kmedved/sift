@@ -23,7 +23,7 @@ def _data(n=3_000, seed=0):
 def test_fraction_and_count_draw_exact_sorted_unique_rows():
     X, y = _data()
     for size, expected in ((0.2, 600), (0.05, 150), (777, 777)):
-        s = sample_rows(X, y, size, pilot=X[:, 0], random_state=0)
+        s = sample_rows(X, y, size, pilot=X[:, 0], random_state=0, method="residual")
         assert isinstance(s, RowSample)
         assert len(s) == expected
         assert s.n_rows == len(y)
@@ -38,7 +38,7 @@ def test_fraction_and_count_draw_exact_sorted_unique_rows():
 def test_size_at_or_above_n_keeps_every_row_unweighted():
     X, y = _data(n=200)
     for size in (1.0, 200, 10_000):
-        s = sample_rows(X, y, size)
+        s = sample_rows(X, y, size, method="residual")
         np.testing.assert_array_equal(s.indices, np.arange(200))
         np.testing.assert_array_equal(s.weights, np.ones(200))
         np.testing.assert_array_equal(s.inclusion_prob, np.ones(200))
@@ -47,7 +47,7 @@ def test_size_at_or_above_n_keeps_every_row_unweighted():
 def test_take_handles_arrays_frames_and_series():
     X, y = _data(n=500)
     df = pd.DataFrame(X, columns=list("abc"), index=np.arange(1_000, 1_500))
-    s = sample_rows(df, pd.Series(y, index=df.index), 0.1, pilot=LinearRegression(), random_state=1)
+    s = sample_rows(df, pd.Series(y, index=df.index), 0.1, pilot=LinearRegression(), random_state=1, method="residual")
     np.testing.assert_array_equal(s.take(X), X[s.indices])
     assert s.take(df).index.tolist() == (1_000 + s.indices).tolist()
     assert s.take(pd.Series(y)).tolist() == y[s.indices].tolist()
@@ -56,10 +56,10 @@ def test_take_handles_arrays_frames_and_series():
 
 def test_same_seed_same_draw_and_different_seed_different_draw():
     X, y = _data()
-    a = sample_rows(X, y, 0.1, random_state=5)
-    b = sample_rows(X, y, 0.1, random_state=5)
-    c = sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=6)
-    d = sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=5)
+    a = sample_rows(X, y, 0.1, random_state=5, method="residual")
+    b = sample_rows(X, y, 0.1, random_state=5, method="residual")
+    c = sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=6, method="residual")
+    d = sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=5, method="residual")
     assert not np.array_equal(a.indices, d.indices)
     np.testing.assert_array_equal(a.indices, b.indices)
     np.testing.assert_array_equal(a.weights, b.weights)
@@ -75,7 +75,8 @@ def test_empirical_inclusion_frequency_matches_inclusion_probability():
     draws = 4_000
     pi = np.zeros(n)
     for seed in range(draws):
-        s = sample_rows(None, y, k, pilot=pred, random_state=seed)
+        s = sample_rows(None, y, k, pilot=pred, random_state=seed, method="residual")
+        assert s.method == "residual"
         counts[s.indices] += 1
         pi[s.indices] = s.inclusion_prob
     expected = 0.5 * _capped_pi(np.abs(y), k) + 0.5 * k / n
@@ -87,7 +88,7 @@ def test_empirical_inclusion_frequency_matches_inclusion_probability():
 def test_weighted_estimates_are_unbiased_for_full_data_totals():
     X, y = _data(n=4_000, seed=1)
     est = [np.average(y[s.indices], weights=s.weights)
-           for s in (sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=r) for r in range(300))]
+           for s in (sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=r, method="residual") for r in range(300))]
     se = np.std(est) / np.sqrt(len(est))
     assert abs(np.mean(est) - y.mean()) < 4 * se
 
@@ -100,7 +101,8 @@ def test_residual_draw_does_not_lock_onto_a_repeating_series():
     y = (np.arange(n) % 5 == 4).astype(float)
     means = []
     for seed in range(100):
-        s = sample_rows(None, y, 0.2, pilot=np.zeros(n), random_state=seed)
+        s = sample_rows(None, y, 0.2, pilot=np.zeros(n), random_state=seed, method="residual")
+        assert s.method == "residual"
         assert len(s) == 1_000 and np.unique(s.indices).size == 1_000
         means.append(np.average(y[s.indices], weights=s.weights))
     assert 0.15 < min(means) and max(means) < 0.25
@@ -109,7 +111,7 @@ def test_residual_draw_does_not_lock_onto_a_repeating_series():
 def test_larger_residuals_get_larger_inclusion_probability():
     rng = np.random.default_rng(0)
     y = rng.normal(size=1_000)
-    s = sample_rows(None, y, 1_000 - 1, pilot=np.zeros(1_000), random_state=0)
+    s = sample_rows(None, y, 1_000 - 1, pilot=np.zeros(1_000), random_state=0, method="residual")
     order = np.argsort(np.abs(y[s.indices]))
     assert np.all(np.diff(s.inclusion_prob[order]) >= -1e-12)
 
@@ -118,7 +120,7 @@ def test_uniform_share_bounds_weights_even_with_outliers():
     X, y = _data(n=5_000)
     y = y.copy()
     y[:5] = 1e6
-    s = sample_rows(X, y, 0.2, pilot=LinearRegression(), random_state=0)
+    s = sample_rows(X, y, 0.2, pilot=LinearRegression(), random_state=0, method="residual")
     # Every row keeps at least uniform_mix * k / n = 0.1, so raw 1/pi <= 10; a capped
     # row has pi = 0.5 * 1 + 0.5 * 0.2 = 0.6.
     raw = 1.0 / s.inclusion_prob
@@ -134,7 +136,7 @@ def test_rows_the_pilot_fits_exactly_stay_drawable():
     pred = np.where(np.arange(2_000) < 1_000, y, 0.0)  # first half fitted exactly
     seen = np.zeros(2_000, dtype=bool)
     for seed in range(20):
-        s = sample_rows(None, y, 0.2, pilot=pred, random_state=seed)
+        s = sample_rows(None, y, 0.2, pilot=pred, random_state=seed, method="residual")
         assert s.inclusion_prob.min() >= 0.5 * 0.2 - 1e-12
         seen[s.indices] = True
     assert seen[:1_000].mean() > 0.5
@@ -144,7 +146,7 @@ def test_equal_probability_methods_and_uniform_mix_one():
     X, y = _data()
     groups = np.repeat(np.arange(30), 100)
     cases = [
-        sample_rows(X, y, 0.1, pilot=X[:, 0], uniform_mix=1.0, random_state=0),
+        sample_rows(X, y, 0.1, pilot=X[:, 0], uniform_mix=1.0, random_state=0, method="residual"),
         sample_rows(size=0.1, method="uniform", always_include=np.zeros(len(y), bool)),
         sample_rows(size=0.1, method="chronological", groups=groups),
     ]
@@ -214,17 +216,17 @@ def test_always_include_rows_are_kept_with_probability_one():
     keep = np.zeros(len(y), dtype=bool)
     keep[[3, 50, 999]] = True
     groups = np.repeat(np.arange(30), 100)
-    for kwargs in ({"X": X, "y": y, "pilot": X[:, 0]}, {"method": "uniform"},
+    for kwargs in ({"X": X, "y": y, "pilot": X[:, 0], "method": "residual"}, {"method": "uniform"},
                    {"method": "chronological", "groups": groups}):
         s = sample_rows(size=100, always_include=keep, random_state=0, **kwargs)
         assert len(s) == 100
         assert {3, 50, 999} <= set(s.indices.tolist())
         assert np.all(s.inclusion_prob[np.isin(s.indices, [3, 50, 999])] == 1.0)
     with pytest.raises(ValueError, match="always_include marks 3 rows but size allows only 2"):
-        sample_rows(X, y, 2, always_include=keep)
+        sample_rows(X, y, 2, always_include=keep, method="residual")
     with pytest.raises(ValueError, match="the whole budget"):
-        sample_rows(X, y, 3, always_include=keep)
-    s = sample_rows(X[:3], y[:3], 3, always_include=np.ones(3, bool))
+        sample_rows(X, y, 3, always_include=keep, method="residual")
+    s = sample_rows(X[:3], y[:3], 3, always_include=np.ones(3, bool), method="residual")
     np.testing.assert_array_equal(s.indices, [0, 1, 2])
 
 
@@ -232,13 +234,13 @@ def test_structure_arguments_belong_to_the_chronological_method():
     X, y = _data(n=500)
     for kwargs in ({"groups": np.zeros(500)}, {"time": np.arange(500)}, {"strata": np.zeros(500)}):
         with pytest.raises(ValueError, match="shape only method='chronological'"):
-            sample_rows(X, y, 0.1, **kwargs)
+            sample_rows(X, y, 0.1, method="residual", **kwargs)
         with pytest.raises(ValueError, match="shape only method='chronological'"):
             sample_rows(size=0.1, method="uniform", **kwargs)
     with pytest.raises(ValueError, match="needs groups or time"):
         sample_rows(X, y, 0.1, method="chronological")
     with pytest.raises(ValueError, match="needs a pilot"):
-        sample_rows(X, y, 0.1, pilot=None)
+        sample_rows(X, y, 0.1, pilot=None, method="residual")
     with pytest.raises(ValueError, match="method must be one of"):
         sample_rows(X, y, 0.1, method="smart")
 
@@ -254,7 +256,7 @@ def test_auto_task_detection():
     assert _resolve_task(np.round(y).astype(int), "auto") == "regression"
     assert _resolve_task(np.digitize(y, [-1, 1]), "auto") == "regression"
     assert _resolve_task(np.digitize(y, [-1, 1]), "classification") == "classification"
-    s = sample_rows(None, (y > 0).astype(int), 0.1, pilot=np.full(len(y), 0.5))
+    s = sample_rows(None, (y > 0).astype(int), 0.1, pilot=np.full(len(y), 0.5), method="residual")
     assert s.task == "classification"
 
 
@@ -276,7 +278,7 @@ def test_classification_pilot_survives_class_missing_from_pilot_slice():
     y[:2] = "rare"
     for seed in range(3):
         s = sample_rows(X, y, 0.2, task="classification", pilot=LogisticRegression(),
-                        pilot_size=1_000, random_state=seed)
+                        pilot_size=1_000, random_state=seed, method="residual")
         assert len(s) == 1_000
         assert np.isfinite(s.weights).all()
 
@@ -290,7 +292,7 @@ def test_pilot_slice_with_one_class_scores_the_other_class_highest(pilot, rare_l
     y = np.full(n, 1 - rare_label)
     y[1234] = rare_label
     with pytest.warns(RuntimeWarning, match="single class"):
-        s = sample_rows(X, y, 0.2, task="classification", pilot=pilot, random_state=0)
+        s = sample_rows(X, y, 0.2, task="classification", pilot=pilot, random_state=0, method="residual")
     assert len(s) == 1_200
     common = s.indices != 1234
     np.testing.assert_allclose(s.inclusion_prob[common], 0.5 * 1_199 / 5_999 + 0.5 * 0.2)
@@ -300,11 +302,11 @@ def test_pilot_slice_with_one_class_scores_the_other_class_highest(pilot, rare_l
 def test_custom_pilot_estimator_is_cloned_not_fitted():
     X, y = _data()
     pilot = LinearRegression()
-    s = sample_rows(X, y, 0.1, pilot=pilot)
+    s = sample_rows(X, y, 0.1, pilot=pilot, method="residual")
     assert len(s) == 300
     assert not hasattr(pilot, "coef_")
     clf = LogisticRegression()
-    s = sample_rows(X, (y > 0).astype(int), 0.1, pilot=clf)
+    s = sample_rows(X, (y > 0).astype(int), 0.1, pilot=clf, method="residual")
     assert s.task == "classification"
     assert not hasattr(clf, "coef_")
 
@@ -312,28 +314,28 @@ def test_custom_pilot_estimator_is_cloned_not_fitted():
 def test_classification_pilot_without_predict_proba_is_rejected():
     X, y = _data()
     with pytest.raises(TypeError, match="predict_proba"):
-        sample_rows(X, (y > 0).astype(int), 0.1, pilot=LinearRegression())
+        sample_rows(X, (y > 0).astype(int), 0.1, pilot=LinearRegression(), method="residual")
 
 
 def test_precomputed_pilot_matches_fitted_pilot_contract():
     X, y = _data()
-    s = sample_rows(None, y, 0.1, pilot=X[:, 0])
+    s = sample_rows(None, y, 0.1, pilot=X[:, 0], method="residual")
     assert len(s) == 300
     yc = (y > 0).astype(int)
-    s = sample_rows(None, yc, 0.1, pilot=np.full(len(y), 0.5))
+    s = sample_rows(None, yc, 0.1, pilot=np.full(len(y), 0.5), method="residual")
     assert s.task == "classification"
     with pytest.raises(ValueError, match="precomputed pilot has 10 rows"):
-        sample_rows(None, y, 0.1, pilot=np.zeros(10))
+        sample_rows(None, y, 0.1, pilot=np.zeros(10), method="residual")
     bad = X[:, 0].copy()
     bad[0] = np.nan
     with pytest.raises(ValueError, match="finite"):
-        sample_rows(None, y, 0.1, pilot=bad)
+        sample_rows(None, y, 0.1, pilot=bad, method="residual")
 
 
 def test_perfect_pilot_falls_back_to_equal_probability_with_warning():
     _, y = _data()
     with pytest.warns(RuntimeWarning, match="pilot fits every row exactly"):
-        s = sample_rows(None, y, 0.1, pilot=y)
+        s = sample_rows(None, y, 0.1, pilot=y, method="residual")
     np.testing.assert_allclose(s.weights, 1.0)
 
 
@@ -341,17 +343,17 @@ def test_auto_pilot_accepts_missing_features_but_not_infinite_ones():
     X, y = _data()
     X = X.copy()
     X[::7, 1] = np.nan
-    assert len(sample_rows(X, y, 0.1)) == 300
+    assert len(sample_rows(X, y, 0.1, method="residual")) == 300
     X[0, 0] = np.inf
     with pytest.raises(ValueError, match="infinite"):
-        sample_rows(X, y, 0.1)
+        sample_rows(X, y, 0.1, method="residual")
 
 
 def test_auto_pilot_rejects_non_numeric_features():
     X, y = _data(n=300)
     df = pd.DataFrame({"a": X[:, 0], "b": ["x", "y", "z"] * 100})
     with pytest.raises(TypeError, match="numeric features"):
-        sample_rows(df, y, 0.1)
+        sample_rows(df, y, 0.1, method="residual")
 
 
 @pytest.mark.parametrize(
@@ -375,42 +377,68 @@ def test_auto_pilot_rejects_non_numeric_features():
 def test_invalid_arguments_are_rejected(kwargs, error, match):
     X, y = _data(n=100)
     with pytest.raises(error, match=match):
-        sample_rows(X, y, **{"size": 0.1, **kwargs})
+        sample_rows(X, y, method="residual", **{"size": 0.1, **kwargs})
 
 
 def test_target_and_shape_validation():
     X, y = _data(n=100)
     with pytest.raises(ValueError, match="y is required"):
-        sample_rows(X, None, 0.1)
+        sample_rows(X, None, 0.1, method="residual")
     with pytest.raises(ValueError, match="needs at least one of"):
-        sample_rows(None, None, 0.1, pilot=None)
+        sample_rows(None, None, 0.1, pilot=None, method="residual")
     bad = y.copy()
     bad[0] = np.inf
     with pytest.raises(ValueError, match="finite for regression"):
-        sample_rows(X, bad, 0.1)
+        sample_rows(X, bad, 0.1, method="residual")
     labels = np.array(["a", None] * 50, dtype=object)
     with pytest.raises(ValueError, match="missing labels"):
-        sample_rows(X, labels, 0.1, task="classification")
+        sample_rows(X, labels, 0.1, task="classification", method="residual")
     with pytest.raises(ValueError, match="groups must be 1-D"):
-        sample_rows(X, y, 0.1, groups=np.zeros(99))
+        sample_rows(X, y, 0.1, groups=np.zeros(99), method="residual")
     with pytest.raises(ValueError, match="numeric"):
-        sample_rows(X, np.array(["a"] * 100, dtype=object), 0.1, task="regression")
+        sample_rows(X, np.array(["a"] * 100, dtype=object), 0.1, task="regression", method="residual")
 
 
 def test_verbose_logs_pilot_and_sample_summary(caplog):
     X, y = _data()
     with caplog.at_level(logging.INFO, logger="sift"):
-        sample_rows(X, y, 0.1, verbose=True)
+        sample_rows(X, y, 0.1, verbose=True, method="residual")
     text = caplog.text
     assert "Pilot fitted on 1,000 of 3,000 rows" in text
     assert "Sampled 300 of 3,000 rows" in text
 
 
-def test_no_warnings_on_the_default_path():
+def test_no_warnings_on_the_default_or_residual_path():
     X, y = _data()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         sample_rows(X, y)
+        sample_rows(X, y, method="residual")
+
+
+def test_default_method_is_a_uniform_draw_without_a_pilot():
+    X, y = _data(n=1_000)
+    s = sample_rows(X, y, 0.1, random_state=0)
+    assert s.method == "uniform" and s.task is None
+    assert len(s) == 100 and np.all(s.weights == 1.0)
+    np.testing.assert_array_equal(s.indices, sample_rows(size=0.1, method="uniform",
+                                                         always_include=np.zeros(1_000, bool),
+                                                         random_state=0).indices)
+    assert sift.SmartSamplerConfig().method == "uniform"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"pilot": None}, {"pilot": LinearRegression()}, {"pilot": np.zeros(500)},
+    {"pilot_size": 0.05}, {"uniform_mix": 0.3},
+])
+def test_residual_only_arguments_are_rejected_for_other_methods(kwargs):
+    X, y = _data(n=500)
+    with pytest.raises(ValueError, match="apply only to method='residual'"):
+        sample_rows(X, y, 0.1, **kwargs)
+    with pytest.raises(ValueError, match="apply only to method='residual'"):
+        sample_rows(X, y, 0.1, method="chronological", time=np.arange(500), **kwargs)
+    with pytest.raises(ValueError, match="apply only to method='residual'"):
+        sift.SmartSamplerConfig(**kwargs)
 
 
 def test_top_level_exports():

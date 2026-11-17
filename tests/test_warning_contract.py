@@ -50,6 +50,7 @@ def test_smart_sample_runtime_warning_points_to_public_caller():
     )
     config = smart_module.SmartSamplerConfig(
         size=0.5,
+        method="residual",
         pilot=frame["pred"].to_numpy(),
         random_state=0,
         verbose=False,
@@ -60,7 +61,7 @@ def test_smart_sample_runtime_warning_points_to_public_caller():
     assert Path(caught[0].filename) == Path(__file__)
 
     with pytest.warns(RuntimeWarning, match="pilot fits every row exactly") as caught:
-        smart_module.sample_rows(None, frame["y"], 0.5, pilot=frame["pred"])
+        smart_module.sample_rows(None, frame["y"], 0.5, method="residual", pilot=frame["pred"])
     assert Path(caught[0].filename) == Path(__file__)
 
 

@@ -84,9 +84,9 @@ different primary knob:
 - Boruta scales with `max_iter`, tree count, and the importance backend;
 - permutation importance scales with feature count times `n_repeats` and the
   fitted model's prediction cost;
-- smart sampling's default residual method scales with its pilot fit on 2% of
-  rows and one prediction pass over all rows; the chronological and uniform
-  methods only sort or draw row indices;
+- smart sampling's uniform (default) and chronological methods only draw or
+  sort row indices; the opt-in residual method adds a pilot fit on 2% of rows
+  and one prediction pass over all rows;
 - CatBoost and Boruta-SHAP require optional dependencies and model budgets.
 
 Their focused harnesses remain under `benchmarks/`. Mixing reduced iteration

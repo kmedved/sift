@@ -74,7 +74,7 @@ flowchart TD
 - `smart_sample` and `sample_rows` reduce rows, not columns. Apply them before a
   selector only when the full panel is too large for the chosen method
   (selecting on all rows is better tested), and to train the final model on a
-  weighted 20% sample drawn from all eligible rows.
+  20% sample drawn from all eligible rows (chronological on panels).
 
 ## Apply the workflow modifiers
 

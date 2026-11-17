@@ -151,13 +151,12 @@ scores prefixes of that path. Every returned table sets `in_sample=True` and
 ## Inclusion weights
 
 The mean-one fitting weights from `sample_rows`, or the `sample_weight`
-column written by `smart_sample`: inverse inclusion probabilities
-(Horvitz–Thompson weights) rescaled to mean 1. Equal-probability draws give
-weights of 1. To estimate a full-data total, weight by the raw
-`1 / inclusion_prob`; those weighted sums are unbiased. A weighted model fit
-is consistent for the full-data fit but not exactly unbiased. Downstream
-selectors and models consume them as ordinary
-[sample weights](#sample-weight).
+column written by `smart_sample`: inverse inclusion probabilities rescaled to
+mean 1. Equal-probability draws give weights of 1. They are for fitting; what
+a weighted fit does depends on the learner. To estimate a fixed full-data
+total, weight by the raw `1 / inclusion_prob` (Horvitz–Thompson), which is
+unbiased because every row can be drawn. Downstream selectors and models
+consume them as ordinary [sample weights](#sample-weight).
 
 ## Joint mutual information
 
@@ -358,10 +357,10 @@ baseline. Beating shadows is an all-relevant heuristic, not FDR control.
 ## Smart sampling
 
 `sample_rows` / `smart_sample`: keep a fixed number of rows. The default
+`method="uniform"` is a simple random sample; `method="chronological"` spreads
+equal-probability draws along each entity's timeline; the opt-in
 `method="residual"` draws half in proportion to how wrong a cheap pilot model
-is on them and half evenly, in random order; `method="chronological"` spreads
-equal-probability draws along each entity's timeline; `method="uniform"` is a
-simple random sample. They do not select features. See
+is on them and half evenly, in random order. They do not select features. See
 [inclusion weights](#inclusion-weights).
 
 ## Stability frequency

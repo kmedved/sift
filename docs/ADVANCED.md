@@ -356,18 +356,20 @@ Use nested mode when the validation estimate matters more than runtime.
 ## Smart Sampling
 
 `sample_rows` keeps a fraction of a large table so an expensive model trains
-faster. Its default `method="residual"` draws rows in proportion to how wrong a
-cheap pilot model is on them, half evenly, along a random order, and each kept
-row carries a mean-one fitting weight. `method="chronological"` draws with
-equal probability, spread over each entity's timeline with entity and season
-quotas; `method="uniform"` is a simple random sample.
+faster. Its default `method="uniform"` is a simple random sample.
+`method="chronological"` draws with equal probability, spread over each
+entity's timeline with entity and season quotas. The opt-in
+`method="residual"` draws rows in proportion to how wrong a cheap pilot model
+is on them, half evenly, along a random order, and gives each kept row a
+mean-one fitting weight.
 
 Typical workflow on a large panel: select features on all eligible rows when
-that is affordable, then train the final model on a 20% sample of all eligible
-rows, using the selected features. On panels, whether the residual or the
-chronological method trains better is open (see below). The evidence for
-selecting on a sample is thinner. If selection is too slow, start with a 20%
-chronological sample with season strata, as the example does.
+that is affordable, then train the final model on a 20% chronological sample
+of all eligible rows, using the selected features. On the panel below the
+residual draw tied chronological sampling and took longer, so it is opt-in,
+for expensive, weight-aware fits. The evidence for selecting on a sample is
+thinner. If selection is too slow, start with a 20% chronological sample with
+season strata, as the example does.
 
 ```python
 import numpy as np
@@ -389,11 +391,15 @@ screen = smart_sample(df, feature_cols, "target",
 chosen = select_mrmr(screen[feature_cols], screen["target"], k=3, task="regression",
                      sample_weight=screen["sample_weight"].to_numpy())
 
-# 2. Train on a 20% weighted sample of all rows, with the chosen features.
-s = sample_rows(df[chosen], df["target"], size=0.2, random_state=1)
+# 2. Train on a 20% chronological sample of all rows, with the chosen features.
+s = sample_rows(size=0.2, method="chronological", groups=df["entity_id"],
+                time=df["timestamp"], random_state=1)
 model = HistGradientBoostingRegressor().fit(
     s.take(df[chosen]), s.take(df["target"]), sample_weight=s.weights
 )
+
+# Opt-in alternative for an expensive, weight-aware learner:
+r = sample_rows(df[chosen], df["target"], size=0.2, method="residual", random_state=1)
 ```
 
 ### How much to sample
@@ -406,9 +412,9 @@ over 20 fresh seeds.
 
 The residual column is an earlier draw that ran systematically along each
 entity's timeline. That draw can line up with residuals that repeat every
-`1 / fraction` rows, so the shipped method draws along a random order instead.
-A targeted check at 20% of rows (20 seeds, the same pilot) found that the
-random order gives up most of the edge:
+`1 / fraction` rows, so the shipped residual method draws along a random order
+instead. A targeted check at 20% of rows (20 seeds, the same pilot) found that
+the random order loses most of the edge:
 
 - Every draw had exactly the requested number of rows.
 - On the 9 stable combinations, the random-order draw was 0.39% [0.23, 0.54]
@@ -417,8 +423,10 @@ random order gives up most of the edge:
   at 25%, which takes about the same time).
 - Across all 12 combinations it tied chronological sampling at 20%: +0.03%
   [−0.41, +0.52].
-- The time-ordered draw's edge came with its spread along each timeline, which
-  a random order gives up.
+- Sample plus fit took a median 23.1 s, against 19.3 s for chronological
+  sampling at 20%.
+- The time-ordered draw also spread its rows along each timeline. Whether that
+  explains its edge was not tested.
 
 | Rows kept | Residual, time-ordered draw | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
@@ -467,18 +475,18 @@ with the downstream model trained on all rows. At 10% on CDC the interval
 reaches +0.7%, so a small loss is not ruled out, and the panel benchmark above
 fixed its features before sampling. The quality of
 `StabilitySelector(use_smart_sampler=True)` has not been benchmarked. The one
-cell where the
-smart sample did worse is a linear model on California housing at 20%: 1.2%
-worse than a uniform sample, though not significantly over 10 seeds. The smart
-sample landed at the full-data fit, while the uniform samples beat the
-full-data fit by 1.2%. Dropping the 56 training rows with an extreme feature
-value (|z| > 8) improves the full-data linear fit by 2.5%. The smart sample
-estimates the full-data fit, so it inherits that fit's weaknesses, but these
-runs did not establish why uniform subsamples do better.
+cell where the residual sample did worse is a linear model on California
+housing at 20%: 1.2% worse than a uniform sample, though not significantly
+over 10 seeds. The residual sample landed at the full-data fit, while the
+uniform samples beat the full-data fit by 1.2%. Dropping the 56 training rows
+with an extreme feature value (|z| > 8) improves the full-data linear fit by
+2.5%. Weighting aims the residual sample at the full-data fit, so it can
+inherit that fit's weaknesses, but these runs did not establish why uniform
+subsamples do better.
 
 Filter selectors cap their input at `subsample=50_000` rows by default. They
-reach the cap by thinning uniformly and keeping the weights, which leaves the
-smart sample's weighting intact. Draw about 50k rows for selection, or pass
+reach the cap by thinning uniformly and keeping the weights, which leaves a
+residual sample's weighting intact. Draw about 50k rows for selection, or pass
 `subsample=None` to use the whole sample.
 
 ### What did not work
@@ -493,15 +501,16 @@ None of the following beat the pilot residual in that benchmark:
 
 Optimal-subsampling theory for observed labels scales a row's probability with
 its residual, usually times a term that depends on its features and the model;
-the default keeps only the residual part, an empirical choice. The MVS score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used
-instead of the even share, was about 0.1% better on the stable combinations
-but 0.9% (12-seed screen) to 2.2% (20-seed run) worse on the noise-dominated ones,
-so it is not the default.
+the residual method keeps only the residual part, an empirical choice. The MVS
+score `sqrt(g**2 + mean(g**2))` (Ibragimov & Gusev, 2019), used instead of the
+even share, was about 0.1% better on the stable combinations but 0.9% (12-seed
+screen) to 2.2% (20-seed run) worse on the noise-dominated ones, so the
+residual method does not use it.
 
 ### Cautions
 
-- **Pass the weights to every downstream fit.** Unweighted, the model
-  over-represents the rows the pilot found hard.
+- **Pass the weights to every downstream fit.** Unweighted, a model fitted on a
+  residual sample over-represents the rows the pilot found hard.
 - **Pin automatic hyperparameters.** If a learner derives its learning rate or
   leaf regularisation from the weights' effective sample size, set them to what
   an unweighted fit of the same size would use.
@@ -509,10 +518,11 @@ so it is not the default.
   sample can beat the full-data fit, so distance to the full fit is the wrong
   yardstick. The even share is what keeps the draw from chasing noise; 0.5 is
   the only benchmarked `uniform_mix`.
-- **Weighted fits are consistent, not unbiased.** The weights make weighted
-  sums unbiased for the full-data sums. A fit divides by the realized weight
-  total, so in a small sample it is pulled toward the rows that were likely to
-  be drawn.
+- **The returned weights are for fitting.** They are `1 / inclusion_prob`
+  rescaled to mean one. What a weighted fit gains or loses against a
+  full-data fit depends on the learner. To estimate a fixed full-data total,
+  weight by the raw `1 / inclusion_prob`, which is unbiased because every row
+  can be drawn.
 - **External weights.** Do not pass external `sample_weight` with
   `StabilitySelector(use_smart_sampler=True)`; the sampler creates the weights
   for the rows it keeps.
@@ -523,7 +533,8 @@ Use `sample_rows(method="chronological")`, or `chronological_sample` on a
 DataFrame, when nearby observations for the same entity are often similar,
 or to keep every season and entity represented. It allocates a proportional
 share within each season and entity, then spreads the draws over the ordered
-observations. It is the sampled baseline to beat on panels.
+observations. It is the method to start with on panels, and the baseline a
+residual draw has to beat.
 
 ```python
 import numpy as np

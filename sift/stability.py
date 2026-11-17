@@ -242,12 +242,13 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
         Block bootstrap flavor for the same path.
     use_smart_sampler : bool, default=False
         Whether to subsample rows before stability selection.
-        ``sift.smart_sample`` draws them once (by default weighted toward the
-        rows a cheap pilot model gets wrong), and the resamples run on that
-        weighted sample. Selecting on all rows is the better-tested choice
-        when it is affordable.
+        ``sift.smart_sample`` draws them once (by default a uniform random
+        sample; ``sift.panel_config`` gives a chronological one), and the
+        resamples run on that sample. Selecting on all rows is the
+        better-tested choice when it is affordable.
     sampler_config : SmartSamplerConfig, optional
-        Sampler settings; ``SmartSamplerConfig()`` (20% of rows) when omitted.
+        Sampler settings; ``SmartSamplerConfig()`` (a uniform 20% of rows)
+        when omitted.
         ``task`` is always set from this selector's own ``task``.
     store_coefs : bool, default=True
         Whether to store full coefficient matrix from all bootstraps.
