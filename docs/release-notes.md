@@ -9,37 +9,51 @@ clipped weights. Its per-group draws kept any extra rows and topped up short
 ones with the highest-scoring rows, so it overshot its budget. On a 770k-row
 panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
 
-- **New: `sample_rows(X, y, size=0.2, ...) -> RowSample`.** This is the
-  array-level sampler for any model:
-  - It fits a cheap pilot on 2% of rows and scores rows by the size of the
-    loss gradient. Half of the inclusion probability follows that score and
-    half is spread evenly (`uniform_mix=0.5`).
-  - It draws exactly `size` rows (a fraction or a count), systematically along
-    `groups` and `time`.
-  - It returns indices, exact inverse-probability weights (mean 1) and
-    inclusion probabilities.
-  - The pilot can be `"auto"` (HistGradientBoosting), any estimator, an array
-    of precomputed predictions, or `None` for an equal-probability draw. That
-    draw takes about one row, at a random position, from each block of about
-    `1 / fraction` rows of a timeline, so a repeating schedule cannot line up
-    with it.
-  - Classification uses the log-loss gradient.
-- **`smart_sample` runs on the new engine.** It keeps its DataFrame signature,
-  and `StabilitySelector(use_smart_sampler=True)` uses it with the selector's
-  own `task`. Classification no longer falls back to geometry-only sampling.
+- **New: `sample_rows(X, y, size=0.2, method="residual", ...) -> RowSample`.**
+  This is the array-level sampler for any model. It draws exactly `size` rows
+  (a fraction or a count) by one of three methods:
+  - `"residual"` (default) fits a cheap pilot on 2% of rows and scores rows by
+    the size of the loss gradient. Half of the inclusion probability follows
+    that score and half is spread evenly (`uniform_mix=0.5`). The draw is
+    systematic along a random order of the rows: exact size, exact inclusion
+    probabilities, and no lock-on to a repeating pattern in the data. The pilot
+    can be `"auto"` (HistGradientBoosting), any estimator, or an array of
+    precomputed predictions. Classification uses the log-loss gradient.
+  - `"chronological"` draws with equal probability through
+    `chronological_sample`: proportional quotas per `strata` (for example
+    season) and per `groups` entity, spread along each entity's `time`.
+  - `"uniform"` is a simple random sample.
+
+  It returns indices, mean-one fitting weights (`1 / inclusion_prob` rescaled
+  to mean 1; use the raw `1 / inclusion_prob` to estimate full-data totals),
+  inclusion probabilities and the method. Rows in `always_include` are always
+  kept, but they may not take the whole budget while other rows remain.
+- **New: `sift.sampling.chronological_sample(frame, n_rows, group_col=...,
+  time_col=..., stratum_col=...)`** returns the positions of an
+  equal-probability chronological draw from a DataFrame.
+- **`smart_sample` runs on the new engine.** It keeps its DataFrame signature
+  and takes `SmartSamplerConfig(method=...)`.
+  `StabilitySelector(use_smart_sampler=True)` uses it with the selector's own
+  `task`. Classification no longer falls back to geometry-only sampling.
 
 ### Breaking changes
 
-- **`SmartSamplerConfig` fields are now** `size`, `group_col`, `time_col`,
-  `task`, `pilot`, `pilot_size`, `uniform_mix`, `anchor_fn`, `random_state`
-  and `verbose`. Removed: `sample_frac` (now `size`), `pilot_sample_size`,
+- **`SmartSamplerConfig` fields are now** `size`, `method`, `group_col`,
+  `time_col`, `strata_col`, `task`, `pilot`, `pilot_size`, `uniform_mix`,
+  `anchor_fn`, `random_state` and `verbose`. Removed: `sample_frac` (now `size`), `pilot_sample_size`,
   `min_per_group`, `leverage_batch_size`, `svd_sample_size`,
   `weight_clip_quantile`, `residual_weight_cap`, `uniform_floor` and
   `anchor_max_share`. Passing a removed field raises `TypeError` that names its
   replacement.
+- **`pilot=None` is gone;** use `method="uniform"` or
+  `method="chronological"` for an equal-probability draw. `group_col`,
+  `time_col` and `strata_col` shape only `method="chronological"`; the
+  residual and uniform methods draw in random order and reject them (except
+  as inputs to `anchor_fn`).
 - **The default size is 20% of rows,** up from 10%.
-- **Presets:** `panel_config(group_col, time_col=None, size=0.2)` no longer
-  anchors the first and last row of each group. `cross_section_config`,
+- **Presets:** `panel_config(group_col, time_col=None, size=0.2,
+  strata_col=None)` now returns an equal-probability chronological config and
+  no longer anchors the first and last row of each group. `cross_section_config`,
   `financial_config` and `medical_config` are removed.
 - **`smart_sample` output:** it keeps the input index instead of resetting it,
   writes `float64` weights, and rejects datetime or non-numeric feature columns

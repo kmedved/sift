@@ -888,7 +888,7 @@ def test_stability_smart_sampler_honors_explicit_feature_subset():
         use_smart_sampler=True,
         sampler_config=SmartSamplerConfig(
             size=0.8,
-            pilot=None,
+            method="uniform",
             random_state=0,
             verbose=False,
         ),
@@ -910,7 +910,7 @@ def test_stability_smart_sampler_honors_explicit_feature_subset():
         use_smart_sampler=True,
         sampler_config=SmartSamplerConfig(
             size=0.8,
-            pilot=None,
+            method="uniform",
             random_state=0,
             verbose=False,
         ),
@@ -964,10 +964,10 @@ def test_stability_smart_sampler_excludes_explicit_metadata_names():
         alpha=0.1,
         use_smart_sampler=True,
         sampler_config=SmartSamplerConfig(
+            method="chronological",
             group_col="group",
             time_col="time",
             size=0.8,
-            pilot=None,
             random_state=0,
             verbose=False,
         ),
@@ -1002,10 +1002,10 @@ def test_stability_smart_sampler_tune_threshold_retains_metadata_columns():
         alpha=0.1,
         use_smart_sampler=True,
         sampler_config=SmartSamplerConfig(
+            method="chronological",
             group_col="group",
             time_col="time",
             size=0.8,
-            pilot=None,
             random_state=0,
             verbose=False,
         ),

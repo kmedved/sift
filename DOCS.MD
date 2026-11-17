@@ -1776,35 +1776,40 @@ full-panel draw budget used by earlier releases.
 
 ## Smart Sampling
 
-Smart sampling keeps the rows that teach a model the most, so training (and,
-less tested, selection) runs on a fraction of the data with little accuracy
-lost. It works in three steps:
+`sample_rows` draws exactly `size` training rows and returns mean-one fitting
+weights. It has three methods:
 
-1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores every
-   row by how wrong it is: the size of its loss gradient, which is the residual
-   for regression and `||onehot(y) - p||` for classification.
-2. **Exact draw.** Exactly `size` rows are drawn. Half of each row's inclusion
-   probability is proportional to `g` and half is spread evenly
-   (`uniform_mix=0.5`), which keeps every row drawable and keeps the draw from
-   chasing noise. The draw runs systematically along groups (in random order)
-   and time (in order), so every entity's timeline is covered evenly.
-3. **Weights.** Each kept row carries `1 / inclusion probability`, rescaled to
-   mean 1. Weighted sums are unbiased for the full-data sums. A model fitted
-   with the weights is consistent for the full-data fit but not exactly
-   unbiased, and how much variance it saves depends on the model and data.
+- **`method="residual"` (default).** Keeps the rows a model learns the most
+  from:
+  1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores
+     every row by how wrong it is: the size of its loss gradient, which is the
+     residual for regression and `||onehot(y) - p||` for classification.
+  2. **Exact draw.** Half of each row's inclusion probability is proportional
+     to that score and half is spread evenly (`uniform_mix=0.5`), which keeps
+     every row drawable and keeps the draw from chasing noise. Rows are drawn
+     systematically along a random order, so a repeating pattern in the data
+     cannot line up with the draw.
+  3. **Weights.** Each kept row carries a mean-one fitting weight:
+     `1 / inclusion probability`, rescaled to mean 1. Sums weighted by the raw
+     `1 / inclusion_prob` are unbiased for the full-data sums. A model fitted
+     with the weights is consistent for the full-data fit but not exactly
+     unbiased, and how much variance it saves depends on the model and data.
+- **`method="chronological"`.** Equal probability, spread over time. Each
+  entity in `groups`, inside each stratum in `strata` (such as a season), gets
+  its proportional share rounded up or down, drawn along its timeline. This is
+  `sift.sampling.chronological_sample`.
+- **`method="uniform"`.** A simple random sample.
 
-Where it pays off: expensive learners, or several fits on one draw. The pilot
-costs more than fitting a linear model on every row, so a cheap learner gains
-nothing. The evidence is strongest for training a model after its features
-are chosen; for feature selection it is limited (see
-[docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all
-rows when that is affordable.
-
-With `pilot=None` every row has the same probability. The draw then takes
-about one row, at a random position, from each block of about `1 / fraction`
-consecutive rows of a timeline, so a repeating schedule (weekday data at 20%,
-say) cannot line up with it. It balances one level of `groups`; to balance
-seasons as well as players, sample each season separately.
+Where the residual draw can pay off: expensive learners, or several fits on
+one draw. The pilot costs more than fitting a linear model on every row, so a
+cheap learner gains nothing. On a large player panel, the random-order draw
+tied chronological sampling at 20% of rows over all targets and was 0.18%
+worse on the stable ones; an earlier time-ordered draw that beat it is
+described in [docs/ADVANCED.md](docs/ADVANCED.md#how-much-to-sample). The evidence is for training a model after its
+features are chosen; for feature selection it is thin (see
+[docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all rows
+when that is affordable. Draw the training sample from all eligible rows,
+not from a selection sample, or a 20% sample of a 20% sample leaves 4%.
 
 The array-level entry point is `sample_rows`. It returns indices and weights,
 so it works with any model:
@@ -1823,7 +1828,8 @@ model = HistGradientBoostingRegressor().fit(s.take(X), s.take(y), sample_weight=
 ```
 
 `smart_sample` is the DataFrame front end. It returns the kept rows, with the
-original index, plus a `sample_weight` column:
+original index, plus a `sample_weight` column. `panel_config` sets up a
+chronological draw by entity, time and, optionally, season:
 
 ```python
 import numpy as np
@@ -1848,28 +1854,28 @@ sampled = smart_sample(
 Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 
 - `size` (default 0.2): rows to keep, as a float fraction in `(0, 1]` or an int
-  row count. On a 770k-row panel, 20-25% landed within about 0.2% of
-  full-data RMSE. Use 5-10% for a rough feature screen.
-- `groups` / `group_col` and `time` / `time_col`: spread the draw across
-  entities and along their timelines.
-- `task` (default `"auto"`): `"auto"` treats non-numeric, boolean and two-valued
-  targets as classification. Pass `"classification"` for integer-coded
-  multiclass labels.
-- `pilot` (default `"auto"`): one of
+  row count.
+- `method` (default `"residual"`): `"residual"`, `"chronological"` or
+  `"uniform"`.
+- `groups` / `group_col`, `time` / `time_col` and `strata` / `strata_col`:
+  shape `method="chronological"` only; other methods raise if they are given
+  (in `smart_sample`, `group_col` and `time_col` may also feed `anchor_fn`).
+- `task` (default `"auto"`, residual only): `"auto"` treats non-numeric,
+  boolean and two-valued targets as classification. Pass `"classification"`
+  for integer-coded multiclass labels.
+- `pilot` (default `"auto"`, residual only): one of
   - `"auto"`, a 100-iteration scikit-learn HistGradientBoosting model;
   - any estimator, which is cloned and fitted (classification pilots need
     `predict_proba`);
   - an array of precomputed predictions, for example yesterday's production
-    model, which makes the pilot free;
-  - `None`, for an equal-probability draw that still spreads along groups and
-    time.
-- `pilot_size` (default 0.02): rows used to fit the pilot, at least 1,000.
-- `uniform_mix` (default 0.5): share of probability spread evenly, in
-  `(0, 1]`. It keeps every row drawable and caps each raw weight at
-  `1 / (uniform_mix * fraction)`; `1.0` is an equal-probability draw. 0.5 is
-  the benchmarked value.
+    model, which makes the pilot free.
+- `pilot_size` (default 0.02, residual only): rows used to fit the pilot, at
+  least 1,000.
+- `uniform_mix` (default 0.5, residual only): share of probability spread
+  evenly, in `(0, 1]`. It keeps every row drawable and caps each raw weight at
+  `1 / (uniform_mix * fraction)`. 0.5 is the benchmarked value.
 - `always_include` / `anchor_fn`: rows that must be kept. They count against
-  `size`.
+  `size` and must leave room for at least one drawn row.
 - `random_state` (default 42) and `verbose`.
 
 Two cautions for downstream fits:
@@ -1882,7 +1888,8 @@ Two cautions for downstream fits:
   size would use. Otherwise a comparison against a full-data fit is
   confounded.
 
-Use smart sampling inside stability selection:
+If stability selection is too slow on every row, sample once before it. This
+example uses a chronological 30% sample:
 
 ```python
 import numpy as np
@@ -1909,7 +1916,7 @@ selector.fit(df, y)
 ```
 
 `StabilitySelector` draws the sample once, before its resamples, and always
-passes its own `task` to the pilot.
+passes its own `task` to the pilot of a residual draw.
 
 When `use_smart_sampler=True`, `X` must be a DataFrame. An explicit
 `fit(..., feature_names=[...])` sequence is preserved as an ordered feature
@@ -1918,8 +1925,8 @@ refer to numeric columns after the sampler's metadata exclusions. Pass an
 ordered iterable such as a list, tuple, pandas Index, or one-dimensional NumPy
 array; strings, bytes-like objects, mappings, sets, scalar arrays, and
 matrix-like containers are rejected. Tuple and MultiIndex column labels remain
-single feature names in `get_feature_names_out`. Configured `group_col` and
-`time_col` columns remain metadata and are excluded from the feature matrix even
+single feature names in `get_feature_names_out`. Configured `group_col`,
+`time_col` and `strata_col` columns remain metadata and are excluded from the feature matrix even
 if they appear in `feature_names`. Without explicit names, the sampler uses
 numeric columns other than those group/time columns. Datetime and timedelta
 feature columns are rejected before numeric coercion; a configured datetime
@@ -1928,8 +1935,9 @@ retain the configured group/time metadata while scoring only fitted features.
 
 ### Anchors and the panel preset
 
-`panel_config(group_col, time_col=None, size=0.2)` is the root-level preset
-for entity-over-time data. Anchor rules come from `sift.sampling`:
+`panel_config(group_col, time_col=None, size=0.2, strata_col=None)` is the
+root-level preset for a chronological draw from entity-over-time data. Anchor
+rules come from `sift.sampling`:
 
 ```python
 from sift.sampling import (
@@ -1966,8 +1974,9 @@ their weight is the smallest in the sample.
 | `weight_clip_quantile` | removed; weights are exact |
 | `min_per_group`, `anchor_max_share` | `anchor_fn=first_per_group`; anchors always kept |
 | `cross_section_config()` | `SmartSamplerConfig()` |
-| `financial_config`, `medical_config` | `panel_config` plus an `anchor_fn` |
-| `panel_config(..., sample_frac=)` anchored first and last rows | `panel_config(..., size=)`; no anchors unless set |
+| `financial_config`, `medical_config` | `SmartSamplerConfig(anchor_fn=...)` |
+| `panel_config(..., sample_frac=)`: smart draw spread by group and time, first and last rows anchored | `panel_config(..., size=)`: an equal-probability chronological draw, no anchors unless set; for the residual draw use `SmartSamplerConfig()`, which ignores group and time |
+| `pilot=None` | `method="uniform"` or `method="chronological"` |
 | output index reset, float32 weights | input index kept, float64 weights |
 
 Passing a removed field raises `TypeError` with the replacement in the message.

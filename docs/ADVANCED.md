@@ -355,15 +355,19 @@ Use nested mode when the validation estimate matters more than runtime.
 
 ## Smart Sampling
 
-Smart sampling keeps the rows a model learns the most from, so an expensive
-model trains on a fraction of a large table. Rows are drawn in proportion to
-how wrong a cheap pilot model is on them, and each kept row carries an exact
-inverse-probability weight.
+`sample_rows` keeps a fraction of a large table so an expensive model trains
+faster. Its default `method="residual"` draws rows in proportion to how wrong a
+cheap pilot model is on them, half evenly, along a random order, and each kept
+row carries a mean-one fitting weight. `method="chronological"` draws with
+equal probability, spread over each entity's timeline with entity and season
+quotas; `method="uniform"` is a simple random sample.
 
 Typical workflow on a large panel: select features on all eligible rows when
-that is affordable, then train the final model on a 20-25% smart sample of the
-selected features. The evidence for selecting on a sample is thinner (see
-below); the example selects on one for when the full table is too slow.
+that is affordable, then train the final model on a 20% sample of all eligible
+rows, using the selected features. On panels, whether the residual or the
+chronological method trains better is open (see below). The evidence for
+selecting on a sample is thinner. If selection is too slow, start with a 20%
+chronological sample with season strata, as the example does.
 
 ```python
 import numpy as np
@@ -379,15 +383,14 @@ df["entity_id"] = np.repeat(np.arange(200), 100)
 df["timestamp"] = np.tile(np.arange(100), 200)
 df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.standard_t(3, size=len(df))
 
-# 1. If selection on every row is too slow, select on a weighted sample.
+# 1. If selection on every row is too slow, select on a chronological sample.
 screen = smart_sample(df, feature_cols, "target",
-                      panel_config("entity_id", "timestamp", size=0.1))
+                      panel_config("entity_id", "timestamp", size=0.2))
 chosen = select_mrmr(screen[feature_cols], screen["target"], k=3, task="regression",
                      sample_weight=screen["sample_weight"].to_numpy())
 
-# 2. Train on a weighted 25% sample of the chosen features.
-s = sample_rows(df[chosen], df["target"], size=0.25,
-                groups=df["entity_id"], time=df["timestamp"], random_state=1)
+# 2. Train on a 20% weighted sample of all rows, with the chosen features.
+s = sample_rows(df[chosen], df["target"], size=0.2, random_state=1)
 model = HistGradientBoostingRegressor().fit(
     s.take(df[chosen]), s.take(df["target"]), sample_weight=s.weights
 )
@@ -399,35 +402,53 @@ These numbers come from a benchmark on a ~770k-row player-season panel: 5
 targets, scored in 12 target/window combinations, refitting a gradient-boosted
 model on 50 features chosen beforehand, with the learning rate pinned. Each
 figure is the mean RMSE gap to a full-data fit on the 9 stable combinations,
-over 20 fresh seeds, for `sample_rows` with its defaults.
+over 20 fresh seeds.
 
-| Rows kept | `sample_rows` | Chronological (equal-probability) | Uniform random (12-seed screen) |
+The residual column is an earlier draw that ran systematically along each
+entity's timeline. That draw can line up with residuals that repeat every
+`1 / fraction` rows, so the shipped method draws along a random order instead.
+A targeted check at 20% of rows (20 seeds, the same pilot) found that the
+random order gives up most of the edge:
+
+- Every draw had exactly the requested number of rows.
+- On the 9 stable combinations, the random-order draw was 0.39% [0.23, 0.54]
+  worse than the time-ordered draw, and 0.18% [0.02, 0.34] worse than
+  chronological sampling at 20% (0.19% [0.02, 0.38] worse than chronological
+  at 25%, which takes about the same time).
+- Across all 12 combinations it tied chronological sampling at 20%: +0.03%
+  [−0.41, +0.52].
+- The time-ordered draw's edge came with its spread along each timeline, which
+  a random order gives up.
+
+| Rows kept | Residual, time-ordered draw | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
 | 10% | +0.58% | +0.99% | about +1.7% |
 | 15% | +0.30% | +0.61% | about +1.2% |
 | 20% | +0.17% | +0.39% | about +0.8% |
 | 25% | +0.19% | +0.37% | about +0.7% |
 
-- **It beat chronological sampling on the stable combinations:** by 0.40%,
-  0.30%, 0.21% and 0.17% at 10%, 15%, 20% and 25% of rows. The 25% interval
-  just reaches 0.
+- **The time-ordered draw beat chronological sampling on the stable
+  combinations:** by 0.40%, 0.30%, 0.21% and 0.17% at 10%, 15%, 20% and 25% of
+  rows. The 25% interval just reaches 0.
 - **On the 3 noise-dominated combinations (all forward windows), the gap to
-  full data means little.** Chronological samples and the default's samples
-  both beat the full-data fit there, by 2-5%. Against chronological sampling
-  the default's test RMSE was +1.2% at 10% (interval −0.4% to +2.7%), then
-  −1.5%, −2.1% and −1.1% at 15%, 20% and 25%. So at 10% it only ties
-  chronological sampling across all 12 combinations (−0.02%); at 20% it is
-  0.68% better.
+  full data means little.** Chronological samples and time-ordered residual
+  samples both beat the full-data fit there, by 2-5%. Against chronological
+  sampling the time-ordered draw's test RMSE was +1.2% at 10% (interval −0.4%
+  to +2.7%), then −1.5%, −2.1% and −1.1% at 15%, 20% and 25%. So at 10% it
+  only ties chronological sampling across all 12 combinations (−0.02%); at 20%
+  it is 0.68% better.
 - **Every draw had exactly the requested number of rows.**
 - **Count the pilot's time.** Drawing the sample, pilot included, takes about
   2.7 s on 770k rows with one thread; a full-data fit there takes about 47 s.
   Matched for total time instead of rows, the edge over chronological sampling
   on the stable combinations was 0.1-0.25%.
 
-Outside that panel, `benchmarks/bench_row_sampling.py` compared a smart sample
-with a uniform sample of the same size over 10 seeds. Three datasets were used:
-a 400k-row synthetic panel, the CDC diabetes survey (250k rows, binary
-classification) and California housing (20k rows).
+Outside that panel, `benchmarks/bench_row_sampling.py` compared a residual
+sample with a uniform sample of the same size over 10 seeds. These runs also
+used the earlier draw, systematic along the input order (by group and time on
+the synthetic panel), and have not been rerun with the random order. Three
+datasets were used: a 400k-row synthetic panel, the CDC diabetes survey (250k
+rows, binary classification) and California housing (20k rows).
 
 | Fit on the sample | Smart vs uniform, 10% of rows | Smart vs uniform, 20% of rows |
 |---|---|---|
@@ -498,18 +519,36 @@ so it is not the default.
 
 ### Chronological sampling at a fixed row budget
 
-Use `chronological_sample` when nearby observations for the same entity
-are often similar. It allocates a proportional share within each season
-and entity, then spreads the draws over the ordered observations.
+Use `sample_rows(method="chronological")`, or `chronological_sample` on a
+DataFrame, when nearby observations for the same entity are often similar,
+or to keep every season and entity represented. It allocates a proportional
+share within each season and entity, then spreads the draws over the ordered
+observations. It is the sampled baseline to beat on panels.
 
 ```python
+import numpy as np
+import pandas as pd
+
+from sift import sample_rows
 from sift.sampling import chronological_sample
+
+train_df = pd.DataFrame({
+    "entity_id": np.repeat(np.arange(50), 40),
+    "timestamp": np.tile(np.arange(40), 50),
+})
+train_df["season"] = train_df["timestamp"] // 10
 
 positions = chronological_sample(
     train_df, len(train_df) // 10, group_col="entity_id",
     time_col="timestamp", stratum_col="season", random_state=42,
 )
 sampled = train_df.iloc[positions]
+
+# The same draw through sample_rows; its weights are all 1.
+s = sample_rows(size=0.1, method="chronological", groups=train_df["entity_id"],
+                time=train_df["timestamp"], strata=train_df["season"],
+                random_state=42)
+assert (s.indices == positions).all() and (s.weights == 1).all()
 ```
 
 Split off validation first. Omit `stratum_col` to allocate across whole
@@ -517,9 +556,10 @@ entity histories. Groups with fewer rows than the sampling interval
 may receive zero slots. Every row has the same marginal inclusion
 probability, so an equal-row training objective uses equal weights.
 
-For stability selection, name the feature subset explicitly. The sampler needs
-the group and time columns to stay in the frame, and `feature_names` keeps them
-(and the target) out of the candidate set.
+For stability selection on a chronological sample, name the feature subset
+explicitly. The sampler needs the group and time columns to stay in the frame,
+and `feature_names` keeps them (and the target) out of the candidate set. The
+sampler draws one 30% chronological sample, and the bootstraps resample it.
 
 ```python
 import numpy as np

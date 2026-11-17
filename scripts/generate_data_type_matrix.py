@@ -655,6 +655,8 @@ def call_smart_sample(payload: Payload) -> None:
         kwargs["group_col"] = "entity"
     if payload.time is not None:
         kwargs["time_col"] = "as_of"
+    if payload.groups is not None or payload.time is not None:
+        kwargs["method"] = "chronological"
     if payload.sample_weight is not None:
         kwargs["sample_weight"] = payload.sample_weight
     smart_sample(df, feature_cols, y_col, **kwargs)
@@ -1022,8 +1024,8 @@ def _stable_note(
         if entry.name == "smart_sample":
             col = "group_col" if axis == "groups" else "time_col"
             return (
-                f"`{axis}` is accepted as `{col}` on `SmartSamplerConfig`, "
-                f"not as a `{axis}=` array argument"
+                f"`{axis}` is accepted as `{col}` on `SmartSamplerConfig` with "
+                f'`method="chronological"`, not as a `{axis}=` array argument'
             )
         return f"`{axis}` is accepted on the seeded baseline call"
     if status == SUPPORTED:

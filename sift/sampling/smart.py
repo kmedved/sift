@@ -8,8 +8,9 @@ draw runs systematically along a random order of the rows, so it keeps an exact
 size and cannot line up with a repeating pattern in the data, and every kept
 row carries the inverse of its inclusion probability as a weight.
 ``sample_rows(method="chronological")`` instead draws with equal probability,
-spread along each entity's timeline (``sift.sampling.chronological_sample``).  Weighted sums over the sample are unbiased for the
-full-data sums (Horvitz-Thompson).  A model fitted with the weights is
+spread along each entity's timeline (``sift.sampling.chronological_sample``).
+Weighted sums over the sample are unbiased for the full-data sums
+(Horvitz-Thompson).  A model fitted with the weights is
 consistent for the full-data fit but not exactly unbiased: the fit divides by
 the realized weight total, and nonlinear models add their own bias.
 
@@ -20,8 +21,10 @@ The gradient alone is the model-agnostic part of that rule.  It is an
 empirical choice that beat smoothed scores in the benchmark, not a proven
 optimum for every model.  The even half keeps every row drawable, bounds every
 weight, and keeps the draw from chasing noise on targets that are mostly
-noise.  The defaults come from a benchmark on a ~770k-row player panel; see
-``docs/ADVANCED.md``.
+noise.  The defaults come from a benchmark on a ~770k-row player panel that
+used an earlier draw along each entity's timeline; the random-order draw was
+checked there only at 20% of rows, where it tied chronological sampling
+overall.  See ``docs/ADVANCED.md``.
 """
 
 from __future__ import annotations

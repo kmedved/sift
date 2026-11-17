@@ -72,8 +72,9 @@ flowchart TD
   data supplied to it. Use held-out data when the ranking should describe
   out-of-sample behavior.
 - `smart_sample` and `sample_rows` reduce rows, not columns. Apply them before a
-  selector when the full panel is too large for the chosen method, and again to
-  train the final model on a weighted 20-25% of rows.
+  selector only when the full panel is too large for the chosen method
+  (selecting on all rows is better tested), and to train the final model on a
+  weighted 20% sample drawn from all eligible rows.
 
 ## Apply the workflow modifiers
 
