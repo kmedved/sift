@@ -1800,10 +1800,11 @@ are chosen; for feature selection it is limited (see
 [docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all
 rows when that is affordable.
 
-With `pilot=None` every row has the same probability. The draw then takes one
-random row from each block of about `1 / fraction` consecutive rows of a
-timeline, so a repeating schedule (weekday data at 20%, say) cannot line up
-with it.
+With `pilot=None` every row has the same probability. The draw then takes
+about one row, at a random position, from each block of about `1 / fraction`
+consecutive rows of a timeline, so a repeating schedule (weekday data at 20%,
+say) cannot line up with it. It balances one level of `groups`; to balance
+seasons as well as players, sample each season separately.
 
 The array-level entry point is `sample_rows`. It returns indices and weights,
 so it works with any model:

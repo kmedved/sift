@@ -20,8 +20,9 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
     inclusion probabilities.
   - The pilot can be `"auto"` (HistGradientBoosting), any estimator, an array
     of precomputed predictions, or `None` for an equal-probability draw. That
-    draw takes one random row from each block of about `1 / fraction` rows
-    of a timeline, so a repeating schedule cannot line up with it.
+    draw takes about one row, at a random position, from each block of about
+    `1 / fraction` rows of a timeline, so a repeating schedule cannot line up
+    with it.
   - Classification uses the log-loss gradient.
 - **`smart_sample` runs on the new engine.** It keeps its DataFrame signature,
   and `StabilitySelector(use_smart_sampler=True)` uses it with the selector's

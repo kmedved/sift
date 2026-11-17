@@ -256,9 +256,11 @@ def _draw_order(n: int, groups, time, rng: np.random.Generator) -> np.ndarray:
 def _shuffle_blocks(order: np.ndarray, groups, block: int, rng: np.random.Generator) -> np.ndarray:
     """Shuffle rows within consecutive blocks of ``block`` rows inside each group.
 
-    An evenly spaced draw along the result takes a random row from each block
-    rather than the same position every time, so a schedule that repeats every
-    ``block`` rows cannot line up with it.  Group order and block order stay.
+    An evenly spaced draw along the result takes about one row per block, at a
+    random position rather than the same one every time, so a schedule that
+    repeats every ``block`` rows cannot line up with it.  A block holds about
+    one pick's worth of probability, not exactly one, so a few blocks get 0 or
+    2 rows.  Group order and block order stay.
     """
     if block <= 1 or order.size == 0:
         return order
@@ -443,9 +445,9 @@ def sample_rows(
         precomputed predictions (probabilities for classification), for
         example yesterday's production model. ``None`` skips the pilot and
         draws with equal probability, still spread along groups and time:
-        one random row from each block of about ``1 / fraction`` consecutive
-        rows, so a repeating schedule (weekday data at 20%, say) cannot line
-        up with the draw.
+        about one row, at a random position, from each block of about
+        ``1 / fraction`` consecutive rows, so a repeating schedule (weekday
+        data at 20%, say) cannot line up with the draw.
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot: a fraction or a count. At least 1,000
         rows (or all rows, if fewer) are used.
