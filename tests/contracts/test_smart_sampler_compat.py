@@ -17,7 +17,7 @@ EXPECTED_DEFAULTS = {
     "task": "auto",
     "pilot": "auto",
     "pilot_size": 0.02,
-    "uniform_mix": 0.0,
+    "uniform_mix": 0.5,
     "anchor_fn": None,
     "random_state": 42,
     "verbose": False,

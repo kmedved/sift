@@ -83,8 +83,7 @@ def test_empirical_inclusion_frequency_matches_inclusion_probability(structure):
         if pi is None:
             pi = np.zeros(n)
         pi[s.indices] = s.inclusion_prob
-    score = np.sqrt(y ** 2 + np.mean(y ** 2))
-    expected = _capped_pi(score, k)
+    expected = 0.5 * _capped_pi(np.abs(y), k) + 0.5 * k / n
     np.testing.assert_allclose(pi[pi > 0], expected[pi > 0])
     se = np.sqrt(expected * (1 - expected) / draws) + 1e-9
     assert np.max(np.abs(counts / draws - expected) / se) < 5.0
@@ -106,13 +105,30 @@ def test_larger_residuals_get_larger_inclusion_probability():
     assert np.all(np.diff(s.inclusion_prob[order]) >= -1e-12)
 
 
-def test_mvs_score_bounds_weights_even_with_outliers():
+def test_uniform_share_bounds_weights_even_with_outliers():
     X, y = _data(n=5_000)
     y = y.copy()
     y[:5] = 1e6
     s = sample_rows(X, y, 0.2, pilot=LinearRegression(), random_state=0)
-    assert s.weights.max() / s.weights.min() < 1e6
-    assert set(range(5)) <= set(s.indices.tolist())
+    # Every row keeps at least uniform_mix * k / n = 0.1, so raw 1/pi <= 10; a capped
+    # row has pi = 0.5 * 1 + 0.5 * 0.2 = 0.6.
+    raw = 1.0 / s.inclusion_prob
+    assert raw.max() <= 10.0 + 1e-9
+    assert raw.min() == pytest.approx(1 / 0.6)
+    outliers = np.isin(s.indices, np.arange(5))
+    np.testing.assert_allclose(s.inclusion_prob[outliers], 0.6)
+
+
+def test_rows_the_pilot_fits_exactly_stay_drawable():
+    rng = np.random.default_rng(0)
+    y = rng.normal(size=2_000)
+    pred = np.where(np.arange(2_000) < 1_000, y, 0.0)  # first half fitted exactly
+    seen = np.zeros(2_000, dtype=bool)
+    for seed in range(20):
+        s = sample_rows(None, y, 0.2, pilot=pred, random_state=seed)
+        assert s.inclusion_prob.min() >= 0.5 * 0.2 - 1e-12
+        seen[s.indices] = True
+    assert seen[:1_000].mean() > 0.5
 
 
 def test_uniform_mix_one_and_no_pilot_give_equal_probabilities():
@@ -273,6 +289,7 @@ def test_auto_pilot_rejects_non_numeric_features():
         ({"size": "10%"}, TypeError, "int row count or a float"),
         ({"pilot_size": -3}, ValueError, "pilot_size"),
         ({"uniform_mix": 1.5}, ValueError, "uniform_mix"),
+        ({"uniform_mix": 0.0}, ValueError, r"uniform_mix must be in \(0, 1\]"),
         ({"uniform_mix": "half"}, TypeError, "uniform_mix"),
         ({"task": "ranking"}, ValueError, "task must be one of"),
         ({"pilot": 3}, TypeError, "pilot must be"),

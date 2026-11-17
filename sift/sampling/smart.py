@@ -1,21 +1,22 @@
 """Pilot-residual importance sampling of training rows.
 
 A cheap pilot model is fitted on a small random slice of the data and scores
-every row by how wrong it is (the magnitude of the loss gradient at the pilot
-prediction).  Rows are then drawn with probability proportional to the MVS
-score ``sqrt(g**2 + mean(g**2))`` (Ibragimov & Gusev, 2019), systematically
-along each group's timeline so the draw keeps an exact size and an even
-spread, and every kept row carries the inverse of its inclusion probability as
-a weight.  Fitting on the weighted sample is an unbiased estimate of fitting
-on all rows, with lower variance than a uniform sample of the same size.
+every row by how wrong it is: the magnitude ``g`` of the loss gradient at the
+pilot prediction.  Half of each row's inclusion probability is proportional to
+``g`` and half is spread evenly (a defensive mixture; Hesterberg, 1995).  The
+draw runs systematically along each group's timeline, so it keeps an exact size
+and an even spread, and every kept row carries the inverse of its inclusion
+probability as a weight.  Fitting on the weighted sample is an unbiased
+estimate of fitting on all rows, with lower variance than a uniform sample of
+the same size.
 
 When labels are observed, the realized gradient magnitude is the
 variance-optimal sampling score (Wang, Zhu & Ma, 2018; Ai et al., 2021; Ting &
 Brochu, 2018); smoothing it, for example with isotonic regression, discards
-information.  The defaults come from a benchmark on a ~770k-row player panel
-(see ``docs/ADVANCED.md``): at 20-25% of rows the weighted sample lands within
-about 0.1-0.15% of full-data RMSE, against 0.4% for an equal-probability
-chronological sample, at about a quarter of the training time.
+information.  The even half keeps every row drawable, bounds every weight, and
+keeps the draw from chasing noise on targets that are mostly noise.  The
+defaults come from a benchmark on a ~770k-row player panel; see
+``docs/ADVANCED.md``.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from sift._logging import logger
 
 DEFAULT_SIZE = 0.2
 DEFAULT_PILOT_SIZE = 0.02
+DEFAULT_UNIFORM_MIX = 0.5
 # Provisional floor so tiny datasets still get a usable pilot; not benchmarked.
 MIN_PILOT_ROWS = 1_000
 PILOT_MAX_ITER = 100
@@ -101,8 +103,11 @@ def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -
         )
     if not _is_real_like(uniform_mix) or not np.isfinite(uniform_mix):
         raise TypeError("uniform_mix must be a finite real number.")
-    if not (0 <= uniform_mix <= 1):
-        raise ValueError("uniform_mix must be in [0, 1].")
+    if not (0 < uniform_mix <= 1):
+        raise ValueError(
+            "uniform_mix must be in (0, 1]; a positive share keeps every row drawable, "
+            "which the inverse-probability weights need to stay unbiased."
+        )
     if random_state is not None and not _is_int_like(random_state):
         raise TypeError("random_state must be an integer or None.")
 
@@ -359,18 +364,20 @@ def sample_rows(
     task: str = "auto",
     pilot: Any = "auto",
     pilot_size: float | int = DEFAULT_PILOT_SIZE,
-    uniform_mix: float = 0.0,
+    uniform_mix: float = DEFAULT_UNIFORM_MIX,
     always_include=None,
     random_state: Optional[int] = 42,
     verbose: bool = False,
 ) -> RowSample:
     """Choose the most informative training rows and weight them for unbiased fits.
 
-    Fits a cheap pilot model on ``pilot_size`` of the rows, scores every row by
-    ``sqrt(g**2 + mean(g**2))`` where ``g`` is the pilot's loss gradient
-    (the residual for regression, ``||onehot(y) - p||`` for classification),
-    and draws exactly ``size`` rows with probability proportional to that
-    score.  The draw is systematic along ``groups`` (in random order) and
+    Fits a cheap pilot model on ``pilot_size`` of the rows and scores every
+    row by the magnitude ``g`` of the pilot's loss gradient (the absolute
+    residual for regression, ``||onehot(y) - p||`` for classification).  It
+    then draws exactly ``size`` rows; a row's inclusion probability is
+    ``(1 - uniform_mix)`` times a share proportional to ``g`` (capped at 1)
+    plus ``uniform_mix`` times the sampling fraction.  The draw is systematic
+    along ``groups`` (in random order) and
     ``time`` (in order inside each group), so every entity's timeline is
     covered evenly.  Fit downstream models with ``sample_weight=weights``.
 
@@ -405,10 +412,11 @@ def sample_rows(
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot: a fraction or a count. At least 1,000
         rows (or all rows, if fewer) are used.
-    uniform_mix : float, default=0.0
-        Share of the inclusion probability spread evenly over rows. Raise it
-        toward 0.5 for very noisy targets, where chasing large residuals
-        mostly chases noise.
+    uniform_mix : float, default=0.5
+        Share of the inclusion probability spread evenly over rows, in
+        ``(0, 1]``. The even share keeps every row drawable and caps each raw
+        weight at ``1 / (uniform_mix * fraction)``; ``1.0`` is an
+        equal-probability draw. 0.5 is the benchmarked value.
     always_include : array-like of bool, optional
         Rows that must be kept (probability 1). They count against ``size``.
     random_state : int or None, default=42
@@ -506,8 +514,7 @@ def _sample_rows(
         score = np.ones(n, dtype=np.float64)
     else:
         g = _pilot_gradient(X, y_arr, resolved, pilot, pilot_size, rng, random_state, verbose)
-        lam = float(np.mean(g ** 2))
-        if not np.isfinite(lam) or lam <= 0:
+        if not g[~anchors].any():
             warnings.warn(
                 "pilot fits every row exactly; sampling with equal probability.",
                 RuntimeWarning,
@@ -515,7 +522,7 @@ def _sample_rows(
             )
             score = np.ones(n, dtype=np.float64)
         else:
-            score = np.sqrt(g ** 2 + lam)
+            score = g
 
     free = ~anchors
     pi = np.ones(n, dtype=np.float64)
@@ -583,8 +590,8 @@ class SmartSamplerConfig:
         Pilot model; see ``sample_rows``.
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot.
-    uniform_mix : float, default=0.0
-        Share of probability spread evenly over rows.
+    uniform_mix : float, default=0.5
+        Share of probability spread evenly over rows, in ``(0, 1]``.
     anchor_fn : callable, optional
         ``anchor_fn(df, group_col, time_col) -> bool mask`` of rows that must
         be kept, e.g. ``sift.sampling.first_per_group``.
@@ -605,7 +612,7 @@ class SmartSamplerConfig:
     >>> from sift import SmartSamplerConfig
     >>> config = SmartSamplerConfig(size=0.25, group_col="team")
     >>> config.size, config.pilot, config.uniform_mix
-    (0.25, 'auto', 0.0)
+    (0.25, 'auto', 0.5)
     >>> dataclasses.replace(config, size=10_000).size
     10000
     """
@@ -616,7 +623,7 @@ class SmartSamplerConfig:
     task: str = "auto"
     pilot: Any = "auto"
     pilot_size: float | int = DEFAULT_PILOT_SIZE
-    uniform_mix: float = 0.0
+    uniform_mix: float = DEFAULT_UNIFORM_MIX
     anchor_fn: Optional[Callable] = None
     random_state: Optional[int] = 42
     verbose: bool = False
