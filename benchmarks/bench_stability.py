@@ -109,8 +109,8 @@ def main() -> int:
                 "label",
                 config=SmartSamplerConfig(
                     size=0.25,
+                    method="chronological",
                     group_col="group",
-                    pilot=None,
                     random_state=0,
                     verbose=False,
                 ),
@@ -124,7 +124,6 @@ def main() -> int:
                 "label",
                 config=SmartSamplerConfig(
                     size=0.25,
-                    group_col="group",
                     random_state=0,
                     verbose=False,
                 ),

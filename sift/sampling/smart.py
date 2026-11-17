@@ -4,9 +4,11 @@ A cheap pilot model is fitted on a small random slice of the data and scores
 every row by how wrong it is: the magnitude ``g`` of the loss gradient at the
 pilot prediction.  Half of each row's inclusion probability is proportional to
 ``g`` and half is spread evenly (a defensive mixture; Hesterberg, 1995).  The
-draw runs systematically along each group's timeline, so it keeps an exact size
-and an even spread, and every kept row carries the inverse of its inclusion
-probability as a weight.  Weighted sums over the sample are unbiased for the
+draw runs systematically along a random order of the rows, so it keeps an exact
+size and cannot line up with a repeating pattern in the data, and every kept
+row carries the inverse of its inclusion probability as a weight.
+``sample_rows(method="chronological")`` instead draws with equal probability,
+spread along each entity's timeline (``sift.sampling.chronological_sample``).  Weighted sums over the sample are unbiased for the
 full-data sums (Horvitz-Thompson).  A model fitted with the weights is
 consistent for the full-data fit but not exactly unbiased: the fit divides by
 the realized weight total, and nonlinear models add their own bias.
@@ -42,6 +44,7 @@ MIN_PILOT_ROWS = 1_000
 PILOT_MAX_ITER = 100
 
 _TASKS = ("auto", "regression", "classification")
+_METHODS = ("residual", "chronological", "uniform")
 
 _REMOVED_FIELDS = {
     "sample_frac": "renamed to 'size' (a fraction in (0, 1] or a row count)",
@@ -89,8 +92,10 @@ def _is_precomputed_pilot(pilot: object) -> bool:
     return isinstance(pilot, (np.ndarray, pd.Series, pd.DataFrame, list, tuple))
 
 
-def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -> None:
+def _validate_common(size, method, task, pilot, pilot_size, uniform_mix, random_state) -> None:
     _validate_size(size, "size")
+    if not isinstance(method, str) or method not in _METHODS:
+        raise ValueError(f"method must be one of {_METHODS}; got {method!r}.")
     _validate_size(pilot_size, "pilot_size")
     if task not in _TASKS:
         raise ValueError(f"task must be one of {_TASKS}; got {task!r}.")
@@ -122,24 +127,27 @@ def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -
 
 @dataclass(frozen=True)
 class RowSample:
-    """Rows chosen by ``sample_rows`` and their inverse-probability weights.
+    """Rows chosen by ``sample_rows`` and their fitting weights.
 
     Attributes
     ----------
     indices : ndarray of int64
         Sorted positions (not labels) of the kept rows in the input.
     weights : ndarray of float64
-        ``1 / inclusion_prob`` rescaled to mean 1 over the kept rows, so the
-        sample has the same total weight as an unweighted sample of its size.
-        Pass them to the downstream fit as ``sample_weight``.
+        Mean-one fitting weights: ``1 / inclusion_prob`` rescaled to mean 1
+        over the kept rows, so the sample has the same total weight as an
+        unweighted sample of its size. Pass them to the downstream fit as
+        ``sample_weight``. To estimate a full-data total, use
+        ``1 / inclusion_prob`` itself.
     inclusion_prob : ndarray of float64
         Probability that each kept row was drawn.
     n_rows : int
         Number of rows in the input.
-    task : str
-        ``"regression"`` or ``"classification"`` as resolved for the pilot,
-        or ``"uniform"`` when no pilot was fitted (``pilot=None``, or
-        ``size`` covering every row).
+    task : str or None
+        ``"regression"`` or ``"classification"`` as resolved for the pilot;
+        None when no pilot was fitted.
+    method : str
+        ``"residual"``, ``"chronological"`` or ``"uniform"``.
 
     Examples
     --------
@@ -162,7 +170,8 @@ class RowSample:
     weights: np.ndarray
     inclusion_prob: np.ndarray
     n_rows: int
-    task: str
+    task: Optional[str]
+    method: str
 
     def __len__(self) -> int:
         return int(self.indices.size)
@@ -200,7 +209,7 @@ def _n_rows(*candidates) -> int:
         if obj is not None:
             return int(len(obj))
     raise ValueError(
-        "sample_rows needs at least one of X, y, groups, time, always_include or "
+        "sample_rows needs at least one of X, y, groups, time, strata, always_include or "
         "precomputed pilot predictions to count rows."
     )
 
@@ -238,45 +247,13 @@ def _capped_pi(score: np.ndarray, k: int) -> np.ndarray:
         budget = k - float((~free).sum())
 
 
-def _draw_order(n: int, groups, time, rng: np.random.Generator) -> np.ndarray:
-    """Groups in random order, rows by time inside each group."""
-    if groups is None and time is None:
-        return rng.permutation(n)
-    keys = [np.arange(n)]
-    if time is not None:
-        codes = pd.factorize(pd.Series(time), sort=True)[0]
-        keys.append(codes)
-    if groups is not None:
-        codes = pd.factorize(pd.Series(groups), use_na_sentinel=True)[0].astype(np.int64)
-        codes[codes < 0] = codes.max() + 1
-        keys.append(rng.permutation(int(codes.max()) + 1)[codes])
-    return np.lexsort(tuple(keys))
-
-
-def _shuffle_blocks(order: np.ndarray, groups, block: int, rng: np.random.Generator) -> np.ndarray:
-    """Shuffle rows within consecutive blocks of ``block`` rows inside each group.
-
-    An evenly spaced draw along the result takes about one row per block, at a
-    random position rather than the same one every time, so a schedule that
-    repeats every ``block`` rows cannot line up with it.  A block holds about
-    one pick's worth of probability, not exactly one, so a few blocks get 0 or
-    2 rows.  Group order and block order stay.
-    """
-    if block <= 1 or order.size == 0:
-        return order
-    if groups is None:
-        run = np.zeros(order.size, dtype=np.int64)
-        rank = np.arange(order.size)
-    else:
-        codes = pd.factorize(pd.Series(groups), use_na_sentinel=False)[0][order]
-        start = np.r_[True, codes[1:] != codes[:-1]]
-        run = np.cumsum(start) - 1
-        rank = np.arange(order.size) - np.flatnonzero(start)[run]
-    return order[np.lexsort((rng.random(order.size), rank // block, run))]
-
-
 def _systematic(order: np.ndarray, pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
-    """Systematic PPS along ``order``: exactly ``k`` rows with inclusion probability ``pi``."""
+    """Systematic PPS along ``order``: exactly ``k`` rows with inclusion probability ``pi``.
+
+    The caller passes ``order`` already shuffled.  Along a fixed order, one
+    shared start would pick the same position in every repeat of a pattern
+    whose probabilities sum to 1, keeping all of one kind of row or none.
+    """
     if k <= 0 or order.size == 0:
         return np.array([], dtype=np.int64)
     cum = np.cumsum(pi[order])
@@ -395,8 +372,10 @@ def sample_rows(
     y=None,
     size: float | int = DEFAULT_SIZE,
     *,
+    method: str = "residual",
     groups=None,
     time=None,
+    strata=None,
     task: str = "auto",
     pilot: Any = "auto",
     pilot_size: float | int = DEFAULT_PILOT_SIZE,
@@ -405,69 +384,84 @@ def sample_rows(
     random_state: Optional[int] = 42,
     verbose: bool = False,
 ) -> RowSample:
-    """Choose the most informative training rows and weight them by inverse inclusion probability.
+    """Draw exactly ``size`` training rows, with mean-one fitting weights.
 
-    Fits a cheap pilot model on ``pilot_size`` of the rows and scores every
-    row by the magnitude ``g`` of the pilot's loss gradient (the absolute
-    residual for regression, ``||onehot(y) - p||`` for classification).  It
-    then draws exactly ``size`` rows; a row's inclusion probability is
-    ``(1 - uniform_mix)`` times a share proportional to ``g`` (capped at 1)
-    plus ``uniform_mix`` times the sampling fraction.  The draw is systematic
-    along ``groups`` (in random order) and
-    ``time`` (in order inside each group), so every entity's timeline is
-    covered evenly.  Fit downstream models with ``sample_weight=weights``.
+    Three methods:
+
+    ``"residual"`` (default)
+        Fits a cheap pilot model on ``pilot_size`` of the rows and scores
+        every row by the magnitude ``g`` of the pilot's loss gradient (the
+        absolute residual for regression, ``||onehot(y) - p||`` for
+        classification).  A row's inclusion probability is
+        ``(1 - uniform_mix)`` times a share proportional to ``g`` (capped at
+        1) plus ``uniform_mix`` times the sampling fraction.  Rows are drawn
+        systematically along a random order, so a repeating pattern in the
+        data cannot line up with the draw.
+    ``"chronological"``
+        Equal probability, spread over time: each entity in ``groups`` (and
+        each stratum, such as a season) gets its proportional share rounded
+        up or down, drawn evenly along its timeline.  This is
+        ``sift.sampling.chronological_sample``.
+    ``"uniform"``
+        A simple random sample.
+
+    Fit downstream models with ``sample_weight=weights``.
 
     Parameters
     ----------
     X : array-like of shape (n_rows, n_features), optional
         Features for the pilot. DataFrame, ndarray or anything your pilot
-        estimator accepts. Not needed when ``pilot`` is None or precomputed.
+        estimator accepts. Needed only for ``method="residual"`` with a
+        fitted pilot.
     y : array-like of shape (n_rows,), optional
-        Target. Required unless ``pilot`` is None.
+        Target. Needed only for ``method="residual"``.
     size : float or int, default=0.2
         Rows to keep: a float fraction in ``(0, 1]`` or an int row count.
-        20-25% landed within about 0.2% of full-data RMSE on the stable
-        targets of the panel benchmark.
+        Draw it from all eligible training rows: sampling a sample (20% of
+        a 20% selection sample, say) leaves a much smaller fit.
+    method : {"residual", "chronological", "uniform"}, default="residual"
+        How rows are chosen; see above.
     groups : array-like of shape (n_rows,), optional
-        Entity of each row (player, customer, ticker). Spreads the draw across
-        entities.
+        ``method="chronological"`` only. Entity of each row (player,
+        customer, ticker); each entity gets its share of the draw.
     time : array-like of shape (n_rows,), optional
-        Sortable time of each row. Spreads the draw along each timeline.
+        ``method="chronological"`` only. Sortable time of each row; the draw
+        is spread along each entity's timeline. Defaults to input order.
+    strata : array-like of shape (n_rows,), optional
+        ``method="chronological"`` only. Outer level (for example a season)
+        whose shares are allocated before the entities inside it.
     task : {"auto", "regression", "classification"}, default="auto"
-        ``"auto"`` treats non-numeric, boolean and two-valued targets as
-        classification and everything else as regression. Pass
-        ``"classification"`` explicitly for integer-coded multiclass labels.
-    pilot : "auto", estimator, array-like or None, default="auto"
-        ``"auto"`` fits a 100-iteration scikit-learn HistGradientBoosting
-        model. An estimator (for example a 100-tree booster from your own
-        library) is cloned and fitted instead; classification pilots need
-        ``predict_proba``. An array of length ``n_rows`` is used as
-        precomputed predictions (probabilities for classification), for
-        example yesterday's production model. ``None`` skips the pilot and
-        draws with equal probability, still spread along groups and time:
-        about one row, at a random position, from each block of about
-        ``1 / fraction`` consecutive rows, so a repeating schedule (weekday
-        data at 20%, say) cannot line up with the draw.
+        ``method="residual"`` only. ``"auto"`` treats non-numeric, boolean
+        and two-valued targets as classification and everything else as
+        regression. Pass ``"classification"`` explicitly for integer-coded
+        multiclass labels.
+    pilot : "auto", estimator or array-like, default="auto"
+        ``method="residual"`` only. ``"auto"`` fits a 100-iteration
+        scikit-learn HistGradientBoosting model. An estimator (for example a
+        100-tree booster from your own library) is cloned and fitted
+        instead; classification pilots need ``predict_proba``. An array of
+        length ``n_rows`` is used as precomputed predictions (probabilities
+        for classification), for example yesterday's production model.
     pilot_size : float or int, default=0.02
-        Rows used to fit the pilot: a fraction or a count. At least 1,000
-        rows (or all rows, if fewer) are used.
+        ``method="residual"`` only. Rows used to fit the pilot: a fraction or
+        a count. At least 1,000 rows (or all rows, if fewer) are used.
     uniform_mix : float, default=0.5
-        Share of the inclusion probability spread evenly over rows, in
-        ``(0, 1]``. The even share keeps every row drawable and caps each raw
-        weight at ``1 / (uniform_mix * fraction)``; ``1.0`` is an
-        equal-probability draw. 0.5 is the benchmarked value.
+        ``method="residual"`` only. Share of the inclusion probability spread
+        evenly over rows, in ``(0, 1]``. The even share keeps every row
+        drawable and caps each raw weight at
+        ``1 / (uniform_mix * fraction)``. 0.5 is the benchmarked value.
     always_include : array-like of bool, optional
-        Rows that must be kept (probability 1). They count against ``size``.
+        Rows that must be kept (probability 1). They count against ``size``
+        and must leave room for at least one drawn row.
     random_state : int or None, default=42
-        Seed for the pilot slice, the group order, the systematic start and,
-        for equal-probability draws, the shuffle within blocks.
+        Seed for the pilot slice and the draw.
     verbose : bool, default=False
         Log progress at INFO on the ``sift`` logger.
 
     Returns
     -------
     RowSample
-        ``indices``, ``weights`` (mean 1), ``inclusion_prob`` and a
+        ``indices``, mean-one fitting ``weights``, ``inclusion_prob`` and a
         ``take()`` helper.
 
     Notes
@@ -476,7 +470,7 @@ def sample_rows(
     example a learning rate or leaf regularisation scaled by the effective
     sample size) must have those pinned to what an unweighted fit of the
     same size would use; otherwise the comparison with a full-data fit is
-    confounded. The weights are mean-1, so ``sum(weights) == len(sample)``.
+    confounded. The weights are mean-one, so ``sum(weights) == len(sample)``.
 
     Examples
     --------
@@ -488,27 +482,32 @@ def sample_rows(
     >>> y = X @ [1.0, -2.0, 0.5, 0.0] + rng.standard_t(3, size=5_000)
     >>> s = sample_rows(X, y, size=1_000, random_state=0)
     >>> model = Ridge().fit(s.take(X), s.take(y), sample_weight=s.weights)
-    >>> len(s)
-    1000
+    >>> len(s), s.method
+    (1000, 'residual')
+    >>> players = np.repeat(np.arange(50), 100)
+    >>> days = np.tile(np.arange(100), 50)
+    >>> len(sample_rows(size=0.1, method="chronological", groups=players, time=days))
+    500
     """
     return _sample_rows(
-        X, y, size, groups=groups, time=time, task=task, pilot=pilot, pilot_size=pilot_size,
-        uniform_mix=uniform_mix, always_include=always_include, random_state=random_state,
-        verbose=verbose,
+        X, y, size, method=method, groups=groups, time=time, strata=strata, task=task,
+        pilot=pilot, pilot_size=pilot_size, uniform_mix=uniform_mix,
+        always_include=always_include, random_state=random_state, verbose=verbose,
     )
 
 
 def _sample_rows(
-    X, y, size, *, groups, time, task, pilot, pilot_size, uniform_mix, always_include,
-    random_state, verbose,
+    X, y, size, *, method, groups, time, strata, task, pilot, pilot_size, uniform_mix,
+    always_include, random_state, verbose,
 ) -> RowSample:
     """Implementation shared by ``sample_rows`` and ``smart_sample``.
 
     Both public functions call this directly, so ``stacklevel=3`` warnings
     point at the user's call site.
     """
-    _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state)
-    n = _n_rows(X, y, pilot if _is_precomputed_pilot(pilot) else None, groups, time, always_include)
+    _validate_common(size, method, task, pilot, pilot_size, uniform_mix, random_state)
+    precomputed = pilot if method == "residual" and _is_precomputed_pilot(pilot) else None
+    n = _n_rows(X, y, precomputed, groups, time, strata, always_include)
     k = _resolve_count(size, n)
     rng = np.random.default_rng(random_state)
 
@@ -521,20 +520,43 @@ def _sample_rows(
             f"always_include marks {n_anchor:,} rows but size allows only {k:,}; "
             "raise size or include fewer rows."
         )
+    if n_anchor == k < n:
+        raise ValueError(
+            f"always_include marks {n_anchor:,} rows, the whole budget, so no other row "
+            "could be drawn; raise size or include fewer rows."
+        )
     groups = None if groups is None else _as_1d(groups, n, "groups")
     time = None if time is None else _as_1d(time, n, "time")
+    strata = None if strata is None else _as_1d(strata, n, "strata")
+    if method != "chronological" and not (groups is None and time is None and strata is None):
+        raise ValueError(
+            f"groups, time and strata shape only method='chronological'; "
+            f"method={method!r} draws rows in random order."
+        )
+    if method == "chronological" and groups is None and time is None:
+        raise ValueError(
+            "method='chronological' needs groups or time; use method='uniform' for a "
+            "plain random draw."
+        )
+    if method == "residual" and pilot is None:
+        raise ValueError(
+            "method='residual' needs a pilot; for an equal-probability draw use "
+            "method='uniform' or method='chronological'."
+        )
 
     if k >= n:
         idx = np.arange(n, dtype=np.int64)
         ones = np.ones(n, dtype=np.float64)
-        return RowSample(idx, ones, ones.copy(), n, "uniform")
+        return RowSample(idx, ones, ones.copy(), n, None, method)
 
-    if pilot is None:
-        resolved = "uniform"
-        y_arr = None
-    else:
+    free = ~anchors
+    free_idx = np.flatnonzero(free)
+    k_free = k - n_anchor
+    pi = np.ones(n, dtype=np.float64)
+    resolved = None
+    if method == "residual":
         if y is None:
-            raise ValueError("y is required unless pilot=None.")
+            raise ValueError("y is required for method='residual'.")
         y_raw = _as_1d(y, n, "y")
         resolved = _resolve_task(y_raw, task)
         if resolved == "regression":
@@ -548,49 +570,50 @@ def _sample_rows(
             if pd.isna(y_raw).any():
                 raise ValueError("y must not contain missing labels for classification.")
             y_arr = y_raw
-
-    k_free = k - n_anchor
-    if y_arr is None or k_free == 0:
-        score = np.ones(n, dtype=np.float64)
-    else:
+        # The pilot slice is the first draw from ``rng``.
         g = _pilot_gradient(X, y_arr, resolved, pilot, pilot_size, rng, random_state, verbose)
-        if not g[~anchors].any():
+        score = g
+        if not g[free].any():
             warnings.warn(
                 "pilot fits every row exactly; sampling with equal probability.",
                 RuntimeWarning,
                 stacklevel=3,
             )
             score = np.ones(n, dtype=np.float64)
-        else:
-            score = g
-
-    free = ~anchors
-    pi = np.ones(n, dtype=np.float64)
-    if k_free > 0:
         pi_free = _capped_pi(score[free], k_free)
-        if uniform_mix > 0:
-            pi_free = (1.0 - uniform_mix) * pi_free + uniform_mix * k_free / free.sum()
+        pi_free = (1.0 - uniform_mix) * pi_free + uniform_mix * k_free / free_idx.size
         pi[free] = pi_free
-        order = _draw_order(n, groups, time, rng)
-        order = order[free[order]]
-        if (groups is not None or time is not None) and np.all(pi_free == pi_free[0]):
-            # Equal probabilities give evenly spaced picks; shuffle within blocks
-            # of about one pick each so a repeating schedule cannot line up.
-            order = _shuffle_blocks(order, groups, int(round(order.size / k_free)), rng)
-        drawn = _systematic(order, pi, k_free, rng)
+        drawn = _systematic(rng.permutation(free_idx), pi, k_free, rng)
+    elif method == "uniform":
+        pi[free] = k_free / free_idx.size
+        drawn = rng.choice(free_idx, k_free, replace=False)
     else:
-        drawn = np.array([], dtype=np.int64)
+        from sift.sampling.chronological import chronological_sample
+
+        pi[free] = k_free / free_idx.size
+        frame = pd.DataFrame({
+            "group": groups[free] if groups is not None else np.zeros(free_idx.size, dtype=np.int8),
+            "time": time[free] if time is not None else np.arange(free_idx.size),
+        })
+        if strata is not None:
+            frame["stratum"] = strata[free]
+        positions = chronological_sample(
+            frame, k_free, group_col="group", time_col="time",
+            stratum_col="stratum" if strata is not None else None,
+            random_state=random_state,
+        )
+        drawn = free_idx[positions]
     idx = np.sort(np.r_[np.flatnonzero(anchors), drawn]).astype(np.int64)
     inclusion = pi[idx]
     weights = 1.0 / inclusion
     weights /= weights.mean()
     if verbose:
         logger.info(
-            f"Sampled {idx.size:,} of {n:,} rows ({idx.size / n:.1%}); "
+            f"Sampled {idx.size:,} of {n:,} rows ({idx.size / n:.1%}, method={method}); "
             f"max weight {weights.max():.2f}, Kish fraction "
             f"{weights.sum() ** 2 / (weights ** 2).sum() / idx.size:.2f}."
         )
-    return RowSample(idx, weights, inclusion, n, resolved)
+    return RowSample(idx, weights, inclusion, n, resolved, method)
 
 
 # =============================================================================
@@ -600,15 +623,30 @@ def _sample_rows(
 
 def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
     _validate_common(
-        config.size, config.task, config.pilot, config.pilot_size,
+        config.size, config.method, config.task, config.pilot, config.pilot_size,
         config.uniform_mix, config.random_state,
     )
-    for name in ("group_col", "time_col"):
+    for name in ("group_col", "time_col", "strata_col"):
         value = getattr(config, name)
         if value is not None and not isinstance(value, str):
             raise TypeError(f"{name} must be a string or None.")
     if config.anchor_fn is not None and not callable(config.anchor_fn):
         raise TypeError("anchor_fn must be callable or None.")
+    if config.method != "chronological":
+        if config.strata_col is not None:
+            raise ValueError("strata_col applies only to method='chronological'.")
+        if config.anchor_fn is None and (config.group_col or config.time_col):
+            raise ValueError(
+                f"group_col and time_col shape only method='chronological' (or feed "
+                f"anchor_fn); method={config.method!r} draws rows in random order."
+            )
+    elif not (config.group_col or config.time_col):
+        raise ValueError("method='chronological' needs group_col or time_col.")
+    if config.method == "residual" and config.pilot is None:
+        raise ValueError(
+            "method='residual' needs a pilot; for an equal-probability draw use "
+            "method='uniform' or method='chronological'."
+        )
     if not isinstance(config.verbose, (bool, np.bool_)):
         raise TypeError("verbose must be a bool.")
 
@@ -618,21 +656,27 @@ class SmartSamplerConfig:
     """Settings for ``smart_sample`` and ``StabilitySelector(use_smart_sampler=True)``.
 
     Every field mirrors the keyword of the same name in ``sample_rows``;
-    ``group_col``, ``time_col`` and ``anchor_fn`` name DataFrame columns and
-    an anchor rule instead of passing arrays.
+    ``group_col``, ``time_col``, ``strata_col`` and ``anchor_fn`` name
+    DataFrame columns and an anchor rule instead of passing arrays.
 
     Parameters
     ----------
     size : float or int, default=0.2
         Rows to keep: a fraction in ``(0, 1]`` or a row count.
+    method : {"residual", "chronological", "uniform"}, default="residual"
+        How rows are chosen; see ``sample_rows``.
     group_col : str, optional
-        Entity column; spreads the draw across entities.
+        Entity column. Shapes ``method="chronological"``; other methods use
+        it only to call ``anchor_fn``.
     time_col : str, optional
-        Time column; spreads the draw along each entity's timeline.
+        Time column. Shapes ``method="chronological"``; other methods use it
+        only to call ``anchor_fn``.
+    strata_col : str, optional
+        Outer level (such as a season) for ``method="chronological"``.
     task : {"auto", "regression", "classification"}, default="auto"
-        How the pilot's gradient is computed.
-    pilot : "auto", estimator, array-like or None, default="auto"
-        Pilot model; see ``sample_rows``.
+        How the pilot's gradient is computed (``method="residual"``).
+    pilot : "auto", estimator or array-like, default="auto"
+        Pilot model for ``method="residual"``; see ``sample_rows``.
     pilot_size : float or int, default=0.02
         Rows used to fit the pilot.
     uniform_mix : float, default=0.5
@@ -655,16 +699,18 @@ class SmartSamplerConfig:
     --------
     >>> import dataclasses
     >>> from sift import SmartSamplerConfig
-    >>> config = SmartSamplerConfig(size=0.25, group_col="team")
-    >>> config.size, config.pilot, config.uniform_mix
-    (0.25, 'auto', 0.5)
+    >>> config = SmartSamplerConfig(size=0.25)
+    >>> config.size, config.method, config.pilot, config.uniform_mix
+    (0.25, 'residual', 'auto', 0.5)
     >>> dataclasses.replace(config, size=10_000).size
     10000
     """
 
     size: float | int = DEFAULT_SIZE
+    method: str = "residual"
     group_col: Optional[str] = None
     time_col: Optional[str] = None
+    strata_col: Optional[str] = None
     task: str = "auto"
     pilot: Any = "auto"
     pilot_size: float | int = DEFAULT_PILOT_SIZE
@@ -707,12 +753,14 @@ def smart_sample(
     config: Optional[SmartSamplerConfig] = None,
     **kwargs,
 ) -> pd.DataFrame:
-    """Keep the most informative rows of a DataFrame, with a ``sample_weight`` column.
+    """Draw training rows of a DataFrame, with a ``sample_weight`` column.
 
-    DataFrame front end to ``sample_rows``: fits a pilot on
-    ``feature_cols``, draws exactly ``size`` rows weighted toward the rows the
-    pilot gets wrong, and returns them (original index preserved) with exact
-    inverse-probability weights rescaled to mean 1.
+    DataFrame front end to ``sample_rows``. With the default
+    ``method="residual"`` it fits a pilot on ``feature_cols`` and draws
+    exactly ``size`` rows weighted toward the rows the pilot gets wrong;
+    ``method="chronological"`` and ``"uniform"`` draw with equal probability.
+    It returns the kept rows (original index preserved) with mean-one
+    fitting weights.
 
     Parameters
     ----------
@@ -749,10 +797,13 @@ def smart_sample(
     ...     "team": np.repeat([f"t{i}" for i in range(6)], 1_000),
     ... })
     >>> df["y"] = 2.0 * df["x0"] - df["x1"] + rng.standard_t(3, size=6_000)
-    >>> sample = smart_sample(df, ["x0", "x1"], "y", size=0.25, group_col="team",
-    ...                       random_state=0)
+    >>> sample = smart_sample(df, ["x0", "x1"], "y", size=0.25, random_state=0)
     >>> len(sample), list(sample.columns)
     (1500, ['x0', 'x1', 'team', 'y', 'sample_weight'])
+    >>> spread = smart_sample(df, ["x0", "x1"], "y", size=0.25, method="chronological",
+    ...                       group_col="team")
+    >>> spread["team"].value_counts().tolist()
+    [250, 250, 250, 250, 250, 250]
     >>> round(float(sample["sample_weight"].mean()), 6)
     1.0
     """
@@ -761,7 +812,7 @@ def smart_sample(
         raise TypeError("smart_sample requires a pandas DataFrame; use sample_rows for arrays.")
     feature_cols = list(feature_cols)
     required = set(feature_cols) | {y_col}
-    for col in (config.group_col, config.time_col):
+    for col in (config.group_col, config.time_col, config.strata_col):
         if col:
             required.add(col)
     missing = required - set(df.columns)
@@ -773,10 +824,11 @@ def smart_sample(
             "'sample_weight' column, but the input already has one. Rename or "
             "drop that column first so a feature is not silently overwritten."
         )
-    if not feature_cols and config.pilot is not None and not _is_precomputed_pilot(config.pilot):
+    residual = config.method == "residual"
+    if residual and not feature_cols and not _is_precomputed_pilot(config.pilot):
         raise ValueError("feature_cols must name at least one column to fit the pilot.")
     X = df[feature_cols]
-    if isinstance(config.pilot, str):
+    if residual and isinstance(config.pilot, str):
         bad = [c for c in feature_cols if not pd.api.types.is_numeric_dtype(df[c])
                or pd.api.types.is_bool_dtype(df[c])]
         if bad:
@@ -792,12 +844,15 @@ def smart_sample(
         ).reshape(-1)
         if anchors.size != len(df):
             raise ValueError(f"anchor_fn returned {anchors.size} rows but df has {len(df)} rows")
+    chronological = config.method == "chronological"
     result = _sample_rows(
         X,
         df[y_col],
         config.size,
-        groups=df[config.group_col] if config.group_col else None,
-        time=df[config.time_col] if config.time_col else None,
+        method=config.method,
+        groups=df[config.group_col] if chronological and config.group_col else None,
+        time=df[config.time_col] if chronological and config.time_col else None,
+        strata=df[config.strata_col] if config.strata_col else None,
         task=config.task,
         pilot=config.pilot,
         pilot_size=config.pilot_size,

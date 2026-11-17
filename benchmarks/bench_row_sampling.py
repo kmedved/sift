@@ -104,7 +104,7 @@ def draw(ds, arm, frac, seed, Xtr, ytr, gtr, ttr):
         n = len(ytr)
         k = int(np.floor(frac * n))
         return np.sort(np.random.default_rng([seed, 7]).choice(n, k, replace=False)), None
-    s = sift.sample_rows(Xtr, ytr, frac, groups=gtr, time=ttr, task=ds["task"], random_state=seed)
+    s = sift.sample_rows(Xtr, ytr, frac, task=ds["task"], random_state=seed)
     return s.indices, s.weights
 
 

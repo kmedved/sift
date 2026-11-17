@@ -641,7 +641,7 @@ def test_smart_sample_accepts_list_anchor_mask():
         SmartSamplerConfig(
             size=0.2,
             anchor_fn=anchor_fn,
-            pilot=None,
+            method="uniform",
             random_state=6,
             verbose=False,
         ),
@@ -670,7 +670,7 @@ def test_smart_sample_rejects_wrong_length_anchor_mask():
             "y",
             SmartSamplerConfig(
                 anchor_fn=anchor_fn,
-                pilot=None,
+                method="uniform",
                 verbose=False,
             ),
         )
@@ -687,7 +687,7 @@ def test_prep_arrays_exclusion_only_when_smart_sampler_enabled():
     X['timestamp'] = np.tile(np.arange(10), 10)
     y = X['f0'] + np.random.randn(n) * 0.3
 
-    config = SmartSamplerConfig(group_col='group_id', time_col='timestamp')
+    config = SmartSamplerConfig(method='chronological', group_col='group_id', time_col='timestamp')
 
     # With use_smart_sampler=False, group_id and timestamp should be treated as features
     selector = StabilitySelector(

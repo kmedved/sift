@@ -193,28 +193,35 @@ def panel_config(
     group_col: str,
     time_col: Optional[str] = None,
     size: float | int = 0.2,
+    strata_col: Optional[str] = None,
 ) -> SmartSamplerConfig:
-    """Preset for panel (entity-over-time) data.
+    """Preset for a chronological draw from panel (entity-over-time) data.
 
-    Builds a ``sift.SmartSamplerConfig`` that spreads the draw across entities
-    in ``group_col`` and along each entity's timeline in ``time_col``. This is
-    the configuration benchmarked on the NBA player panel.
+    Builds a ``sift.SmartSamplerConfig`` with ``method="chronological"``:
+    every row has the same probability, each entity in ``group_col`` (inside
+    each stratum in ``strata_col``, such as a season) gets its proportional
+    share rounded up or down, and the draw is spread along each entity's
+    timeline in ``time_col``.  For the residual draw, use
+    ``SmartSamplerConfig()``; it ignores entity and time structure.
 
     Parameters
     ----------
     group_col : str
         Column naming the entity each row belongs to.
     time_col : str, optional
-        Column ordering rows inside an entity.
+        Column ordering rows inside an entity; input order when omitted.
     size : float or int, default=0.2
         Rows to keep: a fraction in ``(0, 1]`` or a row count.
+    strata_col : str, optional
+        Outer level whose shares are allocated first, such as a season.
 
     Returns
     -------
     SmartSamplerConfig
-        A config with ``size``, ``group_col`` and ``time_col`` set and every
-        other field at its default. Add ``anchor_fn=first_per_group`` (or any
-        anchor rule) to guarantee that each entity keeps at least one row.
+        A config with ``method="chronological"``, ``size``, ``group_col``,
+        ``time_col`` and ``strata_col`` set and every other field at its
+        default. Add ``anchor_fn=first_per_group`` (or any anchor rule) to
+        guarantee that each entity keeps at least one row.
 
     See Also
     --------
@@ -224,8 +231,11 @@ def panel_config(
     Examples
     --------
     >>> from sift import panel_config
-    >>> config = panel_config("entity_id", "date", size=0.25)
-    >>> config.size, config.group_col, config.time_col
-    (0.25, 'entity_id', 'date')
+    >>> config = panel_config("entity_id", "date", size=0.25, strata_col="season")
+    >>> config.method, config.size, config.group_col, config.time_col, config.strata_col
+    ('chronological', 0.25, 'entity_id', 'date', 'season')
     """
-    return SmartSamplerConfig(size=size, group_col=group_col, time_col=time_col)
+    return SmartSamplerConfig(
+        size=size, method="chronological", group_col=group_col, time_col=time_col,
+        strata_col=strata_col,
+    )

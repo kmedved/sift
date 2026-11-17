@@ -12,8 +12,10 @@ from sift.sampling import first_per_group
 
 EXPECTED_DEFAULTS = {
     "size": 0.2,
+    "method": "residual",
     "group_col": None,
     "time_col": None,
+    "strata_col": None,
     "task": "auto",
     "pilot": "auto",
     "pilot_size": 0.02,
@@ -67,7 +69,8 @@ def test_removed_1x_fields_fail_with_a_migration_hint(name):
 
 
 def test_keyword_overrides_equal_explicit_config_and_are_warning_free():
-    options = dict(size=0.25, group_col="group", time_col="time", random_state=7, pilot=None)
+    options = dict(size=0.25, method="chronological", group_col="group", time_col="time",
+                   random_state=7)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         by_keyword = sift.smart_sample(_frame(), ["f0", "f1"], "y", **options)
@@ -100,9 +103,9 @@ def test_full_size_keeps_every_row_in_order_with_unit_weights():
 
 def test_overrides_do_not_mutate_the_callers_config():
     config = sift.SmartSamplerConfig(size=0.5, random_state=3)
-    sift.smart_sample(_frame(), ["f0", "f1"], "y", config, size=0.1, pilot=None)
+    sift.smart_sample(_frame(), ["f0", "f1"], "y", config, size=0.1, method="uniform")
     assert config.size == 0.5
-    assert config.pilot == "auto"
+    assert config.method == "residual"
 
 
 def test_config_validates_on_construction_replace_and_use():
@@ -116,6 +119,16 @@ def test_config_validates_on_construction_replace_and_use():
         sift.smart_sample(_frame(), ["f0", "f1"], "y", config)
     with pytest.raises(TypeError, match="group_col"):
         sift.SmartSamplerConfig(group_col=3)
+    with pytest.raises(ValueError, match="method must be one of"):
+        sift.SmartSamplerConfig(method="smart")
+    with pytest.raises(ValueError, match="shape only method='chronological'"):
+        sift.SmartSamplerConfig(group_col="group")
+    with pytest.raises(ValueError, match="strata_col applies only"):
+        sift.SmartSamplerConfig(strata_col="season", method="uniform")
+    with pytest.raises(ValueError, match="needs group_col or time_col"):
+        sift.SmartSamplerConfig(method="chronological")
+    with pytest.raises(ValueError, match="needs a pilot"):
+        sift.SmartSamplerConfig(pilot=None)
     with pytest.raises(TypeError, match="anchor_fn"):
         sift.SmartSamplerConfig(anchor_fn="first")
     with pytest.raises(TypeError, match="verbose"):
@@ -135,8 +148,8 @@ def test_rejects_input_weight_column_instead_of_overwriting_it():
 @pytest.mark.parametrize(
     ("change", "message"),
     (
-        ({"group_col": "missing_group"}, "Missing columns.*missing_group"),
-        ({"time_col": "missing_time"}, "Missing columns.*missing_time"),
+        ({"method": "chronological", "group_col": "missing_group"}, "Missing columns.*missing_group"),
+        ({"method": "chronological", "time_col": "missing_time"}, "Missing columns.*missing_time"),
         ({"unknown_option": 1}, "Unknown SmartSamplerConfig field"),
     ),
 )
@@ -169,13 +182,19 @@ def test_anchor_fn_rows_are_always_kept():
         sift.smart_sample(source, ["f0", "f1"], "y", anchor_fn=wrong_length)
 
 
-def test_panel_config_wires_group_time_and_size():
+def test_panel_config_is_a_chronological_preset():
     config = sift.panel_config("group", "time", size=0.3)
-    assert (config.size, config.group_col, config.time_col, config.anchor_fn) == (0.3, "group", "time", None)
+    assert (config.method, config.size, config.group_col, config.time_col, config.strata_col,
+            config.anchor_fn) == ("chronological", 0.3, "group", "time", None, None)
     assert sift.panel_config("g").size == 0.2
     out = sift.smart_sample(_frame(), ["f0", "f1"], "y", sift.panel_config("group", "time", size=0.1))
     assert len(out) == 120
-    assert set(out["group"]) == {"a", "b", "c"}
+    assert out["group"].value_counts().to_dict() == {"b": 40, "a": 40, "c": 40}
+    np.testing.assert_array_equal(out["sample_weight"].to_numpy(), np.ones(120))
+    source = _frame()
+    source["season"] = np.tile([2023, 2024], len(source) // 2)
+    out = sift.smart_sample(source, ["f0"], "y", sift.panel_config("group", "time", 0.1, "season"))
+    assert out["season"].value_counts().to_dict() == {2023: 60, 2024: 60}
 
 
 def test_classification_target_uses_the_class_gradient():

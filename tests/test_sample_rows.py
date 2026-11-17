@@ -1,4 +1,4 @@
-"""Behaviour of ``sift.sample_rows``: exact draws, correct probabilities, unbiased weights."""
+"""Behaviour of ``sift.sample_rows``: exact draws, correct probabilities, mean-one weights."""
 
 import logging
 import warnings
@@ -66,22 +66,17 @@ def test_same_seed_same_draw_and_different_seed_different_draw():
     assert not np.array_equal(a.indices, c.indices)
 
 
-@pytest.mark.parametrize("structure", ["none", "groups_time"])
-def test_empirical_inclusion_frequency_matches_inclusion_probability(structure):
+def test_empirical_inclusion_frequency_matches_inclusion_probability():
     rng = np.random.default_rng(3)
     n, k = 120, 30
     y = rng.standard_t(2, size=n)
     pred = np.zeros(n)
-    groups = rng.integers(0, 9, n) if structure == "groups_time" else None
-    time = rng.integers(0, 20, n) if structure == "groups_time" else None
     counts = np.zeros(n)
     draws = 4_000
-    pi = None
+    pi = np.zeros(n)
     for seed in range(draws):
-        s = sample_rows(None, y, k, groups=groups, time=time, pilot=pred, random_state=seed)
+        s = sample_rows(None, y, k, pilot=pred, random_state=seed)
         counts[s.indices] += 1
-        if pi is None:
-            pi = np.zeros(n)
         pi[s.indices] = s.inclusion_prob
     expected = 0.5 * _capped_pi(np.abs(y), k) + 0.5 * k / n
     np.testing.assert_allclose(pi[pi > 0], expected[pi > 0])
@@ -95,6 +90,20 @@ def test_weighted_estimates_are_unbiased_for_full_data_totals():
            for s in (sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=r) for r in range(300))]
     se = np.std(est) / np.sqrt(len(est))
     assert abs(np.mean(est) - y.mean()) < 4 * se
+
+
+def test_residual_draw_does_not_lock_onto_a_repeating_series():
+    # y repeats [0, 0, 0, 0, 1] and the pilot predicts 0, so each 1 has
+    # probability 0.6, each 0 has 0.1, and every 5 rows hold one pick. Along a
+    # fixed order one shared start keeps all ones or none.
+    n = 5_000
+    y = (np.arange(n) % 5 == 4).astype(float)
+    means = []
+    for seed in range(100):
+        s = sample_rows(None, y, 0.2, pilot=np.zeros(n), random_state=seed)
+        assert len(s) == 1_000 and np.unique(s.indices).size == 1_000
+        means.append(np.average(y[s.indices], weights=s.weights))
+    assert 0.15 < min(means) and max(means) < 0.25
 
 
 def test_larger_residuals_get_larger_inclusion_probability():
@@ -131,79 +140,72 @@ def test_rows_the_pilot_fits_exactly_stay_drawable():
     assert seen[:1_000].mean() > 0.5
 
 
-def test_uniform_mix_one_and_no_pilot_give_equal_probabilities():
+def test_equal_probability_methods_and_uniform_mix_one():
     X, y = _data()
-    for kwargs in ({"uniform_mix": 1.0}, {"pilot": None}):
-        s = sample_rows(X, y, 0.1, random_state=0, **{"pilot": X[:, 0], **kwargs})
+    groups = np.repeat(np.arange(30), 100)
+    cases = [
+        sample_rows(X, y, 0.1, pilot=X[:, 0], uniform_mix=1.0, random_state=0),
+        sample_rows(size=0.1, method="uniform", always_include=np.zeros(len(y), bool)),
+        sample_rows(size=0.1, method="chronological", groups=groups),
+    ]
+    for s in cases:
+        assert len(s) == 300
         np.testing.assert_allclose(s.inclusion_prob, 0.1)
         np.testing.assert_allclose(s.weights, 1.0)
-    assert sample_rows(X, None, 0.1, pilot=None).task == "uniform"
+    assert [s.method for s in cases] == ["residual", "uniform", "chronological"]
+    assert [s.task for s in cases] == ["regression", None, None]
 
 
-def test_equal_probability_draw_spreads_exactly_across_groups():
+def test_uniform_method_is_a_simple_random_sample():
+    n, draws = 60, 6_000
+    counts = np.zeros(n)
+    for seed in range(draws):
+        s = sample_rows(size=12, method="uniform", always_include=np.zeros(n, bool), random_state=seed)
+        counts[s.indices] += 1
+    assert np.abs(counts / draws - 0.2).max() < 5 * np.sqrt(0.2 * 0.8 / draws)
+
+
+def test_chronological_method_calls_chronological_sample():
     rng = np.random.default_rng(0)
-    n = 10_000
-    groups = rng.integers(0, 40, n)
-    time = rng.integers(0, 1_000, n)
-    s = sample_rows(None, None, 0.1, groups=groups, time=time, pilot=None, random_state=0)
-    sizes = np.bincount(groups, minlength=40)
-    got = np.bincount(groups[s.indices], minlength=40)
-    assert np.all(np.abs(got - 0.1 * sizes) < 1.0 + 1e-9)
+    n = 4_000
+    frame = pd.DataFrame({
+        "player": rng.integers(0, 80, n),
+        "day": rng.integers(0, 400, n),
+        "season": rng.integers(2019, 2024, n),
+    })
+    for seed in range(3):
+        s = sample_rows(size=0.15, method="chronological", groups=frame["player"],
+                        time=frame["day"], strata=frame["season"], random_state=seed)
+        expected = sift.sampling.chronological_sample(
+            frame, 600, group_col="player", time_col="day", stratum_col="season",
+            random_state=seed)
+        np.testing.assert_array_equal(s.indices, expected)
+    seasons = np.repeat([0, 1], 3)
+    players = np.tile(np.arange(3), 2)
+    for seed in range(50):
+        s = sample_rows(size=3, method="chronological", groups=players, time=np.arange(6),
+                        strata=seasons, random_state=seed)
+        assert sorted(np.bincount(seasons[s.indices], minlength=2)) == [1, 2]
 
 
-def test_time_order_spreads_draw_along_each_timeline():
-    n = 1_000
+def test_chronological_method_spreads_along_each_timeline():
     groups = np.repeat(np.arange(10), 100)
     time = np.tile(np.arange(100), 10)[::-1].copy()
-    s = sample_rows(None, None, 100, groups=groups, time=time, pilot=None, random_state=2)
-    offsets = []
+    s = sample_rows(size=100, method="chronological", groups=groups, time=time, random_state=2)
     for g in range(10):
         t = np.sort(time[s.indices][groups[s.indices] == g])
-        np.testing.assert_array_equal(t // 10, np.arange(10))  # one row per block of 10
-        offsets.append(t % 10)
-    assert np.unique(np.concatenate(offsets)).size > 5  # not the same slot in every block
-
-
-def test_equal_probability_draw_does_not_lock_onto_a_repeating_schedule():
-    # 100 groups of 20 rows with a flag on every 10th row, sampled at 10%: one
-    # evenly spaced start would keep either every flagged row or none.
-    groups = np.repeat(np.arange(100), 20)
-    time = np.tile(np.arange(20), 100)
-    flag = time % 10 == 0
-    shares = [
-        flag[sample_rows(None, None, 0.1, groups=groups, time=time, pilot=None,
-                         random_state=seed).indices].mean()
-        for seed in range(100)
-    ]
-    assert abs(np.mean(shares) - 0.1) < 0.01
-    assert np.std(shares) < 0.04
-    # One weekday series at 20%: each draw keeps about a fifth of each weekday.
-    n = 5_000
-    weekday = np.arange(n) % 5
-    for seed in range(5):
-        s = sample_rows(None, None, 0.2, time=np.arange(n), pilot=None, random_state=seed)
-        assert np.all(np.abs(np.bincount(weekday[s.indices], minlength=5) / len(s) - 0.2) < 0.05)
-
-
-def test_equal_probability_block_shuffle_keeps_inclusion_equal():
-    rng = np.random.default_rng(1)
-    n = 90
-    groups = rng.integers(0, 7, n)
-    time = rng.integers(0, 30, n)
-    counts = np.zeros(n)
-    draws = 6_000
-    for seed in range(draws):
-        s = sample_rows(None, None, 0.15, groups=groups, time=time, pilot=None, random_state=seed)
-        assert len(s) == 13
-        counts[s.indices] += 1
-    p = 13 / n
-    assert np.abs(counts / draws - p).max() < 5 * np.sqrt(p * (1 - p) / draws)
+        assert len(t) == 10
+        gaps = np.r_[np.diff(t), t[0] + 100 - t[-1]]  # one pick per (rotated) block of 10
+        assert gaps.max() < 20
+    single = sample_rows(size=0.2, method="chronological", time=np.arange(5_000), random_state=0)
+    weekday = np.arange(5_000) % 5
+    assert np.all(np.abs(np.bincount(weekday[single.indices], minlength=5) / 1_000 - 0.2) < 0.05)
 
 
 def test_missing_groups_are_a_group_not_dropped():
     n = 600
     groups = np.array(["a", "b", None] * (n // 3), dtype=object)
-    s = sample_rows(None, None, 0.5, groups=groups, pilot=None, random_state=0)
+    s = sample_rows(size=0.5, method="chronological", groups=groups, random_state=0)
     assert pd.isna(groups[s.indices]).sum() == 100
 
 
@@ -211,14 +213,34 @@ def test_always_include_rows_are_kept_with_probability_one():
     X, y = _data()
     keep = np.zeros(len(y), dtype=bool)
     keep[[3, 50, 999]] = True
-    s = sample_rows(X, y, 100, pilot=X[:, 0], always_include=keep, random_state=0)
-    assert len(s) == 100
-    assert {3, 50, 999} <= set(s.indices.tolist())
-    assert np.all(s.inclusion_prob[np.isin(s.indices, [3, 50, 999])] == 1.0)
+    groups = np.repeat(np.arange(30), 100)
+    for kwargs in ({"X": X, "y": y, "pilot": X[:, 0]}, {"method": "uniform"},
+                   {"method": "chronological", "groups": groups}):
+        s = sample_rows(size=100, always_include=keep, random_state=0, **kwargs)
+        assert len(s) == 100
+        assert {3, 50, 999} <= set(s.indices.tolist())
+        assert np.all(s.inclusion_prob[np.isin(s.indices, [3, 50, 999])] == 1.0)
     with pytest.raises(ValueError, match="always_include marks 3 rows but size allows only 2"):
         sample_rows(X, y, 2, always_include=keep)
-    s = sample_rows(X, y, 3, always_include=keep)
-    np.testing.assert_array_equal(s.indices, [3, 50, 999])
+    with pytest.raises(ValueError, match="the whole budget"):
+        sample_rows(X, y, 3, always_include=keep)
+    s = sample_rows(X[:3], y[:3], 3, always_include=np.ones(3, bool))
+    np.testing.assert_array_equal(s.indices, [0, 1, 2])
+
+
+def test_structure_arguments_belong_to_the_chronological_method():
+    X, y = _data(n=500)
+    for kwargs in ({"groups": np.zeros(500)}, {"time": np.arange(500)}, {"strata": np.zeros(500)}):
+        with pytest.raises(ValueError, match="shape only method='chronological'"):
+            sample_rows(X, y, 0.1, **kwargs)
+        with pytest.raises(ValueError, match="shape only method='chronological'"):
+            sample_rows(size=0.1, method="uniform", **kwargs)
+    with pytest.raises(ValueError, match="needs groups or time"):
+        sample_rows(X, y, 0.1, method="chronological")
+    with pytest.raises(ValueError, match="needs a pilot"):
+        sample_rows(X, y, 0.1, pilot=None)
+    with pytest.raises(ValueError, match="method must be one of"):
+        sample_rows(X, y, 0.1, method="smart")
 
 
 def test_auto_task_detection():
