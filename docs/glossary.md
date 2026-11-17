@@ -152,10 +152,10 @@ scores prefixes of that path. Every returned table sets `in_sample=True` and
 
 The mean-one fitting weights from `sample_rows`, or the `sample_weight`
 column written by `smart_sample`: inverse inclusion probabilities rescaled to
-mean 1. Equal-probability draws give weights of 1. They are for fitting; what
-a weighted fit does depends on the learner. To estimate a fixed full-data
-total, weight by the raw `1 / inclusion_prob` (Horvitz–Thompson), which is
-unbiased because every row can be drawn. Downstream selectors and models
+mean 1. Equal-probability draws without forced rows give weights of 1. They
+are for fitting; what a weighted fit does depends on the learner. To estimate
+a fixed full-data total, weight by the raw `1 / inclusion_prob`
+(Horvitz–Thompson), which is unbiased because every row can be drawn. Downstream selectors and models
 consume them as ordinary [sample weights](#sample-weight).
 
 ## Joint mutual information

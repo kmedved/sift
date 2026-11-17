@@ -1779,12 +1779,13 @@ full-panel draw budget used by earlier releases.
 `sample_rows` draws exactly `size` training rows and returns mean-one fitting
 weights. It has three methods:
 
-- **`method="uniform"` (default).** A simple random sample; every weight is 1.
+- **`method="uniform"` (default).** A simple random sample; every weight is 1
+  unless rows are forced in.
 - **`method="chronological"`.** Equal probability, spread over time. Each
   entity in `groups`, inside each stratum in `strata` (such as a season), gets
   its proportional share rounded up or down, drawn along its timeline. This is
-  `sift.sampling.chronological_sample`; every weight is 1. Start here on
-  entity-over-time panels.
+  `sift.sampling.chronological_sample`; every weight is 1 unless rows are
+  forced in. Start here on entity-over-time panels.
 - **`method="residual"` (opt-in).** Keeps the rows a model learns the most
   from:
   1. **Pilot model.** A cheap model is fitted on 2% of the rows and scores
@@ -1880,7 +1881,10 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
   evenly, in `(0, 1]`. It keeps every row drawable and caps each raw weight at
   `1 / (uniform_mix * fraction)`. 0.5 is the benchmarked value.
 - `always_include` / `anchor_fn`: rows that must be kept. They count against
-  `size` and must leave room for at least one drawn row.
+  `size` and must leave room for at least one drawn row. Forced rows have
+  inclusion probability 1 and the other rows share the rest of the budget, so
+  with forced rows the weights are not all 1, even for the uniform and
+  chronological methods, and chronological quotas cover only the drawn rows.
 - `random_state` (default 42) and `verbose`.
 
 Two cautions for fits on a residual sample:

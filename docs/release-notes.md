@@ -29,11 +29,13 @@ panel benchmark it lost to plain chronological sampling. sift 2.0 replaces it.
     meant for expensive, weight-aware fits.
 
   It returns indices, mean-one fitting weights (`1 / inclusion_prob` rescaled
-  to mean 1; all 1 for the equal-probability methods), inclusion
+  to mean 1; all 1 for the equal-probability methods unless rows are forced
+  in), inclusion
   probabilities and the method. Weighting by the raw `1 / inclusion_prob`
   estimates a fixed full-data total without bias. Rows in `always_include`
   are always kept, but they may not take the whole budget while other rows
-  remain.
+  remain; the other rows share the rest of the budget, so chronological
+  quotas cover only the drawn rows.
 - **New: `sift.sampling.chronological_sample(frame, n_rows, group_col=...,
   time_col=..., stratum_col=...)`** returns the positions of an
   equal-probability chronological draw from a DataFrame.

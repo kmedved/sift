@@ -409,13 +409,14 @@ def sample_rows(
     Three methods:
 
     ``"uniform"`` (default)
-        A simple random sample.  The weights are all 1.
+        A simple random sample.  Without forced rows the weights are all 1.
     ``"chronological"``
         Equal probability, spread over time: each entity in ``groups`` (and
         each stratum, such as a season) gets its proportional share rounded
         up or down, drawn evenly along its timeline.  This is
-        ``sift.sampling.chronological_sample``, and the weights are all 1.
-        On entity-over-time panels it is the method to start with.
+        ``sift.sampling.chronological_sample``; without forced rows the
+        weights are all 1.  On entity-over-time panels it is the method to
+        start with.
     ``"residual"``
         Fits a cheap pilot model on ``pilot_size`` of the rows and scores
         every row by the magnitude ``g`` of the pilot's loss gradient (the
@@ -426,6 +427,12 @@ def sample_rows(
         systematically along a random order, so a repeating pattern in the
         data cannot line up with the draw.  The pilot costs time, so it pays
         off only for expensive, weight-aware fits.
+
+    Rows in ``always_include`` are kept with probability 1 and every method
+    draws the rest of the budget from the other rows.  With forced rows the
+    weights are therefore not all 1, even for ``"uniform"`` and
+    ``"chronological"`` (forced rows get the smallest weight), and the
+    chronological quotas cover only the drawn rows, not the forced ones.
 
     Fit downstream models with ``sample_weight=weights``.
 
@@ -474,7 +481,9 @@ def sample_rows(
         ``1 / (uniform_mix * fraction)``. 0.5 is the benchmarked value.
     always_include : array-like of bool, optional
         Rows that must be kept (probability 1). They count against ``size``
-        and must leave room for at least one drawn row.
+        and must leave room for at least one drawn row. The other rows share
+        the rest of the budget, so weights are no longer all 1 and
+        chronological quotas apply to the drawn rows only.
     random_state : int or None, default=42
         Seed for the pilot slice and the draw.
     verbose : bool, default=False
@@ -787,7 +796,8 @@ def smart_sample(
     DataFrame front end to ``sample_rows``. The default ``method="uniform"``
     draws a simple random sample and ``method="chronological"`` an
     equal-probability draw along each entity's timeline (see
-    ``sift.panel_config``); both write weights of 1. ``method="residual"``
+    ``sift.panel_config``); both write weights of 1 unless ``anchor_fn``
+    forces rows in. ``method="residual"``
     fits a pilot on ``feature_cols`` and draws exactly ``size`` rows weighted
     toward the rows the pilot gets wrong. It returns the kept rows (original
     index preserved) with mean-one fitting weights.

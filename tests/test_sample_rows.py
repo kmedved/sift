@@ -85,12 +85,32 @@ def test_empirical_inclusion_frequency_matches_inclusion_probability():
     assert np.max(np.abs(counts / draws - expected) / se) < 5.0
 
 
-def test_weighted_estimates_are_unbiased_for_full_data_totals():
+@pytest.mark.parametrize("method", ["residual", "uniform", "chronological"])
+def test_raw_inverse_probability_totals_are_unbiased(method):
+    # Horvitz-Thompson: sum(y / inclusion_prob) over the sample estimates sum(y),
+    # including forced rows (probability 1).
     X, y = _data(n=4_000, seed=1)
-    est = [np.average(y[s.indices], weights=s.weights)
-           for s in (sample_rows(X, y, 0.1, pilot=X[:, 0], random_state=r, method="residual") for r in range(300))]
-    se = np.std(est) / np.sqrt(len(est))
-    assert abs(np.mean(est) - y.mean()) < 4 * se
+    forced = np.zeros(len(y), bool)
+    forced[np.argsort(y)[-5:]] = True
+    kwargs = {"residual": {"pilot": X[:, 0]}, "uniform": {},
+              "chronological": {"groups": np.repeat(np.arange(40), 100)}}[method]
+    totals = []
+    for r in range(300):
+        s = sample_rows(X, y, 0.1, method=method, always_include=forced, random_state=r, **kwargs)
+        totals.append(np.sum(y[s.indices] / s.inclusion_prob))
+    se = np.std(totals) / np.sqrt(len(totals))
+    assert abs(np.mean(totals) - y.sum()) < 4 * se
+
+
+def test_forced_rows_make_equal_probability_weights_unequal():
+    y = np.arange(5.0)
+    forced = np.array([True, False, False, False, False])
+    for kwargs in ({"method": "uniform"}, {"method": "chronological", "time": np.arange(5)}):
+        s = sample_rows(None, y, 2, always_include=forced, random_state=0, **kwargs)
+        assert s.indices[0] == 0 and len(s) == 2
+        np.testing.assert_allclose(s.inclusion_prob, [1.0, 0.25])
+        np.testing.assert_allclose(s.weights, [0.4, 1.6])
+        assert np.all(sample_rows(None, y, 2, random_state=0, **kwargs).weights == 1.0)
 
 
 def test_residual_draw_does_not_lock_onto_a_repeating_series():
