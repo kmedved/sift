@@ -201,9 +201,10 @@ def panel_config(
     every row has the same probability, each entity in ``group_col`` (inside
     each stratum in ``strata_col``, such as a season) gets its proportional
     share rounded up or down, and the draw is spread along each entity's
-    timeline in ``time_col``.  For the residual draw, use
-    ``SmartSamplerConfig(method="residual")``; it ignores entity and time
-    structure.
+    timeline in ``time_col``.  If an ``anchor_fn`` is added, its rows are
+    kept outside these quotas and the weights are no longer all 1.  For the
+    residual draw, use ``SmartSamplerConfig(method="residual")``; it ignores
+    entity and time structure.
 
     Parameters
     ----------

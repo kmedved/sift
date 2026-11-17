@@ -565,7 +565,9 @@ assert (s.indices == positions).all() and (s.weights == 1).all()
 Split off validation first. Omit `stratum_col` to allocate across whole
 entity histories. Groups with fewer rows than the sampling interval
 may receive zero slots. Every row has the same marginal inclusion
-probability, so an equal-row training objective uses equal weights.
+probability, so an equal-row training objective uses equal weights. In
+`sample_rows`, rows forced in with `always_include` sit outside the quotas,
+which then cover only the drawn rows, and the weights are no longer all 1.
 
 For stability selection on a chronological sample, name the feature subset
 explicitly. The sampler needs the group and time columns to stay in the frame,
