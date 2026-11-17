@@ -1,4 +1,4 @@
-from sift.sampling.smart import SmartSamplerConfig, smart_sample
+from sift.sampling.smart import RowSample, SmartSamplerConfig, sample_rows, smart_sample
 from sift.sampling.anchors import (
     no_anchors,
     first_per_group,
@@ -8,13 +8,12 @@ from sift.sampling.anchors import (
     event_window_anchors,
     combine_anchors,
     panel_config,
-    cross_section_config,
-    financial_config,
-    medical_config,
 )
 
 __all__ = [
+    "RowSample",
     "SmartSamplerConfig",
+    "sample_rows",
     "smart_sample",
     "no_anchors",
     "first_per_group",
@@ -24,7 +23,4 @@ __all__ = [
     "event_window_anchors",
     "combine_anchors",
     "panel_config",
-    "cross_section_config",
-    "financial_config",
-    "medical_config",
 ]

@@ -55,10 +55,11 @@ LEGACY_EXPECTED_ALL = [
     "CEFSPlusBinarySelector",
     "KnockoffSelector",
     "permutation_importance",
+    "RowSample",
     "SmartSamplerConfig",
+    "sample_rows",
     "smart_sample",
     "panel_config",
-    "cross_section_config",
     "StabilitySelector",
     "stability_regression",
     "stability_classif",
@@ -87,10 +88,10 @@ def _default(callable_, name):
 
 
 def test_version_and_ordered_public_exports():
-    assert sift.__version__ == "1.0.3.dev0"
+    assert sift.__version__ == "2.0.0.dev0"
     assert sift.__all__ == EXPECTED_ALL
-    assert sift.__all__[:55] == LEGACY_EXPECTED_ALL
-    assert sift.__all__[55:] == [
+    assert sift.__all__[:len(LEGACY_EXPECTED_ALL)] == LEGACY_EXPECTED_ALL
+    assert sift.__all__[len(LEGACY_EXPECTED_ALL):] == [
         "set_verbosity",
         "SelectionView",
         "as_result",
@@ -103,7 +104,7 @@ def test_version_and_ordered_public_exports():
         "ClassicFeatureCache",
         "build_classic_cache",
     ]
-    assert len(sift.__all__) == 66
+    assert len(sift.__all__) == 67
 
 
 @pytest.mark.parametrize("name", EXPECTED_ALL)

@@ -241,9 +241,13 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
     block_method : {'moving', 'circular', 'stationary'}, default='moving'
         Block bootstrap flavor for the same path.
     use_smart_sampler : bool, default=False
-        Whether to apply smart sampling before stability selection.
+        Whether to keep only the most informative rows before stability
+        selection. ``sift.smart_sample`` draws them once, weighted toward the
+        rows a cheap pilot model gets wrong, and the resamples run on that
+        weighted sample.
     sampler_config : SmartSamplerConfig, optional
-        Configuration for smart sampler.
+        Sampler settings; ``SmartSamplerConfig()`` (20% of rows) when omitted.
+        ``task`` is always set from this selector's own ``task``.
     store_coefs : bool, default=True
         Whether to store full coefficient matrix from all bootstraps.
         Set False to save memory (disables get_coef_stability and plot_coef_distributions).
@@ -1634,10 +1638,8 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
             config.random_state = seed if seed is not None else 42
         config.verbose = self.verbose
 
-        # For classification, disable residual-based sampling (regression on class IDs is meaningless)
-        # Use geometry-only sampling (leverage + uniform floor + anchors)
-        if self.task == 'classification':
-            config.residual_weight_cap = 0.0
+        # The pilot's gradient follows the selector's task, not the label dtype.
+        config.task = self.task
 
         exclude = set()
         if config.group_col:
@@ -1726,7 +1728,7 @@ class StabilitySelector(SelectorMixin, BaseEstimator):
                 missing_labels = [self.classes_[i] for i in missing]
                 raise ValueError(
                     f"Smart sampler dropped class(es): {missing_labels}. "
-                    f"Increase sample_frac or disable use_smart_sampler for classification."
+                    f"Increase the sampler size or disable use_smart_sampler for classification."
                 )
         else:
             y_out = sampled[y_col].values.astype(np.float64)

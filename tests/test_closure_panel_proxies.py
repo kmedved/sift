@@ -2507,7 +2507,7 @@ def test_stability_single_column_2d_target_fits_exactly_like_1d(
         threshold=0.5,
         use_smart_sampler=use_smart_sampler,
         sampler_config=(
-            sift.SmartSamplerConfig(sample_frac=0.8) if use_smart_sampler else None
+            sift.SmartSamplerConfig(size=0.8) if use_smart_sampler else None
         ),
     )
     flat = sift.StabilitySelector(**kwargs).fit(X, y)

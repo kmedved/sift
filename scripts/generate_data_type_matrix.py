@@ -638,8 +638,7 @@ def call_smart_sample(payload: Payload) -> None:
             "y",
             random_state=SEED,
             verbose=False,
-            sample_frac=0.5,
-            min_per_group=1,
+            size=0.5,
         )
         return
 
@@ -650,8 +649,7 @@ def call_smart_sample(payload: Payload) -> None:
     kwargs = {
         "random_state": SEED,
         "verbose": False,
-        "sample_frac": 0.5,
-        "min_per_group": 1,
+        "size": 0.5,
     }
     if payload.groups is not None:
         kwargs["group_col"] = "entity"
@@ -1015,12 +1013,6 @@ def _stable_note(
             "`permutation_importance` forwards X to the fitted model; with a "
             "dtype-tolerant fitted estimator the public call completes. Support "
             "is model-dependent"
-        )
-    if status == SUPPORTED and axis == "datetime_timedelta" and entry.name == "smart_sample":
-        return (
-            "the baseline call completes after coercing datetime/timedelta "
-            "feature columns to epoch-scale float32 values, which can be "
-            "lossy; convert them to numeric features explicitly"
         )
     if status == SUPPORTED and axis == "categorical":
         return "string/category columns are consumed by the seeded baseline call"

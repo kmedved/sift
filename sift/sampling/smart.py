@@ -1,183 +1,623 @@
+"""Pilot-residual importance sampling of training rows.
+
+A cheap pilot model is fitted on a small random slice of the data and scores
+every row by how wrong it is (the magnitude of the loss gradient at the pilot
+prediction).  Rows are then drawn with probability proportional to the MVS
+score ``sqrt(g**2 + mean(g**2))`` (Ibragimov & Gusev, 2019), systematically
+along each group's timeline so the draw keeps an exact size and an even
+spread, and every kept row carries the inverse of its inclusion probability as
+a weight.  Fitting on the weighted sample is an unbiased estimate of fitting
+on all rows, with lower variance than a uniform sample of the same size.
+
+When labels are observed, the realized gradient magnitude is the
+variance-optimal sampling score (Wang, Zhu & Ma, 2018; Ai et al., 2021; Ting &
+Brochu, 2018); smoothing it, for example with isotonic regression, discards
+information.  The defaults come from a benchmark on a ~770k-row player panel
+(see ``docs/ADVANCED.md``): at 20-25% of rows the weighted sample lands within
+about 0.1-0.15% of full-data RMSE, against 0.4% for an equal-probability
+chronological sample, at about a quarter of the training time.
+"""
+
+from __future__ import annotations
+
+import numbers
+import warnings
+from dataclasses import dataclass, fields, replace
+from typing import Any, Callable, List, Optional
+
 import numpy as np
 import pandas as pd
-import numbers
-from typing import Optional, List, Dict, Tuple, Callable
-from dataclasses import dataclass, fields, replace
-import warnings
-
-from sklearn.utils.extmath import randomized_svd
-from sklearn.ensemble import HistGradientBoostingRegressor
 
 from sift._logging import logger
 
+DEFAULT_SIZE = 0.2
+DEFAULT_PILOT_SIZE = 0.02
+# Provisional floor so tiny datasets still get a usable pilot; not benchmarked.
+MIN_PILOT_ROWS = 1_000
+PILOT_MAX_ITER = 100
 
-def leverage_scores_multi_alpha(
-    Xs: np.ndarray,
-    V: Optional[np.ndarray],
-    S: Optional[np.ndarray],
-    s2: Optional[np.ndarray],
-    leverage_batch_size: int,
-) -> np.ndarray:
-    """Compute leverage scores across multiple ridge parameters."""
-    n = Xs.shape[0]
-    if V is None or S is None or s2 is None:
-        return np.ones(n, dtype=np.float32)
+_TASKS = ("auto", "regression", "classification")
 
-    s2_pos = s2[s2 > 1e-8]
-    if s2_pos.size:
-        qs = np.percentile(s2_pos, [5, 25, 50, 75, 95]).astype(np.float32)
-        alphas = np.unique(np.clip(np.array([1e-6, *qs], dtype=np.float32), 1e-8, None))
-    else:
-        alphas = np.array([1e-6], dtype=np.float32)
-
-    invS = (1.0 / (S + 1e-12)).astype(np.float32)
-    W = (s2[:, None] / (s2[:, None] + alphas[None, :])).astype(np.float32)
-
-    lev = np.empty(n, dtype=np.float32)
-    B = leverage_batch_size
-    for start in range(0, n, B):
-        stop = min(n, start + B)
-        XV = Xs[start:stop] @ V
-        U_chunk = XV * invS
-        U2 = U_chunk * U_chunk
-        lev_multi = U2 @ W
-        lev[start:stop] = lev_multi.mean(axis=1)
-
-    lev = np.maximum(lev, 1e-12)
-    lev /= lev.mean()
-    return lev
+_REMOVED_FIELDS = {
+    "sample_frac": "renamed to 'size' (a fraction in (0, 1] or a row count)",
+    "pilot_sample_size": "replaced by 'pilot_size' (default 2% of rows)",
+    "min_per_group": "removed; use anchor_fn=first_per_group to guarantee coverage",
+    "leverage_batch_size": "removed with leverage scoring",
+    "svd_sample_size": "removed with leverage scoring",
+    "weight_clip_quantile": "removed; weights are exact inverse probabilities",
+    "residual_weight_cap": "removed; use uniform_mix to blend in equal-probability draws",
+    "uniform_floor": "replaced by 'uniform_mix'",
+    "anchor_max_share": "removed; anchors are always kept and count against the budget",
+}
 
 
 def _is_int_like(value: object) -> bool:
-    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+    return isinstance(value, numbers.Integral) and not isinstance(value, (bool, np.bool_))
 
 
 def _is_real_like(value: object) -> bool:
-    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+    return isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_))
+
+
+def _validate_size(value: object, name: str) -> None:
+    if _is_int_like(value):
+        if value < 1:
+            raise ValueError(f"{name} must be a row count >= 1 or a fraction in (0, 1].")
+        return
+    if not _is_real_like(value):
+        raise TypeError(f"{name} must be an int row count or a float fraction.")
+    if not np.isfinite(value) or not (0 < value <= 1):
+        raise ValueError(
+            f"{name} must be a fraction in (0, 1] when given as a float "
+            f"(pass an int for a row count); got {value!r}."
+        )
+
+
+def _resolve_count(value, n: int) -> int:
+    """Rows requested by a fraction or a count, clipped to [1, n]."""
+    if _is_int_like(value):
+        return int(min(int(value), n))
+    return int(min(n, max(1, np.floor(float(value) * n))))
+
+
+def _is_precomputed_pilot(pilot: object) -> bool:
+    return isinstance(pilot, (np.ndarray, pd.Series, pd.DataFrame, list, tuple))
+
+
+def _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state) -> None:
+    _validate_size(size, "size")
+    _validate_size(pilot_size, "pilot_size")
+    if task not in _TASKS:
+        raise ValueError(f"task must be one of {_TASKS}; got {task!r}.")
+    if not (
+        pilot is None
+        or (isinstance(pilot, str) and pilot == "auto")
+        or _is_precomputed_pilot(pilot)
+        or hasattr(pilot, "fit")
+    ):
+        raise TypeError(
+            "pilot must be 'auto', None, an estimator with fit/predict, or an "
+            "array of precomputed predictions."
+        )
+    if not _is_real_like(uniform_mix) or not np.isfinite(uniform_mix):
+        raise TypeError("uniform_mix must be a finite real number.")
+    if not (0 <= uniform_mix <= 1):
+        raise ValueError("uniform_mix must be in [0, 1].")
+    if random_state is not None and not _is_int_like(random_state):
+        raise TypeError("random_state must be an integer or None.")
+
+
+# =============================================================================
+# Result
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class RowSample:
+    """Rows chosen by :func:`sample_rows` and their inverse-probability weights.
+
+    Attributes
+    ----------
+    indices : ndarray of int64
+        Sorted positions (not labels) of the kept rows in the input.
+    weights : ndarray of float64
+        ``1 / inclusion_prob`` rescaled to mean 1 over the kept rows, so the
+        sample has the same total weight as an unweighted sample of its size.
+        Pass them to the downstream fit as ``sample_weight``.
+    inclusion_prob : ndarray of float64
+        Probability that each kept row was drawn.
+    n_rows : int
+        Number of rows in the input.
+    task : str
+        ``"regression"`` or ``"classification"`` as resolved for the pilot,
+        or ``"uniform"`` when no pilot was fitted (``pilot=None``, or
+        ``size`` covering every row).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sift import sample_rows
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(2_000, 3))
+    >>> y = X[:, 0] + rng.normal(size=2_000)
+    >>> s = sample_rows(X, y, size=0.25, random_state=0)
+    >>> len(s), s.n_rows
+    (500, 2000)
+    >>> X_small, y_small = s.take(X), s.take(y)
+    >>> X_small.shape
+    (500, 3)
+    >>> round(float(s.weights.mean()), 6)
+    1.0
+    """
+
+    indices: np.ndarray
+    weights: np.ndarray
+    inclusion_prob: np.ndarray
+    n_rows: int
+    task: str
+
+    def __len__(self) -> int:
+        return int(self.indices.size)
+
+    @property
+    def fraction(self) -> float:
+        """Share of input rows that were kept."""
+        return len(self) / self.n_rows if self.n_rows else 0.0
+
+    def take(self, data):
+        """Return the kept rows of ``data`` (DataFrame, Series or array)."""
+        if hasattr(data, "iloc"):
+            return data.iloc[self.indices]
+        if hasattr(data, "to_pandas") and not isinstance(data, np.ndarray):
+            data = data.to_pandas()
+            return data.iloc[self.indices]
+        return np.asarray(data)[self.indices]
+
+
+# =============================================================================
+# Core sampler
+# =============================================================================
+
+
+def _as_1d(values, n: int, name: str) -> np.ndarray:
+    arr = values.to_numpy() if hasattr(values, "to_numpy") else np.asarray(values)
+    arr = arr.reshape(-1) if arr.ndim > 1 and arr.shape[-1] == 1 else arr
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise ValueError(f"{name} must be 1-D with one entry per row ({n}); got shape {arr.shape}.")
+    return arr
+
+
+def _n_rows(*candidates) -> int:
+    for obj in candidates:
+        if obj is not None:
+            return int(len(obj))
+    raise ValueError(
+        "sample_rows needs at least one of X, y, groups, time, always_include or "
+        "precomputed pilot predictions to count rows."
+    )
+
+
+def _resolve_task(y: np.ndarray, task: str) -> str:
+    if task != "auto":
+        return task
+    if y.dtype.kind in "OSUbc" or isinstance(y.dtype, pd.CategoricalDtype):
+        return "classification"
+    values = np.asarray(y, dtype=np.float64)
+    if not np.isfinite(values).all():
+        return "regression"  # rejected with a clear message by the regression path
+    distinct = np.unique(values)
+    if distinct.size <= 2 and np.all(distinct == np.round(distinct)):
+        return "classification"
+    return "regression"
+
+
+def _capped_pi(score: np.ndarray, k: int) -> np.ndarray:
+    """Inclusion probabilities proportional to ``score``, summing to ``k``, capped at 1."""
+    pi = np.zeros(score.size, dtype=np.float64)
+    free = np.ones(score.size, dtype=bool)
+    budget = float(k)
+    while True:
+        total = score[free].sum()
+        if total <= 0:
+            pi[free] = budget / max(int(free.sum()), 1)
+            return np.minimum(pi, 1.0)
+        pi[free] = budget * score[free] / total
+        over = free & (pi > 1.0)
+        if not over.any():
+            return pi
+        pi[over] = 1.0
+        free &= ~over
+        budget = k - float((~free).sum())
+
+
+def _draw_order(n: int, groups, time, rng: np.random.Generator) -> np.ndarray:
+    """Groups in random order, rows by time inside each group."""
+    if groups is None and time is None:
+        return rng.permutation(n)
+    keys = [np.arange(n)]
+    if time is not None:
+        codes = pd.factorize(pd.Series(time), sort=True)[0]
+        keys.append(codes)
+    if groups is not None:
+        codes = pd.factorize(pd.Series(groups), use_na_sentinel=True)[0].astype(np.int64)
+        codes[codes < 0] = codes.max() + 1
+        keys.append(rng.permutation(int(codes.max()) + 1)[codes])
+    return np.lexsort(tuple(keys))
+
+
+def _systematic(order: np.ndarray, pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
+    """Systematic PPS along ``order``: exactly ``k`` rows with inclusion probability ``pi``."""
+    if k <= 0 or order.size == 0:
+        return np.array([], dtype=np.int64)
+    cum = np.cumsum(pi[order])
+    cum *= k / cum[-1]
+    u = rng.random()
+    hits = np.floor(cum - u) - np.floor(np.r_[0.0, cum[:-1]] - u)
+    chosen = order[hits > 0]
+    if chosen.size > k:  # floating-point edge
+        chosen = rng.choice(chosen, k, replace=False)
+    elif chosen.size < k:
+        rest = np.setdiff1d(order, chosen)
+        chosen = np.r_[chosen, rng.choice(rest, k - chosen.size, replace=False)]
+    return np.sort(chosen).astype(np.int64)
+
+
+def _take_rows(X, idx: np.ndarray):
+    if hasattr(X, "iloc"):
+        return X.iloc[idx]
+    return np.asarray(X)[idx]
+
+
+def _auto_matrix(X) -> np.ndarray:
+    from sift._preprocess import to_numpy
+
+    try:
+        Xa = to_numpy(X, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "pilot='auto' needs numeric features; encode categorical or datetime "
+            "columns first, or pass your own pilot estimator."
+        ) from exc
+    if Xa.ndim != 2:
+        raise ValueError(f"X must be 2-D; got shape {Xa.shape}.")
+    if np.isinf(Xa).any():
+        raise ValueError("X contains infinite values; NaN is allowed, inf is not.")
+    return Xa
+
+
+def _class_gradient(y: np.ndarray, proba: np.ndarray, classes: np.ndarray) -> np.ndarray:
+    """Norm of the softmax log-loss gradient, ||onehot(y) - p||."""
+    proba = np.asarray(proba, dtype=np.float64)
+    if proba.ndim == 1:
+        proba = np.column_stack([1.0 - proba, proba])
+    if proba.shape != (y.size, classes.size):
+        raise ValueError(
+            f"pilot probabilities must have shape ({y.size}, {classes.size}); got {proba.shape}."
+        )
+    pos = np.searchsorted(classes, y)
+    pos = np.clip(pos, 0, classes.size - 1)
+    known = classes[pos] == y
+    p_true = np.where(known, proba[np.arange(y.size), pos], 0.0)
+    sq = (proba ** 2).sum(axis=1) - np.where(known, p_true ** 2, 0.0)
+    return np.sqrt(np.maximum((1.0 - p_true) ** 2 + sq, 0.0))
+
+
+def _pilot_gradient(X, y, task, pilot, pilot_size, rng, random_state, verbose) -> np.ndarray:
+    n = y.size
+    if task == "classification":
+        classes = np.unique(y)
+    if _is_precomputed_pilot(pilot):
+        pred = np.asarray(pilot, dtype=np.float64)
+        if pred.shape[0] != n:
+            raise ValueError(f"precomputed pilot has {pred.shape[0]} rows; expected {n}.")
+        if not np.isfinite(pred).all():
+            raise ValueError("precomputed pilot predictions must be finite.")
+        if task == "classification":
+            return _class_gradient(y, pred, classes)
+        return np.abs(y - pred.reshape(-1))
+
+    if X is None:
+        raise ValueError("X is required to fit a pilot model.")
+    p_rows = max(_resolve_count(pilot_size, n), min(n, MIN_PILOT_ROWS))
+    pidx = np.sort(rng.choice(n, size=p_rows, replace=False))
+    if isinstance(pilot, str):  # "auto"
+        from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+        Xfit = _auto_matrix(X)
+        cls = HistGradientBoostingClassifier if task == "classification" else HistGradientBoostingRegressor
+        model = cls(max_iter=PILOT_MAX_ITER, random_state=random_state)
+    else:
+        from sklearn.base import clone
+
+        Xfit = X
+        model = clone(pilot)
+    model.fit(_take_rows(Xfit, pidx), y[pidx])
+    if task == "classification":
+        if not hasattr(model, "predict_proba"):
+            raise TypeError("a classification pilot needs predict_proba.")
+        proba = np.asarray(model.predict_proba(Xfit), dtype=np.float64)
+        full = np.zeros((n, classes.size))
+        full[:, np.searchsorted(classes, np.asarray(model.classes_))] = proba
+        g = _class_gradient(y, full, classes)
+    else:
+        pred = np.asarray(model.predict(Xfit), dtype=np.float64).reshape(-1)
+        g = np.abs(y - pred)
+    if not np.isfinite(g).all():
+        raise ValueError("pilot model produced non-finite predictions.")
+    if verbose:
+        logger.info(f"Pilot fitted on {p_rows:,} of {n:,} rows ({type(model).__name__}).")
+    return g
+
+
+def sample_rows(
+    X=None,
+    y=None,
+    size: float | int = DEFAULT_SIZE,
+    *,
+    groups=None,
+    time=None,
+    task: str = "auto",
+    pilot: Any = "auto",
+    pilot_size: float | int = DEFAULT_PILOT_SIZE,
+    uniform_mix: float = 0.0,
+    always_include=None,
+    random_state: Optional[int] = 42,
+    verbose: bool = False,
+) -> RowSample:
+    """Choose the most informative training rows and weight them for unbiased fits.
+
+    Fits a cheap pilot model on ``pilot_size`` of the rows, scores every row by
+    ``sqrt(g**2 + mean(g**2))`` where ``g`` is the pilot's loss gradient
+    (the residual for regression, ``||onehot(y) - p||`` for classification),
+    and draws exactly ``size`` rows with probability proportional to that
+    score.  The draw is systematic along ``groups`` (in random order) and
+    ``time`` (in order inside each group), so every entity's timeline is
+    covered evenly.  Fit downstream models with ``sample_weight=weights``.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_rows, n_features), optional
+        Features for the pilot. DataFrame, ndarray or anything your pilot
+        estimator accepts. Not needed when ``pilot`` is None or precomputed.
+    y : array-like of shape (n_rows,), optional
+        Target. Required unless ``pilot`` is None.
+    size : float or int, default=0.2
+        Rows to keep: a float fraction in ``(0, 1]`` or an int row count.
+        20-25% matched full-data accuracy to about 0.1-0.15% in the panel
+        benchmark; 5-10% is enough for a rough feature screen.
+    groups : array-like of shape (n_rows,), optional
+        Entity of each row (player, customer, ticker). Spreads the draw across
+        entities.
+    time : array-like of shape (n_rows,), optional
+        Sortable time of each row. Spreads the draw along each timeline.
+    task : {"auto", "regression", "classification"}, default="auto"
+        ``"auto"`` treats non-numeric, boolean and two-valued targets as
+        classification and everything else as regression. Pass
+        ``"classification"`` explicitly for integer-coded multiclass labels.
+    pilot : "auto", estimator, array-like or None, default="auto"
+        ``"auto"`` fits a 100-iteration scikit-learn HistGradientBoosting
+        model. An estimator (for example a 100-tree booster from your own
+        library) is cloned and fitted instead; classification pilots need
+        ``predict_proba``. An array of length ``n_rows`` is used as
+        precomputed predictions (probabilities for classification), for
+        example yesterday's production model. ``None`` skips the pilot and
+        draws with equal probability, still spread along groups and time.
+    pilot_size : float or int, default=0.02
+        Rows used to fit the pilot: a fraction or a count. At least 1,000
+        rows (or all rows, if fewer) are used.
+    uniform_mix : float, default=0.0
+        Share of the inclusion probability spread evenly over rows. Raise it
+        toward 0.5 for very noisy targets, where chasing large residuals
+        mostly chases noise.
+    always_include : array-like of bool, optional
+        Rows that must be kept (probability 1). They count against ``size``.
+    random_state : int or None, default=42
+        Seed for the pilot slice, the group order and the systematic start.
+    verbose : bool, default=False
+        Log progress at INFO on the ``sift`` logger.
+
+    Returns
+    -------
+    RowSample
+        ``indices``, ``weights`` (mean 1), ``inclusion_prob`` and a
+        ``take()`` helper.
+
+    Notes
+    -----
+    Learners whose automatic hyperparameters depend on the weights (for
+    example a learning rate or leaf regularisation scaled by the effective
+    sample size) must have those pinned to what an unweighted fit of the
+    same size would use; otherwise the comparison with a full-data fit is
+    confounded. The weights are mean-1, so ``sum(weights) == len(sample)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from sklearn.linear_model import Ridge
+    >>> from sift import sample_rows
+    >>> rng = np.random.default_rng(0)
+    >>> X = rng.normal(size=(5_000, 4))
+    >>> y = X @ [1.0, -2.0, 0.5, 0.0] + rng.standard_t(3, size=5_000)
+    >>> s = sample_rows(X, y, size=1_000, random_state=0)
+    >>> model = Ridge().fit(s.take(X), s.take(y), sample_weight=s.weights)
+    >>> len(s)
+    1000
+    """
+    return _sample_rows(
+        X, y, size, groups=groups, time=time, task=task, pilot=pilot, pilot_size=pilot_size,
+        uniform_mix=uniform_mix, always_include=always_include, random_state=random_state,
+        verbose=verbose,
+    )
+
+
+def _sample_rows(
+    X, y, size, *, groups, time, task, pilot, pilot_size, uniform_mix, always_include,
+    random_state, verbose,
+) -> RowSample:
+    """Implementation shared by ``sample_rows`` and ``smart_sample``.
+
+    Both public functions call this directly, so ``stacklevel=3`` warnings
+    point at the user's call site.
+    """
+    _validate_common(size, task, pilot, pilot_size, uniform_mix, random_state)
+    n = _n_rows(X, y, pilot if _is_precomputed_pilot(pilot) else None, groups, time, always_include)
+    k = _resolve_count(size, n)
+    rng = np.random.default_rng(random_state)
+
+    anchors = np.zeros(n, dtype=bool)
+    if always_include is not None:
+        anchors = _as_1d(always_include, n, "always_include").astype(bool)
+    n_anchor = int(anchors.sum())
+    if n_anchor > k:
+        raise ValueError(
+            f"always_include marks {n_anchor:,} rows but size allows only {k:,}; "
+            "raise size or include fewer rows."
+        )
+    groups = None if groups is None else _as_1d(groups, n, "groups")
+    time = None if time is None else _as_1d(time, n, "time")
+
+    if k >= n:
+        idx = np.arange(n, dtype=np.int64)
+        ones = np.ones(n, dtype=np.float64)
+        return RowSample(idx, ones, ones.copy(), n, "uniform")
+
+    if pilot is None:
+        resolved = "uniform"
+        y_arr = None
+    else:
+        if y is None:
+            raise ValueError("y is required unless pilot=None.")
+        y_raw = _as_1d(y, n, "y")
+        resolved = _resolve_task(y_raw, task)
+        if resolved == "regression":
+            try:
+                y_arr = y_raw.astype(np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("regression y must be numeric; pass task='classification'.") from exc
+            if not np.isfinite(y_arr).all():
+                raise ValueError("y must be finite for regression.")
+        else:
+            if pd.isna(y_raw).any():
+                raise ValueError("y must not contain missing labels for classification.")
+            y_arr = y_raw
+
+    k_free = k - n_anchor
+    if y_arr is None or k_free == 0:
+        score = np.ones(n, dtype=np.float64)
+    else:
+        g = _pilot_gradient(X, y_arr, resolved, pilot, pilot_size, rng, random_state, verbose)
+        lam = float(np.mean(g ** 2))
+        if not np.isfinite(lam) or lam <= 0:
+            warnings.warn(
+                "pilot fits every row exactly; sampling with equal probability.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            score = np.ones(n, dtype=np.float64)
+        else:
+            score = np.sqrt(g ** 2 + lam)
+
+    free = ~anchors
+    pi = np.ones(n, dtype=np.float64)
+    if k_free > 0:
+        pi_free = _capped_pi(score[free], k_free)
+        if uniform_mix > 0:
+            pi_free = (1.0 - uniform_mix) * pi_free + uniform_mix * k_free / free.sum()
+        pi[free] = pi_free
+        order = _draw_order(n, groups, time, rng)
+        drawn = _systematic(order[free[order]], pi, k_free, rng)
+    else:
+        drawn = np.array([], dtype=np.int64)
+    idx = np.sort(np.r_[np.flatnonzero(anchors), drawn]).astype(np.int64)
+    inclusion = pi[idx]
+    weights = 1.0 / inclusion
+    weights /= weights.mean()
+    if verbose:
+        logger.info(
+            f"Sampled {idx.size:,} of {n:,} rows ({idx.size / n:.1%}); "
+            f"max weight {weights.max():.2f}, Kish fraction "
+            f"{weights.sum() ** 2 / (weights ** 2).sum() / idx.size:.2f}."
+        )
+    return RowSample(idx, weights, inclusion, n, resolved)
+
+
+# =============================================================================
+# DataFrame convenience API
+# =============================================================================
 
 
 def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
-    if not _is_real_like(config.sample_frac):
-        raise TypeError("sample_frac must be a real number.")
-    if not np.isfinite(config.sample_frac):
-        raise ValueError("sample_frac must be finite.")
-    if not (0 < config.sample_frac <= 1):
-        raise ValueError("sample_frac must be in (0, 1].")
-    if not _is_int_like(config.min_per_group) or config.min_per_group < 1:
-        raise ValueError("min_per_group must be an integer >= 1.")
-    if not _is_int_like(config.pilot_sample_size) or config.pilot_sample_size < 1:
-        raise ValueError("pilot_sample_size must be an integer >= 1.")
-    if not _is_int_like(config.leverage_batch_size) or config.leverage_batch_size < 1:
-        raise ValueError("leverage_batch_size must be an integer >= 1.")
-    if config.svd_sample_size is not None and (
-        not _is_int_like(config.svd_sample_size) or config.svd_sample_size < 1
-    ):
-        raise ValueError("svd_sample_size must be an integer >= 1 or None.")
-    for name in ("weight_clip_quantile", "residual_weight_cap", "uniform_floor", "anchor_max_share"):
+    _validate_common(
+        config.size, config.task, config.pilot, config.pilot_size,
+        config.uniform_mix, config.random_state,
+    )
+    for name in ("group_col", "time_col"):
         value = getattr(config, name)
-        if not _is_real_like(value):
-            raise TypeError(f"{name} must be a real number.")
-        if not np.isfinite(value):
-            raise ValueError(f"{name} must be finite.")
-    if not (0 <= config.weight_clip_quantile <= 1):
-        raise ValueError("weight_clip_quantile must be in [0, 1].")
-    if config.residual_weight_cap < 0:
-        raise ValueError("residual_weight_cap must be >= 0.")
-    if not (0 <= config.uniform_floor <= 1):
-        raise ValueError("uniform_floor must be in [0, 1].")
-    if not (0 <= config.anchor_max_share <= 1):
-        raise ValueError("anchor_max_share must be in [0, 1].")
-    if config.group_col is not None and not isinstance(config.group_col, str):
-        raise TypeError("group_col must be a string or None.")
-    if config.time_col is not None and not isinstance(config.time_col, str):
-        raise TypeError("time_col must be a string or None.")
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"{name} must be a string or None.")
     if config.anchor_fn is not None and not callable(config.anchor_fn):
         raise TypeError("anchor_fn must be callable or None.")
-    if config.random_state is not None and not _is_int_like(config.random_state):
-        raise TypeError("random_state must be an integer or None.")
     if not isinstance(config.verbose, (bool, np.bool_)):
         raise TypeError("verbose must be a bool.")
 
 
-# =============================================================================
-# Smart Sampler Configuration
-# =============================================================================
-
 @dataclass
 class SmartSamplerConfig:
-    """
-    Configuration for smart sampling behavior.
+    """Settings for :func:`smart_sample` and ``StabilitySelector(use_smart_sampler=True)``.
+
+    Every field mirrors the keyword of the same name in :func:`sample_rows`;
+    ``group_col``, ``time_col`` and ``anchor_fn`` name DataFrame columns and
+    an anchor rule instead of passing arrays.
 
     Parameters
     ----------
-    sample_frac : float
-        Target fraction of rows to sample.
+    size : float or int, default=0.2
+        Rows to keep: a fraction in ``(0, 1]`` or a row count.
     group_col : str, optional
-        Column defining groups/entities (e.g., user_id, patient_id, ticker).
-        If None, treats all rows as one group.
+        Entity column; spreads the draw across entities.
     time_col : str, optional
-        Column defining time ordering within groups.
-    min_per_group : int
-        Minimum rows to keep per group.
-    pilot_sample_size : int
-        Size of pilot sample for residual estimation.
-    leverage_batch_size : int
-        Batch size for leverage score computation (memory vs speed).
-    svd_sample_size : int, optional
-        Row subsample size for randomized SVD (speed on huge n). If set below n, leverage
-        scores become approximate. If None, uses all rows.
-    weight_clip_quantile : float
-        Quantile for clipping extreme weights.
-    residual_weight_cap : float
-        Maximum weight for residual-based scores (vs leverage).
-    uniform_floor : float
-        Minimum base probability (ensures coverage).
+        Time column; spreads the draw along each entity's timeline.
+    task : {"auto", "regression", "classification"}, default="auto"
+        How the pilot's gradient is computed.
+    pilot : "auto", estimator, array-like or None, default="auto"
+        Pilot model; see :func:`sample_rows`.
+    pilot_size : float or int, default=0.02
+        Rows used to fit the pilot.
+    uniform_mix : float, default=0.0
+        Share of probability spread evenly over rows.
     anchor_fn : callable, optional
-        Function(df, group_col, time_col) -> boolean mask identifying anchor rows.
-        Retained anchors are included with probability 1. At least one anchor is
-        retained per non-empty group when ``anchor_max_share`` is positive.
-    anchor_max_share : float
-        Maximum share of per-group quota for anchors.
-    random_state : int, optional
-        Random seed.
+        ``anchor_fn(df, group_col, time_col) -> bool mask`` of rows that must
+        be kept, e.g. :func:`sift.sampling.first_per_group`.
+    random_state : int or None, default=42
+        Seed.
     verbose : bool, default=False
-        Emit sampler progress at INFO on the ``sift`` logger.
+        Log progress at INFO on the ``sift`` logger.
 
     See Also
     --------
-    sift.smart_sample : Consumer of this configuration.
+    sift.sample_rows : The array-level sampler.
+    sift.smart_sample : DataFrame sampler that consumes this configuration.
     sift.panel_config : Preset for entity-over-time data.
-    sift.cross_section_config : Preset for independent rows.
 
     Examples
     --------
     >>> import dataclasses
     >>> from sift import SmartSamplerConfig
-    >>> config = SmartSamplerConfig(sample_frac=0.25, group_col="team",
-    ...                             random_state=0, verbose=False)
-    >>> config.sample_frac, config.group_col
-    (0.25, 'team')
-    >>> config.min_per_group, config.uniform_floor
-    (2, 0.05)
-
-    The dataclass is mutable, so a preset can be adjusted in place or copied
-    with ``dataclasses.replace``:
-
-    >>> dataclasses.replace(config, sample_frac=0.1).sample_frac
-    0.1
+    >>> config = SmartSamplerConfig(size=0.25, group_col="team")
+    >>> config.size, config.pilot, config.uniform_mix
+    (0.25, 'auto', 0.0)
+    >>> dataclasses.replace(config, size=10_000).size
+    10000
     """
-    sample_frac: float = 0.10
+
+    size: float | int = DEFAULT_SIZE
     group_col: Optional[str] = None
     time_col: Optional[str] = None
-    min_per_group: int = 2
-    pilot_sample_size: int = 50_000
-    leverage_batch_size: int = 200_000
-    svd_sample_size: Optional[int] = None
-    weight_clip_quantile: float = 0.99
-    residual_weight_cap: float = 0.4
-    uniform_floor: float = 0.05
+    task: str = "auto"
+    pilot: Any = "auto"
+    pilot_size: float | int = DEFAULT_PILOT_SIZE
+    uniform_mix: float = 0.0
     anchor_fn: Optional[Callable] = None
-    anchor_max_share: float = 0.4
     random_state: Optional[int] = 42
     verbose: bool = False
 
@@ -185,53 +625,93 @@ class SmartSamplerConfig:
         _validate_smart_sampler_config(self)
 
 
-# =============================================================================
-# Smart Sampler
-# =============================================================================
-
-@dataclass(frozen=True)
-class SmartSampleArrays:
-    df: pd.DataFrame
-    Xs: np.ndarray
-    y: np.ndarray | None
-    group_indices: Dict[object, np.ndarray]
+def _removed_field_error(names) -> TypeError:
+    details = "; ".join(
+        f"{name}: {_REMOVED_FIELDS[name]}" for name in sorted(names) if name in _REMOVED_FIELDS
+    )
+    suffix = f" sift 2.0 changes: {details}." if details else ""
+    return TypeError(f"Unknown SmartSamplerConfig field(s): {sorted(names)}.{suffix}")
 
 
-@dataclass(frozen=True)
-class SmartSampleScores:
-    leverage: np.ndarray
-    residual: np.ndarray
-    base: np.ndarray
-    beta: float
-
-
-def _resolve_smart_config(
-    config: Optional[SmartSamplerConfig],
-    overrides: dict,
-) -> SmartSamplerConfig:
+def _resolve_smart_config(config: Optional[SmartSamplerConfig], overrides: dict) -> SmartSamplerConfig:
+    valid = {f.name for f in fields(SmartSamplerConfig)}
+    unknown = set(overrides) - valid
+    if unknown:
+        raise _removed_field_error(unknown)
     if config is None:
         return SmartSamplerConfig(**overrides)
+    if not isinstance(config, SmartSamplerConfig):
+        raise TypeError("config must be a SmartSamplerConfig or None.")
     if overrides:
-        valid_fields = {field.name for field in fields(SmartSamplerConfig)}
-        unknown = sorted(set(overrides) - valid_fields)
-        if unknown:
-            raise TypeError(f"Unknown SmartSamplerConfig override(s): {unknown}")
         return replace(config, **overrides)
     _validate_smart_sampler_config(config)
     return config
 
 
-def _validate_smart_columns(
+def smart_sample(
     df: pd.DataFrame,
     feature_cols: List[str],
     y_col: str,
-    config: SmartSamplerConfig,
-) -> None:
-    required = set(feature_cols + [y_col])
-    if config.group_col:
-        required.add(config.group_col)
-    if config.time_col:
-        required.add(config.time_col)
+    config: Optional[SmartSamplerConfig] = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """Keep the most informative rows of a DataFrame, with a ``sample_weight`` column.
+
+    DataFrame front end to :func:`sample_rows`: fits a pilot on
+    ``feature_cols``, draws exactly ``size`` rows weighted toward the rows the
+    pilot gets wrong, and returns them (original index preserved) with exact
+    inverse-probability weights rescaled to mean 1.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input data.
+    feature_cols : list of str
+        Numeric feature columns for the pilot (NaN allowed).
+    y_col : str
+        Target column.
+    config : SmartSamplerConfig, optional
+        Settings. If None, defaults plus keyword overrides are used.
+    **kwargs
+        Override individual ``SmartSamplerConfig`` fields by name.
+
+    Returns
+    -------
+    DataFrame
+        The kept rows in input order with an added ``sample_weight`` column.
+
+    See Also
+    --------
+    sift.sample_rows : Array-level sampler returning indices and weights.
+    sift.panel_config : Preset for entity-over-time data.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from sift import smart_sample
+    >>> rng = np.random.default_rng(0)
+    >>> df = pd.DataFrame({
+    ...     "x0": rng.normal(size=6_000),
+    ...     "x1": rng.normal(size=6_000),
+    ...     "team": np.repeat([f"t{i}" for i in range(6)], 1_000),
+    ... })
+    >>> df["y"] = 2.0 * df["x0"] - df["x1"] + rng.standard_t(3, size=6_000)
+    >>> sample = smart_sample(df, ["x0", "x1"], "y", size=0.25, group_col="team",
+    ...                       random_state=0)
+    >>> len(sample), list(sample.columns)
+    (1500, ['x0', 'x1', 'team', 'y', 'sample_weight'])
+    >>> round(float(sample["sample_weight"].mean()), 6)
+    1.0
+    """
+    config = _resolve_smart_config(config, kwargs)
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("smart_sample requires a pandas DataFrame; use sample_rows for arrays.")
+    feature_cols = list(feature_cols)
+    required = set(feature_cols) | {y_col}
+    for col in (config.group_col, config.time_col):
+        if col:
+            required.add(col)
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
@@ -241,507 +721,47 @@ def _validate_smart_columns(
             "'sample_weight' column, but the input already has one. Rename or "
             "drop that column first so a feature is not silently overwritten."
         )
-
-
-def _prepare_scaled_matrix(df: pd.DataFrame, feature_cols: List[str]) -> np.ndarray:
-    from sift._impute import mean_impute
-
-    X = df[feature_cols].to_numpy(dtype=np.float32, copy=True)
-    X = mean_impute(X, copy=False)
-
-    mu = X.mean(axis=0, dtype=np.float64)
-    sigma = X.std(axis=0, dtype=np.float64)
-    sigma[sigma < 1e-12] = 1.0
-    X -= mu.astype(np.float32)
-    X /= sigma.astype(np.float32)
-    if not np.isfinite(X).all():
-        raise ValueError(
-            "X contains non-finite values after imputation/scaling; check for extreme magnitudes."
-        )
-    return X
-
-
-def _prepare_smart_arrays(
-    df: pd.DataFrame,
-    feature_cols: List[str],
-    y_col: str,
-    config: SmartSamplerConfig,
-) -> SmartSampleArrays:
-    _validate_smart_columns(df, feature_cols, y_col, config)
-    df_reset = df.reset_index(drop=True)
-    Xs = _prepare_scaled_matrix(df_reset, feature_cols)
-    y = None
-    if config.residual_weight_cap > 0:
-        y = df_reset[y_col].to_numpy(dtype=np.float64, copy=True)
-        if not np.isfinite(y).all():
-            raise ValueError("y must be finite (no NaN or inf) when residual_weight_cap > 0")
-    return SmartSampleArrays(
-        df=df_reset,
-        Xs=Xs,
-        y=y,
-        group_indices=_build_group_indices(df_reset, config),
-    )
-
-
-def _build_group_indices(
-    df: pd.DataFrame,
-    config: SmartSamplerConfig,
-) -> Dict[object, np.ndarray]:
-    if not config.group_col:
-        return {"_all": np.arange(len(df))}
-
-    group_vals = df[config.group_col]
-    group_key = group_vals.astype("object")
-    if group_vals.isna().any():
-        sentinel = "__SIFT_MISSING_GROUP__"
-        existing = set(group_key[~group_vals.isna()].unique().tolist())
-        while sentinel in existing:
-            sentinel += "_"
-        group_key = group_key.where(~group_vals.isna(), sentinel)
-    return {g: idx for g, idx in df.groupby(group_key, sort=False).indices.items()}
-
-
-def _compute_svd_factors(
-    Xs: np.ndarray,
-    config: SmartSamplerConfig,
-    rng: np.random.Generator,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
-    n, d = Xs.shape
-    k = int(min(128, d, max(16, np.ceil(np.log2(d + 1)) * 8)))
-    k = min(k, max(1, min(n, d) - 1))
-    try:
-        X_svd = Xs
-        if config.svd_sample_size is not None:
-            svd_rows = min(n, int(config.svd_sample_size))
-            if svd_rows < n:
-                if config.verbose:
-                    logger.info(
-                        f"SVD computed on {svd_rows:,}/{n:,} rows; leverage scores are approximate."
-                    )
-                svd_idx = rng.choice(n, size=svd_rows, replace=False)
-                X_svd = Xs[svd_idx]
-        n_svd = X_svd.shape[0]
-        k_svd = min(k, max(1, min(n_svd, d) - 1))
-        _, S, Vt = randomized_svd(
-            X_svd,
-            n_components=k_svd,
-            n_iter=4,
-            random_state=config.random_state,
-        )
-        V = Vt.T.astype(np.float32)
-        S = S.astype(np.float32)
-        return V, S, S * S
-    except Exception as e:
-        warnings.warn(
-            f"SVD failed ({e}); using uniform geometry scores.",
-            RuntimeWarning,
-            stacklevel=4,
-        )
-        return None, None, None
-
-
-def _compute_residual_scores(
-    Xs: np.ndarray,
-    y: np.ndarray | None,
-    config: SmartSamplerConfig,
-    rng: np.random.Generator,
-) -> Tuple[np.ndarray, float]:
-    n = Xs.shape[0]
-    ps = min(n, config.pilot_sample_size)
-    pilot_all = rng.choice(n, size=ps, replace=False)
-
-    min_val_size = min(100, ps // 4)
-    half = max(min_val_size, ps // 2)
-    half = min(half, ps - min_val_size)
-
-    pilot_train = pilot_all[:half]
-    pilot_val = pilot_all[half:]
-
-    beta = 0.0
-    res_scores = np.ones(n, dtype=np.float32)
-    if config.residual_weight_cap <= 0:
-        return res_scores, beta
-
-    assert y is not None
-    if len(pilot_train) >= 50 and len(pilot_val) >= 20:
-        try:
-            y_float = np.asarray(y, dtype=np.float64)
-            target_origin = float(np.median(y_float[pilot_all]))
-            y_centered = y_float - target_origin
-            var_y = float(np.var(y_centered[pilot_all]))
-            if not np.isfinite(var_y) or var_y <= 0.0:
-                return res_scores, beta
-
-            pilot_train_model = HistGradientBoostingRegressor(
-                max_iter=50,
-                max_depth=4,
-                learning_rate=0.1,
-                random_state=config.random_state,
+    if not feature_cols and config.pilot is not None and not _is_precomputed_pilot(config.pilot):
+        raise ValueError("feature_cols must name at least one column to fit the pilot.")
+    X = df[feature_cols]
+    if isinstance(config.pilot, str):
+        bad = [c for c in feature_cols if not pd.api.types.is_numeric_dtype(df[c])
+               or pd.api.types.is_bool_dtype(df[c])]
+        if bad:
+            raise TypeError(
+                f"smart_sample's default pilot needs numeric feature columns; "
+                f"non-numeric: {bad[:5]}"
             )
-            pilot_val_model = HistGradientBoostingRegressor(
-                max_iter=50,
-                max_depth=4,
-                learning_rate=0.1,
-                random_state=config.random_state,
-            )
-            pilot_train_model.fit(Xs[pilot_train], y_centered[pilot_train])
-            pilot_val_model.fit(Xs[pilot_val], y_centered[pilot_val])
-
-            # Two-fold cross-fitting: neither pilot fold is scored by a model
-            # trained on that fold.
-            preds = np.empty(n, dtype=np.float64)
-            preds[pilot_val] = pilot_train_model.predict(Xs[pilot_val])
-            preds[pilot_train] = pilot_val_model.predict(Xs[pilot_train])
-            nonpilot_mask = np.ones(n, dtype=bool)
-            nonpilot_mask[pilot_all] = False
-            nonpilot = np.flatnonzero(nonpilot_mask)
-            if nonpilot.size:
-                # Assign each non-pilot row to exactly one unseen model. An
-                # ensemble prediction would have lower residual variance than
-                # the one-model OOF predictions used for pilot rows, making
-                # pilot membership itself affect sampling scores.
-                assignment_rng = np.random.default_rng(config.random_state)
-                use_train_model = assignment_rng.integers(
-                    0,
-                    2,
-                    size=nonpilot.size,
-                    dtype=np.int8,
-                ).astype(bool)
-                train_model_rows = nonpilot[use_train_model]
-                val_model_rows = nonpilot[~use_train_model]
-                if train_model_rows.size:
-                    preds[train_model_rows] = pilot_train_model.predict(
-                        Xs[train_model_rows]
-                    )
-                if val_model_rows.size:
-                    preds[val_model_rows] = pilot_val_model.predict(Xs[val_model_rows])
-            if not np.isfinite(preds).all():
-                raise ValueError("pilot model produced non-finite predictions")
-
-            pilot_resid = y_centered[pilot_all] - preds[pilot_all]
-            pilot_mse = float(np.mean(pilot_resid ** 2))
-            r2 = max(0.0, min(1.0, 1.0 - pilot_mse / var_y))
-
-            resid_all = np.abs(y_centered - preds)
-            mean_resid = float(np.mean(resid_all))
-            if not np.isfinite(mean_resid) or mean_resid <= 0.0:
-                return res_scores, beta
-            res_scores = resid_all / mean_resid
-            res_scores = np.maximum(res_scores, np.finfo(np.float64).tiny)
-            res_scores /= res_scores.mean()
-
-            beta = min(config.residual_weight_cap, r2)
-            if config.verbose:
-                logger.info(f"Pilot R² = {r2:.3f} → residual weight β = {beta:.3f}")
-        except Exception as e:
-            warnings.warn(
-                f"Pilot model failed ({e}); using geometry only.",
-                RuntimeWarning,
-                stacklevel=4,
-            )
-    elif config.verbose:
-        warnings.warn(
-            f"Dataset too small for pilot model (n={n}); using geometry only.",
-            RuntimeWarning,
-            stacklevel=4,
-        )
-    return res_scores, beta
-
-
-def _compute_sampling_scores(
-    arrays: SmartSampleArrays,
-    config: SmartSamplerConfig,
-    rng: np.random.Generator,
-) -> SmartSampleScores:
-    V, S, s2 = _compute_svd_factors(arrays.Xs, config, rng)
-    lev_scores = leverage_scores_multi_alpha(arrays.Xs, V, S, s2, config.leverage_batch_size)
-    res_scores, beta = _compute_residual_scores(arrays.Xs, arrays.y, config, rng)
-    base_scores = (1.0 - beta) * lev_scores + beta * res_scores
-    base_scores = (
-        (1 - config.uniform_floor)
-        * (base_scores / (base_scores.mean() + 1e-12))
-        + config.uniform_floor
+    anchors = None
+    if config.anchor_fn is not None:
+        anchors = np.asarray(
+            config.anchor_fn(df.reset_index(drop=True), config.group_col, config.time_col),
+            dtype=bool,
+        ).reshape(-1)
+        if anchors.size != len(df):
+            raise ValueError(f"anchor_fn returned {anchors.size} rows but df has {len(df)} rows")
+    result = _sample_rows(
+        X,
+        df[y_col],
+        config.size,
+        groups=df[config.group_col] if config.group_col else None,
+        time=df[config.time_col] if config.time_col else None,
+        task=config.task,
+        pilot=config.pilot,
+        pilot_size=config.pilot_size,
+        uniform_mix=config.uniform_mix,
+        always_include=anchors,
+        random_state=config.random_state,
+        verbose=bool(config.verbose),
     )
-    return SmartSampleScores(
-        leverage=lev_scores,
-        residual=res_scores,
-        base=base_scores,
-        beta=beta,
-    )
-
-
-def _build_anchor_mask(df: pd.DataFrame, config: SmartSamplerConfig) -> np.ndarray:
-    if config.anchor_fn is None:
-        return np.zeros(len(df), dtype=bool)
-    anchor_mask = np.asarray(
-        config.anchor_fn(df, config.group_col, config.time_col),
-        dtype=bool,
-    ).reshape(-1)
-    if len(anchor_mask) != len(df):
-        raise ValueError(
-            f"anchor_fn returned {len(anchor_mask)} rows but df has {len(df)} rows"
-        )
-    if config.verbose and anchor_mask.any():
-        logger.info(f"Anchors: {anchor_mask.sum():,} rows")
-    return anchor_mask
-
-
-def _poisson_calibrated(
-    local_scores: np.ndarray,
-    budget: int,
-    rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
-    m = local_scores.size
-    if budget <= 0 or m == 0:
-        return np.array([], dtype=int), np.zeros(0, dtype=np.float32)
-
-    s = np.maximum(local_scores.astype(np.float64), 0.0)
-    s_sum = s.sum()
-    if s_sum == 0:
-        p = np.full(m, 1.0 / m, dtype=np.float64)
-    else:
-        p = s / s_sum
-
-    p_max = p.max()
-    if p_max == 0:
-        return np.array([], dtype=int), np.zeros(0, dtype=np.float32)
-
-    def expected(tau: float) -> float:
-        return float(np.minimum(1.0, tau * p).sum())
-
-    lo, hi = 0.0, max(1.0, budget / p_max)
-    while expected(hi) < budget and hi < 1e12:
-        hi *= 2.0
-    for _ in range(40):
-        mid = 0.5 * (lo + hi)
-        if expected(mid) < budget:
-            lo = mid
-        else:
-            hi = mid
-    pi = np.minimum(1.0, hi * p)
-
-    chosen = rng.random(m) < pi
-    return np.nonzero(chosen)[0].astype(int), pi.astype(np.float32)
-
-
-def _add_rows(pi: np.ndarray, indices: np.ndarray, pis: np.ndarray) -> None:
-    if indices.size == 0:
-        return
-    idx = np.asarray(indices, dtype=np.intp)
-    vals = np.asarray(pis, dtype=np.float32)
-    np.add.at(pi, idx, vals)
-    # Only the touched entries can exceed 1; clipping the whole vector here
-    # made every per-group call O(n).
-    pi[idx] = np.minimum(pi[idx], 1.0)
-
-
-def _cap_group_anchors(
-    g_idx: np.ndarray,
-    anchor_mask: np.ndarray,
-    base_scores: np.ndarray,
-    target_g: int,
-    config: SmartSamplerConfig,
-) -> np.ndarray:
-    anchor_pos = np.flatnonzero(anchor_mask[g_idx])
-    if not anchor_pos.size:
-        return anchor_pos
-    if config.anchor_max_share <= 0 or target_g <= 0:
-        return np.array([], dtype=int)
-
-    max_anchor_keep = max(1, int(np.floor(config.anchor_max_share * target_g)))
-    max_anchor_keep = min(max_anchor_keep, target_g)
-    if anchor_pos.size <= max_anchor_keep:
-        return anchor_pos
-
-    anchor_scores = base_scores[g_idx[anchor_pos]]
-    top_local = np.argpartition(-anchor_scores, max_anchor_keep - 1)[:max_anchor_keep]
-    return anchor_pos[top_local]
-
-
-def _sample_group_into_pi(
-    pi: np.ndarray,
-    g_idx: np.ndarray,
-    base_scores: np.ndarray,
-    anchor_mask: np.ndarray,
-    config: SmartSamplerConfig,
-    rng: np.random.Generator,
-) -> None:
-    n_g = g_idx.size
-    target_g = max(config.min_per_group, int(np.floor(config.sample_frac * n_g)))
-    if target_g >= n_g:
-        _add_rows(pi, g_idx, np.ones(n_g, dtype=np.float32))
-        return
-
-    anchor_pos = _cap_group_anchors(g_idx, anchor_mask, base_scores, target_g, config)
-    g_anchor = g_idx[anchor_pos]
-    if g_anchor.size:
-        _add_rows(pi, g_anchor, np.ones(g_anchor.size, dtype=np.float32))
-
-    pool_mask = np.ones(n_g, dtype=bool)
-    if anchor_pos.size:
-        pool_mask[anchor_pos] = False
-    pool = g_idx[pool_mask]
-    remaining = max(0, target_g - g_anchor.size)
-
-    if remaining <= 0 or pool.size <= 0:
-        return
-
-    chosen_local, pi_local = _poisson_calibrated(base_scores[pool], remaining, rng)
-    if chosen_local.size:
-        _add_rows(pi, pool[chosen_local], pi_local[chosen_local])
-
-    short = remaining - chosen_local.size
-    if short <= 0:
-        return
-
-    leftover_mask = np.ones(pool.size, dtype=bool)
-    if chosen_local.size:
-        leftover_mask[chosen_local] = False
-    leftover = pool[leftover_mask]
-    if leftover.size == 0:
-        return
-
-    n_need = min(short, leftover.size)
-    if n_need > 0:
-        top_local = np.argpartition(-base_scores[leftover], n_need - 1)[:n_need]
-        need = leftover[top_local]
-        _add_rows(pi, need, np.ones(need.size, dtype=np.float32))
-
-
-def _sample_inclusion_probabilities(
-    arrays: SmartSampleArrays,
-    scores: SmartSampleScores,
-    anchor_mask: np.ndarray,
-    config: SmartSamplerConfig,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    pi = np.zeros(len(arrays.df), dtype=np.float32)
-    for g_idx in arrays.group_indices.values():
-        _sample_group_into_pi(pi, g_idx, scores.base, anchor_mask, config, rng)
-    return pi
-
-
-def _assemble_sample(
-    arrays: SmartSampleArrays,
-    pi: np.ndarray,
-    config: SmartSamplerConfig,
-) -> pd.DataFrame:
-    final_idx = np.flatnonzero(pi > 0)
-    final_pi = pi[final_idx].astype(np.float32, copy=True)
-    final_pi = np.clip(final_pi, 1e-12, 1.0)
-    final_w = 1.0 / final_pi
-
-    if 0.5 < config.weight_clip_quantile < 1.0 and final_w.size > 1:
-        cap = np.quantile(final_w, config.weight_clip_quantile)
-        final_w = np.minimum(final_w, cap)
-    final_w /= final_w.mean() + 1e-12
-
-    out = arrays.df.iloc[final_idx].copy()
-    out["sample_weight"] = final_w
-
-    if config.verbose:
-        n_groups = out[config.group_col].nunique() if config.group_col else 1
-        total_groups = len(arrays.group_indices)
-        logger.info(
-            f"Sampled {len(out):,} rows ({len(out)/len(arrays.df):.1%}), "
-            f"{n_groups:,}/{total_groups:,} groups"
-        )
-
-    return out.reset_index(drop=True)
-
-def smart_sample(
-    df: pd.DataFrame,
-    feature_cols: List[str],
-    y_col: str,
-    config: Optional[SmartSamplerConfig] = None,
-    **kwargs
-) -> pd.DataFrame:
-    """
-    Informative subsampler for large datasets.
-
-    Combines leverage-based geometric sampling with residual-based hard case
-    detection. Returns a sample with approximate inverse-probability weights
-    for bias reduction in downstream estimation.
-
-    Note: The weights are approximate due to deterministic top-up for minimum
-    group coverage. They reduce bias but are not exact Horvitz-Thompson weights.
-
-    Parameters
-    ----------
-    df : DataFrame
-        Input data with features, target, and optionally grouping columns.
-    feature_cols : list of str
-        Feature column names.
-    y_col : str
-        Target column name.
-    config : SmartSamplerConfig, optional
-        Configuration object. If None, uses defaults with any kwargs overrides.
-    **kwargs
-        Override individual ``SmartSamplerConfig`` fields by name. They
-        win over the matching fields of ``config``; a keyword that is not a
-        config field raises ``TypeError``.
-
-    Returns
-    -------
-    DataFrame
-        Sampled data with 'sample_weight' column (approximate inverse
-        inclusion probability, mean-normalized).
-
-    See Also
-    --------
-    SmartSamplerConfig : Every tunable field, with defaults.
-    sift.panel_config : Preset for entity-over-time data.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> import pandas as pd
-    >>> from sift import SmartSamplerConfig, smart_sample
-    >>> rng = np.random.default_rng(0)
-    >>> df = pd.DataFrame({
-    ...     "x0": rng.normal(size=600),
-    ...     "x1": rng.normal(size=600),
-    ...     "team": np.repeat([f"t{i}" for i in range(6)], 100),
-    ... })
-    >>> df["y"] = 2.0 * df["x0"] - df["x1"] + 0.1 * rng.normal(size=600)
-    >>> config = SmartSamplerConfig(sample_frac=0.25, group_col="team",
-    ...                             random_state=0, verbose=False)
-    >>> sample = smart_sample(df, ["x0", "x1"], "y", config)
-    >>> list(sample.columns)
-    ['x0', 'x1', 'team', 'y', 'sample_weight']
-    >>> sorted(sample["team"].unique())
-    ['t0', 't1', 't2', 't3', 't4', 't5']
-    >>> round(float(sample["sample_weight"].mean()), 3)
-    1.0
-
-    Keyword overrides replace the matching config fields, so a one-off tweak
-    needs no config object:
-
-    >>> smaller = smart_sample(df, ["x0", "x1"], "y", sample_frac=0.1,
-    ...                        random_state=0, verbose=False)
-    >>> len(smaller) < len(sample)
-    True
-    """
-    config = _resolve_smart_config(config, kwargs)
-    rng = np.random.default_rng(config.random_state)
-    arrays = _prepare_smart_arrays(df, feature_cols, y_col, config)
-
-    if config.verbose:
-        n, d = arrays.Xs.shape
-        target_total = int(np.floor(config.sample_frac * n))
-        logger.info(
-            f"Smart sampler: {n:,} rows × {d} features → target "
-            f"{target_total:,} ({config.sample_frac:.1%})"
-        )
-
-    scores = _compute_sampling_scores(arrays, config, rng)
-    anchor_mask = _build_anchor_mask(arrays.df, config)
-    pi = _sample_inclusion_probabilities(arrays, scores, anchor_mask, config, rng)
-    return _assemble_sample(arrays, pi, config)
+    out = df.iloc[result.indices].copy()
+    out["sample_weight"] = result.weights
+    return out
 
 
 __all__ = [
+    "RowSample",
     "SmartSamplerConfig",
-    "leverage_scores_multi_alpha",
+    "sample_rows",
     "smart_sample",
 ]

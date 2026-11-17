@@ -87,7 +87,7 @@ PUBLIC_API_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "Smart sampling",
-        ("SmartSamplerConfig", "smart_sample", "panel_config", "cross_section_config"),
+        ("sample_rows", "RowSample", "smart_sample", "SmartSamplerConfig", "panel_config"),
     ),
     (
         "Purged time-series CV",

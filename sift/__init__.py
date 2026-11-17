@@ -1,4 +1,4 @@
-__version__ = "1.0.3.dev0"
+__version__ = "2.0.0.dev0"
 
 from sift._logging import set_verbosity
 from sift.api import (
@@ -18,7 +18,7 @@ from sift.api import (
 )
 from sift.boruta import BorutaResult, BorutaSelector, select_boruta, select_boruta_shap
 from sift.importance import permutation_importance
-from sift.sampling import SmartSamplerConfig, cross_section_config, panel_config, smart_sample
+from sift.sampling import RowSample, SmartSamplerConfig, panel_config, sample_rows, smart_sample
 from sift.selectors import (
     CEFSPlusBinarySelector,
     CEFSPlusSelector,
@@ -119,10 +119,11 @@ __all__ = [
     "CEFSPlusBinarySelector",
     "KnockoffSelector",
     "permutation_importance",
+    "RowSample",
     "SmartSamplerConfig",
+    "sample_rows",
     "smart_sample",
     "panel_config",
-    "cross_section_config",
     "StabilitySelector",
     "stability_regression",
     "stability_classif",

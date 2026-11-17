@@ -232,14 +232,12 @@ def test_published_catboost_cells_bind_live_missing_extra_attempts(
             )
 
 
-def test_smart_sample_datetime_coercion_is_recorded(
+def test_smart_sample_rejects_datetime_features(
     matrix_mod, published_cells
 ) -> None:
     grid = {(cell.entry, cell.axis): cell for cell in published_cells}
     cell = grid[("smart_sample", "datetime_timedelta")]
-    assert cell.status == matrix_mod.SUPPORTED
-    assert "float32" in cell.note
-    assert "lossy" in cell.note
+    assert cell.status == matrix_mod.REJECTED
     assert "explicitly" in cell.note
 
 
