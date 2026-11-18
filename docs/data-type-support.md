@@ -222,9 +222,9 @@ copied onto this page.
 | `permutation_importance` | groups | supported | `groups` is accepted on the seeded baseline call |
 | `permutation_importance` | time | supported | `time` is accepted on the seeded baseline call |
 | `smart_sample` | ndarray | rejected | requires a pandas DataFrame; ndarray input is rejected |
-| `smart_sample` | categorical | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric features |
+| `smart_sample` | categorical | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric or boolean features |
 | `smart_sample` | sparse | rejected | requires a pandas DataFrame; sparse input is rejected |
-| `smart_sample` | datetime/timedelta | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric features |
+| `smart_sample` | datetime/timedelta | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric or boolean features |
 | `smart_sample` | weights | rejected | there is no input `sample_weight` argument; the sampler writes its own `sample_weight` column |
 | `smart_sample` | groups | supported | `groups` is accepted as `group_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `groups=` array argument |
 | `smart_sample` | time | supported | `time` is accepted as `time_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `time=` array argument |

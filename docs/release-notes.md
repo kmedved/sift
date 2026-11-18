@@ -2,6 +2,17 @@
 
 ## 2.0.1 (unreleased)
 
+### Fixed
+
+- `sample_rows(method="residual")` with the default pilot no longer casts
+  datetime and timedelta feature columns to low-precision floats. It now
+  rejects them with a `TypeError` that names the columns, as `smart_sample`
+  already did.
+- `smart_sample(method="residual")` with the default pilot now accepts boolean
+  feature columns, as `sample_rows` and sift's selectors do.
+- Both share one check and one message:
+  `pilot='auto' needs numeric or boolean features; non-numeric: [...]`.
+
 ### Documentation
 
 - The tutorial has a row-sampling branch: select on all rows when that is

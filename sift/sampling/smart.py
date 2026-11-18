@@ -295,16 +295,56 @@ def _take_rows(X, idx: np.ndarray):
     return np.asarray(X)[idx]
 
 
+_AUTO_PILOT_HINT = (
+    "Encode datetime, timedelta, text and categorical columns first, or pass your "
+    "own pilot estimator or precomputed predictions."
+)
+
+
+def _auto_pilot_error(bad: list) -> TypeError:
+    shown = f"{bad[:5]}{'...' if len(bad) > 5 else ''}"
+    return TypeError(
+        f"pilot='auto' needs numeric or boolean features; non-numeric: {shown}. "
+        f"{_AUTO_PILOT_HINT}"
+    )
+
+
+def _check_auto_pilot_features(X) -> None:
+    """Reject features the default pilot cannot use, the way sift's selectors do.
+
+    Numeric and boolean columns pass. Datetime and timedelta columns are rejected
+    instead of being cast to low-precision floats, and so are text and
+    categorical columns.
+    """
+    from sift._preprocess import _is_temporal_feature_dtype, reject_datetime_like_features
+
+    if hasattr(X, "to_pandas"):  # Polars and Arrow frames
+        X = X.to_pandas()
+    if isinstance(X, pd.DataFrame):
+        bad = [
+            name for name, dtype in X.dtypes.items()
+            if _is_temporal_feature_dtype(dtype) or not pd.api.types.is_numeric_dtype(dtype)
+        ]
+        if bad:
+            raise _auto_pilot_error(bad)
+        return
+    try:
+        reject_datetime_like_features(X)
+    except ValueError as exc:  # temporal array or object array of timestamps
+        raise _auto_pilot_error(["<array>"]) from exc
+    kind = getattr(np.asarray(X), "dtype", np.dtype(object)).kind
+    if kind in "USc":
+        raise _auto_pilot_error(["<array>"])
+
+
 def _auto_matrix(X) -> np.ndarray:
     from sift._preprocess import to_numpy
 
+    _check_auto_pilot_features(X)
     try:
         Xa = to_numpy(X, dtype=np.float32)
     except (TypeError, ValueError) as exc:
-        raise TypeError(
-            "pilot='auto' needs numeric features; encode categorical or datetime "
-            "columns first, or pass your own pilot estimator."
-        ) from exc
+        raise _auto_pilot_error(["<array>"]) from exc
     if Xa.ndim != 2:
         raise ValueError(f"X must be 2-D; got shape {Xa.shape}.")
     if np.isinf(Xa).any():
@@ -466,7 +506,9 @@ def sample_rows(
         multiclass labels.
     pilot : "auto", estimator or array-like, default="auto"
         ``method="residual"`` only. ``"auto"`` fits a 100-iteration
-        scikit-learn HistGradientBoosting model. An estimator (for example a
+        scikit-learn HistGradientBoosting model on numeric or boolean features;
+        datetime, timedelta, text and categorical columns raise ``TypeError``
+        and must be encoded first. An estimator (for example a
         100-tree booster from your own library) is cloned and fitted
         instead; classification pilots need ``predict_proba``. An array of
         length ``n_rows`` is used as precomputed predictions (probabilities
@@ -813,7 +855,7 @@ def smart_sample(
         Input data.
     feature_cols : list of str
         Feature columns. With ``method="residual"`` they feed the pilot and,
-        for the default pilot, must be numeric (NaN allowed).
+        for the default pilot, must be numeric or boolean (NaN allowed).
     y_col : str
         Target column.
     config : SmartSamplerConfig, optional
@@ -876,13 +918,7 @@ def smart_sample(
         raise ValueError("feature_cols must name at least one column to fit the pilot.")
     X = df[feature_cols]
     if residual and isinstance(config.pilot, str):
-        bad = [c for c in feature_cols if not pd.api.types.is_numeric_dtype(df[c])
-               or pd.api.types.is_bool_dtype(df[c])]
-        if bad:
-            raise TypeError(
-                f"smart_sample's default pilot needs numeric feature columns; "
-                f"non-numeric: {bad[:5]}"
-            )
+        _check_auto_pilot_features(X)
     anchors = None
     if config.anchor_fn is not None:
         anchors = np.asarray(

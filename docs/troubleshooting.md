@@ -290,16 +290,15 @@ draw. Raise `size` or force fewer rows. The related message
 `always_include marks N rows but size allows only K` means the forced rows
 alone exceed the budget.
 
-### `TypeError: pilot='auto' needs numeric features; …`
+### `TypeError: pilot='auto' needs numeric or boolean features; non-numeric: […]`
 
-The default residual pilot is a scikit-learn HistGradientBoosting model, which
-needs numeric columns. `sample_rows` raises this for text and categorical
-columns. `smart_sample` checks more strictly and raises
-`TypeError: smart_sample's default pilot needs numeric feature columns; non-numeric: [...]`
-for any non-numeric feature column, including datetime, timedelta and boolean
-ones. Encode those columns first, pass your own `pilot` estimator, or pass
-precomputed predictions as `pilot`. The uniform and chronological methods do
-not fit a pilot and accept any columns.
+The default residual pilot is a scikit-learn HistGradientBoosting model. Like
+sift's selectors, `sample_rows` and `smart_sample` accept numeric and boolean
+feature columns for it and reject datetime, timedelta, text and categorical
+ones, which the message lists by name (`'<array>'` for an array). Encode those
+columns first, pass your own `pilot` estimator, or pass precomputed predictions
+as `pilot`. The uniform and chronological methods do not fit a pilot and accept
+any columns.
 
 ### A sample from 1.x code changed after upgrading to 2.0
 
