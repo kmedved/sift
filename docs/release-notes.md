@@ -1,6 +1,6 @@
 # Release Notes
 
-## 2.0.1 (unreleased)
+## 2.0.1 (2026-11-17)
 
 ### Fixed
 
