@@ -23,7 +23,7 @@ flowchart TD
     Payloads --> Binary["sift.selection.cefsplus_binary"]
     Loops --> Estimators["sift.estimators relevance and joint_mi"]
     AutoK --> AutoKCore["sift.selection.auto_k and auto_k_core"]
-    Stability --> Sampling["sift.sampling.smart, anchors, and stability"]
+    Stability --> Sampling["sift.sampling: sample_rows, chronological, anchors, bootstrap"]
     Importance --> Permute["sift._permute"]
     Cache --> Gaussian["Gaussian mRMR, JMI, JMIM, CEFS+"]
     Binary --> BinaryPath["Binary CEFS+ logistic path"]
@@ -50,7 +50,7 @@ flowchart TD
 | `sift/selection/orchestration.py` | Internal F6 `SelectionBackend` / `run_selection` contract used by generic `ModelSelector` and the CatBoost preset. |
 | `sift/selection/model_selector.py` | Generic `ModelSelector` around a cloned sklearn estimator (RFE/forward/stability, group/time CV, opt-in nested scoring). |
 | `sift/estimators/` | Relevance scores, Gaussian copula transforms, classic numeric `ClassicFeatureCache`, Gaussian knockoff samplers, and joint mutual-information estimators. |
-| `sift/sampling/` | Smart sampling, anchor strategies, and bootstrap split generators. |
+| `sift/sampling/` | Row sampling: `sample_rows`, `RowSample`, `smart_sample` and `SmartSamplerConfig` (`smart.py`), `chronological_sample` (`chronological.py`), anchor helpers and `panel_config` (`anchors.py`), and bootstrap split generators (`stability.py`). |
 | `sift/stability.py` | Stability selection estimator and convenience wrappers. |
 | `sift/importance.py` and `sift/_permute.py` | Permutation importance and grouped/time-aware permutation strategies. |
 | `sift/boruta.py` and `sift/catboost.py` | Boruta, Boruta-Shap, and optional CatBoost-based selectors. |

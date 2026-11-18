@@ -268,8 +268,8 @@ frequency(f) = selected_bootstraps(f) / n_bootstrap
 ```
 
 SIFT supports regression and classification, optional sample weights, group
-bootstrap, block bootstrap for grouped time series, and smart sampling for large
-datasets.
+bootstrap, block bootstrap for grouped time series, and one up-front
+[row sample](#row-sampling) for large datasets (`use_smart_sampler=True`).
 
 Use stability selection when:
 
@@ -330,6 +330,87 @@ SIFT uses several information proxies internally:
 | KSG | Nearest-neighbor MI | Nonlinear continuous signal | More expensive |
 | R2 proxy | Convert predictive R2 to MI-like score | Fast approximation | Linear-model bias |
 | Logistic/Brier proxy | Binary conditional score | Binary targets | Not a multiclass generalization |
+
+## Row Sampling
+
+`sample_rows` (and `smart_sample`, its DataFrame form) keeps exactly `k` of
+`n` rows without replacement, where `size` is a fraction or a count. It
+records each kept row's inclusion probability `pi`. Rows in `always_include`
+are kept with `pi = 1`; the other `n - n_forced` rows share the remaining
+`k - n_forced` draws, so the fraction drawn from them is
+
+```text
+f = (k - n_forced) / (n - n_forced)
+```
+
+which is `k / n` when nothing is forced.
+
+**Uniform** (default). A simple random sample of the non-forced rows; each has
+`pi = f`.
+
+**Chronological.** Rows are grouped by stratum (for example season) and by
+entity, and each group is sorted by time.
+
+1. **Quotas.** Strata are visited in turn and the entities inside each in a
+   random order. One running remainder with a random start hands each
+   stratum, and each entity within it, the floor or ceiling of its
+   proportional share (`k * n_group / n` for a group of `n_group` rows). The quotas add up to exactly `k`, and
+   a group smaller than `n / k` rows can get zero rows in a given draw.
+2. **Spread.** A group's time-ordered rows are rotated by a random offset and
+   cut into `quota` nearly equal blocks; one row is drawn at random from each
+   block, so the kept rows cover the whole timeline.
+
+Every row has the same marginal inclusion probability `f`, so without forced
+rows the weights are all 1. This is `sift.sampling.chronological_sample`.
+
+**Residual** (opt-in).
+
+1. **Pilot.** A cheap model is fitted on a random `pilot_size` slice (default
+   2% of rows, at least 1,000). The default is a 100-iteration
+   HistGradientBoosting model; any estimator or an array of precomputed
+   predictions can replace it.
+2. **Score.** Each row gets the size of the pilot's loss gradient:
+   `g = |y - y_hat|` for regression and `g = ||onehot(y) - p||` for
+   classification. Rows in the pilot slice are scored in-sample like the rest.
+3. **Probabilities.** Shares proportional to `g` are scaled to sum to the
+   budget; any share above 1 is set to 1 and the rest are rescaled until none
+   is. Then a fixed part `m = uniform_mix` (default 0.5) is spread evenly:
+
+   ```text
+   pi = (1 - m) * pi_g + m * f
+   ```
+
+4. **Draw.** Systematic sampling with probability proportional to `pi`: the
+   rows are shuffled, cumulative `pi` is laid along a line, and the rows hit
+   by points `u, u + 1, ..., u + k - 1` (one random `u`) are kept. That gives
+   exactly `k` rows, each with inclusion probability `pi`. The shuffle stops a
+   repeating pattern in the data from lining up with the evenly spaced points.
+
+**Weights.** Every method returns
+
+```text
+weight_i = (1 / pi_i) / mean(1 / pi_j over the kept rows)
+```
+
+which has mean one and is meant for fitting. Without forced rows the uniform
+and chronological weights are all 1. With forced rows the forced rows get the
+smallest weight; for example, keeping 2 of 5 rows with one forced gives weights
+0.4 and 1.6. The raw `1 / pi_i` give the Horvitz-Thompson estimate
+`sum(y_i / pi_i)` of a full-data total, which is unbiased because every row has
+`pi > 0`. The even share bounds every raw weight in the residual method:
+
+```text
+1 / pi <= 1 / (m * f)
+```
+
+That is 10 at `size=0.2` and `m=0.5`, but forced rows shrink `f`: with 100
+rows, `k = 20` and 19 forced rows, `f = 1/81` and a raw weight can reach 162.
+
+Why the residual score: for observed labels, optimal-subsampling results
+scale a row's probability with its residual, usually times a term that depends
+on its features and the model; the residual method keeps only the residual
+part. [Advanced workflows](ADVANCED.md#smart-sampling) has the benchmark
+results and the cautions for weighted fits.
 
 ## Choosing a Method
 

@@ -8,7 +8,7 @@ knockoff set are not interchangeable.
 ```mermaid
 flowchart TD
     Start["What do you need to reduce or explain?"]
-    Start -->|Rows before selection| Sample["smart_sample"]
+    Start -->|Rows: a training sample, or fewer rows if selecting on all is too slow| Sample["sample_rows or smart_sample"]
     Start -->|Features or fitted-model behavior| Output
 
     Output["Do you already have a fitted predictive model?"]
@@ -71,10 +71,13 @@ flowchart TD
 - `permutation_importance` ranks columns for an already-fitted estimator on the
   data supplied to it. Use held-out data when the ranking should describe
   out-of-sample behavior.
-- `smart_sample` and `sample_rows` reduce rows, not columns. Apply them before a
-  selector only when the full panel is too large for the chosen method
-  (selecting on all rows is better tested), and to train the final model on a
-  20% sample drawn from all eligible rows (chronological on panels).
+- `sample_rows` and `smart_sample` reduce rows, not columns. Their main use is
+  training the final model on a 20% sample drawn from all eligible rows:
+  `method="chronological"` on entity-over-time panels, the uniform default
+  otherwise. Select on a sample only when selecting on all rows is too slow.
+  On a 770k-row panel a 20% sample made selection 5-6x faster but the whole
+  job only 16-22% faster, and its accuracy cost was not settled
+  ([details](ADVANCED.md#selecting-features-on-a-sample)).
 
 ## Apply the workflow modifiers
 

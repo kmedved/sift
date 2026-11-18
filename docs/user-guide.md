@@ -592,7 +592,8 @@ encode a one-vs-rest target numerically for categorical multiclass tasks.
 ## 8. Reuse work, then consider specialized row context
 
 These steps are optional. Skip them unless the job actually has a shared
-numeric matrix, a CatBoost final model, or an already-fitted estimator.
+numeric matrix, a CatBoost final model, an already-fitted estimator, or more
+rows than the final model can train on in reasonable time.
 
 ### When many selectors share one numeric matrix
 
@@ -744,6 +745,52 @@ without applying an arbitrary selection threshold. Rank on held-out rows when
 the question is out-of-sample behavior of that fitted model, not a new SIFT
 filter path.
 
+### When the table is too large to train on
+
+Select features on every eligible training row when that is affordable.
+Sampling pays off for the final model, which usually costs far more than
+selection: train it on a 20% sample drawn from all eligible training rows. On
+an entity-over-time panel use `method="chronological"`, which spreads each
+entity's rows over its timeline and gives every season its share. On other
+tables the uniform default is the plain choice.
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+from sift import sample_rows, select_mrmr
+
+rng = np.random.default_rng(0)
+feature_cols = [f"x{i}" for i in range(10)]
+panel = pd.DataFrame(rng.normal(size=(20_000, 10)), columns=feature_cols)
+panel["entity_id"] = np.repeat(np.arange(200), 100)
+panel["timestamp"] = np.tile(np.arange(100), 200)
+panel["season"] = panel["timestamp"] // 25
+panel["target"] = 2.0 * panel["x0"] - 1.5 * panel["x1"] + rng.normal(size=len(panel))
+
+# Select on every eligible row.
+chosen = select_mrmr(panel[feature_cols], panel["target"], k=3, task="regression")
+
+# Train the final model on exactly 20% of the rows, spread along each timeline.
+s = sample_rows(size=0.2, method="chronological", groups=panel["entity_id"],
+                time=panel["timestamp"], strata=panel["season"], random_state=0)
+model = HistGradientBoostingRegressor(random_state=0).fit(
+    s.take(panel[chosen]), s.take(panel["target"]), sample_weight=s.weights
+)
+assert len(s.indices) == 4_000
+```
+
+`s.indices` are the kept row positions and `s.take(...)` selects them from an
+array or DataFrame. A chronological or uniform draw gives every row the same
+chance, so its weights are all 1; pass them anyway, so the code stays correct
+if you force rows in with `always_include` or switch to the opt-in
+`method="residual"`, whose weights differ. Split off validation rows before
+sampling, and sample only training rows. For a table that is not a panel,
+`sample_rows(X, y, size=0.2)` gives a uniform random sample.
+[Advanced workflows](ADVANCED.md#smart-sampling) has the benchmark behind
+these choices and the residual method's cautions.
+
 ## 9. Compare selectors without scoring a full-sample subset
 
 `sift.compare` refits each selector factory inside the training fold and
@@ -813,6 +860,9 @@ Before leaving this page:
    questions, not as a default second opinion.
 7. Selector comparisons used `sift.compare` in `mode="cv"` rather than
    scoring a subset chosen on all of `y`.
+8. If the table was too large, features were still selected on all eligible
+   rows where affordable, and the final model trained on a sample drawn from
+   all eligible training rows.
 
 Then read the canonical pages instead of enlarging this walkthrough:
 

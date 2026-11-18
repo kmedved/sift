@@ -16,7 +16,7 @@ def test_selector_decision_tree_covers_each_public_workflow_leaf() -> None:
     diagram = text.split("```mermaid\n", 1)[1].split("\n```", 1)[0]
     assert diagram.startswith("flowchart TD\n")
     for node in (
-        'Sample["smart_sample"]',
+        'Sample["sample_rows or smart_sample"]',
         'Permutation["permutation_importance"]',
         'Knockoff["select_fdr or KnockoffSelector"]',
         'Boruta["select_boruta or BorutaSelector"]',

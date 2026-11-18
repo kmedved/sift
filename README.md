@@ -2,8 +2,9 @@
 
 SIFT is a Python feature-selection toolbox for fast filter selectors, automatic
 feature-count selection, q-calibrated Gaussian-copula knockoffs, stability
-selection, smart sampling, Boruta-style selection, grouped or time-aware
-permutation importance, and optional CatBoost selection.
+selection, row sampling (uniform, chronological or residual), Boruta-style
+selection, grouped or time-aware permutation importance, and optional CatBoost
+selection.
 
 The package is a single Python library. Public entry points are exported from
 `sift`, while advanced building blocks live under `sift.selection`,
