@@ -228,6 +228,21 @@ def test_residual_config_draws_along_the_timeline_like_sample_rows():
     assert (kept - share).abs().max() <= 2
 
 
+def test_an_anchor_rule_that_names_its_own_columns_keeps_the_random_order_draw():
+    # The 2.1 migration note: residual configs that set group_col/time_col only for anchor_fn.
+    source = _frame()
+    options = dict(size=60, method="residual", random_state=0)
+    kept = sift.smart_sample(source, ["f0", "f1"], "y", **options,
+                             anchor_fn=lambda df, g, t: first_per_group(df, "group", "time"))
+    mask = first_per_group(source.reset_index(drop=True), "group", "time")
+    direct = sift.sample_rows(source[["f0", "f1"]], source["y"], always_include=mask, **options)
+    np.testing.assert_array_equal(kept.index.to_numpy(), source.index.to_numpy()[direct.indices])
+    np.testing.assert_array_equal(kept["sample_weight"].to_numpy(), direct.weights)
+    timeline = sift.smart_sample(source, ["f0", "f1"], "y", **options, group_col="group",
+                                 time_col="time", anchor_fn=first_per_group)
+    assert set(timeline.index) != set(kept.index)
+
+
 def test_classification_target_uses_the_class_gradient():
     source = _frame()
     source["cls"] = np.where(source["y"] > 0, "pos", "neg")

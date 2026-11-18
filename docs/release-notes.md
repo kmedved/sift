@@ -31,8 +31,12 @@
   draws along those timelines. In 2.0 such a config was valid only with an
   `anchor_fn`, and the columns fed the anchor rule alone. That config now
   returns different rows for the same seed, and a `time_col` with missing
-  values raises. Every other draw returns the same rows and weights as 2.0.1
-  for the same seed.
+  values raises. To keep the 2.0 rows, leave `group_col` and `time_col` unset
+  and let the anchor rule name its own columns, for example
+  `anchor_fn=lambda df, g, t: first_per_group(df, "player", "date")`; or
+  pass the forced rows to `sample_rows(..., always_include=mask)` without
+  `groups` or `time`. Every other draw returns the same rows and weights as
+  2.0.1 for the same seed.
 - `method="uniform"` still rejects `groups`, `time` and `strata`; its message
   now names both methods that use them. `method="residual"` raises if `strata`
   is given without `groups` or `time`, or if `time` has missing values.

@@ -466,10 +466,14 @@ a 95% interval; negative favours the first draw.
 | Residual in random order vs chronological | +0.01% [−0.16, +0.18] | +0.16% [+0.04, +0.28] |
 | Chronological vs uniform | −0.55% [−0.73, −0.37] | −0.53% [−0.73, −0.34] |
 
-- **If you use the residual method on a panel, pass the timeline.** It beat
-  the random order at both budgets on the stable combinations. On the 3
-  noise-dominated combinations it beat it at 10% (−1.78% [−2.94, −0.58]); at
-  20% the difference was not resolved (−0.54% [−1.81, +0.68]).
+- **If you use the residual method on a panel, pass the timeline.** The
+  timeline draw beat the released random-order draw at both budgets on the
+  stable combinations. On the 3 noise-dominated combinations it beat it at
+  10% (−1.78% [−2.94, −0.58]); at 20% the difference was not resolved (−0.54%
+  [−1.81, +0.68]). The two draws differ in the order of the rows and in how
+  the points are placed: a fresh point for each kept row against evenly
+  spaced points. The run compares them as built and does not separate the
+  two.
 - **Against chronological sampling, the gain is at 10% of rows.** At 20% the
   two tied.
 - **On the noise-dominated combinations, chronological sampling is the safer
@@ -481,19 +485,19 @@ a 95% interval; negative favours the first draw.
   the timeline residual draw and chronological sampling tied: −0.08%
   [−0.51, +0.35] at 10% and +0.17% [−0.30, +0.61] at 20%.
 - **Count the pilot's time.** With 10 fits running at once, sample plus fit
-  took a median 14.9 s for the timeline residual draw at 10% of rows. A
-  chronological sample took 9.7 s at 10% and 18.2 s at 20%. In a comparison
-  made after the run, the 10% timeline residual sample was worse than the 20%
-  chronological sample: by 0.31% [0.16, 0.47] on the stable combinations and
-  by 3.13% [1.23, 4.98] on the noise-dominated ones. On the stable
-  combinations it therefore sits between the 10% and 20% chronological
-  samples in both time and accuracy. No chronological sample of matching time
-  was run, so at this fit cost the residual draw has not been shown to save
-  time. Drawing the
-  residual sample, pilot included, took about 5.5 s at either budget, against
-  under 1 s for a chronological sample. That cost does not depend on the
-  final learner, so it matters less as the fit gets more expensive; that case
-  was not benchmarked.
+  took a median 12.2 s for the timeline residual draw at 10% of rows and
+  11.8 s for the random-order residual draw. A chronological sample took
+  9.3 s at 10% and 17.8 s at 20%. In a comparison made after the run, the 10%
+  timeline residual sample was worse than the 20% chronological sample: by
+  0.31% [0.16, 0.47] on the stable combinations and by 3.13% [1.23, 4.98] on
+  the noise-dominated ones. On the stable combinations it therefore sits
+  between the 10% and 20% chronological samples in both time and accuracy. No
+  chronological sample of matching time was run, so whether the residual draw
+  saves time at this fit cost is not known. Drawing the residual sample,
+  pilot included, took about 2.7 s at either budget, against about 0.4 s for
+  a chronological sample. That cost does not depend on the final learner, so
+  it matters less as the fit gets more expensive; that case was not
+  benchmarked.
 - **Every draw had exactly the requested number of rows.**
 - **What was tested.** `groups`, `time` and season `strata` together, on
   regression targets, with a 500-tree model. `groups` alone and `time` alone
