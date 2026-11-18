@@ -274,14 +274,22 @@ should get its share. In `smart_sample`, set `group_col` and `time_col`, or use
 `panel_config(group_col, time_col, strata_col=...)`. For a plain random draw
 use `method="uniform"`.
 
-### `ValueError: groups, time and strata shape only method='chronological'; …`
+### `ValueError: groups, time and strata shape only method='chronological' and method='residual'; …`
 
-The uniform and residual methods draw in random order and would ignore those
-arguments, so they are rejected. Pass `method="chronological"` or drop them.
-`smart_sample` raises the matching errors
-`group_col and time_col shape only method='chronological' (or feed anchor_fn)`
+The uniform method draws in random order and would ignore those arguments, so
+they are rejected. Pass `method="chronological"` or `method="residual"`, or
+drop them. `smart_sample` raises the matching errors
+`group_col and time_col shape only method='chronological' and method='residual' (or feed anchor_fn)`
 (unless an `anchor_fn` uses those columns) and
-`strata_col applies only to method='chronological'`.
+`strata_col applies only to method='chronological' and method='residual'`.
+
+### `ValueError: strata needs groups or time to order the rows inside each stratum.`
+
+`method="residual"` uses `strata` only to order a draw along timelines. Pass
+`groups` or `time` as well, or drop `strata`. `smart_sample` raises the
+matching `strata_col needs group_col or time_col …`. The same draw raises
+`time must not contain missing values` if `time` has gaps: fill or drop those
+rows first.
 
 ### `ValueError: always_include marks N rows, the whole budget, so no other row could be drawn; …`
 

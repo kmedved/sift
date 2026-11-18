@@ -226,8 +226,8 @@ copied onto this page.
 | `smart_sample` | sparse | rejected | requires a pandas DataFrame; sparse input is rejected |
 | `smart_sample` | datetime/timedelta | supported | the default `method="uniform"` only subsets rows, so any column passes through; `method="residual"` with the default pilot needs numeric or boolean features |
 | `smart_sample` | weights | rejected | there is no input `sample_weight` argument; the sampler writes its own `sample_weight` column |
-| `smart_sample` | groups | supported | `groups` is accepted as `group_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `groups=` array argument |
-| `smart_sample` | time | supported | `time` is accepted as `time_col` on `SmartSamplerConfig` with `method="chronological"`, not as a `time=` array argument |
+| `smart_sample` | groups | supported | `groups` is accepted as `group_col` on `SmartSamplerConfig` with `method="chronological"` or `method="residual"`, not as a `groups=` array argument |
+| `smart_sample` | time | supported | `time` is accepted as `time_col` on `SmartSamplerConfig` with `method="chronological"` or `method="residual"`, not as a `time=` array argument |
 | `catboost_select` | ndarray | rejected | ndarray input is rejected; pass a pandas DataFrame |
 | `catboost_select` | DataFrame | dependency-gated | requires the optional `catboost` extra; installing it unlocks this axis |
 | `catboost_select` | categorical | dependency-gated | requires the optional `catboost` extra; installing it unlocks this axis |

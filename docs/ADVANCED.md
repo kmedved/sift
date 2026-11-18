@@ -360,14 +360,19 @@ faster. Its default `method="uniform"` is a simple random sample.
 `method="chronological"` draws with equal probability, spread over each
 entity's timeline with entity and season quotas. The opt-in
 `method="residual"` draws rows in proportion to how wrong a cheap pilot model
-is on them, half evenly, along a random order, and gives each kept row a
-mean-one fitting weight.
+is on them, half evenly, and gives each kept row a mean-one fitting weight.
+Given `groups` or `time` it draws along each entity's timeline; otherwise
+along a random order.
 
 Typical workflow on a large panel: select features on all eligible rows when
 that is affordable, then train the final model on a 20% chronological sample
-of all eligible rows, using the selected features. On the panel below the
-residual draw tied chronological sampling and took longer, so it is opt-in,
-for expensive, weight-aware fits. Selecting on a sample saves less time than
+of all eligible rows, using the selected features. The residual method is
+opt-in, for expensive, weight-aware fits. On the panel below, drawn along the
+timelines, it beat chronological sampling with the same number of rows at 10%
+on the stable targets and tied it at 20%. It was not better on targets that
+are mostly noise, and it took longer; see
+[Residual sampling along timelines](#residual-sampling-along-timelines).
+Selecting on a sample saves less time than
 it seems, and its accuracy cost is not settled; see
 [Selecting features on a sample](#selecting-features-on-a-sample). If
 selection itself is the bottleneck, start with a 20% chronological sample with
@@ -402,8 +407,10 @@ model = HistGradientBoostingRegressor().fit(
     s.take(df[chosen]), s.take(df["target"]), sample_weight=s.weights
 )
 
-# Opt-in alternative for an expensive, weight-aware learner:
-r = sample_rows(df[chosen], df["target"], size=0.2, method="residual", random_state=1)
+# Opt-in alternative for an expensive, weight-aware learner on a small row budget:
+r = sample_rows(df[chosen], df["target"], size=0.1, method="residual",
+                groups=df["entity_id"], time=df["timestamp"], strata=df["season"],
+                random_state=1)
 ```
 
 ### How much to sample
@@ -415,22 +422,10 @@ figure is the mean RMSE gap to a full-data fit on the 9 stable combinations,
 over 20 fresh seeds.
 
 The residual column is an earlier draw that ran systematically along each
-entity's timeline. That draw can line up with residuals that repeat every
-`1 / fraction` rows, so the shipped residual method draws along a random order
-instead. A targeted check at 20% of rows (20 seeds, the same pilot) found that
-the random order loses most of the edge:
-
-- Every draw had exactly the requested number of rows.
-- On the 9 stable combinations, the random-order draw was 0.39% [0.23, 0.54]
-  worse than the time-ordered draw, and 0.18% [0.02, 0.34] worse than
-  chronological sampling at 20% (0.19% [0.02, 0.38] worse than chronological
-  at 25%, which takes about the same time).
-- Across all 12 combinations it tied chronological sampling at 20%: +0.03%
-  [−0.41, +0.52].
-- Sample plus fit took a median 23.1 s, against 19.3 s for chronological
-  sampling at 20%.
-- The time-ordered draw also spread its rows along each timeline. Whether that
-  explains its edge was not tested.
+entity's timeline from one shared random start. That draw can line up with
+residuals that repeat every `1 / fraction` rows, so it was never shipped.
+[Residual sampling along timelines](#residual-sampling-along-timelines) tests
+the draw that replaced it.
 
 | Rows kept | Residual, time-ordered draw | Chronological (equal-probability) | Uniform random (12-seed screen) |
 |---|---|---|---|
@@ -455,10 +450,65 @@ the random order loses most of the edge:
   Matched for total time instead of rows, the edge over chronological sampling
   on the stable combinations was 0.1-0.25%.
 
+### Residual sampling along timelines
+
+On a panel, give `method="residual"` the entity, time and season columns. A
+run on the same panel compared draws of the same size over 30 fresh seeds, at
+10% and 20% of rows, on all 12 combinations. The rule for reading it was
+written down before the run. The residual draws shared one pilot per seed and
+were fitted with their weights. Each figure is a difference in test RMSE with
+a 95% interval; negative favours the first draw.
+
+| 9 stable combinations | 10% of rows | 20% of rows |
+|---|---|---|
+| Residual along timelines vs residual in random order | −0.50% [−0.66, −0.33] | −0.16% [−0.29, −0.03] |
+| Residual along timelines vs chronological | −0.48% [−0.68, −0.30] | 0.00% [−0.15, +0.14] |
+| Residual in random order vs chronological | +0.01% [−0.16, +0.18] | +0.16% [+0.04, +0.28] |
+| Chronological vs uniform | −0.55% [−0.73, −0.37] | −0.53% [−0.73, −0.34] |
+
+- **If you use the residual method on a panel, pass the timeline.** It beat
+  the random order at both budgets on the stable combinations. On the 3
+  noise-dominated combinations it beat it at 10% (−1.78% [−2.94, −0.58]); at
+  20% the difference was not resolved (−0.54% [−1.81, +0.68]).
+- **Against chronological sampling, the gain is at 10% of rows.** At 20% the
+  two tied.
+- **On the noise-dominated combinations, chronological sampling is the safer
+  choice.** Against it the timeline residual draw's test RMSE was +1.12%
+  [−0.56, +2.84] at 10% and +0.68% [−0.94, +2.28] at 20%. Neither difference
+  is resolved, but both estimates favour chronological sampling. At 10% the
+  residual draw was also 1.82% [0.32, 3.26] worse there than an
+  equal-probability draw along the same timelines. Across all 12 combinations
+  the timeline residual draw and chronological sampling tied: −0.08%
+  [−0.51, +0.35] at 10% and +0.17% [−0.30, +0.61] at 20%.
+- **Count the pilot's time.** With 10 fits running at once, sample plus fit
+  took a median 14.9 s for the timeline residual draw at 10% of rows. A
+  chronological sample took 9.7 s at 10% and 18.2 s at 20%. In a comparison
+  made after the run, the 10% timeline residual sample was worse than the 20%
+  chronological sample: by 0.31% [0.16, 0.47] on the stable combinations and
+  by 3.13% [1.23, 4.98] on the noise-dominated ones. With a fit this cheap, a
+  larger chronological sample is the better use of the same time. Drawing the
+  residual sample, pilot included, took about 5.5 s at either budget, against
+  under 1 s for a chronological sample. That cost does not depend on the
+  final learner, so it matters less as the fit gets more expensive; that case
+  was not benchmarked.
+- **Every draw had exactly the requested number of rows.**
+- **What was tested.** `groups`, `time` and season `strata` together, on
+  regression targets, with a 500-tree model. `groups` alone and `time` alone
+  were not benchmarked.
+- **Compared with the earlier time-ordered draw,** the timeline draw's edge
+  over chronological sampling was about the same at 10% of rows (−0.48% here,
+  −0.40% in the earlier run) but not at 20% (0.00% here, −0.21% earlier). The
+  runs used different seeds. The draws also differ: the earlier one shuffled
+  player-season blocks across seasons and used evenly spaced points, while
+  this one goes season by season with a fresh random point for each kept row.
+  What explains the gap at 20% was not investigated.
+
+### Other datasets
+
 Outside that panel, `benchmarks/bench_row_sampling.py` compared a residual
 sample with a uniform sample of the same size over 10 seeds. These runs also
 used the earlier draw, systematic along the input order (by group and time on
-the synthetic panel), and have not been rerun with the random order. Three
+the synthetic panel), and have not been rerun with either shipped draw. Three
 datasets were used: a 400k-row synthetic panel, the CDC diabetes survey (250k
 rows, binary classification) and California housing (20k rows).
 

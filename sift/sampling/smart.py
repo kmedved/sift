@@ -12,9 +12,12 @@
     scores every row by how wrong it is: the magnitude ``g`` of the loss
     gradient at the pilot prediction.  Half of each row's inclusion
     probability is proportional to ``g`` and half is spread evenly (a
-    defensive mixture; Hesterberg, 1995).  The draw runs systematically along
-    a random order of the rows, so it keeps an exact size and cannot line up
-    with a repeating pattern in the data.
+    defensive mixture; Hesterberg, 1995).  The draw keeps an exact size.
+    Given ``groups`` or ``time`` it runs along each entity's timeline, one
+    row per unit of cumulative probability with a fresh random point in each
+    unit (Deville, 1998), so the kept rows are spread over entities and time.
+    Otherwise it runs systematically along a random order of the rows.
+    Neither can line up with a repeating pattern in the data.
 
 Every row has a positive inclusion probability, so weighting by the raw
 ``1 / inclusion_prob`` estimates a fixed full-data total without bias
@@ -28,11 +31,12 @@ residual, usually times a term that depends on its features and the model.
 The gradient alone is the model-agnostic part of that rule, an empirical
 choice rather than a proven optimum.  The even half keeps every row drawable,
 bounds every weight, and keeps the draw from chasing noise on targets that are
-mostly noise.  The residual settings come from a benchmark on a ~770k-row
-player panel that used an earlier draw along each entity's timeline.  The
-random-order draw was checked there only at 20% of rows: it tied
-chronological sampling across all targets and trailed it on the stable ones.
-See ``docs/ADVANCED.md``.
+mostly noise.  The pilot and the mix were chosen in a benchmark on a
+~770k-row player panel.  There the timeline draw beat the random-order draw
+at 10% and 20% of rows.  Against chronological sampling with the same number
+of rows it was better on the stable targets at 10%, tied at 20%, and was not
+better on the noise-dominated targets; it also costs a pilot fit.  See
+``docs/ADVANCED.md``.
 """
 
 from __future__ import annotations
@@ -542,10 +546,14 @@ def sample_rows(
         absolute residual for regression, ``||onehot(y) - p||`` for
         classification).  A row's inclusion probability is
         ``(1 - uniform_mix)`` times a share proportional to ``g`` (capped at
-        1) plus ``uniform_mix`` times the sampling fraction.  Rows are drawn
-        systematically along a random order, so a repeating pattern in the
-        data cannot line up with the draw.  The pilot costs time, so it pays
-        off only for expensive, weight-aware fits.
+        1) plus ``uniform_mix`` times the sampling fraction.  On a panel,
+        pass ``groups`` and ``time`` (and ``strata``): the rows are then
+        drawn along each entity's timeline, one row per unit of cumulative
+        probability, which spreads them over entities and time.  Without
+        them the rows are drawn systematically along a random order.  A
+        repeating pattern in the data cannot line up with either draw.  The
+        pilot costs time, so it pays off only for expensive, weight-aware
+        fits.
 
     Rows in ``always_include`` are kept with probability 1 and every method
     draws the rest of the budget from the other rows.  With forced rows the
@@ -570,14 +578,19 @@ def sample_rows(
     method : {"uniform", "chronological", "residual"}, default="uniform"
         How rows are chosen; see above.
     groups : array-like of shape (n_rows,), optional
-        ``method="chronological"`` only. Entity of each row (player,
-        customer, ticker); each entity gets its share of the draw.
+        ``method="chronological"`` and ``method="residual"``. Entity of each
+        row (player, customer, ticker). The chronological method gives each
+        entity its share of the draw; the residual method keeps each
+        entity's rows together when it orders the draw.
     time : array-like of shape (n_rows,), optional
-        ``method="chronological"`` only. Sortable time of each row; the draw
-        is spread along each entity's timeline. Defaults to input order.
+        ``method="chronological"`` and ``method="residual"``. Sortable time
+        of each row, without missing values; the draw is spread along each
+        entity's timeline. Defaults to input order.
     strata : array-like of shape (n_rows,), optional
-        ``method="chronological"`` only. Outer level (for example a season)
-        whose shares are allocated before the entities inside it.
+        ``method="chronological"`` and ``method="residual"``, with
+        ``groups`` or ``time``. Outer level (for example a season): the
+        chronological method allocates its share before the entities inside
+        it, and the residual method orders the draw stratum by stratum.
     task : {"auto", "regression", "classification"}, default="auto"
         ``method="residual"`` only. ``"auto"`` treats non-numeric, boolean
         and two-valued targets as classification and everything else as
@@ -810,16 +823,24 @@ def _validate_smart_sampler_config(config: "SmartSamplerConfig") -> None:
             raise TypeError(f"{name} must be a string or None.")
     if config.anchor_fn is not None and not callable(config.anchor_fn):
         raise TypeError("anchor_fn must be callable or None.")
-    if config.method != "chronological":
+    timeline = bool(config.group_col or config.time_col)
+    if config.method == "uniform":
         if config.strata_col is not None:
-            raise ValueError("strata_col applies only to method='chronological'.")
-        if config.anchor_fn is None and (config.group_col or config.time_col):
             raise ValueError(
-                f"group_col and time_col shape only method='chronological' (or feed "
-                f"anchor_fn); method={config.method!r} draws rows in random order."
+                "strata_col applies only to method='chronological' and method='residual'."
             )
-    elif not (config.group_col or config.time_col):
+        if config.anchor_fn is None and timeline:
+            raise ValueError(
+                "group_col and time_col shape only method='chronological' and "
+                "method='residual' (or feed anchor_fn); method='uniform' draws rows in "
+                "random order."
+            )
+    elif config.method == "chronological" and not timeline:
         raise ValueError("method='chronological' needs group_col or time_col.")
+    elif config.method == "residual" and config.strata_col is not None and not timeline:
+        raise ValueError(
+            "strata_col needs group_col or time_col to order the rows inside each stratum."
+        )
     if config.method == "residual" and config.pilot is None:
         raise ValueError(
             "method='residual' needs a pilot; for an equal-probability draw use "
@@ -844,13 +865,16 @@ class SmartSamplerConfig:
     method : {"uniform", "chronological", "residual"}, default="uniform"
         How rows are chosen; see ``sample_rows``.
     group_col : str, optional
-        Entity column. Shapes ``method="chronological"``; other methods use
-        it only to call ``anchor_fn``.
+        Entity column. Shapes ``method="chronological"`` and
+        ``method="residual"``; ``method="uniform"`` uses it only to call
+        ``anchor_fn``.
     time_col : str, optional
-        Time column. Shapes ``method="chronological"``; other methods use it
-        only to call ``anchor_fn``.
+        Time column. Shapes ``method="chronological"`` and
+        ``method="residual"``; ``method="uniform"`` uses it only to call
+        ``anchor_fn``.
     strata_col : str, optional
-        Outer level (such as a season) for ``method="chronological"``.
+        Outer level (such as a season) for ``method="chronological"`` and,
+        with ``group_col`` or ``time_col``, ``method="residual"``.
     task : {"auto", "regression", "classification"}, default="auto"
         How the pilot's gradient is computed (``method="residual"``).
     pilot : "auto", estimator or array-like, default="auto"
@@ -939,8 +963,9 @@ def smart_sample(
     ``sift.panel_config``); both write weights of 1 unless ``anchor_fn``
     forces rows in. ``method="residual"``
     fits a pilot on ``feature_cols`` and draws exactly ``size`` rows weighted
-    toward the rows the pilot gets wrong. It returns the kept rows (original
-    index preserved) with mean-one fitting weights.
+    toward the rows the pilot gets wrong; with ``group_col`` or ``time_col``
+    set it draws them along each entity's timeline. It returns the kept rows
+    (original index preserved) with mean-one fitting weights.
 
     Parameters
     ----------
@@ -1020,14 +1045,14 @@ def smart_sample(
         ).reshape(-1)
         if anchors.size != len(df):
             raise ValueError(f"anchor_fn returned {anchors.size} rows but df has {len(df)} rows")
-    chronological = config.method == "chronological"
+    timeline = config.method != "uniform"
     result = _sample_rows(
         X,
         df[y_col],
         config.size,
         method=config.method,
-        groups=df[config.group_col] if chronological and config.group_col else None,
-        time=df[config.time_col] if chronological and config.time_col else None,
+        groups=df[config.group_col] if timeline and config.group_col else None,
+        time=df[config.time_col] if timeline and config.time_col else None,
         strata=df[config.strata_col] if config.strata_col else None,
         task=config.task,
         pilot=config.pilot,

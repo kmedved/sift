@@ -360,7 +360,8 @@ baseline. Beating shadows is an all-relevant heuristic, not FDR control.
 `method="uniform"` is a simple random sample; `method="chronological"` spreads
 equal-probability draws along each entity's timeline; the opt-in
 `method="residual"` draws half in proportion to how wrong a cheap pilot model
-is on them and half evenly, in random order. They do not select features. See
+is on them and half evenly, along each entity's timeline when `groups` or
+`time` is given and in random order otherwise. They do not select features. See
 [inclusion weights](#inclusion-weights).
 
 ## Stability frequency

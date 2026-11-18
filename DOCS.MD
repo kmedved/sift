@@ -1793,9 +1793,11 @@ weights. It has three methods:
      residual for regression and `||onehot(y) - p||` for classification.
   2. **Exact draw.** Half of each row's inclusion probability is proportional
      to that score and half is spread evenly (`uniform_mix=0.5`), which keeps
-     every row drawable and keeps the draw from chasing noise. Rows are drawn
-     systematically along a random order, so a repeating pattern in the data
-     cannot line up with the draw.
+     every row drawable and keeps the draw from chasing noise. Given `groups`
+     or `time`, rows are drawn along each entity's timeline, one per unit of
+     cumulative probability, which spreads them over entities and time.
+     Otherwise they are drawn systematically along a random order. A repeating
+     pattern in the data cannot line up with either draw.
   3. **Weights.** Each kept row carries a mean-one fitting weight:
      `1 / inclusion probability`, rescaled to mean 1, for the downstream fit.
      What a weighted fit gains or loses against a full-data fit depends on the
@@ -1806,11 +1808,14 @@ returned weights) estimates a fixed full-data total without bias.
 
 Where the residual draw can pay off: expensive, weight-aware learners, or
 several fits on one draw. The pilot costs more than fitting a linear model on
-every row, so a cheap learner gains nothing. On a large player panel, the
-residual draw tied chronological sampling at 20% of rows over all targets,
-was 0.18% worse on the stable ones, and took longer; an earlier time-ordered
-draw that beat chronological sampling is described in
-[docs/ADVANCED.md](docs/ADVANCED.md#how-much-to-sample). The evidence is for training a model after its
+every row, so a cheap learner gains nothing. On a panel, pass `groups`, `time`
+and `strata` to the residual method. On a large player panel the residual
+draw along timelines beat the residual draw in random order. Against
+chronological sampling with the same number of rows it was 0.48% better on
+the stable targets at 10% of rows and tied at 20%; it was not better on
+targets that are mostly noise, and it took longer. Chronological sampling
+stays the method to start with on panels; see
+[docs/ADVANCED.md](docs/ADVANCED.md#residual-sampling-along-timelines). The evidence is for training a model after its
 features are chosen; for feature selection it is thin (see
 [docs/ADVANCED.md](docs/ADVANCED.md#smart-sampling)), so select on all rows
 when that is affordable. Draw the training sample from all eligible rows,
@@ -1834,7 +1839,9 @@ model = HistGradientBoostingRegressor().fit(s.take(X), s.take(y), sample_weight=
 
 `smart_sample` is the DataFrame front end. It returns the kept rows, with the
 original index, plus a `sample_weight` column. `panel_config` sets up a
-chronological draw by entity, time and, optionally, season:
+chronological draw by entity, time and, optionally, season. For a residual
+draw along the same timelines, change its method with
+`dataclasses.replace(config, method="residual")`:
 
 ```python
 import numpy as np
@@ -1863,8 +1870,10 @@ Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 - `method` (default `"uniform"`): `"uniform"`, `"chronological"` or
   `"residual"`.
 - `groups` / `group_col`, `time` / `time_col` and `strata` / `strata_col`:
-  shape `method="chronological"` only; other methods raise if they are given
-  (in `smart_sample`, `group_col` and `time_col` may also feed `anchor_fn`).
+  shape `method="chronological"` and `method="residual"`; `method="uniform"`
+  raises if they are given (in `smart_sample`, `group_col` and `time_col` may
+  also feed `anchor_fn`). The residual method uses `strata` only together
+  with `groups` or `time`.
 - `task` (default `"auto"`, residual only): `"auto"` treats non-numeric,
   boolean and two-valued targets as classification. Pass `"classification"`
   for integer-coded multiclass labels.
