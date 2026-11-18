@@ -394,8 +394,54 @@ def test_auto_pilot_accepts_missing_features_but_not_infinite_ones():
 def test_auto_pilot_rejects_non_numeric_features():
     X, y = _data(n=300)
     df = pd.DataFrame({"a": X[:, 0], "b": ["x", "y", "z"] * 100})
-    with pytest.raises(TypeError, match="numeric features"):
+    with pytest.raises(TypeError, match=r"non-numeric: \['b'\]"):
         sample_rows(df, y, 0.1, method="residual")
+
+
+_PILOT_COLUMNS = {
+    "int": lambda n: np.arange(n),
+    "bool": lambda n: np.arange(n) % 2 == 0,
+    "nullable_int": lambda n: pd.array(np.arange(n), dtype="Int64"),
+    "nullable_bool": lambda n: pd.array(np.arange(n) % 2 == 0, dtype="boolean"),
+    "datetime": lambda n: pd.date_range("2020-01-01", periods=n),
+    "datetime_tz": lambda n: pd.date_range("2020-01-01", periods=n, tz="UTC"),
+    "timedelta": lambda n: pd.to_timedelta(np.arange(n), unit="D"),
+    "text": lambda n: np.array(["x", "y"] * (n // 2), dtype=object),
+    "category": lambda n: pd.Categorical(["x", "y"] * (n // 2)),
+}
+_PILOT_ACCEPTS = {"int", "bool", "nullable_int", "nullable_bool"}
+
+
+@pytest.mark.parametrize("kind", sorted(_PILOT_COLUMNS))
+def test_auto_pilot_column_rule_is_shared_by_sample_rows_and_smart_sample(kind):
+    # Numeric and boolean columns feed the default pilot; datetime, timedelta,
+    # text and categorical columns are rejected by both entry points, by name,
+    # instead of being cast to low-precision floats.
+    n = 200
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"a": rng.normal(size=n), "c": _PILOT_COLUMNS[kind](n), "y": rng.normal(size=n)})
+    calls = (
+        lambda: sample_rows(df[["a", "c"]], df["y"], 0.2, method="residual", random_state=0),
+        lambda: sift.smart_sample(df, ["a", "c"], "y", method="residual", random_state=0),
+    )
+    for call in calls:
+        if kind in _PILOT_ACCEPTS:
+            assert len(call()) == 40
+        else:
+            with pytest.raises(TypeError, match=r"needs numeric or boolean features; non-numeric: \['c'\]"):
+                call()
+
+
+def test_auto_pilot_column_rule_covers_arrays():
+    n = 200
+    y = np.random.default_rng(0).normal(size=n)
+    assert len(sample_rows(np.c_[np.arange(n) % 2 == 0, np.arange(n)], y, 0.2, method="residual")) == 40
+    stamps = np.array(pd.date_range("2020-01-01", periods=n)).reshape(-1, 1)
+    for X in (stamps, np.array([["x"]] * n)):
+        with pytest.raises(TypeError, match=r"non-numeric: \['<array>'\]"):
+            sample_rows(X, y, 0.2, method="residual")
+    # An explicit pilot estimator or precomputed predictions bypass the rule.
+    assert len(sample_rows(None, y, 0.2, method="residual", pilot=np.zeros(n))) == 40
 
 
 @pytest.mark.parametrize(

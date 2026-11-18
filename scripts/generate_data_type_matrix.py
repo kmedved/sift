@@ -1022,7 +1022,7 @@ def _stable_note(
         return (
             'the default `method="uniform"` only subsets rows, so any column '
             'passes through; `method="residual"` with the default pilot needs '
-            "numeric features"
+            "numeric or boolean features"
         )
     if status == SUPPORTED and axis == "categorical":
         return "string/category columns are consumed by the seeded baseline call"
