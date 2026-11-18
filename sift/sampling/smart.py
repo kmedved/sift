@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 
 from sift._logging import logger
+from sift._numba import njit_optional_cache
 
 DEFAULT_SIZE = 0.2
 DEFAULT_PILOT_SIZE = 0.02
@@ -287,6 +288,84 @@ def _systematic(order: np.ndarray, pi: np.ndarray, k: int, rng: np.random.Genera
         rest = np.setdiff1d(order, chosen)
         chosen = np.r_[chosen, rng.choice(rest, k - chosen.size, replace=False)]
     return np.sort(chosen).astype(np.int64)
+
+
+@njit_optional_cache(cache=True)
+def _unit_picks(cum: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """Positions of one row per unit of ``cum``, for uniforms ``u``.
+
+    Unit ``i`` is the stretch ``[i, i + 1)`` of cumulative probability.  A
+    row lying across the boundary at ``i`` has ``a`` of its probability
+    before it and ``b`` after.  If the unit before took that row, this unit's
+    point falls past it; otherwise the row is taken with probability
+    ``b / (1 - a)``.  Either way the point is uniform over the unit overall,
+    so every row keeps its probability and none is taken twice.
+    """
+    n = cum.size
+    out = np.empty(u.size, np.int64)
+    j = 0
+    took_boundary_row = False
+    for i in range(u.size):
+        while j < n - 1 and cum[j] <= i:
+            j += 1
+        start = cum[j - 1] if j > 0 else 0.0
+        x = u[i]
+        if start < i:
+            a = i - start
+            b = min(cum[j] - i, 1.0)
+            if took_boundary_row:
+                x = b + x * (1.0 - b)
+            else:
+                share = b / (1.0 - a) if a < 1.0 else 1.0
+                if x < share:
+                    x *= 1.0 - a
+                else:
+                    x = b + (x - share) / (1.0 - share) * (1.0 - b)
+        point = i + x
+        while j < n - 1 and cum[j] <= point:
+            j += 1
+        out[i] = j
+        took_boundary_row = cum[j] > i + 1
+    return out
+
+
+def _ordered_draw(order: np.ndarray, pi: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
+    """Exactly ``k`` rows with inclusion probability ``pi``, one per unit along ``order``.
+
+    Deville's (1998) systematic sampling.  Unlike ``_systematic`` it draws a
+    fresh point in every unit of cumulative probability, so it can follow a
+    meaningful order (a timeline) without lining up with a repeating pattern.
+    """
+    if k <= 0 or order.size == 0:
+        return np.array([], dtype=np.int64)
+    cum = np.cumsum(pi[order])
+    cum *= k / cum[-1]
+    chosen = np.unique(order[_unit_picks(cum, rng.random(k))])
+    if chosen.size < k:  # floating-point edge: a row's share rounded above 1
+        rest = np.setdiff1d(order, chosen)
+        chosen = np.r_[chosen, rng.choice(rest, k - chosen.size, replace=False)]
+    return chosen.astype(np.int64)
+
+
+def _timeline_order(groups, time, strata, rng: np.random.Generator) -> np.ndarray:
+    """Positions sorted by stratum, then entity (entities in random order), then time."""
+    n = len(groups if groups is not None else time)
+    stratum = (
+        pd.factorize(strata, use_na_sentinel=False)[0] if strata is not None
+        else np.zeros(n, dtype=np.intp)
+    )
+    entity = (
+        pd.factorize(groups, use_na_sentinel=False)[0] if groups is not None
+        else np.zeros(n, dtype=np.intp)
+    )
+    # Number entities within strata so each stratum shuffles its own entities.
+    entity, entities = pd.factorize(pd.MultiIndex.from_arrays([stratum, entity]))
+    frame = pd.DataFrame({
+        "stratum": stratum,
+        "entity": rng.permutation(len(entities))[entity],
+        "time": time if time is not None else np.arange(n),
+    })
+    return frame.sort_values(["stratum", "entity", "time"], kind="stable").index.to_numpy()
 
 
 def _take_rows(X, idx: np.ndarray):
@@ -613,16 +692,21 @@ def _sample_rows(
     groups = None if groups is None else _as_1d(groups, n, "groups")
     time = None if time is None else _as_1d(time, n, "time")
     strata = None if strata is None else _as_1d(strata, n, "strata")
-    if method != "chronological" and not (groups is None and time is None and strata is None):
+    timeline = not (groups is None and time is None)
+    if method == "uniform" and (timeline or strata is not None):
         raise ValueError(
-            f"groups, time and strata shape only method='chronological'; "
-            f"method={method!r} draws rows in random order."
+            "groups, time and strata shape only method='chronological' and "
+            "method='residual'; method='uniform' draws rows in random order."
         )
-    if method == "chronological" and groups is None and time is None:
+    if method == "chronological" and not timeline:
         raise ValueError(
             "method='chronological' needs groups or time; use method='uniform' for a "
             "plain random draw."
         )
+    if method == "residual" and strata is not None and not timeline:
+        raise ValueError("strata needs groups or time to order the rows inside each stratum.")
+    if method == "residual" and time is not None and pd.isna(time).any():
+        raise ValueError("time must not contain missing values.")
     if method == "residual" and pilot is None:
         raise ValueError(
             "method='residual' needs a pilot; for an equal-probability draw use "
@@ -668,7 +752,16 @@ def _sample_rows(
         pi_free = _capped_pi(score[free], k_free)
         pi_free = (1.0 - uniform_mix) * pi_free + uniform_mix * k_free / free_idx.size
         pi[free] = pi_free
-        drawn = _systematic(rng.permutation(free_idx), pi, k_free, rng)
+        if timeline:
+            order = free_idx[_timeline_order(
+                None if groups is None else groups[free],
+                None if time is None else time[free],
+                None if strata is None else strata[free],
+                rng,
+            )]
+            drawn = _ordered_draw(order, pi, k_free, rng)
+        else:
+            drawn = _systematic(rng.permutation(free_idx), pi, k_free, rng)
     elif method == "uniform":
         pi[free] = k_free / free_idx.size
         drawn = rng.choice(free_idx, k_free, replace=False)
