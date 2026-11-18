@@ -1839,9 +1839,7 @@ model = HistGradientBoostingRegressor().fit(s.take(X), s.take(y), sample_weight=
 
 `smart_sample` is the DataFrame front end. It returns the kept rows, with the
 original index, plus a `sample_weight` column. `panel_config` sets up a
-chronological draw by entity, time and, optionally, season. For a residual
-draw along the same timelines, change its method with
-`dataclasses.replace(config, method="residual")`:
+chronological draw by entity, time and, optionally, season:
 
 ```python
 import numpy as np
@@ -1862,6 +1860,9 @@ sampled = smart_sample(
     config=panel_config("user_id", "timestamp", size=0.2),
 )
 ```
+
+For a residual draw along the same timelines, change the config's method with
+`dataclasses.replace(config, method="residual")`.
 
 Options (`sample_rows` keywords and `SmartSamplerConfig` fields):
 

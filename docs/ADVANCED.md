@@ -485,8 +485,11 @@ a 95% interval; negative favours the first draw.
   chronological sample took 9.7 s at 10% and 18.2 s at 20%. In a comparison
   made after the run, the 10% timeline residual sample was worse than the 20%
   chronological sample: by 0.31% [0.16, 0.47] on the stable combinations and
-  by 3.13% [1.23, 4.98] on the noise-dominated ones. With a fit this cheap, a
-  larger chronological sample is the better use of the same time. Drawing the
+  by 3.13% [1.23, 4.98] on the noise-dominated ones. On the stable
+  combinations it therefore sits between the 10% and 20% chronological
+  samples in both time and accuracy. No chronological sample of matching time
+  was run, so at this fit cost the residual draw has not been shown to save
+  time. Drawing the
   residual sample, pilot included, took about 5.5 s at either budget, against
   under 1 s for a chronological sample. That cost does not depend on the
   final learner, so it matters less as the fit gets more expensive; that case
