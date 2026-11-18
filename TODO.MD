@@ -4,7 +4,9 @@ Current state and open work. Delivered work lives in `docs/release-notes.md`.
 
 ## Version and release state
 
-- `v2.0.0` (2026-11-17) is the latest GitHub release: the rebuilt
+- `v2.0.1` (2026-11-17) is the latest GitHub release: one default-pilot
+  column check for `sample_rows` and `smart_sample` (#117) and the 2.0
+  sampling documentation (#116). `v2.0.0` (2026-11-17) shipped the rebuilt
   `sample_rows` / `smart_sample` sampler (PRs #112, #113, #114). The release
   workflow builds its wheel and source distribution, checks their metadata with
   Twine and smoke-tests a clean wheel install, with no PyPI publication.
