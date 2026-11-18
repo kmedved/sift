@@ -248,6 +248,66 @@ input, so rebuilding avoids silent feature-name ambiguity.
 Every column in `X` has near-zero standard deviation in the subsample. Pass
 informative features, increase `subsample`, or check upstream preprocessing.
 
+## Sampling
+
+### `TypeError: Unknown SmartSamplerConfig field(s): ['sample_frac']. sift 2.0 changes: …`
+
+A 1.x sampler setting was passed to `smart_sample`. The message names the
+replacement; for example `sample_frac` is now `size`. The same setting passed
+to `SmartSamplerConfig(...)` raises Python's usual
+`TypeError: ... got an unexpected keyword argument`. The
+[migration table](https://github.com/kmedved/sift/blob/main/DOCS.MD#migrating-from-sift-1x)
+lists every removed field and preset.
+
+### `ValueError: pilot, pilot_size and uniform_mix apply only to method='residual'; …`
+
+Since 2.0 the default draw is a uniform random sample, which has no pilot. Pass
+`method="residual"` to use a pilot, or drop the pilot arguments. The 1.x
+`pilot=None` (an equal-probability draw) is now `method="uniform"` or
+`method="chronological"`.
+
+### `ValueError: method='chronological' needs groups or time; …`
+
+The chronological draw spreads rows over each entity's timeline. Pass `groups`
+(the entity) and `time`, plus `strata` (for example season) if every stratum
+should get its share. In `smart_sample`, set `group_col` and `time_col`, or use
+`panel_config(group_col, time_col, strata_col=...)`. For a plain random draw
+use `method="uniform"`.
+
+### `ValueError: groups, time and strata shape only method='chronological'; …`
+
+The uniform and residual methods draw in random order and would ignore those
+arguments, so they are rejected. Pass `method="chronological"` or drop them.
+`smart_sample` raises the matching errors
+`group_col and time_col shape only method='chronological' (or feed anchor_fn)`
+(unless an `anchor_fn` uses those columns) and
+`strata_col applies only to method='chronological'`.
+
+### `ValueError: always_include marks N rows, the whole budget, so no other row could be drawn; …`
+
+Forced rows count against `size`, and at least one row must be left for the
+draw. Raise `size` or force fewer rows. The related message
+`always_include marks N rows but size allows only K` means the forced rows
+alone exceed the budget.
+
+### `TypeError: pilot='auto' needs numeric features; …`
+
+The default residual pilot is a scikit-learn HistGradientBoosting model, which
+needs numeric columns. `sample_rows` raises this for text and categorical
+columns. `smart_sample` checks more strictly and raises
+`TypeError: smart_sample's default pilot needs numeric feature columns; non-numeric: [...]`
+for any non-numeric feature column, including datetime, timedelta and boolean
+ones. Encode those columns first, pass your own `pilot` estimator, or pass
+precomputed predictions as `pilot`. The uniform and chronological methods do
+not fit a pilot and accept any columns.
+
+### A sample from 1.x code changed after upgrading to 2.0
+
+In 2.0 the default draw is uniform rather than pilot-weighted, the default
+size is 20% rather than 10%, `panel_config` no longer anchors the first and
+last row of each group, and the same seed draws different rows. Set `size`,
+`method` and `random_state` explicitly to pin the draw.
+
 ## Bug Reports
 
 If you hit something not covered here, please open an issue with a minimal

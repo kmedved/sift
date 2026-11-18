@@ -88,7 +88,7 @@ def _default(callable_, name):
 
 
 def test_version_and_ordered_public_exports():
-    assert sift.__version__ == "2.0.0"
+    assert sift.__version__ == "2.0.1.dev0"
     assert sift.__all__ == EXPECTED_ALL
     assert sift.__all__[:len(LEGACY_EXPECTED_ALL)] == LEGACY_EXPECTED_ALL
     assert sift.__all__[len(LEGACY_EXPECTED_ALL):] == [

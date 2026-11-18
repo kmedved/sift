@@ -1,5 +1,22 @@
 # Release Notes
 
+## 2.0.1 (unreleased)
+
+### Documentation
+
+- The tutorial has a row-sampling branch: select on all rows when that is
+  affordable, then train on a 20% sample (chronological on panels).
+- `docs/ALGORITHMS.md` describes how each `sample_rows` method draws, the
+  inclusion probabilities, the weights and the raw-weight cap.
+- `docs/troubleshooting.md` lists the sampler's validation errors and their
+  fixes.
+- The advanced guide reports a check of feature selection on a 20% sample on
+  the 770k-row panel, and its example now uses the season strata it
+  describes.
+- Corrected: only `smart_sample(...)` names the replacement for a removed 1.x
+  field; `SmartSamplerConfig(...)` raises Python's usual unexpected-keyword
+  `TypeError`. The 2.0.0 notes said both did.
+
 ## 2.0.0 (2026-11-17)
 
 ### Smart sampling, rebuilt

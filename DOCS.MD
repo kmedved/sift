@@ -1993,7 +1993,9 @@ their weight is the smallest in the sample.
 | `pilot=None` | `method="uniform"` or `method="chronological"` |
 | output index reset, float32 weights | input index kept, float64 weights |
 
-Passing a removed field raises `TypeError` with the replacement in the message.
+Passing a removed field to `smart_sample(...)` raises a `TypeError` that names
+its replacement. `SmartSamplerConfig(...)` raises Python's usual
+`unexpected keyword argument` `TypeError`; use the table above.
 
 ## Boruta and Boruta-Shap
 

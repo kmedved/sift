@@ -367,8 +367,10 @@ Typical workflow on a large panel: select features on all eligible rows when
 that is affordable, then train the final model on a 20% chronological sample
 of all eligible rows, using the selected features. On the panel below the
 residual draw tied chronological sampling and took longer, so it is opt-in,
-for expensive, weight-aware fits. The evidence for selecting on a sample is
-thinner. If selection is too slow, start with a 20% chronological sample with
+for expensive, weight-aware fits. Selecting on a sample saves less time than
+it seems, and its accuracy cost is not settled; see
+[Selecting features on a sample](#selecting-features-on-a-sample). If
+selection itself is the bottleneck, start with a 20% chronological sample with
 season strata, as the example does.
 
 ```python
@@ -383,17 +385,19 @@ feature_cols = [f"x{i}" for i in range(10)]
 df = pd.DataFrame(rng.normal(size=(20_000, 10)), columns=feature_cols)
 df["entity_id"] = np.repeat(np.arange(200), 100)
 df["timestamp"] = np.tile(np.arange(100), 200)
+df["season"] = df["timestamp"] // 25
 df["target"] = 2.0 * df["x0"] - 1.5 * df["x1"] + rng.standard_t(3, size=len(df))
 
 # 1. If selection on every row is too slow, select on a chronological sample.
 screen = smart_sample(df, feature_cols, "target",
-                      panel_config("entity_id", "timestamp", size=0.2))
+                      panel_config("entity_id", "timestamp", size=0.2,
+                                   strata_col="season"))
 chosen = select_mrmr(screen[feature_cols], screen["target"], k=3, task="regression",
                      sample_weight=screen["sample_weight"].to_numpy())
 
 # 2. Train on a 20% chronological sample of all rows, with the chosen features.
 s = sample_rows(size=0.2, method="chronological", groups=df["entity_id"],
-                time=df["timestamp"], random_state=1)
+                time=df["timestamp"], strata=df["season"], random_state=1)
 model = HistGradientBoostingRegressor().fit(
     s.take(df[chosen]), s.take(df["target"]), sample_weight=s.weights
 )
@@ -469,11 +473,12 @@ three datasets, the pilot plus a 20% linear fit took longer than a linear fit
 on every row (CDC: 0.29 s against 0.07 s), and on California boosting saved no
 time either.
 
-None of the selection differences was significant, but the selection
-evidence is thin: weighted `select_mrmr` on the synthetic panel and CDC only,
-with the downstream model trained on all rows. At 10% on CDC the interval
-reaches +0.7%, so a small loss is not ruled out, and the panel benchmark above
-fixed its features before sampling. The quality of
+None of these selection differences was significant: weighted `select_mrmr`
+on the synthetic panel and CDC only, with the downstream model trained on all
+rows. At 10% on CDC the interval reaches +0.7%, so a small loss is not ruled
+out. The panel benchmark above fixed its features before sampling;
+[Selecting features on a sample](#selecting-features-on-a-sample) covers
+selection on that panel. The quality of
 `StabilitySelector(use_smart_sampler=True)` has not been benchmarked. The one
 cell where the residual sample did worse is a linear model on California
 housing at 20%: 1.2% worse than a uniform sample, though not significantly
@@ -488,6 +493,41 @@ Filter selectors cap their input at `subsample=50_000` rows by default. They
 reach the cap by thinning uniformly and keeping the weights, which leaves a
 residual sample's weighting intact. Draw about 50k rows for selection, or pass
 `subsample=None` to use the whole sample.
+
+### Selecting features on a sample
+
+A separate check on the same ~770k-row panel asked whether CEFS+ can choose
+its features from a 20% sample. It used two target/window combinations: a
+stable forward window and a historical backcast of a rate's denominator.
+CEFS+ chose 50 of 294 candidate features from all eligible rows, from a 20%
+uniform sample, or from a 20% chronological sample with season strata, over
+10 draws each. The same gradient-boosted model was then fitted on all rows
+with each feature set and scored on the same untouched holdout.
+
+| | All rows | 20% uniform | 20% chronological |
+|---|---|---|---|
+| Selection time, forward / backcast | 18.3 s / 17.4 s | 3.3 s / 3.0 s | 3.5 s / 3.3 s |
+| Selection plus fit, forward / backcast | 83.5 s / 63.7 s | −16% / −22% | −16% / −20% |
+| Test RMSE vs all-row features, forward | — | +0.79% [+0.06, +1.55] | +0.14% [−0.63, +0.82] |
+| Test RMSE vs all-row features, backcast | — | −0.11% [−1.07, +0.61] | +0.35% [−0.68, +1.68] |
+| Features shared with the all-row set (Jaccard), forward / backcast | — | 0.52 / 0.82 | 0.55 / 0.85 |
+
+- **Selection got 5-6x faster, the whole job only 16-22% faster,** because
+  the fit dominates. Selection was timed one at a time on one thread; the fit
+  times come from six fits running at once.
+- **The model's own seed is the bigger noise.** Refitting the all-row feature
+  set with different random seeds moved its test RMSE by 0.7-0.9% (standard
+  deviation), more than any gap above. Each comparison therefore refits both
+  feature sets with the same seed; the intervals are 95% bootstrap intervals
+  over the 10 draws.
+- **Neither sample was shown to stay within 0.15%** of selecting on all rows,
+  the margin used for the training-sample results above. The uniform sample
+  was worse on the forward window. The chronological sample was unresolved on
+  both: its intervals include both a small gain and a loss of over 0.8%.
+- **Select on all eligible rows when you can.** If selection itself is the
+  bottleneck, a 20% chronological sample with season strata is the
+  better-supported choice. Settling the accuracy question would take many
+  more target/window combinations, not more draws on these two.
 
 ### What did not work
 

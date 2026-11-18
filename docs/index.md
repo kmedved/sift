@@ -1,8 +1,8 @@
 # SIFT Documentation
 
 SIFT is a Python feature-selection toolbox for fast filters, automatic-k
-selection, stability selection, model importance, smart sampling, and optional
-CatBoost workflows.
+selection, stability selection, model importance, row sampling (uniform,
+chronological or residual), and optional CatBoost workflows.
 
 - Start with the [README](https://github.com/kmedved/sift#readme) for installation
   and a quick example.
