@@ -380,11 +380,24 @@ rows the weights are all 1. This is `sift.sampling.chronological_sample`.
    pi = (1 - m) * pi_g + m * f
    ```
 
-4. **Draw.** Systematic sampling with probability proportional to `pi`: the
-   rows are shuffled, cumulative `pi` is laid along a line, and the rows hit
-   by points `u, u + 1, ..., u + k - 1` (one random `u`) are kept. That gives
-   exactly `k` rows, each with inclusion probability `pi`. The shuffle stops a
-   repeating pattern in the data from lining up with the evenly spaced points.
+4. **Draw.** The rows are put in a line, cumulative `pi` is laid along it, and
+   the line is cut into `k` intervals that each hold one unit of probability.
+   One row is kept per interval, which gives exactly `k` rows, each with
+   inclusion probability `pi`. The line and the points depend on the
+   arguments:
+   - **With `groups` or `time`** the line runs stratum by stratum (if `strata`
+     is given), then entity by entity in a random order, then by time. Every
+     interval draws its own random point (Deville, 1998). A row that lies
+     across the boundary between two intervals is handled by both together:
+     if the first interval took it, the second draws from its other rows;
+     if not, the second takes it with the probability that brings its total
+     to `pi`. The number of rows kept from the first `j` rows of the line is
+     always within one of their summed `pi`, so strata, entities and stretches
+     of time all get close to their share. Because each interval has its own
+     point, a repeating pattern in the data cannot line up with the draw.
+   - **Without them** the rows are shuffled and the points are
+     `u, u + 1, ..., u + k - 1` for one random `u`. The shuffle stops a
+     repeating pattern from lining up with the evenly spaced points.
 
 **Weights.** Every method returns
 

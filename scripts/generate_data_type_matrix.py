@@ -1033,7 +1033,8 @@ def _stable_note(
             col = "group_col" if axis == "groups" else "time_col"
             return (
                 f"`{axis}` is accepted as `{col}` on `SmartSamplerConfig` with "
-                f'`method="chronological"`, not as a `{axis}=` array argument'
+                f'`method="chronological"` or `method="residual"`, not as a '
+                f"`{axis}=` array argument"
             )
         return f"`{axis}` is accepted on the seeded baseline call"
     if status == SUPPORTED:

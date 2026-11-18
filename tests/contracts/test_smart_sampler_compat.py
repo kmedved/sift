@@ -131,6 +131,9 @@ def test_config_validates_on_construction_replace_and_use():
         sift.SmartSamplerConfig(strata_col="season", method="uniform")
     with pytest.raises(ValueError, match="needs group_col or time_col"):
         sift.SmartSamplerConfig(method="chronological")
+    with pytest.raises(ValueError, match="strata_col needs group_col or time_col"):
+        sift.SmartSamplerConfig(method="residual", strata_col="season")
+    assert sift.SmartSamplerConfig(method="residual", group_col="group").group_col == "group"
     with pytest.raises(ValueError, match="needs a pilot"):
         sift.SmartSamplerConfig(method="residual", pilot=None)
     with pytest.raises(ValueError, match="apply only to method='residual'"):
@@ -203,6 +206,41 @@ def test_panel_config_is_a_chronological_preset():
     source["season"] = np.tile([2023, 2024], len(source) // 2)
     out = sift.smart_sample(source, ["f0"], "y", sift.panel_config("group", "time", 0.1, "season"))
     assert out["season"].value_counts().to_dict() == {2023: 60, 2024: 60}
+
+
+def test_residual_config_draws_along_the_timeline_like_sample_rows():
+    source = _frame()
+    source["season"] = np.where(source["time"] < source["time"].max() / 2, 2023, 2024)
+    options = dict(size=0.25, method="residual", random_state=5)
+    config = replace(sift.panel_config("group", "time", strata_col="season"), **options)
+    out = sift.smart_sample(source, ["f0", "f1"], "y", config)
+    direct = sift.sample_rows(source[["f0", "f1"]], source["y"], groups=source["group"],
+                              time=source["time"], strata=source["season"], **options)
+    np.testing.assert_array_equal(out.index.to_numpy(), source.index.to_numpy()[direct.indices])
+    np.testing.assert_allclose(out["sample_weight"].to_numpy(), direct.weights)
+    assert len(out) == 300 and out["sample_weight"].nunique() > 1
+    random_order = sift.smart_sample(source, ["f0", "f1"], "y", **options)
+    assert set(out.index) != set(random_order.index)
+    # An equal-probability draw through the same routine shows the spread over seasons and entities.
+    even = sift.smart_sample(source, ["f0", "f1"], "y", config, uniform_mix=1.0)
+    share = source.groupby(["season", "group"]).size() * 0.25
+    kept = even.groupby(["season", "group"]).size().reindex(share.index, fill_value=0)
+    assert (kept - share).abs().max() <= 2
+
+
+def test_an_anchor_rule_that_names_its_own_columns_keeps_the_random_order_draw():
+    # The 2.1 migration note: residual configs that set group_col/time_col only for anchor_fn.
+    source = _frame()
+    options = dict(size=60, method="residual", random_state=0)
+    kept = sift.smart_sample(source, ["f0", "f1"], "y", **options,
+                             anchor_fn=lambda df, g, t: first_per_group(df, "group", "time"))
+    mask = first_per_group(source.reset_index(drop=True), "group", "time")
+    direct = sift.sample_rows(source[["f0", "f1"]], source["y"], always_include=mask, **options)
+    np.testing.assert_array_equal(kept.index.to_numpy(), source.index.to_numpy()[direct.indices])
+    np.testing.assert_array_equal(kept["sample_weight"].to_numpy(), direct.weights)
+    timeline = sift.smart_sample(source, ["f0", "f1"], "y", **options, group_col="group",
+                                 time_col="time", anchor_fn=first_per_group)
+    assert set(timeline.index) != set(kept.index)
 
 
 def test_classification_target_uses_the_class_gradient():

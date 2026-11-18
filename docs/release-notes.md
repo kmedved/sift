@@ -1,5 +1,46 @@
 # Release Notes
 
+## 2.1.0 (unreleased)
+
+### Added
+
+- **`sample_rows(method="residual")` accepts `groups`, `time` and `strata`.**
+  Given `groups` or `time` it draws along each entity's timeline: stratum by
+  stratum, then entity by entity in a random order, then by time, keeping one
+  row per unit of cumulative inclusion probability with a fresh random point
+  in each unit (Deville, 1998). The draw still keeps exactly `size` rows, and
+  the inclusion probabilities and weights are computed as before. The kept
+  rows are spread over strata, entities and time, and a repeating pattern in
+  the data cannot line up with the draw.
+  `SmartSamplerConfig(method="residual")` takes `group_col`, `time_col` and
+  `strata_col` in the same way.
+- **Benchmark.** On a 770k-row player panel (30 seeds, 12 target/window
+  combinations, the reading rule fixed before the run), the timeline draw beat
+  the random-order residual draw on the 9 stable combinations: by 0.50%
+  [0.33, 0.66] at 10% of rows and 0.16% [0.03, 0.29] at 20%. Against
+  chronological sampling with the same number of rows it was 0.48%
+  [0.30, 0.68] better at 10% and tied at 20%. On the 3 noise-dominated
+  combinations it was not better (+1.12% [−0.56, +2.84] at 10%, +0.68%
+  [−0.94, +2.28] at 20%), and it costs a pilot fit. Chronological sampling
+  stays the method to start with on panels. See
+  [Residual sampling along timelines](ADVANCED.md#residual-sampling-along-timelines).
+
+### Changed
+
+- `smart_sample(method="residual")` with `group_col` or `time_col` set now
+  draws along those timelines. In 2.0 such a config was valid only with an
+  `anchor_fn`, and the columns fed the anchor rule alone. That config now
+  returns different rows for the same seed, and a `time_col` with missing
+  values raises. To keep the 2.0 rows, leave `group_col` and `time_col` unset
+  and let the anchor rule name its own columns, for example
+  `anchor_fn=lambda df, g, t: first_per_group(df, "player", "date")`; or
+  pass the forced rows to `sample_rows(..., always_include=mask)` without
+  `groups` or `time`. Every other draw returns the same rows and weights as
+  2.0.1 for the same seed.
+- `method="uniform"` still rejects `groups`, `time` and `strata`; its message
+  now names both methods that use them. `method="residual"` raises if `strata`
+  is given without `groups` or `time`, or if `time` has missing values.
+
 ## 2.0.1 (2026-11-17)
 
 ### Fixed

@@ -202,9 +202,9 @@ def panel_config(
     each stratum in ``strata_col``, such as a season) gets its proportional
     share rounded up or down, and the draw is spread along each entity's
     timeline in ``time_col``.  If an ``anchor_fn`` is added, its rows are
-    kept outside these quotas and the weights are no longer all 1.  For the
-    residual draw, use ``SmartSamplerConfig(method="residual")``; it ignores
-    entity and time structure.
+    kept outside these quotas and the weights are no longer all 1.  For a
+    residual draw along the same timelines, change the method:
+    ``dataclasses.replace(config, method="residual")``.
 
     Parameters
     ----------

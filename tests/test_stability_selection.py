@@ -567,6 +567,34 @@ def test_tune_threshold_default_thresholds_are_immutable():
     assert default_thresholds == (0.4, 0.5, 0.6, 0.7, 0.8)
 
 
+def test_smart_sampler_accepts_a_residual_timeline_config():
+    rng = np.random.default_rng(457)
+    n = 600
+    X = pd.DataFrame(rng.normal(size=(n, 4)), columns=[f"f{i}" for i in range(4)])
+    X["player"] = np.repeat(np.arange(20), 30)
+    X["day"] = np.tile(np.arange(30), 20)
+    X["season"] = X["day"] // 15
+    y = X["f0"] - 0.5 * X["f1"] + rng.normal(size=n)
+    config = SmartSamplerConfig(size=0.5, method="residual", group_col="player",
+                                time_col="day", strata_col="season")
+
+    selector = StabilitySelector(
+        n_bootstrap=4,
+        threshold=0.5,
+        task="regression",
+        use_smart_sampler=True,
+        sampler_config=config,
+        n_jobs=1,
+        random_state=7,
+        verbose=False,
+    )
+    selector.fit(X, y)
+
+    assert set(selector.feature_names_in_) == {"f0", "f1", "f2", "f3"}
+    chosen = np.asarray(selector.feature_names_in_)[selector.selected_features_]
+    assert "f0" in chosen
+
+
 def test_smart_sampler_config_is_not_mutated():
     rng = np.random.default_rng(456)
     n, p = 80, 4

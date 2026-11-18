@@ -10,7 +10,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 import sift
 from sift import RowSample, sample_rows
-from sift.sampling.smart import _capped_pi, _class_gradient, _resolve_task
+from sift.sampling.smart import _capped_pi, _class_gradient, _ordered_draw, _resolve_task
 
 
 def _data(n=3_000, seed=0):
@@ -85,18 +85,21 @@ def test_empirical_inclusion_frequency_matches_inclusion_probability():
     assert np.max(np.abs(counts / draws - expected) / se) < 5.0
 
 
-@pytest.mark.parametrize("method", ["residual", "uniform", "chronological"])
+@pytest.mark.parametrize("method", ["residual", "residual_timeline", "uniform", "chronological"])
 def test_raw_inverse_probability_totals_are_unbiased(method):
     # Horvitz-Thompson: sum(y / inclusion_prob) over the sample estimates sum(y),
     # including forced rows (probability 1).
     X, y = _data(n=4_000, seed=1)
     forced = np.zeros(len(y), bool)
     forced[np.argsort(y)[-5:]] = True
+    groups = np.repeat(np.arange(40), 100)
     kwargs = {"residual": {"pilot": X[:, 0]}, "uniform": {},
-              "chronological": {"groups": np.repeat(np.arange(40), 100)}}[method]
+              "residual_timeline": {"pilot": X[:, 0], "groups": groups, "method": "residual"},
+              "chronological": {"groups": groups}}[method]
+    kwargs.setdefault("method", method)
     totals = []
     for r in range(300):
-        s = sample_rows(X, y, 0.1, method=method, always_include=forced, random_state=r, **kwargs)
+        s = sample_rows(X, y, 0.1, always_include=forced, random_state=r, **kwargs)
         totals.append(np.sum(y[s.indices] / s.inclusion_prob))
     se = np.std(totals) / np.sqrt(len(totals))
     assert abs(np.mean(totals) - y.sum()) < 4 * se
@@ -126,6 +129,108 @@ def test_residual_draw_does_not_lock_onto_a_repeating_series():
         assert len(s) == 1_000 and np.unique(s.indices).size == 1_000
         means.append(np.average(y[s.indices], weights=s.weights))
     assert 0.15 < min(means) and max(means) < 0.25
+
+
+def _mixed_pi(score, k, uniform_mix):
+    return (1 - uniform_mix) * _capped_pi(score, k) + uniform_mix * k / score.size
+
+
+@pytest.mark.parametrize("uniform_mix", [0.5, 0.02, 1e-9])
+def test_ordered_draw_is_exact_and_matches_inclusion_probability(uniform_mix):
+    # A small uniform_mix puts the capped rows' probability at or next to 1,
+    # where a row can fill a whole unit of cumulative probability.
+    rng = np.random.default_rng(11)
+    n, k, draws = 400, 60, 20_000
+    score = np.abs(rng.standard_t(2, size=n))
+    score[rng.choice(n, 8, replace=False)] = 1e4
+    pi = _mixed_pi(score, k, uniform_mix)
+    assert pi.max() > 0.98 - 0.5 * (uniform_mix == 0.5)
+    order = rng.permutation(n)
+    counts = np.zeros(n)
+    for _ in range(draws):
+        drawn = _ordered_draw(order, pi, k, rng)
+        assert drawn.size == k and np.unique(drawn).size == k
+        counts[drawn] += 1
+    se = np.sqrt(pi * (1 - pi) / draws) + 1e-4
+    assert np.max(np.abs(counts / draws - pi) / se) < 5.0
+
+
+def test_ordered_draw_keeps_every_prefix_within_one_row_of_its_probability():
+    # One row per unit of cumulative probability: along the order, the rows
+    # drawn so far never differ from the probability so far by more than one.
+    rng = np.random.default_rng(5)
+    n, k = 3_000, 450
+    pi = _mixed_pi(np.abs(rng.standard_t(3, size=n)), k, 0.5)
+    order = rng.permutation(n)
+    for _ in range(50):
+        taken = np.zeros(n)
+        taken[_ordered_draw(order, pi, k, rng)] = 1
+        assert np.abs(np.cumsum(taken[order]) - np.cumsum(pi[order])).max() <= 1 + 1e-9
+
+
+def test_residual_timeline_draw_does_not_lock_onto_a_repeating_series():
+    # The same repeating series as above, now drawn in time order, where one
+    # shared start would keep all the ones or none of them.
+    n = 5_000
+    y = (np.arange(n) % 5 == 4).astype(float)
+    means = []
+    for seed in range(100):
+        s = sample_rows(None, y, 0.2, pilot=np.zeros(n), time=np.arange(n), random_state=seed,
+                        method="residual")
+        assert len(s) == 1_000 and np.unique(s.indices).size == 1_000
+        means.append(np.average(y[s.indices], weights=s.weights))
+    assert 0.15 < min(means) and max(means) < 0.25
+    # Equal probabilities and a period of exactly 1 / fraction rows.
+    weekday = np.arange(n) % 5
+    for seed in range(20):
+        s = sample_rows(None, y, 0.2, pilot=np.zeros(n), time=np.arange(n), uniform_mix=1.0,
+                        random_state=seed, method="residual")
+        np.testing.assert_allclose(s.weights, 1.0)
+        assert np.all(np.abs(np.bincount(weekday[s.indices], minlength=5) / 1_000 - 0.2) < 0.06)
+
+
+def test_residual_timeline_draw_spreads_over_strata_entities_and_time():
+    rng = np.random.default_rng(8)
+    entities, seasons, games = 40, 4, 50
+    groups = np.repeat(np.arange(entities), seasons * games)
+    strata = np.tile(np.repeat(np.arange(seasons), games), entities)
+    time = np.tile(np.arange(seasons * games), entities)
+    y = rng.standard_t(3, size=groups.size) * (1 + (strata == 3))
+    k = groups.size // 5
+    pi = _mixed_pi(np.abs(y), k, 0.5)
+    cell = groups * seasons + strata
+    for seed in range(20):
+        s = sample_rows(None, y, k, pilot=np.zeros(y.size), groups=groups, time=time[::-1].copy(),
+                        strata=strata, random_state=seed, method="residual")
+        assert len(s) == k
+        np.testing.assert_allclose(s.inclusion_prob, pi[s.indices])
+        taken = np.zeros(y.size)
+        taken[s.indices] = 1
+        # Each season, and each entity-season inside it, is one stretch of the order.
+        assert np.abs(np.bincount(strata, taken) - np.bincount(strata, pi)).max() < 2
+        assert np.abs(np.bincount(cell, taken) - np.bincount(cell, pi)).max() < 2
+    again = sample_rows(None, y, k, pilot=np.zeros(y.size), groups=groups, time=time,
+                        strata=strata, random_state=3, method="residual")
+    same = sample_rows(None, y, k, pilot=np.zeros(y.size), groups=groups, time=time,
+                       strata=strata, random_state=3, method="residual")
+    np.testing.assert_array_equal(again.indices, same.indices)
+    # Two seasons of three rows each and three draws: never all from one season.
+    two = np.repeat([0, 1], 3)
+    for seed in range(50):
+        s = sample_rows(None, np.arange(6.0), 3, pilot=np.zeros(6), task="regression",
+                        uniform_mix=1.0, groups=np.tile(np.arange(3), 2), time=np.arange(6),
+                        strata=two, random_state=seed, method="residual")
+        assert sorted(np.bincount(two[s.indices], minlength=2)) == [1, 2]
+
+
+def test_residual_timeline_draw_accepts_dates_and_missing_groups():
+    X, y = _data(n=600)
+    dates = np.array(pd.date_range("2024-01-01", periods=600))
+    groups = np.where(np.arange(600) % 3 == 0, None, "a").astype(object)
+    s = sample_rows(X, y, 60, pilot=X[:, 0], groups=groups, time=dates, method="residual",
+                    random_state=0)
+    assert len(s) == 60 and np.unique(s.indices).size == 60
+    assert 10 <= pd.isna(groups[s.indices]).sum() <= 30
 
 
 def test_larger_residuals_get_larger_inclusion_probability():
@@ -259,6 +364,7 @@ def test_always_include_rows_are_kept_with_probability_one():
     keep[[3, 50, 999]] = True
     groups = np.repeat(np.arange(30), 100)
     for kwargs in ({"X": X, "y": y, "pilot": X[:, 0], "method": "residual"}, {"method": "uniform"},
+                   {"X": X, "y": y, "pilot": X[:, 0], "method": "residual", "groups": groups},
                    {"method": "chronological", "groups": groups}):
         s = sample_rows(size=100, always_include=keep, random_state=0, **kwargs)
         assert len(s) == 100
@@ -272,15 +378,17 @@ def test_always_include_rows_are_kept_with_probability_one():
     np.testing.assert_array_equal(s.indices, [0, 1, 2])
 
 
-def test_structure_arguments_belong_to_the_chronological_method():
+def test_structure_arguments_do_not_apply_to_the_uniform_method():
     X, y = _data(n=500)
     for kwargs in ({"groups": np.zeros(500)}, {"time": np.arange(500)}, {"strata": np.zeros(500)}):
-        with pytest.raises(ValueError, match="shape only method='chronological'"):
-            sample_rows(X, y, 0.1, method="residual", **kwargs)
-        with pytest.raises(ValueError, match="shape only method='chronological'"):
+        with pytest.raises(ValueError, match="method='uniform' draws rows in random order"):
             sample_rows(size=0.1, method="uniform", **kwargs)
     with pytest.raises(ValueError, match="needs groups or time"):
         sample_rows(X, y, 0.1, method="chronological")
+    with pytest.raises(ValueError, match="strata needs groups or time"):
+        sample_rows(X, y, 0.1, method="residual", strata=np.zeros(500))
+    with pytest.raises(ValueError, match="time must not contain missing values"):
+        sample_rows(X, y, 0.1, method="residual", time=np.r_[np.nan, np.arange(499.0)])
     with pytest.raises(ValueError, match="needs a pilot"):
         sample_rows(X, y, 0.1, pilot=None, method="residual")
     with pytest.raises(ValueError, match="method must be one of"):
